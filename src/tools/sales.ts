@@ -527,16 +527,34 @@ const listOrders = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/orders"]],
   inputSchema: {
-    status: z.enum(["all", "open", "closed"]).optional().describe("Filter by order status."),
+    status: z
+      .enum(["all", "open", "closed"])
+      .optional()
+      .describe(
+        'Filter by order status. With "open" the date window is widened automatically — see the ' +
+          "note on startDate.",
+      ),
     customerId: z.number().int().optional().describe("Filter by customer."),
     orderNumber: z.string().optional().describe("Filter by order number."),
     externalReference: z.string().optional().describe("Filter by an external system's reference."),
-    startDate: isoDate.optional().describe("Inclusive start date."),
+    startDate: isoDate
+      .optional()
+      .describe(
+        "Inclusive start date. The API defaults this to ONE YEAR before endDate, so an order left " +
+          'unbilled longer than that is invisible unless you widen it. With status="open" this tool ' +
+          "reaches back to 2000 instead, because that is the question people are really asking.",
+      ),
     endDate: isoDate.optional().describe("Inclusive end date."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+    // The API defaults startDate to one year before endDate, and the endpoint returns
+    // only orders in that window — so "which orders are still unbilled" silently
+    // omitted anything older, exactly as the customer ledger did before it was
+    // widened. An unbilled order from two years ago is precisely the one worth seeing.
+    const widened = args.status === "open" && args.startDate === undefined;
+    if (widened) query.startDate = OPEN_ITEM_FLOOR;
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/orders",
@@ -544,7 +562,14 @@ const listOrders = defineTool({
       tenantId: requireTenantId(tenantId, ctx),
     });
     const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} order(s).` });
+    return ok(res.data, {
+      note:
+        `${count} order(s).` +
+        (widened
+          ? ` Window widened back to ${OPEN_ITEM_FLOOR}: the API would otherwise default to one ` +
+            `year and hide older unbilled orders.`
+          : ""),
+    });
   },
 });
 

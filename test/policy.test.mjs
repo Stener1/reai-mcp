@@ -753,3 +753,111 @@ test("an inventory adjustment is irreversible", async () => {
   // Creating a warehouse is ordinary master data.
   assert.equal(classifyRequest("POST", "/api/warehouses"), "reversible");
 });
+
+test("open-item queries widen the date window; ordinary ones do not", async () => {
+  // Three endpoints return only records "with activity in the period" and default to a
+  // one-year or current-year window, so the open-item question — which orders are
+  // unbilled, what have we not reimbursed, what do we still owe — silently omitted
+  // anything older. Same shape as the customer-ledger bug that was already fixed; the
+  // rest were missed.
+  const { allTools } = await import("../dist/server.js");
+  const sent = [];
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 200, data: [] };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+
+  const cases = [
+    ["reai_list_orders", { status: "open" }, { status: "all" }],
+    ["reai_list_expenses", { paidOut: "false" }, { paidOut: "true" }],
+    ["reai_supplier_ledger", { isUnpaid: true }, {}],
+  ];
+  for (const [name, openArgs, plainArgs] of cases) {
+    const tool = allTools.find((t) => t.name === name);
+    assert.ok(tool, `${name} should exist`);
+
+    sent.length = 0;
+    await tool.handler(openArgs, ctx);
+    assert.equal(sent[0].query.startDate, "2000-01-01", `${name} should widen for open items`);
+
+    sent.length = 0;
+    await tool.handler(plainArgs, ctx);
+    assert.notEqual(sent[0].query.startDate, "2000-01-01", `${name} should not widen otherwise`);
+
+    // An explicit start date always wins.
+    sent.length = 0;
+    await tool.handler({ ...openArgs, startDate: "2026-06-01" }, ctx);
+    assert.equal(sent[0].query.startDate, "2026-06-01", `${name} must respect an explicit date`);
+  }
+});
+
+test("date defaults follow Norway, not UTC", async () => {
+  // toISOString() is UTC, so between midnight and 01:00/02:00 Norwegian time every
+  // default was a day early. At 00:30 on 1 January that stamps an order 31 December of
+  // the year just ended, posting revenue and VAT into a period that may be closed.
+  const { norwegianDate } = await import("../dist/tools/registry.js");
+  assert.equal(norwegianDate(new Date("2025-12-31T23:30:00Z")), "2026-01-01");
+  assert.equal(norwegianDate(new Date("2026-06-15T23:30:00Z")), "2026-06-16");
+  assert.equal(norwegianDate(new Date("2026-06-15T09:00:00Z")), "2026-06-15");
+  assert.match(norwegianDate(new Date()), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("voucher amounts finer than øre are refused, as are all-zero vouchers", async () => {
+  // The balance check rounded the SUM, not the postings, so 100.002 + (-99.998) — a
+  // real 0.004 imbalance — was reported as balanced. Every money field in the API is
+  // multipleOf 0.01, and ReAI rounding each posting silently changes both sides.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_create_voucher");
+  const sent = [];
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 201, data: { id: 1 } };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+  const run = async (postings) => {
+    sent.length = 0;
+    const res = await tool.handler({ date: "2026-08-06", postings }, ctx);
+    return { sent: sent.length, text: res.content.map((c) => c.text).join("\n"), isError: res.isError };
+  };
+
+  const subOre = await run([
+    { accountNumber: "1500", amount: 100.002 },
+    { accountNumber: "3000", amount: -99.998 },
+  ]);
+  assert.equal(subOre.sent, 0, "a sub-øre amount must not be sent");
+  assert.match(subOre.text, /whole øre/);
+
+  const zero = await run([
+    { accountNumber: "1500", amount: 0 },
+    { accountNumber: "3000", amount: 0 },
+  ]);
+  assert.equal(zero.sent, 0);
+  assert.match(zero.text, /record nothing/);
+
+  // Genuine øre amounts still work, and a real imbalance is still caught.
+  const valid = await run([
+    { accountNumber: "1500", amount: 0.01 },
+    { accountNumber: "3000", amount: -0.01 },
+  ]);
+  assert.equal(valid.sent, 1);
+
+  const unbalanced = await run([
+    { accountNumber: "1500", amount: 100 },
+    { accountNumber: "3000", amount: -99 },
+  ]);
+  assert.equal(unbalanced.sent, 0);
+  assert.match(unbalanced.text, /not balanced/);
+});

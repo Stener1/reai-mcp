@@ -657,14 +657,28 @@ const listExpenses = defineTool({
     paidOut: z
       .enum(["true", "false"])
       .optional()
-      .describe('Whether the claim has been reimbursed. The API takes this as a string, not a boolean.'),
+      .describe(
+        'Whether the claim has been reimbursed. The API takes this as a string, not a boolean. ' +
+          'With "false" the date window is widened automatically — see startDate.',
+      ),
     employeeIds: z.string().optional().describe("Comma-separated employee ids."),
-    startDate: isoDate.optional().describe("Inclusive start date."),
+    startDate: isoDate
+      .optional()
+      .describe(
+        "Inclusive start date. The API defaults this to 1 January of the current year, so an " +
+          'unreimbursed claim from last December is invisible. With paidOut="false" this tool ' +
+          "reaches back to 2000 instead.",
+      ),
     endDate: isoDate.optional().describe("Inclusive end date."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+    // The endpoint returns only claims in the window and defaults to the current year,
+    // so "what have we not reimbursed" hid a December claim from last year — the same
+    // shape of bug as the customer and supplier ledgers.
+    const widened = args.paidOut === "false" && args.startDate === undefined;
+    if (widened) query.startDate = OPEN_ITEM_FLOOR;
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/expenses",

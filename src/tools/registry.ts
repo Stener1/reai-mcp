@@ -175,7 +175,23 @@ export const isoDate = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be ISO format yyyy-MM-dd, e.g. 2026-03-31");
 
 export function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return norwegianDate(new Date());
+}
+
+/**
+ * The current date in Norway, not in UTC.
+ *
+ * `toISOString()` is UTC, so between midnight and 01:00 or 02:00 Norwegian time every
+ * date default was a day early. That is mostly cosmetic and once a year it is not: at
+ * 00:30 on 1 January, an order or offer defaulting its date would be stamped 31
+ * December of the year just ended — posting revenue and VAT into a period that may
+ * already be closed, which under bokføringsloven cannot simply be corrected by
+ * deleting. The books are Norwegian, so the date should be too.
+ *
+ * "sv-SE" is used because its short date format is already YYYY-MM-DD.
+ */
+export function norwegianDate(when: Date): string {
+  return when.toLocaleDateString("sv-SE", { timeZone: "Europe/Oslo" });
 }
 
 /**
@@ -184,5 +200,7 @@ export function today(): string {
  * accounting year is normally scoped and saves a failed round-trip.
  */
 export function startOfYear(): string {
-  return `${new Date().getUTCFullYear()}-01-01`;
+  // Also Norwegian: in the same small hours window getUTCFullYear() reports the
+  // previous year, so "what have we spent this year" would answer for last year.
+  return `${norwegianDate(new Date()).slice(0, 4)}-01-01`;
 }

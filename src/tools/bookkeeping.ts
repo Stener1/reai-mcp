@@ -199,8 +199,19 @@ const postingInput = z.object({
  * reject that as unbalanced without explaining why.
  */
 function imbalance(postings: Array<{ amount: number }>): number {
-  const sum = postings.reduce((acc, p) => acc + p.amount, 0);
-  return Math.round(sum * 100) / 100;
+  // Each posting is rounded to øre BEFORE summing, because that is what ReAI stores —
+  // every money field in the API is multipleOf 0.01. Rounding the sum instead let a
+  // real imbalance through: 100.002 + (-99.998) sums to 0.004, rounds to 0, and was
+  // reported as balanced.
+  const sum = postings.reduce((acc, p) => acc + Math.round(p.amount * 100), 0);
+  return sum / 100;
+}
+
+/** Postings whose amount is finer than øre, which the API cannot store. */
+function subOreAmounts(postings: Array<{ accountNumber: string; amount: number }>): string[] {
+  return postings
+    .filter((p) => Math.abs(p.amount * 100 - Math.round(p.amount * 100)) > 1e-9)
+    .map((p) => `${p.accountNumber}: ${p.amount}`);
 }
 
 /**
@@ -355,6 +366,27 @@ const createVoucher = defineTool({
   },
   handler: async (args, ctx) => {
     const tenantId = requireTenantId(args.tenantId, ctx);
+
+    // Refused before the balance check, because an amount ReAI cannot store makes the
+    // balance meaningless: it rounds each posting to øre, which silently changes both
+    // sides of a voucher that looked balanced at three decimals.
+    const tooFine = subOreAmounts(args.postings);
+    if (tooFine.length > 0) {
+      return fail(
+        `Amounts must be in whole øre (at most two decimals) — ReAI stores them that way and ` +
+          `would round these, changing the voucher:\n  ${tooFine.join("\n  ")}\n\n` +
+          `Round them yourself so you decide where the øre goes. Nothing was sent to ReAI.`,
+      );
+    }
+
+    // A voucher where nothing moves is balanced but pointless, and almost always a
+    // mistake upstream rather than an intention.
+    if (args.postings.every((p) => Math.round(p.amount * 100) === 0)) {
+      return fail(
+        "Every posting is zero, so this voucher would record nothing. It balances, but there is " +
+          "no transaction in it. Nothing was sent to ReAI.",
+      );
+    }
 
     const diff = imbalance(args.postings);
     if (diff !== 0) {
