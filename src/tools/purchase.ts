@@ -289,7 +289,10 @@ const getSupplierInvoice = defineTool({
   name: "reai_get_supplier_invoice",
   title: "Get one supplier invoice",
   description:
-    "Fetch a registered supplier invoice by id, with its cost lines, payment state and attachments.",
+    "Fetch a registered supplier invoice by id, with its cost lines, payments and settlement " +
+    "state. It does NOT include attachments — the response has no attachment field. For the " +
+    "original document use reai_request GET /api/supplier-invoices/{id}/attachments, or find it in " +
+    "the reception inbox via reai_list_reception_documents.",
   risk: "read",
   apiPaths: [["GET", "/api/supplier-invoices/{id}"]],
   inputSchema: {
@@ -376,11 +379,20 @@ const createSupplierInvoice = defineTool({
 
 const paySupplierInvoice = defineTool({
   name: "reai_register_supplier_invoice_payment",
-  title: "Register a payment of a supplier invoice",
+  title: "Pay or record payment of a supplier invoice",
   description:
-    "Record that a supplier invoice was paid. This settles the supplier ledger and posts against the " +
-    "bank account, so it moves money in the books. Partial amounts are allowed. " +
-    "Requires REAI_WRITE_MODE=full.",
+    "Settle a supplier invoice. This posts against the bank account and settles the supplier " +
+    "ledger, so it moves money in the books. Requires REAI_WRITE_MODE=full.\n\n" +
+    "READ THIS BEFORE CALLING: `manualPayment` is required and chooses between two genuinely " +
+    "different things.\n" +
+    "  • manualPayment=true — RECORD a payment that has already left the bank. Books only.\n" +
+    "  • manualPayment=false — the BANK-INTEGRATED flow. ReAI may return an approvalUrl that " +
+    "starts a real payment approval (BankID), i.e. it can actually move money.\n" +
+    "If the user said the invoice is already paid, that is manualPayment=true. Never pick false " +
+    "on their behalf without saying what it does.\n\n" +
+    "paidPrivately=true settles the ENTIRE invoice from a sole proprietor's private account — a " +
+    "partial invoiceAmount is meaningless with it, and companyBankId and bankDebitAmount must be " +
+    "omitted. Otherwise companyBankId is required.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/supplier-invoices/{id}/payments"]],
   inputSchema: {
@@ -389,37 +401,99 @@ const paySupplierInvoice = defineTool({
     invoiceAmount: z
       .number()
       .min(0.01)
-      .describe("Amount applied to the invoice. Must be positive — at least 0.01."),
+      .describe(
+        "Amount of the invoice to settle. Must be positive. Ignored in effect when " +
+          "paidPrivately=true, which always settles the invoice in full.",
+      ),
+    manualPayment: z
+      .boolean()
+      .describe(
+        "REQUIRED, and not a formality. true = record a payment already made (books only). " +
+          "false = the bank-integrated flow, which can return an approvalUrl that starts a real " +
+          "BankID payment approval. Choose deliberately.",
+      ),
     companyBankId: z
       .number()
       .int()
+      .positive()
       .optional()
       .describe(
-        "Bank account it was paid from. List them with reai_request GET /api/company-banks. " +
-          "Omit this (and bankDebitAmount) when paidPrivately is true.",
+        "Bank account the payment came from, from reai_list_company_banks. Required unless " +
+          "paidPrivately=true, in which case it must be omitted.",
       ),
     bankDebitAmount: z
       .number()
       .optional()
-      .describe("Amount actually debited from the bank, when it differs (currency or fees)."),
-    manualPayment: z
+      .describe(
+        "What was actually debited from the bank, when it differs from invoiceAmount (fees, " +
+          "currency). Manual payments only — must not be sent for a bank-integrated payment.",
+      ),
+    paidPrivately: z
       .boolean()
       .optional()
-      .describe("The payment was made outside ReAI rather than through its payment flow."),
-    paidPrivately: z.boolean().optional().describe("An owner paid this privately."),
+      .describe(
+        "A sole proprietor paid this from a private account. Settles the invoice IN FULL and " +
+          "requires companyBankId and bankDebitAmount to be omitted. The response then carries a " +
+          "voucherId rather than a payment id.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
-    const res = await ctx.client.request({
+
+    // Each of these is a documented API constraint. Checking locally turns a
+    // generic 400 into an explanation, and for the paidPrivately case prevents
+    // silently settling an invoice in full when a partial amount was asked for.
+    if (args.paidPrivately === true) {
+      const offenders = [
+        args.companyBankId !== undefined ? "companyBankId" : null,
+        args.bankDebitAmount !== undefined ? "bankDebitAmount" : null,
+      ].filter(Boolean);
+      if (offenders.length > 0) {
+        return fail(
+          `paidPrivately=true requires ${offenders.join(" and ")} to be omitted — the payment ` +
+            `comes from a private account, not a company one. Nothing was sent to ReAI.`,
+        );
+      }
+    } else if (args.companyBankId === undefined) {
+      return fail(
+        "companyBankId is required unless paidPrivately=true. List the company's accounts with " +
+          "reai_list_company_banks. Nothing was sent to ReAI.",
+      );
+    }
+
+    if (args.bankDebitAmount !== undefined && args.manualPayment !== true) {
+      return fail(
+        "bankDebitAmount applies only to manual payments. For a bank-integrated payment " +
+          "(manualPayment=false) it must not be sent. Nothing was sent to ReAI.",
+      );
+    }
+
+    const res = await ctx.client.request<{ approvalUrl?: string; voucherId?: number }>({
       method: "POST",
       path: `/api/supplier-invoices/${id}/payments`,
       body,
       tenantId: resolved,
     });
+
+    // An approvalUrl means ReAI is waiting for a human to approve a real
+    // payment. Saying "payment registered" there would be a lie.
+    const notes: string[] = [];
+    if (res.data?.approvalUrl) {
+      notes.push(
+        `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval. ` +
+          `Someone must complete it (BankID) here: ${res.data.approvalUrl}`,
+      );
+    } else if (args.paidPrivately) {
+      notes.push(`Supplier invoice ${id} settled IN FULL from a private account.`);
+    } else {
+      notes.push(
+        `Payment of ${args.invoiceAmount} recorded on supplier invoice ${id}, dated ${args.paymentDate}.`,
+      );
+    }
     return ok(res.data, {
-      note: `Payment of ${args.invoiceAmount} registered on supplier invoice ${id} dated ${args.paymentDate}.`,
+      note: notes.join("\n"),
       link: ctx.client.deepLink(`/supplier-invoices/${id}`, resolved),
     });
   },

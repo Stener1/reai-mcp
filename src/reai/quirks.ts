@@ -32,8 +32,23 @@ export type QuirkKind =
 
 export type Quirk = {
   id: string;
-  /** Spec-form paths (with `{braces}`) this applies to; matched as prefixes. */
+  /** Spec-form paths, with `{braces}`. See `match` for how they are compared. */
   paths: readonly string[];
+  /**
+   * Whether the quirk reaches sub-operations of `paths`.
+   *
+   * Defaults to `"exact"`, and that default matters: matching every entry as a
+   * prefix leaked parent quirks onto unrelated children. `POST
+   * /api/invoices/{id}/email` inherited "an invoice is created FROM AN ORDER" and
+   * was told to send an `orderId`; `POST /api/customers/{id}/contact-persons`
+   * inherited the customer-creation field restrictions and the Brønnøysund
+   * lookup note. Since these are presented next to the real schema and read as
+   * authoritative, a wrong one is worse than none.
+   *
+   * Use `"descendants"` only where the note genuinely holds for everything below
+   * the path.
+   */
+  match?: "exact" | "descendants";
   /** Restrict to specific methods. Omit to apply to all methods on those paths. */
   methods?: readonly HttpMethod[];
   kind: QuirkKind;
@@ -48,6 +63,7 @@ export const QUIRKS: readonly Quirk[] = [
   // notes that are the point of this registry.
   {
     id: "module-gating",
+    match: "descendants",
     paths: ["/api/projects", "/api/warehouses", "/api/timesheets", "/api/salary-payments"],
     kind: "gotcha",
     note:
@@ -57,6 +73,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "date-range-required",
+    match: "descendants",
     paths: ["/api/vouchers", "/api/postings", "/api/ledger"],
     methods: ["GET"],
     kind: "validation",
@@ -68,7 +85,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Bookkeeping ---------------------------------------------------------
   {
     id: "voucher-signed-amounts",
-    paths: ["/api/vouchers"],
+    paths: ["/api/vouchers", "/api/vouchers/{id}"],
     methods: ["POST", "PUT"],
     kind: "shape",
     note:
@@ -107,7 +124,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "offer-lines-stricter",
-    paths: ["/api/offers"],
+    paths: ["/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -116,7 +133,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "line-vat-code-subset",
-    paths: ["/api/orders", "/api/offers", "/api/subscriptions"],
+    paths: ["/api/orders", "/api/offers", "/api/offers/{id}", "/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -125,7 +142,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "days-until-due-mandatory",
-    paths: ["/api/orders", "/api/offers"],
+    paths: ["/api/orders", "/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:
@@ -135,7 +152,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "order-send-ehf",
-    paths: ["/api/orders"],
+    paths: ["/api/orders", "/api/orders/{id}"],
     methods: ["POST", "PUT"],
     kind: "irreversible",
     note:
@@ -155,7 +172,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "customer-name-title-cased",
-    paths: ["/api/customers", "/api/suppliers"],
+    paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
     kind: "gotcha",
     note:
@@ -164,7 +181,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "phone-no-plus47",
-    paths: ["/api/customers", "/api/suppliers"],
+    paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
     kind: "validation",
     note:
@@ -194,7 +211,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Subscriptions -------------------------------------------------------
   {
     id: "subscription-self-invoicing",
-    paths: ["/api/subscriptions"],
+    paths: ["/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],
     kind: "irreversible",
     note:
@@ -219,7 +236,12 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Purchase ------------------------------------------------------------
   {
     id: "cost-line-explicit-accounts",
-    paths: ["/api/supplier-invoices", "/api/invoice-reception-documents", "/api/receipt-reception-documents"],
+    paths: [
+      "/api/supplier-invoices",
+      "/api/supplier-invoices/{id}",
+      "/api/invoice-reception-documents/{id}/supplier-invoice",
+      "/api/receipt-reception-documents/{id}/registration",
+    ],
     methods: ["POST", "PATCH"],
     kind: "shape",
     note:
@@ -238,6 +260,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "reception-inbox-preferred",
+    match: "descendants",
     paths: ["/api/invoice-reception-documents", "/api/receipt-reception-documents"],
     kind: "workflow",
     note:
@@ -257,6 +280,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "expense-lifecycle",
+    match: "descendants",
     paths: ["/api/expenses"],
     kind: "workflow",
     note:
@@ -268,6 +292,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Bank ----------------------------------------------------------------
   {
     id: "no-bank-transaction-list",
+    match: "descendants",
     paths: ["/api/bank-transactions", "/api/bank-reconciliations"],
     kind: "shape",
     note:
@@ -279,6 +304,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "manual-vs-synced-reconciliation",
+    match: "descendants",
     paths: ["/api/bank-reconciliations", "/api/manual-reconciliations"],
     kind: "workflow",
     note:
@@ -289,6 +315,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "reconciliation-month-format",
+    match: "descendants",
     paths: ["/api/bank-reconciliations", "/api/manual-reconciliations"],
     kind: "validation",
     note: "These take `month` as a yyyy-MM string, not a date or a date range.",
@@ -316,7 +343,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "reconciliation-rule-standing-authority",
-    paths: ["/api/reconciliation-rules"],
+    paths: ["/api/reconciliation-rules", "/api/reconciliation-rules/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:
@@ -327,7 +354,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "company-bank-bban",
-    paths: ["/api/company-banks"],
+    paths: ["/api/company-banks", "/api/company-banks/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -339,6 +366,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- VAT and tax ---------------------------------------------------------
   {
     id: "vat-return-does-not-file",
+    match: "descendants",
     paths: ["/api/vat-returns"],
     methods: ["POST"],
     kind: "irreversible",
@@ -360,6 +388,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "vat-codes-tenant-specific",
+    match: "descendants",
     paths: ["/api/vat-codes"],
     kind: "gotcha",
     note:
@@ -381,6 +410,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Transport -----------------------------------------------------------
   {
     id: "peppol-transmits",
+    match: "descendants",
     paths: ["/api/peppol"],
     kind: "irreversible",
     note:
@@ -405,17 +435,32 @@ function normalize(path: string): string {
 }
 
 /**
- * Quirks applying to one operation. A quirk matches when one of its paths equals
- * the operation path or is a path-segment prefix of it, and the method matches.
+ * Quirks applying to one operation.
+ *
+ * Exact by default; only a quirk explicitly marked `descendants` reaches
+ * sub-operations. Anything else would attach parent advice to children it does
+ * not describe.
  */
 export function quirksFor(method: HttpMethod, path: string): Quirk[] {
   const target = normalize(path);
   return QUIRKS.filter((q) => {
     if (q.methods && !q.methods.includes(method)) return false;
     return q.paths.some((p) => {
-      const prefix = normalize(p);
-      return target === prefix || target.startsWith(prefix + "/");
+      const candidate = normalize(p);
+      if (target === candidate) return true;
+      return q.match === "descendants" && target.startsWith(candidate + "/");
     });
+  });
+}
+
+/** True when `quirk` would apply to `method path`. Exposed for tests. */
+export function quirkMatches(q: Quirk, method: HttpMethod, path: string): boolean {
+  if (q.methods && !q.methods.includes(method)) return false;
+  const target = normalize(path);
+  return q.paths.some((p) => {
+    const candidate = normalize(p);
+    if (target === candidate) return true;
+    return q.match === "descendants" && target.startsWith(candidate + "/");
   });
 }
 

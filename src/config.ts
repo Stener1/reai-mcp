@@ -52,6 +52,12 @@ export type ServerConfig = {
   /** Extra hostnames to accept, for DNS-rebinding protection. */
   allowedHosts: string[];
   /**
+   * True when each request builds its own server, i.e. the remote transport.
+   * Session-local state cannot persist there, so tools that would set it must say
+   * so rather than reporting a success that evaporates.
+   */
+  statelessSession: boolean;
+  /**
    * Hosts permitted as OAuth redirect targets. Empty means "any https host",
    * which is what MCP clients expect but also lets anyone register a client and
    * drive a genuine-looking consent page at their own callback. Operators who
@@ -99,6 +105,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
           "only valid over TLS, except on localhost for development.",
       );
     }
+    // Refused rather than half-supported. The consent form posts to a
+    // root-relative /authorize, so under a path prefix the user's ReAI token
+    // would be sent to the wrong place -- a 404 at best, an unrelated service at
+    // worst. Serving under a subpath would need every generated URL to carry the
+    // prefix; until that is done, say so instead of failing obscurely.
+    // Every OAuth endpoint is formed by concatenation (`${base}/authorize`), so a
+    // path, query or fragment all corrupt the result rather than being carried.
+    const path = parsed.pathname.replace(/\/+$/, "");
+    if (path !== "" || parsed.search !== "" || parsed.hash !== "") {
+      const offending = [
+        path !== "" ? "a path" : null,
+        parsed.search !== "" ? "a query string" : null,
+        parsed.hash !== "" ? "a fragment" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      throw new ReaiConfigError(
+        `PUBLIC_URL must be a bare origin, but "${publicUrl}" contains ${offending}. ` +
+          `Endpoint URLs are built by appending to it, so this would produce ` +
+          `"${publicUrl}/authorize" instead of a usable authorization endpoint — and the consent ` +
+          `form, which posts to a root-relative /authorize, would send the user's ReAI token ` +
+          `somewhere else entirely. Use "${parsed.origin}".`,
+      );
+    }
   }
 
   return {
@@ -107,6 +137,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     defaultTenantId,
     // Only the remote transport binds a tenant; local stdio uses a plain default.
     boundTenantId: undefined,
+    // stdio keeps one long-lived server, so session state persists there.
+    statelessSession: false,
     writeMode: parseWriteMode(env.REAI_WRITE_MODE),
     timeoutMs: intFromEnv("REAI_TIMEOUT_MS", 30_000),
     maxRetries: intFromEnv("REAI_MAX_RETRIES", 2),

@@ -103,6 +103,13 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   "/admin",
   // Peppol actually transmits invoices to counterparties over the network.
   "/api/peppol",
+  // A reconciliation rule creates no posting itself, but it is standing
+  // authority to post: applying it books vouchers, the API documents an
+  // auto-reconciliation step at bank-sync time that may act on it without any
+  // further call, and deleting the rule does not reverse what it booked.
+  // Classified here rather than only on the curated tool -- gating the tool
+  // while reai_request still permitted the same call would be theatre.
+  "/api/reconciliation-rules",
 ];
 
 /** Master data: reference records an agent can safely create and clean up. */
@@ -125,7 +132,6 @@ const REVERSIBLE_PREFIXES: readonly string[] = [
   "/api/debtors",
   "/api/creditors",
   "/api/subscriptions",
-  "/api/reconciliation-rules",
   "/api/accountant-clients",
   "/api/invoice-reception-documents",
   "/api/receipt-reception-documents",

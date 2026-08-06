@@ -256,7 +256,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_reconciliation_rules` | Automatic booking rules | read |
 | `reai_get_tax_return` | Skattemelding for a year, with submission status | read |
 | `reai_create_company_bank` | Register a bank account | reversible |
-| `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules | reversible |
+| `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules. A rule is *standing authority to post* — applying it books vouchers, and deleting it does not reverse them | **irreversible** |
 | `reai_match_bank_transactions` | Reconcile transactions against existing postings | **irreversible** |
 | `reai_book_bank_transactions` | Book transactions to a counter-account | **irreversible** |
 | `reai_apply_reconciliation_rules` | Run the rules over a period (background job) | **irreversible** |
@@ -264,7 +264,15 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-Narrow the surface with `REAI_TOOLSETS=bookkeeping,sales,purchase,bank` if 59 tools is more than your client wants to see. Discovery is never disabled, so nothing becomes unreachable.
+If 59 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+
+```
+REAI_TOOLSETS=bookkeeping          # 14 tools
+REAI_TOOLSETS=bookkeeping,sales    # 33 tools
+(unset)                            # all 59
+```
+
+Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 

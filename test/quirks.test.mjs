@@ -9,19 +9,95 @@ import { getSpecIndex } from "../dist/reai/spec.js";
  * longer exists is worse than no quirk, because it looks authoritative.
  */
 
-test("every quirk matches at least one real operation in the spec", () => {
+test("EVERY path of every quirk matches a real operation", () => {
+  // Deliberately per-path. Requiring only one path to match let a renamed
+  // endpoint keep publishing authoritative-looking advice, because a sibling path
+  // in the same quirk still resolved.
   const ops = getSpecIndex().operations;
+  const reaches = (q, candidate, op) => {
+    const target = op.path.toLowerCase();
+    if (target === candidate) return true;
+    return q.match === "descendants" && target.startsWith(candidate + "/");
+  };
+
   for (const q of QUIRKS) {
-    const matched = ops.some((op) => {
-      if (q.methods && !q.methods.includes(op.method)) return false;
-      const target = op.path.toLowerCase();
-      return q.paths.some((p) => {
-        const prefix = p.toLowerCase().replace(/\/+$/, "");
-        return target === prefix || target.startsWith(prefix + "/");
-      });
-    });
-    assert.ok(matched, `quirk "${q.id}" matches no operation — paths: ${q.paths.join(", ")}`);
+    const candidates = q.paths.map((p) => p.toLowerCase().replace(/\/+$/, ""));
+    const methods = q.methods ?? null;
+
+    // Two separate requirements, rather than every path x method pair. A quirk
+    // legitimately spans a collection (POST /api/vouchers) and an item
+    // (PUT /api/vouchers/{id}), where neither path supports both methods.
+
+    // 1. No dead path: each declared path must match some operation the quirk
+    //    could apply to. This is what catches a renamed endpoint.
+    for (const [i, candidate] of candidates.entries()) {
+      const matched = ops.some(
+        (op) => (!methods || methods.includes(op.method)) && reaches(q, candidate, op),
+      );
+      assert.ok(
+        matched,
+        `quirk "${q.id}" declares path "${q.paths[i]}" which matches no operation` +
+          `${methods ? ` for any of ${methods.join("/")}` : ""}` +
+          `${q.match === "descendants" ? "" : ' (match is exact; add match: "descendants" if intended)'}`,
+      );
+    }
+
+    // 2. No dead method: each declared method must reach some declared path.
+    //    This is what catches a quirk scoped to PATCH while naming only the
+    //    collection path, since PATCH lives on /{id}.
+    for (const method of methods ?? []) {
+      const matched = ops.some(
+        (op) => op.method === method && candidates.some((c) => reaches(q, c, op)),
+      );
+      assert.ok(
+        matched,
+        `quirk "${q.id}" declares method ${method}, which matches none of its paths ` +
+          `(${q.paths.join(", ")}). PATCH and PUT usually live on the /{id} path, not the collection.`,
+      );
+    }
   }
+});
+
+test("update-scoped quirks reach the item paths their operations live on", () => {
+  // Regression: exact matching silently dropped these, because PATCH/PUT are on
+  // /{id} while the quirk named only the collection.
+  const cases = [
+    ["PATCH", "/api/customers/{id}", "phone-no-plus47"],
+    ["PATCH", "/api/customers/{id}", "customer-name-title-cased"],
+    ["PATCH", "/api/suppliers/{id}", "phone-no-plus47"],
+    ["PUT", "/api/offers/{id}", "offer-lines-stricter"],
+    ["PUT", "/api/offers/{id}", "days-until-due-mandatory"],
+    ["PUT", "/api/subscriptions/{id}", "subscription-self-invoicing"],
+    ["PUT", "/api/company-banks/{id}", "company-bank-bban"],
+  ];
+  for (const [method, path, id] of cases) {
+    const ids = quirksFor(method, path).map((q) => q.id);
+    assert.ok(ids.includes(id), `${method} ${path} should carry "${id}"; got ${ids.join(", ") || "none"}`);
+  }
+});
+
+test("a quirk only reaches sub-operations when it says it does", () => {
+  // The leak this fixed: POST /api/invoices/{id}/email inherited
+  // "an invoice is created FROM AN ORDER" and was told to send an orderId, and
+  // POST /api/customers/{id}/contact-persons inherited the customer-creation
+  // field restrictions. Both are wrong, and both read as authoritative.
+  const emailIds = quirksFor("POST", "/api/invoices/{id}/email").map((q) => q.id);
+  assert.ok(!emailIds.includes("invoice-from-order-only"), emailIds.join(", "));
+
+  const contactIds = quirksFor("POST", "/api/customers/{id}/contact-persons").map((q) => q.id);
+  for (const leaked of ["customer-create-fields", "brreg-lookup", "phone-no-plus47"]) {
+    assert.ok(!contactIds.includes(leaked), `${leaked} leaked onto contact-persons`);
+  }
+
+  // The parent operations still carry them.
+  assert.ok(quirksFor("POST", "/api/invoices").some((q) => q.id === "invoice-from-order-only"));
+  assert.ok(quirksFor("POST", "/api/customers").some((q) => q.id === "customer-create-fields"));
+
+  // And a descendants-marked quirk still reaches down where that is intended.
+  assert.ok(
+    quirksFor("POST", "/api/vat-returns/reopen").some((q) => q.id === "vat-return-does-not-file"),
+    "vat-return-does-not-file should reach /reopen",
+  );
 });
 
 test("quirk ids are unique and kinds are known", () => {
@@ -42,6 +118,7 @@ test("the quirks that motivated this registry reach their endpoints", () => {
   const cases = [
     ["GET", "/api/bank-transactions/{id}", "no-bank-transaction-list"],
     ["GET", "/api/bank-reconciliations/{bankAccountId}", "no-bank-transaction-list"],
+    ["GET", "/api/bank-reconciliations/{bankAccountId}", "manual-vs-synced-reconciliation"],
     ["POST", "/api/invoices", "invoice-from-order-only"],
     ["POST", "/api/offers", "offer-lines-stricter"],
     ["POST", "/api/orders", "order-send-ehf"],
