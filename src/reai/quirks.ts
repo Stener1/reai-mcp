@@ -190,17 +190,28 @@ export const QUIRKS: readonly Quirk[] = [
 
   {
     id: "leads-paginated-object",
-    paths: ["/api/leads"],
+    paths: ["/api/leads", "/api/leads/person-profiles", "/api/leads/person-role-matches"],
     methods: ["GET"],
     kind: "shape",
     note:
-      "The ONLY paginated collection in this API, and the only one that does not return a bare " +
-      "array. The response is an object: { items, page, hasPrevious, hasNext, latestRegisteredAt }, " +
-      "50 rows per page — so iterating the response directly, or reading .length, yields nothing. " +
-      "Rows also carry \"id\": null, because these are Brønnøysund register entries rather than " +
-      "stored records; there is no local id to fetch one by.",
+      "These return a PAGE OBJECT, not the bare array almost every other collection here returns, " +
+      "so iterating the response or reading .length yields nothing. /api/leads gives " +
+      "{ items, page, hasPrevious, hasNext, latestRegisteredAt } and takes page plus pageSize " +
+      "(1-200, default 50); /api/leads/person-profiles gives { items, hasMore, nextStartOrgNo, limit } " +
+      "and pages by nextStartOrgNo rather than by number. Read the wrapper before assuming a count.",
   },
   {
+    id: "leads-unsaved-rows-have-no-id",
+    paths: ["/api/leads"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "A row's `id` is null only while the lead is UNSAVED — those rows are live Brønnøysund " +
+      "register entries rather than stored records. Saved leads do have an id, and it is the key to " +
+      "the whole workflow: GET/PATCH /api/leads/{id}, POST /api/leads/{id}/convert, and the notes, " +
+      "status and follow-up endpoints. Filter with leadFilter=saved|unsaved|all, and keep any id you " +
+      "are given rather than discarding it.",
+  },  {
     id: "warehouse-inventory-object",
     paths: ["/api/warehouses/inventory"],
     methods: ["GET"],

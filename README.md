@@ -300,7 +300,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **43 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **44 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
@@ -320,7 +320,8 @@ Browse them with `reai_api_notes`, or read the highlights:
 - **`GET /api/timesheets` is unusable without the Project module** — `projectId` is a *required* query parameter, and supplying it returns `400 "projectId cannot be used when the Project module is disabled"`. Required and rejected at once, so no request succeeds.
 
 **Collections that are not arrays**
-- **`/api/leads` is the only paginated endpoint**, and returns an object: `{ items, page, hasPrevious, hasNext, latestRegisteredAt }`, 50 rows a page. Iterating the response or reading `.length` gets you nothing. Rows carry `"id": null` — they are Brønnøysund register entries, not stored records.
+- **The lead endpoints return a page object**, not the bare array nearly every other collection does — so iterating the response or reading `.length` gets you nothing. `/api/leads` gives `{ items, page, hasPrevious, hasNext, … }` with `pageSize` 1–200 (default 50); `/api/leads/person-profiles` gives `{ items, hasMore, nextStartOrgNo, limit }` and pages by `nextStartOrgNo` instead of by number.
+- A lead row's `id` is null only while it is **unsaved** (a live Brønnøysund entry). Saved leads have ids, and they are the key to `GET`/`PATCH /api/leads/{id}` and `…/convert` — keep them rather than discarding them.
 - **`/api/warehouses/inventory`** returns `{ warehouseId, rows, totalStockValue, totalRetailValue }`. The totals are already computed; do not sum `rows`.
 
 **Empty states that look like errors**
