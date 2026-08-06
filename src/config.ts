@@ -75,12 +75,23 @@ export type ServerConfig = {
   allowedRedirectHosts: string[];
 };
 
-function intFromEnv(name: string, fallback: number): number {
+/**
+ * `minimum` exists because zero is meaningful for exactly one of these settings:
+ * REAI_MAX_RETRIES=0 means "attempt every request once and never repeat it",
+ * which is what you want when writes land in real accounting records. A shared
+ * "must be positive" rule made the safest configuration unexpressible. A timeout
+ * or a page size of zero is still nonsense, so those keep a minimum of 1.
+ */
+function intFromEnv(name: string, fallback: number, minimum = 1): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new ReaiConfigError(`${name} must be a positive number, got "${raw}".`);
+  if (!Number.isFinite(n) || n < minimum) {
+    throw new ReaiConfigError(
+      minimum === 0
+        ? `${name} must be zero or a positive number, got "${raw}".`
+        : `${name} must be a positive number, got "${raw}".`,
+    );
   }
   return Math.floor(n);
 }
@@ -152,7 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowExternalSend:
       env.REAI_ALLOW_EXTERNAL_SEND === "1" || env.REAI_ALLOW_EXTERNAL_SEND === "true",
     timeoutMs: intFromEnv("REAI_TIMEOUT_MS", 30_000),
-    maxRetries: intFromEnv("REAI_MAX_RETRIES", 2),
+    maxRetries: intFromEnv("REAI_MAX_RETRIES", 2, 0),
     verbose: env.REAI_VERBOSE === "1" || env.REAI_VERBOSE === "true",
     toolsets: parseToolsets(env.REAI_TOOLSETS),
     port: intFromEnv("PORT", 8080),

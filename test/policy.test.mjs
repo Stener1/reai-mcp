@@ -570,7 +570,11 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
   rows = sent[0].body.postings.map((p) => p.rowNumber);
   assert.deepEqual(rows, [undefined, undefined], "identical descriptions merge fine");
 
-  // An explicit rowNumber is always respected.
+  // An explicit rowNumber is respected -- and the *other* posting still has to be
+  // given a row. This assertion previously expected [7, undefined], which pinned a
+  // real bug: leaving the second posting unnumbered defaults it to row 0 at the
+  // API, so a voucher that mixed explicit and implicit rows hit the very merge
+  // failure this logic exists to prevent.
   sent.length = 0;
   await tool.handler(
     {
@@ -583,5 +587,6 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
     ctx,
   );
   rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.deepEqual(rows, [7, undefined], "an explicit rowNumber must be respected");
+  assert.equal(rows[0], 7, "an explicit rowNumber must be respected");
+  assert.ok(rows[1] !== undefined && rows[1] !== 7, `the second posting needs its own row, got ${rows[1]}`);
 });

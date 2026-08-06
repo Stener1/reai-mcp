@@ -211,22 +211,48 @@ function imbalance(postings: Array<{ amount: number }>): number {
  * So: respect any explicit rowNumber, leave them out when the descriptions agree
  * (which produces a tidier single-row voucher), and otherwise give each posting
  * its own row so per-line descriptions survive.
+ *
+ * A partially numbered voucher is the case worth being careful about. Bailing out
+ * as soon as any posting carried a rowNumber reintroduced the very collision this
+ * guards against: an explicit row 0 describing A alongside an unnumbered posting
+ * describing B left the latter defaulted to row 0 too, so the merge failed again.
+ * Explicit rows are therefore honoured and unnumbered postings are fitted into
+ * rows nobody has claimed.
  */
-function assignRowNumbers<T extends { rowNumber?: number | undefined; description?: string | undefined }>(
+export function assignRowNumbers<T extends { rowNumber?: number | undefined; description?: string | undefined }>(
   postings: T[],
 ): T[] {
-  if (postings.some((p) => p.rowNumber !== undefined)) return postings;
-
   const descriptions = new Set(postings.map((p) => p.description ?? ""));
+  // One description throughout means every posting may share a row, so whatever
+  // shape the caller chose already merges cleanly.
   if (descriptions.size <= 1) return postings;
+  // Fully numbered: the caller has said exactly what they want.
+  if (postings.every((p) => p.rowNumber !== undefined)) return postings;
 
-  // Group by description: postings sharing one still share a row.
+  // Rows already claimed, and what each carries — an unnumbered posting whose
+  // description matches an explicit row can join it instead of taking a new one.
   const rowByDescription = new Map<string, number>();
+  const takenRows = new Set<number>();
+  for (const p of postings) {
+    if (p.rowNumber === undefined) continue;
+    takenRows.add(p.rowNumber);
+    const key = p.description ?? "";
+    if (!rowByDescription.has(key)) rowByDescription.set(key, p.rowNumber);
+  }
+
+  let candidate = 0;
+  const claimFreeRow = (): number => {
+    while (takenRows.has(candidate)) candidate += 1;
+    takenRows.add(candidate);
+    return candidate;
+  };
+
   return postings.map((p) => {
+    if (p.rowNumber !== undefined) return p;
     const key = p.description ?? "";
     let row = rowByDescription.get(key);
     if (row === undefined) {
-      row = rowByDescription.size;
+      row = claimFreeRow();
       rowByDescription.set(key, row);
     }
     return { ...p, rowNumber: row };

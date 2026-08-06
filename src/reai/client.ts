@@ -59,6 +59,29 @@ export type BinaryPayload = {
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 const MAX_ERROR_BODY = 4000;
 
+/**
+ * Methods that may be retried after an *ambiguous* failure — one where the
+ * request might already have reached ReAI and been committed.
+ *
+ * This matters more here than in most API clients. `POST /api/vouchers` is not
+ * idempotent and carries no idempotency key, so retrying it after a lost
+ * response can book the same voucher twice into real accounting records, where
+ * the duplicate cannot simply be deleted once the period closes. A gateway
+ * timeout is exactly the case where the write most likely *did* land.
+ *
+ * DELETE is included because ReAI treats a repeated delete as already-deleted
+ * rather than as a second destructive act.
+ */
+const RETRY_SAFE_METHODS = new Set(["GET", "HEAD", "DELETE"]);
+
+/**
+ * 429 is different from the 5xx family: it means the request was rejected
+ * *before* being processed, so retrying it cannot duplicate anything.
+ */
+function mayRetry(method: string, cause: "status-429" | "ambiguous"): boolean {
+  return cause === "status-429" || RETRY_SAFE_METHODS.has(method.toUpperCase());
+}
+
 export class ReaiClient {
   readonly baseUrl: string;
   private readonly token: string;
@@ -139,7 +162,11 @@ export class ReaiClient {
             rawBody: raw,
             requestId: res.headers.get("x-request-id") ?? undefined,
           });
-          if (RETRYABLE_STATUSES.has(res.status) && attempt < this.maxRetries) {
+          if (
+            RETRYABLE_STATUSES.has(res.status) &&
+            attempt < this.maxRetries &&
+            mayRetry(opts.method, res.status === 429 ? "status-429" : "ambiguous")
+          ) {
             lastError = err;
             continue;
           }
@@ -157,7 +184,9 @@ export class ReaiClient {
       } catch (err) {
         if (err instanceof ReaiApiError) throw err;
         lastError = err;
-        const isLast = attempt === this.maxRetries;
+        // A transport failure is the ambiguous case: the write may already have
+        // been committed, so only retry methods where repeating it is harmless.
+        const isLast = attempt === this.maxRetries || !mayRetry(opts.method, "ambiguous");
         if (isLast) {
           this.log(opts, "error", started, attempt, tenantId);
           throw new ReaiTransportError({

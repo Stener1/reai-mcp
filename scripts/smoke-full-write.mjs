@@ -127,6 +127,10 @@ async function main() {
       REAI_USER_API_TOKEN: token,
       REAI_TENANT_ID: String(tenantId),
       REAI_WRITE_MODE: "full",
+      // The client no longer retries non-idempotent writes after an ambiguous
+      // failure, but this run posts to real books, so it opts out of retries
+      // entirely rather than relying on that classification being right.
+      REAI_MAX_RETRIES: "0",
       // Left unset on purpose. The point of this run is to prove that ledger
       // writes and external sending are genuinely independent.
       REAI_ALLOW_EXTERNAL_SEND: "",
@@ -139,7 +143,13 @@ async function main() {
   console.log(`\nFull-write run against tenant ${tenantId} (write mode: full, external send: OFF)`);
   console.log(`Stamp: ${STAMP}\n`);
 
-  const created = { voucherId: undefined, bankId: undefined, ruleId: undefined };
+  const created = {
+    voucherId: undefined,
+    bankId: undefined,
+    ruleId: undefined,
+    supplierInvoiceId: undefined,
+    supplierId: undefined,
+  };
 
   try {
     // --- 1. Safety first, before anything is written --------------------------
@@ -267,6 +277,85 @@ async function main() {
       created.bankId ? `id=${created.bankId}` : textOf(bankRes).slice(0, 200),
     );
 
+    // --- 4b. The supplier-invoice chain --------------------------------------
+    //
+    // A supplier invoice is an INCOMING document, so registering one transmits
+    // nothing — which is what makes it testable when issuing a customer invoice
+    // is not. It posts to the ledger and to the supplier's reskontro, and its
+    // cost lines deliberately do NOT follow the voucher sign convention, so this
+    // is the only place that difference is exercised against live books.
+    console.log("\n  Supplier-invoice chain (posts to the ledger and the reskontro):");
+    const supRes = await client.callTool({
+      name: "reai_create_supplier",
+      arguments: { name: `${STAMP} supplier`, privateContact: true, skipRegistryLookup: true },
+    });
+    const supplier = supRes.isError ? undefined : jsonOf(supRes);
+    if (Number.isInteger(supplier?.id)) created.supplierId = supplier.id;
+    report("a supplier is created", !supRes.isError && Number.isInteger(created.supplierId), `id=${created.supplierId}`);
+
+    const acctRes = await client.callTool({ name: "reai_list_accounts", arguments: { accountNumberPrefix: "67" } });
+    const costAccount = /"accountNumber":\s*"(\d+)"/.exec(textOf(acctRes))?.[1];
+    report("a cost account is available to book against", Boolean(costAccount), `account=${costAccount}`);
+
+    if (created.supplierId && costAccount) {
+      // The sign rule differs from a voucher's, so a negative amount on an
+      // invoice is a caller mistake and must be caught before it is sent.
+      const wrongSign = await client.callTool({
+        name: "reai_create_supplier_invoice",
+        arguments: {
+          supplierId: created.supplierId,
+          date: today,
+          dueDate: today,
+          costLines: [{ amount: -100, debitAccount: costAccount, description: STAMP }],
+        },
+      });
+      report(
+        "a negative cost line on an invoice is refused locally",
+        wrongSign.isError === true && /documentType/i.test(textOf(wrongSign)),
+        (textOf(wrongSign).split("\n")[0] ?? "").slice(0, 100),
+      );
+
+      const invRes = await client.callTool({
+        name: "reai_create_supplier_invoice",
+        arguments: {
+          supplierId: created.supplierId,
+          date: today,
+          dueDate: today,
+          number: `${STAMP}`.slice(0, 30),
+          costLines: [{ amount: 125, debitAccount: costAccount, description: `${STAMP} cost` }],
+        },
+      });
+      const invoice = invRes.isError ? undefined : jsonOf(invRes);
+      if (Number.isInteger(invoice?.id)) created.supplierInvoiceId = invoice.id;
+      report(
+        "a supplier invoice is registered and posted",
+        !invRes.isError && Number.isInteger(created.supplierInvoiceId),
+        created.supplierInvoiceId ? `id=${created.supplierInvoiceId}` : textOf(invRes).slice(0, 200),
+      );
+
+      if (created.supplierInvoiceId) {
+        const ledgerRes = await client.callTool({ name: "reai_supplier_ledger", arguments: { isUnpaid: true } });
+        report(
+          "it appears in the supplier ledger as unpaid",
+          !ledgerRes.isError && textOf(ledgerRes).includes(String(created.supplierId)),
+          (textOf(ledgerRes).split("\n")[0] ?? "").slice(0, 80),
+        );
+
+        // The payment tool must not be usable without saying which flow it is:
+        // omitting manualPayment once meant the API default selected the
+        // bank-integrated flow, which can begin a real BankID transfer.
+        const noMode = await client.callTool({
+          name: "reai_register_supplier_invoice_payment",
+          arguments: { id: created.supplierInvoiceId, paymentDate: today, invoiceAmount: 125 },
+        });
+        report(
+          "a payment without an explicit manualPayment is rejected",
+          noMode.isError === true,
+          (textOf(noMode).split("\n")[0] ?? "").slice(0, 100),
+        );
+      }
+    }
+
     const ruleRes = await client.callTool({
       name: "reai_create_reconciliation_rule",
       arguments: { matchText: `SMOKE-${Date.now()}`, accountNumber: "7710", description: `${STAMP} rule` },
@@ -280,47 +369,135 @@ async function main() {
     );
   } finally {
     // --- 5. Clean up, most dependent first -----------------------------------
+    //
+    // Every deletion is isolated. A single `await` that rejects here — a
+    // transport hiccup, a timeout — would otherwise abandon the rest of the
+    // block, and the voucher is cleaned up last, so one failed request could
+    // leave a test entry sitting in someone's real ledger. A failure has to be
+    // reported and stepped over, not allowed to propagate.
     console.log("\n  Cleanup:");
+
+    const attempt = async (label, call, describe) => {
+      try {
+        const r = await call();
+        report(label, !r.isError, describe(r));
+        return r;
+      } catch (err) {
+        report(label, false, `CLEANUP REQUEST THREW — ${err?.message ?? err}`);
+        return undefined;
+      }
+    };
+
     if (created.ruleId) {
-      const r = await client.callTool({
-        name: "reai_delete_reconciliation_rule",
-        arguments: { id: created.ruleId },
-      });
-      report("reconciliation rule deleted", !r.isError, textOf(r).slice(0, 90));
+      await attempt(
+        "reconciliation rule deleted",
+        () => client.callTool({ name: "reai_delete_reconciliation_rule", arguments: { id: created.ruleId } }),
+        (r) => textOf(r).slice(0, 90),
+      );
+    }
+    if (created.supplierInvoiceId) {
+      await attempt(
+        "supplier invoice reversed",
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: { method: "DELETE", path: `/api/supplier-invoices/${created.supplierInvoiceId}`, tenantId },
+          }),
+        (r) =>
+          r.isError
+            ? `REVERSAL FAILED — check supplier invoice ${created.supplierInvoiceId} by hand: ${textOf(r).slice(0, 120)}`
+            : textOf(r).slice(0, 90),
+      );
+    }
+    if (created.supplierId) {
+      await attempt(
+        "supplier deleted or archived",
+        () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
+        (r) => textOf(r).slice(0, 90),
+      );
     }
     if (created.bankId) {
-      const r = await client.callTool({
-        name: "reai_request",
-        arguments: { method: "DELETE", path: `/api/company-banks/${created.bankId}`, tenantId },
-      });
-      report("company bank deleted or archived", !r.isError, textOf(r).slice(0, 90));
+      await attempt(
+        "company bank deleted or archived",
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: { method: "DELETE", path: `/api/company-banks/${created.bankId}`, tenantId },
+          }),
+        (r) => textOf(r).slice(0, 90),
+      );
     }
     if (created.voucherId) {
-      const r = await client.callTool({ name: "reai_delete_voucher", arguments: { id: created.voucherId } });
-      report(
+      await attempt(
         "THE VOUCHER IS DELETED",
-        !r.isError,
-        r.isError ? `DELETE FAILED — remove voucher ${created.voucherId} by hand: ${textOf(r).slice(0, 140)}` : textOf(r).slice(0, 90),
+        () => client.callTool({ name: "reai_delete_voucher", arguments: { id: created.voucherId } }),
+        (r) =>
+          r.isError
+            ? `DELETE FAILED — remove voucher ${created.voucherId} by hand: ${textOf(r).slice(0, 140)}`
+            : textOf(r).slice(0, 90),
       );
 
-      const after = await client.callTool({ name: "reai_get_voucher", arguments: { id: created.voucherId } });
-      const gone = after.isError === true;
-      report(
-        "the voucher is gone from the ledger",
-        gone,
-        gone ? "verified" : `STILL PRESENT — delete voucher ${created.voucherId} by hand`,
-      );
+      // Only a 404 proves the voucher is gone. Treating any error as proof made
+      // an auth failure, a 500 or an exhausted retry print "verified" while the
+      // voucher was never actually checked — the one report in this script that
+      // must never be optimistic.
+      try {
+        const after = await client.callTool({ name: "reai_get_voucher", arguments: { id: created.voucherId } });
+        const body = textOf(after);
+        const notFound = after.isError === true && /\b404\b|not found/i.test(body);
+        const stillThere = after.isError !== true;
+        report(
+          "the voucher is gone from the ledger (confirmed by a 404)",
+          notFound,
+          notFound
+            ? "verified"
+            : stillThere
+              ? `STILL PRESENT — delete voucher ${created.voucherId} by hand`
+              : `INCONCLUSIVE, not a 404 — verify voucher ${created.voucherId} by hand: ${body.slice(0, 140)}`,
+        );
+      } catch (err) {
+        report(
+          "the voucher is gone from the ledger (confirmed by a 404)",
+          false,
+          `COULD NOT VERIFY — check voucher ${created.voucherId} by hand: ${err?.message ?? err}`,
+        );
+      }
     }
+
+    // A last sweep by stamp, independent of the ids we think we hold. If a
+    // create was committed but its response never arrived, no id was recorded
+    // and none of the cleanup above would have touched it.
+    try {
+      const sweep = await client.callTool({
+        name: "reai_list_vouchers",
+        arguments: { startDate: today, endDate: today },
+      });
+      const leftovers = [...textOf(sweep).matchAll(/"id":\s*(\d+)[^}]*?"description":\s*"([^"]*)"/g)]
+        .filter(([, , description]) => description.includes(STAMP))
+        .map(([, id]) => Number(id))
+        .filter((id) => id !== created.voucherId);
+      report(
+        "no stray vouchers carrying this run's stamp remain",
+        leftovers.length === 0,
+        leftovers.length === 0 ? "none" : `LEFTOVER VOUCHERS ${leftovers.join(", ")} — delete by hand`,
+      );
+    } catch (err) {
+      report("no stray vouchers carrying this run's stamp remain", false, `sweep failed: ${err?.message ?? err}`);
+    }
+
     await client.close();
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   console.log(
-    "\nDeliberately NOT tested, because they cannot be undone on real books:\n" +
-      "  - issuing an invoice or credit note (transmits to the customer, not deletable)\n" +
-      "  - registering a supplier invoice (DELETE reverses, leaving a permanent pair)\n" +
-      "  - customer/supplier payments, salary payments, VAT settlement (locks a period)\n" +
-      "  - tax return submission (files with Skatteetaten, no idempotency guard)",
+    "\nDeliberately NOT tested:\n" +
+      "  - issuing an invoice or credit note — TRANSMITS to the customer and cannot be\n" +
+      "    recalled. Not a reversibility question, and no flag in this script enables it.\n" +
+      "  - registering an actual payment (customer, supplier or salary) — moves money or\n" +
+      "    records that it moved; the tool's guards are asserted above without paying.\n" +
+      "  - settling a VAT period — locks the books for it, and reopening is a privileged\n" +
+      "    operation, so a test would leave a real company's period in a changed state.\n" +
+      "  - tax return submission — files with Skatteetaten, with no idempotency guard.",
   );
   process.exit(failed === 0 ? 0 : 1);
 }

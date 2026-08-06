@@ -292,8 +292,11 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["DELETE"],
     kind: "irreversible",
     note:
-      "DELETE on a registered supplier invoice REVERSES it with a counter-posting rather than " +
-      "removing it. The original stays in the audit trail.",
+      "DELETE on a registered supplier invoice is only cleanly reversible while its period is " +
+      "open. Verified on live books: deleting a same-day invoice in an open period removed it " +
+      "and its postings entirely, leaving nothing behind. Once the period is closed, bokføringsloven " +
+      "does not allow that, and the delete becomes a counter-posting that leaves the original in " +
+      "the audit trail. Treat it as irreversible unless you know the period is open.",
   },
   {
     id: "reception-inbox-preferred",
