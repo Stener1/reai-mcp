@@ -69,6 +69,13 @@ connector, and has been verified against live ReAI data throughout.
   index.
 - CI across Node 20, 22 and 24, plus a check that the published package contains
   what it should.
+- **`scripts/ci-local.sh`**, which runs everything that workflow runs, on every
+  Node version in its matrix. Written during a multi-hour GitHub Actions outage,
+  when no workflow could start at all — "wait for a green tick" is not a quality
+  gate while the service producing the tick is down. It says outright that it is
+  not a CI run, because it cannot reproduce the clean-room `npm ci` on Linux, and
+  it skips-with-warning rather than silently passing when a Node version is
+  missing locally.
 
 ### Fixed
 
