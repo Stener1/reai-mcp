@@ -74,6 +74,8 @@ const STAMP = `reai-mcp smoke ${new Date().toISOString().replace(/[:.]/g, "-")}`
  */
 const containsStamp = (text) => text.toLowerCase().includes(STAMP.toLowerCase());
 
+const firstLineOf = (text) => (text.split("\n").find((l) => l.trim()) ?? "").slice(0, 130);
+
 async function main() {
   const client = new Client({ name: "reai-mcp-write-smoke", version: "1.0.0" });
   const transport = new StdioClientTransport({
@@ -91,7 +93,12 @@ async function main() {
   await client.connect(transport);
   console.log(`\nReversible write round-trip against tenant ${tenantId} (mode: reversible)\n`);
 
-  const created = { customerId: undefined, offerId: undefined, supplierId: undefined };
+  const created = {
+    customerId: undefined,
+    offerId: undefined,
+    supplierId: undefined,
+    ruleId: undefined,
+  };
 
   try {
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
@@ -265,6 +272,54 @@ async function main() {
       );
     }
 
+    // 7c. Reconciliation rule round-trip. Creating one is reversible (it posts
+    //     nothing by itself), while APPLYING rules is not — assert both halves.
+    //     The account is looked up rather than hardcoded, since a tenant need not
+    //     have 7770 in its chart of accounts.
+    const acctRes = await client.callTool({
+      name: "reai_list_accounts",
+      arguments: { accountNumberPrefix: "77" },
+    });
+    const ruleAccount = /"accountNumber":\s*"(\d+)"/.exec(textOf(acctRes))?.[1];
+    if (!ruleAccount) {
+      console.log("  [SKIP] reconciliation rule round-trip — no 77xx cost account on this tenant");
+    } else {
+      const ruleRes = await client.callTool({
+        name: "reai_create_reconciliation_rule",
+        arguments: {
+          matchText: `SMOKE-${STAMP}`,
+          accountNumber: ruleAccount,
+          description: `${STAMP} rule`,
+        },
+      });
+      const rule = ruleRes.isError ? undefined : jsonOf(ruleRes);
+      if (Number.isInteger(rule?.id)) created.ruleId = rule.id;
+      report(
+        `reai_create_reconciliation_rule (account ${ruleAccount})`,
+        !ruleRes.isError && Number.isInteger(created.ruleId),
+        created.ruleId ? `id=${created.ruleId}` : textOf(ruleRes).slice(0, 240),
+      );
+      if (!created.ruleId && !ruleRes.isError) {
+        report(
+          "rule id could be parsed from the create response",
+          false,
+          `A rule WAS created in tenant ${tenantId} but its id could not be read. Remove it by ` +
+            `hand: description starts "${STAMP}".`,
+        );
+      }
+      if (created.ruleId) {
+        const listRules = await client.callTool({
+          name: "reai_list_reconciliation_rules",
+          arguments: {},
+        });
+        report(
+          "reai_list_reconciliation_rules sees it",
+          !listRules.isError && containsStamp(textOf(listRules)),
+          firstLineOf(textOf(listRules)),
+        );
+      }
+    }
+
     // 8. The things this mode must refuse. These matter more than the successes:
     //    they are the guarantee the consent page and README advertise.
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
@@ -283,6 +338,7 @@ async function main() {
       ["POST /api/users", { method: "POST", path: "/api/users", body: {} }],
       ["POST /api/supplier-invoices", { method: "POST", path: "/api/supplier-invoices", body: { supplierId: 1, costLines: [] } }],
       ["POST /api/expenses/1/voucher", { method: "POST", path: "/api/expenses/1/voucher", body: {} }],
+      ["POST /api/bank-reconciliations/1/apply-rules", { method: "POST", path: "/api/bank-reconciliations/1/apply-rules", body: { month: "2026-08" } }],
     ]) {
       const res = await client.callTool({ name: "reai_request", arguments: { ...args, tenantId } });
       const blocked = res.isError === true && /write policy/i.test(textOf(res));
@@ -300,6 +356,17 @@ async function main() {
         report("the test offer is deleted", !res.isError, textOf(res).slice(0, 120));
       } catch (err) {
         report("offer cleanup", false, `remove offer ${created.offerId} by hand: ${err}`);
+      }
+    }
+    if (created.ruleId) {
+      try {
+        const res = await client.callTool({
+          name: "reai_delete_reconciliation_rule",
+          arguments: { id: created.ruleId },
+        });
+        report("the test reconciliation rule is deleted", !res.isError, textOf(res).slice(0, 120));
+      } catch (err) {
+        report("rule cleanup", false, `remove rule ${created.ruleId} by hand: ${err}`);
       }
     }
     if (created.supplierId) {

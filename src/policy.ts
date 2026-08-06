@@ -85,7 +85,10 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   "/api/amelding",
   "/api/opening-balances",
   "/api/bank-reconciliations",
-  "/api/manual-bank-reconciliations",
+  // Note the path really is "manual-reconciliations", with no "bank" segment.
+  // An earlier "/api/manual-bank-reconciliations" entry here matched nothing;
+  // those endpoints were only protected by the unknown-path fail-closed rule.
+  "/api/manual-reconciliations",
   "/api/bank-transactions",
   "/api/assets",
   "/api/loans",

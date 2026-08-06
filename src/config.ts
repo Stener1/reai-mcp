@@ -123,7 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 }
 
 /** Known curated tool groups. `meta` and `discovery` are always on. */
-export const TOOLSETS = ["bookkeeping", "sales", "purchase"] as const;
+export const TOOLSETS = ["bookkeeping", "sales", "purchase", "bank"] as const;
 export type Toolset = (typeof TOOLSETS)[number];
 
 function parseToolsets(raw: string | undefined): string[] {
