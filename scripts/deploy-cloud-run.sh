@@ -14,6 +14,9 @@
 #   --service-account SA        Runtime identity. Default: a dedicated
 #                               reai-mcp-runtime SA, created if absent
 #   --secret-name N             Secret Manager name for the encryption key
+#   --allow-external-send       Permit EHF/Peppol, invoice email, reminders and
+#                               invoice issuance. Off by default. Enable this for
+#                               a real business doing its own invoicing
 #   --env KEY=VALUE             Extra env var; repeatable
 #
 # Prerequisites:
@@ -45,6 +48,7 @@ WRITE_MODE="reversible"
 ALLOWED_REDIRECT_HOSTS="claude.ai"
 SECRET_NAME="reai-mcp-encryption-key"
 SERVICE_ACCOUNT=""
+ALLOW_EXTERNAL_SEND="false"
 EXTRA_ENV=()
 
 usage() {
@@ -70,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --allowed-redirect-hosts) need_value "$1" $#; ALLOWED_REDIRECT_HOSTS="$2"; shift 2 ;;
     --service-account) need_value "$1" $#; SERVICE_ACCOUNT="$2"; shift 2 ;;
     --secret-name) need_value "$1" $#; SECRET_NAME="$2"; shift 2 ;;
+    --allow-external-send) ALLOW_EXTERNAL_SEND="true"; shift ;;
     --env) need_value "$1" $#; EXTRA_ENV+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1  (try --help)" >&2; exit 2 ;;
@@ -204,6 +209,14 @@ fi
 # delimiter to a semicolon for this argument.
 build_env_arg() {
   local pairs="REAI_WRITE_MODE=${WRITE_MODE};REAI_ALLOWED_REDIRECT_HOSTS=${ALLOWED_REDIRECT_HOSTS}"
+  # Always explicit. --update-env-vars preserves variables it is not given, so
+  # omitting this on a redeploy would leave a previous "1" in place while the
+  # script cheerfully reported "External send: false".
+  if [[ "$ALLOW_EXTERNAL_SEND" == "true" ]]; then
+    pairs="${pairs};REAI_ALLOW_EXTERNAL_SEND=1"
+  else
+    pairs="${pairs};REAI_ALLOW_EXTERNAL_SEND=0"
+  fi
   if [[ -n "${1:-}" ]]; then pairs="${pairs};PUBLIC_URL=${1}"; fi
   if [[ -n "${2:-}" ]]; then pairs="${pairs};REAI_ALLOWED_HOSTS=${2}"; fi
   local kv
@@ -298,6 +311,7 @@ Deployed and verified.
 
   MCP endpoint:  ${URL}/mcp
   Write mode:    ${WRITE_MODE}
+  External send: ${ALLOW_EXTERNAL_SEND} (EHF/Peppol, invoice email, reminders, invoice issuance)
   Runs as:       ${SERVICE_ACCOUNT}
   Callbacks:     ${ALLOWED_REDIRECT_HOSTS} (plus loopback, for local clients)
 

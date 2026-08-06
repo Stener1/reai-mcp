@@ -4,10 +4,13 @@ import { describeOperation, findOperation, getSpecIndex, searchOperations } from
 import { findQuirks, quirksFor } from "../reai/quirks.js";
 import {
   assertAllowed,
+  assertTransmitAllowed,
   canonicalizeApiPath,
   classifyRequest,
+  classifyTransmission,
   classifyWithBody,
   escalatingBodyFields,
+  transmittingBodyFields,
 } from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
 
@@ -214,7 +217,10 @@ const request = defineTool({
     "reai_describe_endpoint first.\n\n" +
     "Authentication and the tenant header are handled for you. Write calls are subject to the " +
     "server's write policy, and unrecognised write paths are treated as irreversible and blocked " +
-    "unless REAI_WRITE_MODE=full.",
+    "unless REAI_WRITE_MODE=full.\n\n" +
+    "Anything that sends to a third party — EHF/Peppol, invoice email, payment reminders, signing " +
+    "requests, and issuing an invoice, which starts delivery — is blocked separately unless " +
+    "REAI_ALLOW_EXTERNAL_SEND is enabled, regardless of write mode.",
   risk: "read", // Reads are always permitted; writes are classified per-call below.
   destructive: true,
   inputSchema: {
@@ -277,8 +283,18 @@ const request = defineTool({
       risk,
       ctx.config.writeMode,
       escalated.length > 0
-        ? `${method} ${path} with ${escalated.join(", ")}=true (this transmits the document externally)`
+        ? `${method} ${path} with ${escalated.join(", ")} (this arms an external send)`
         : `${method} ${path}`,
+    );
+
+    // Separately from reversibility: does this leave the tenant? Checked after
+    // the write policy so the more fundamental refusal is reported first.
+    const transmits = classifyTransmission(method, path, args.body);
+    const sendFields = transmittingBodyFields(args.body);
+    assertTransmitAllowed(
+      transmits,
+      ctx.config.allowExternalSend,
+      sendFields.length > 0 ? `${method} ${path} with ${sendFields.join(", ")}` : `${method} ${path}`,
     );
 
     const isMeta = path === "/api/me" || path === "/api/tenants";
