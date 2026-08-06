@@ -120,7 +120,11 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   const limit = clamp(opts.limit ?? 25, 1, 200);
   const wantMethod = opts.method?.toUpperCase();
   const wantTag = opts.tag?.toLowerCase();
-  const terms = tokenize(opts.query ?? "");
+  const rawTerms = tokenize(opts.query ?? "");
+  const { terms, resourceCount } = expandQuery(opts.query ?? "");
+  // An explicit method filter already narrows the results, so the verb hint would
+  // only add noise on top of it.
+  const impliedMethods = wantMethod ? undefined : impliedMethodsFor(rawTerms);
 
   const hits: SearchHit[] = [];
   for (const op of index.operations) {
@@ -134,22 +138,75 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
     if (terms.length === 0) {
       score = 1;
     } else {
-      const haystacks: Array<[string, number]> = [
+      const haystacks: Array<[string, number, boolean?]> = [
         [op.path.toLowerCase(), 6],
         [op.tag.toLowerCase(), 5],
-        [(op.summary ?? "").toLowerCase(), 4],
-        [(op.description ?? "").toLowerCase(), 2],
+        [(op.summary ?? "").toLowerCase(), 4, true],
+        [(op.description ?? "").toLowerCase(), 2, true],
         [op.id.toLowerCase(), 3],
+        // Parameter and body field names say what an endpoint is ABOUT, often more
+        // plainly than its prose. "employee hours on a project" was landing on the
+        // employee ledger, when /api/timesheets is the endpoint that actually takes
+        // projectId and employeeId — the names were there, just never scored.
+        [fieldNamesOf(op), 3],
       ];
-      const phrase = terms.join(" ");
-      for (const [text, weight] of haystacks) {
+      const phrase = rawTerms.join(" ");
+      const matchedResourceTerms = new Set<string>();
+      // Prose is corroborating evidence, not primary, so its contribution is
+      // capped. `/api/employees` carries no summary at all, while
+      // `/api/ledger/employee` has "List employee ledgers" — so an uncapped
+      // summary plus description was worth as much as the whole path and put a
+      // reporting view above the endpoint that actually creates an employee.
+      // Verbose documentation should not outrank being the right resource.
+      let prose = 0;
+      for (const [text, weight, isProse] of haystacks) {
         if (!text) continue;
-        if (terms.length > 1 && text.includes(phrase)) score += weight * 3;
-        for (const term of terms) if (text.includes(term)) score += weight;
+        const tokens = fieldTokens(text);
+        let contribution = 0;
+        if (rawTerms.length > 1 && text.includes(phrase)) contribution += weight * 3;
+        for (const { term, weight: termWeight } of terms) {
+          const strength = matchStrength(text, tokens, term);
+          if (strength === 0) continue;
+          contribution += weight * strength * termWeight;
+          if (termWeight >= 1) matchedResourceTerms.add(term);
+        }
+        if (isProse) prose += contribution;
+        else score += contribution;
+      }
+      score += Math.min(prose, PROSE_CAP);
+      // Covering more of what the user actually named matters more than matching
+      // one word repeatedly across several fields. Without this, an endpoint whose
+      // long description happens to mention one query word many times outranks the
+      // endpoint that is simply about the thing being asked for.
+      if (resourceCount > 0 && matchedResourceTerms.size > 0) {
+        score *= 1 + 0.6 * ((matchedResourceTerms.size - 1) / resourceCount);
       }
       // A collection endpoint is the more useful answer to a vague query than a
       // deeply nested sub-resource, so mildly prefer shallow paths.
       if (score > 0) score += Math.max(0, 4 - op.path.split("/").length) * 0.5;
+      // A verb in the query says which METHOD is wanted: "register a new employee"
+      // should reach POST /api/employees rather than the read-only employee ledger,
+      // and "delete a customer" should surface the DELETE.
+      //
+      // With no verb, the default is GET. A query with no stated intent is a
+      // question, and in an accounting API the cost of guessing wrong is asymmetric
+      // — "salary payment" was returning POST /api/salary-payments/{id}/complete
+      // first, which finalises payroll and starts an A-melding submission to
+      // Skatteetaten. DELETE is penalised harder still, since nothing about a
+      // neutral question suggests destroying a record.
+      //
+      // This is a nudge, not a filter: verbs are often absent or ambiguous. Use the
+      // explicit `method` option when certainty matters.
+      if (score > 0) {
+        const preferred = impliedMethods ?? GET_ONLY;
+        if (preferred.has(op.method)) score += 2;
+        else if (op.method === "DELETE") score -= 3;
+        // A query that stated no intent gets a firmer push towards reads: "mva
+        // melding" was surfacing POST /api/vat-returns, which SETTLES AND LOCKS a
+        // VAT period. Where a verb was given, the miss is milder and the penalty
+        // stays gentle.
+        else score -= impliedMethods ? 1.5 : 2.5;
+      }
       if (op.deprecated) score -= 3;
     }
 
@@ -344,7 +401,265 @@ function tokenize(query: string): string[] {
     .filter((t) => t.length > 1 && !STOPWORDS.has(t));
 }
 
-const STOPWORDS = new Set(["the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "api", "get", "all"]);
+/**
+ * Words carrying no signal about WHICH endpoint is wanted.
+ *
+ * Agents ask questions rather than typing keywords ("how do I register a new
+ * employee"), and every filler word here was matching substrings in unrelated
+ * paths: "exist" hit `/attachments/existing`, "what" and "new" hit assorted
+ * descriptions. Since scores accumulate per matching term, that noise was enough
+ * to put three supplier-invoice endpoints above `/api/departments` for a query
+ * whose main word was "departments".
+ */
+const STOPWORDS = new Set([
+  "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "api", "get", "all",
+  // Question and filler words.
+  "how", "do", "does", "did", "what", "which", "who", "when", "where", "why",
+  "is", "are", "was", "be", "can", "could", "should", "would", "will",
+  "i", "we", "my", "our", "us", "me", "you", "your",
+  "this", "that", "these", "those", "there", "then", "than",
+  "with", "from", "by", "at", "as", "it", "its", "if", "so", "any", "some",
+  "want", "need", "please", "about", "into", "out", "up", "down", "again",
+  "exist", "exists", "s",
+]);
+
+/**
+ * Terms describing an ACTION rather than a resource.
+ *
+ * "register a new employee" wants `/api/employees`, but "register" substring-
+ * matched `/api/receipt-reception-documents/{id}/registration` just as strongly as
+ * "employee" matched `/api/employees`, so the wrong endpoint won. A verb in the
+ * query says something about the METHOD, not about which resource is meant, so it
+ * is scored at a fraction of a resource word. The `method` filter is the right way
+ * to express intent.
+ */
+const VERB_TERMS = new Set([
+  "register", "registered", "create", "created", "add", "new", "make", "post",
+  "update", "change", "edit", "modify", "patch", "put",
+  "delete", "remove", "cancel",
+  "list", "show", "find", "search", "fetch", "read", "view", "see", "look",
+  "set", "run", "send", "start", "book", "record", "enter", "submit",
+]);
+const VERB_WEIGHT = 0.25;
+
+/** Prose (summary + description) cannot contribute more than this in total. */
+const PROSE_CAP = 3;
+
+/** Terms contributed by an explicit phrase mapping are high-confidence. */
+const PHRASE_WEIGHT = 1.6;
+
+/** The safe default when a query states no intent. */
+const GET_ONLY: ReadonlySet<HttpMethod> = new Set(["GET"]);
+
+/**
+ * Verbs that indicate which HTTP method the user means. Absent or ambiguous
+ * verbs simply yield no hint.
+ */
+const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMethod[]]> = [
+  [["register", "registered", "create", "created", "add", "new", "make", "submit", "start"], ["POST"]],
+  [["update", "change", "edit", "modify", "rename"], ["PUT", "PATCH"]],
+  [["delete", "remove", "cancel"], ["DELETE"]],
+  [["list", "show", "find", "search", "fetch", "read", "view", "see", "which", "what"], ["GET"]],
+];
+
+function impliedMethodsFor(tokens: readonly string[]): Set<HttpMethod> | undefined {
+  const methods = new Set<HttpMethod>();
+  for (const token of tokens) {
+    for (const [verbs, ms] of METHOD_INTENT) {
+      if (verbs.includes(token)) for (const m of ms) methods.add(m);
+    }
+  }
+  // Conflicting verbs ("list and create") carry no usable signal.
+  return methods.size > 0 && methods.size <= 2 ? methods : undefined;
+}
+
+/**
+ * Domain vocabulary mapped onto the API's own words.
+ *
+ * The API names a thing once; users name it several ways. An accountant says
+ * "payroll" where the API says salary-payments, "cost centre" where it says
+ * department, and "recurring invoice" where it says subscription — and every one
+ * of those missed the right endpoint entirely before this existed. Norwegian terms
+ * are here for the same reason: the books are Norwegian even when the API is
+ * English.
+ *
+ * Expansions are additive, so the original term still scores; this only widens
+ * what can match.
+ */
+const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bcost\s*(centre|center)s?\b/g, "department"],
+  [/\bfixed\s+assets?\b/g, "asset depreciation"],
+  [/\b(recurring|repeating)\b[^.]{0,24}\b(invoice|billing)/g, "subscription"],
+  [/\bcredit\s+notes?\b/g, "credit invoice"],
+  [/\bopening\s+balances?\b/g, "opening-balances"],
+  [/\bannual\s+accounts?\b/g, "annual-accounts"],
+  [/\bprofit\s+and\s+loss\b/g, "result income statement"],
+  [/\btrial\s+balance\b/g, "ledger balance"],
+  [/\bchart\s+of\s+accounts\b/g, "chart-of-accounts"],
+  [/\bcash\s+register\b/g, "kassasystem"],
+];
+
+const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
+  payroll: ["salary", "salary-payments"],
+  wages: ["salary"],
+  wage: ["salary"],
+  lonn: ["salary"],
+  salaries: ["salary"],
+  hours: ["timesheet"],
+  hour: ["timesheet"],
+  timetracking: ["timesheet"],
+  recurring: ["subscription"],
+  repeating: ["subscription"],
+  monthly: ["subscription", "period"],
+  inventory: ["warehouse"],
+  stock: ["warehouse"],
+  contract: ["agreement"],
+  contracts: ["agreement"],
+  signing: ["sign", "agreement"],
+  vat: ["vat", "mva"],
+  mva: ["vat"],
+  reskontro: ["ledger"],
+  bilag: ["voucher"],
+  faktura: ["invoice"],
+  kunde: ["customer"],
+  leverandor: ["supplier"],
+  ansatt: ["employee"],
+  konto: ["account"],
+  staff: ["employee"],
+  personnel: ["employee"],
+  employees: ["employee"],
+  department: ["department"],
+  reminder: ["reminders", "dunning"],
+  bank: ["bank", "company-banks"],
+  melding: ["return", "returns"],
+  owes: ["ledger", "unpaid", "customer"],
+  owe: ["ledger", "unpaid", "customer"],
+  outstanding: ["unpaid", "ledger"],
+  receivable: ["customer", "ledger", "unpaid"],
+  receivables: ["customer", "ledger", "unpaid"],
+  payable: ["supplier", "ledger", "unpaid"],
+  payables: ["supplier", "ledger", "unpaid"],
+  overdue: ["unpaid", "due", "reminders"],
+  reconcile: ["reconciliation"],
+  reconciling: ["reconciliation"],
+};
+
+/**
+ * Turn a natural-language query into the terms to score against, each carrying a
+ * weight. Returns resource terms and verb terms separately so coverage can be
+ * measured over the ones that actually identify an endpoint.
+ */
+function expandQuery(query: string): { terms: Array<{ term: string; weight: number }>; resourceCount: number } {
+  const text = query.toLowerCase();
+  // A phrase mapping is a deliberate, high-confidence statement that a user's
+  // words mean a particular resource ("recurring monthly invoice" -> subscription),
+  // so the terms it contributes outweigh a word that merely happens to appear.
+  // Without that, "invoice" in the query kept /api/invoices and the reception inbox
+  // above /api/subscriptions.
+  const phraseTerms: string[] = [];
+  for (const [pattern, replacement] of PHRASE_SYNONYMS) {
+    pattern.lastIndex = 0;
+    if (pattern.test(text)) phraseTerms.push(...replacement.split(" "));
+    pattern.lastIndex = 0;
+  }
+
+  const seen = new Set<string>();
+  const terms: Array<{ term: string; weight: number }> = [];
+  let resourceCount = 0;
+  const push = (term: string, weight: number) => {
+    if (term.length < 2 || seen.has(term)) return;
+    seen.add(term);
+    terms.push({ term, weight });
+    if (weight >= 1) resourceCount += 1;
+  };
+
+  for (const term of phraseTerms) push(term, PHRASE_WEIGHT);
+  for (const token of tokenize(text)) {
+    const isVerb = VERB_TERMS.has(token);
+    push(token, isVerb ? VERB_WEIGHT : 1);
+    // Synonyms inherit the term's own weight class, so a verb synonym cannot
+    // outweigh the resource the user actually named.
+    for (const syn of TERM_SYNONYMS[token] ?? []) push(syn, isVerb ? VERB_WEIGHT : 1);
+  }
+  return { terms, resourceCount };
+}
+
+/**
+ * How well one term matches one field, from 1 (the field contains that exact
+ * word) down to a small credit for a bare substring.
+ *
+ * Plain `includes` treated "register" inside "registration" as a full match,
+ * which is how a receipt-registration endpoint beat `/api/employees`. Ranking a
+ * whole-word hit above a fragment is what separates the two.
+ */
+function matchStrength(haystack: string, haystackTokens: ReadonlySet<string>, term: string): number {
+  if (haystackTokens.has(term)) return 1;
+  for (const token of haystackTokens) {
+    // Plural and inflected forms: "department" in "departments". Restricted to
+    // reasonably long terms so short fragments do not sweep up everything.
+    if (term.length >= 4 && token.startsWith(term)) return 0.75;
+    if (token.length >= 4 && term.startsWith(token)) return 0.6;
+  }
+  return haystack.includes(term) ? 0.2 : 0;
+}
+
+/**
+ * Parameter and body field names as one searchable string, camelCase split so
+ * "projectId" contributes both "project" and "id". Cached per operation because
+ * search walks all 430 of them on every query.
+ */
+const fieldNameCache = new WeakMap<SpecOperation, string>();
+
+function fieldNamesOf(op: SpecOperation): string {
+  const cached = fieldNameCache.get(op);
+  if (cached !== undefined) return cached;
+  const names: string[] = [];
+  // Path parameters are skipped deliberately: `{employeeId}` only restates what
+  // the path already says, and counting it twice made
+  // `/api/ledger/employee/{employeeId}` outrank `/api/employees` for "register a
+  // new employee". Query parameters and body fields carry genuinely new
+  // information — they are why /api/timesheets answers a question about an
+  // employee's hours on a project.
+  for (const p of op.params ?? []) if (p.in !== "path") names.push(p.name);
+  // Body fields are deliberately excluded. Only writes have a body, so scoring
+  // field names handed every POST and PUT a bonus no GET could earn — which put
+  // POST /api/supplier-invoices above the GET for the bare query "supplier
+  // invoice", and POST /api/salary-payments/{id}/complete above the GET for
+  // "salary payment". Query parameters carry the same descriptive value without
+  // being tied to a method.
+  const text = names
+    .join(" ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  fieldNameCache.set(op, text);
+  return text;
+}
+
+const FIELD_TOKENS = /[^a-z0-9æøå]+/;
+
+/**
+ * Field tokens, with a singular form added for plurals.
+ *
+ * REST collections are plural, so `/api/employees` tokenizes to "employees" while
+ * a user searches for "employee" — which scored only as an inflected match, below
+ * the exact hit that `/api/ledger/employee` got for the same word. The collection
+ * endpoint was losing to a sub-view precisely because it followed the convention.
+ * Adding the stem makes the collection an exact match, which is nearly always the
+ * answer the user wanted.
+ */
+function fieldTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const token of text.split(FIELD_TOKENS)) {
+    if (token.length <= 1) continue;
+    tokens.add(token);
+    if (token.endsWith("ies") && token.length > 4) tokens.add(`${token.slice(0, -3)}y`);
+    else if (token.endsWith("ses") && token.length > 4) tokens.add(token.slice(0, -2));
+    else if (token.endsWith("s") && !token.endsWith("ss") && token.length > 3) {
+      tokens.add(token.slice(0, -1));
+    }
+  }
+  return tokens;
+}
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
