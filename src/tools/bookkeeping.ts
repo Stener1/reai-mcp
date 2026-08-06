@@ -230,7 +230,13 @@ function imbalance(postings: Array<{ amount: number }>): number {
  * Explicit row numbers are always respected.
  */
 export function assignRowNumbers<
-  T extends { rowNumber?: number | undefined; description?: string | undefined; amount: number },
+  T extends {
+    rowNumber?: number | undefined;
+    description?: string | undefined;
+    amount: number;
+    currency?: string | undefined;
+    postingDate?: string | undefined;
+  },
 >(postings: T[]): T[] {
   // Fully numbered: the caller has said exactly what they want.
   if (postings.every((p) => p.rowNumber !== undefined)) return postings;
@@ -258,10 +264,16 @@ export function assignRowNumbers<
   // floating point.
   const cents = (n: number): number => Math.round(n * 100);
 
+  // The schema requires both sides of a row to share amount, currency AND date.
+  // Matching on amount alone put a multi-date or multi-currency pair into one row,
+  // which ReAI then rejects — worse than giving each posting its own row.
+  const sameRowEligible = (a: T, b: T): boolean =>
+    cents(Math.abs(a.amount)) === cents(Math.abs(b.amount)) &&
+    (a.currency ?? "") === (b.currency ?? "") &&
+    (a.postingDate ?? "") === (b.postingDate ?? "");
+
   for (const debit of debits) {
-    const match = credits.find(
-      ({ p, i }) => !usedCredits.has(i) && cents(Math.abs(p.amount)) === cents(debit.p.amount),
-    );
+    const match = credits.find(({ p, i }) => !usedCredits.has(i) && sameRowEligible(p, debit.p));
     const row = claimRow();
     assigned.set(debit.i, row);
     if (match) {
@@ -291,11 +303,17 @@ export function assignRowNumbers<
 export function rowDescriptionConflicts<
   T extends { rowNumber?: number | undefined; description?: string | undefined },
 >(postings: T[]): string[] {
+  // An ABSENT description is "unspecified", not the empty string. Treating omission
+  // as "" made a pair where only one side named a description look like a conflict,
+  // and this check refuses the voucher locally — so it would have blocked a call over
+  // a rule the bundled spec does not state anywhere. Only two explicitly different
+  // descriptions are a real disagreement.
   const byRow = new Map<number, Set<string>>();
   for (const p of postings) {
     if (p.rowNumber === undefined) continue;
+    if (p.description === undefined) continue;
     const set = byRow.get(p.rowNumber) ?? new Set<string>();
-    set.add(p.description ?? "");
+    set.add(p.description);
     byRow.set(p.rowNumber, set);
   }
   const conflicts: string[] = [];
@@ -431,12 +449,20 @@ const deleteVoucher = defineTool({
           `reai_list_postings.`,
       });
     }
-    return ok(res.data ?? { outcome: "deleted" }, {
+    if (outcome === "deleted") {
+      return ok(res.data, {
+        note: `Voucher ${args.id} was deleted outright; nothing remains in the ledger.`,
+      });
+    }
+    // No outcome in the body. Report exactly that — an earlier version returned a
+    // synthesized { outcome: "deleted" } next to a note saying the outcome was
+    // unknown, so anything reading the structured value would have concluded the
+    // voucher was gone when it may have been reversed.
+    return ok(res.data ?? { outcome: null }, {
       note:
-        outcome === "deleted"
-          ? `Voucher ${args.id} was deleted outright; nothing remains in the ledger.`
-          : `Voucher ${args.id}: HTTP ${res.status}, but ReAI did not say whether it was deleted or ` +
-            `reversed. Check reai_list_postings before assuming the transaction is gone.`,
+        `Voucher ${args.id}: HTTP ${res.status}, but ReAI did not say whether it was deleted or ` +
+        `REVERSED, so do not assume the transaction is gone. Check reai_list_postings for a ` +
+        `counter-posting before re-booking anything.`,
     });
   },
 });

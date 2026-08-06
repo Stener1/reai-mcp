@@ -167,3 +167,60 @@ test("deleting a voucher reports REVERSAL rather than claiming deletion", async 
   const silent = await run(undefined, 204);
   assert.match(silent, /did not say whether/);
 });
+
+test("a row requires the same currency and date, not just the same amount", async () => {
+  // The schema: both sides of a row share "the same date, description, currency and
+  // absolute amount". Matching on amount alone put a multi-date or multi-currency
+  // pair into one row, which ReAI then rejects — worse than one row each.
+  const { assignRowNumbers } = await import("../dist/tools/bookkeeping.js");
+
+  const differentDate = assignRowNumbers([
+    { amount: 100, postingDate: "2026-01-01" },
+    { amount: -100, postingDate: "2026-02-01" },
+  ]);
+  assert.notEqual(differentDate[0].rowNumber, differentDate[1].rowNumber);
+
+  const differentCurrency = assignRowNumbers([
+    { amount: 100, currency: "NOK" },
+    { amount: -100, currency: "EUR" },
+  ]);
+  assert.notEqual(differentCurrency[0].rowNumber, differentCurrency[1].rowNumber);
+
+  const matching = assignRowNumbers([
+    { amount: 100, currency: "NOK", postingDate: "2026-01-01" },
+    { amount: -100, currency: "NOK", postingDate: "2026-01-01" },
+  ]);
+  assert.equal(matching[0].rowNumber, matching[1].rowNumber);
+});
+
+test("an omitted description is not treated as a conflicting one", async () => {
+  // This check refuses the voucher locally, so it must not fire on a rule the spec
+  // does not state. Only two explicitly different descriptions disagree.
+  const { rowDescriptionConflicts } = await import("../dist/tools/bookkeeping.js");
+  assert.deepEqual(rowDescriptionConflicts([{ rowNumber: 0, description: "Kjøp" }, { rowNumber: 0 }]), []);
+  assert.deepEqual(rowDescriptionConflicts([{ rowNumber: 0 }, { rowNumber: 0 }]), []);
+  assert.equal(
+    rowDescriptionConflicts([
+      { rowNumber: 0, description: "a" },
+      { rowNumber: 0, description: "b" },
+    ]).length,
+    1,
+  );
+});
+
+test("a silent delete response does not report a deleted outcome", async () => {
+  // An earlier version returned a synthesized { outcome: "deleted" } alongside a note
+  // saying the outcome was unknown, so anything reading the structured value would
+  // conclude the voucher was gone when it may have been reversed.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_delete_voucher");
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: { request: async () => ({ status: 204, data: undefined }), deepLink: () => "x" },
+  };
+  const text = (await tool.handler({ id: 9 }, ctx)).content.map((c) => c.text).join("\n");
+  assert.doesNotMatch(text, /"outcome":\s*"deleted"/, "must not synthesize a deleted outcome");
+  assert.match(text, /did not say whether/);
+  assert.match(text, /REVERSED/);
+});
