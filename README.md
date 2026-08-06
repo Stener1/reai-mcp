@@ -256,7 +256,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_reconciliation_rules` | Automatic booking rules | read |
 | `reai_get_tax_return` | Skattemelding for a year, with submission status | read |
 | `reai_create_company_bank` | Register a bank account | reversible |
-| `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules | reversible |
+| `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules. A rule is *standing authority to post* — applying it books vouchers, and deleting it does not reverse them | **irreversible** |
 | `reai_match_bank_transactions` | Reconcile transactions against existing postings | **irreversible** |
 | `reai_book_bank_transactions` | Book transactions to a counter-account | **irreversible** |
 | `reai_apply_reconciliation_rules` | Run the rules over a period (background job) | **irreversible** |

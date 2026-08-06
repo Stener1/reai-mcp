@@ -14,22 +14,65 @@ test("EVERY path of every quirk matches a real operation", () => {
   // endpoint keep publishing authoritative-looking advice, because a sibling path
   // in the same quirk still resolved.
   const ops = getSpecIndex().operations;
+  const reaches = (q, candidate, op) => {
+    const target = op.path.toLowerCase();
+    if (target === candidate) return true;
+    return q.match === "descendants" && target.startsWith(candidate + "/");
+  };
+
   for (const q of QUIRKS) {
-    for (const p of q.paths) {
-      const candidate = p.toLowerCase().replace(/\/+$/, "");
-      const matched = ops.some((op) => {
-        if (q.methods && !q.methods.includes(op.method)) return false;
-        const target = op.path.toLowerCase();
-        if (target === candidate) return true;
-        return q.match === "descendants" && target.startsWith(candidate + "/");
-      });
+    const candidates = q.paths.map((p) => p.toLowerCase().replace(/\/+$/, ""));
+    const methods = q.methods ?? null;
+
+    // Two separate requirements, rather than every path x method pair. A quirk
+    // legitimately spans a collection (POST /api/vouchers) and an item
+    // (PUT /api/vouchers/{id}), where neither path supports both methods.
+
+    // 1. No dead path: each declared path must match some operation the quirk
+    //    could apply to. This is what catches a renamed endpoint.
+    for (const [i, candidate] of candidates.entries()) {
+      const matched = ops.some(
+        (op) => (!methods || methods.includes(op.method)) && reaches(q, candidate, op),
+      );
       assert.ok(
         matched,
-        `quirk "${q.id}" declares path "${p}"` +
-          `${q.methods ? ` for ${q.methods.join("/")}` : ""} which matches no operation` +
-          `${q.match === "descendants" ? "" : " (match is exact; add match: \"descendants\" if intended)"}`,
+        `quirk "${q.id}" declares path "${q.paths[i]}" which matches no operation` +
+          `${methods ? ` for any of ${methods.join("/")}` : ""}` +
+          `${q.match === "descendants" ? "" : ' (match is exact; add match: "descendants" if intended)'}`,
       );
     }
+
+    // 2. No dead method: each declared method must reach some declared path.
+    //    This is what catches a quirk scoped to PATCH while naming only the
+    //    collection path, since PATCH lives on /{id}.
+    for (const method of methods ?? []) {
+      const matched = ops.some(
+        (op) => op.method === method && candidates.some((c) => reaches(q, c, op)),
+      );
+      assert.ok(
+        matched,
+        `quirk "${q.id}" declares method ${method}, which matches none of its paths ` +
+          `(${q.paths.join(", ")}). PATCH and PUT usually live on the /{id} path, not the collection.`,
+      );
+    }
+  }
+});
+
+test("update-scoped quirks reach the item paths their operations live on", () => {
+  // Regression: exact matching silently dropped these, because PATCH/PUT are on
+  // /{id} while the quirk named only the collection.
+  const cases = [
+    ["PATCH", "/api/customers/{id}", "phone-no-plus47"],
+    ["PATCH", "/api/customers/{id}", "customer-name-title-cased"],
+    ["PATCH", "/api/suppliers/{id}", "phone-no-plus47"],
+    ["PUT", "/api/offers/{id}", "offer-lines-stricter"],
+    ["PUT", "/api/offers/{id}", "days-until-due-mandatory"],
+    ["PUT", "/api/subscriptions/{id}", "subscription-self-invoicing"],
+    ["PUT", "/api/company-banks/{id}", "company-bank-bban"],
+  ];
+  for (const [method, path, id] of cases) {
+    const ids = quirksFor(method, path).map((q) => q.id);
+    assert.ok(ids.includes(id), `${method} ${path} should carry "${id}"; got ${ids.join(", ") || "none"}`);
   }
 });
 

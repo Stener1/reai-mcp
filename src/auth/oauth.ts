@@ -485,15 +485,17 @@ export class OAuthProvider {
       if (clientId && clientId !== payload.grant.clientId) {
         return err(400, "invalid_grant", "client_id does not match the refresh token.");
       }
-      const authTime = payload.grant.authTime;
-      if (authTime !== undefined && authTime + GRANT_ABSOLUTE_TTL <= Math.floor(Date.now() / 1000)) {
+      // For a legacy grant, the token's own iat is the best evidence of when the
+      // authorization existed, and it is trustworthy because we sealed it.
+      const effectiveAuthTime = payload.grant.authTime ?? payload.iat;
+      if (effectiveAuthTime + GRANT_ABSOLUTE_TTL <= Math.floor(Date.now() / 1000)) {
         return err(
           400,
           "invalid_grant",
           "This authorization has reached its maximum lifetime. Authorize the connector again.",
         );
       }
-      return { status: 200, json: this.issueTokens(payload.grant) };
+      return { status: 200, json: this.issueTokens(payload.grant, payload.iat) };
     }
 
     return err(
@@ -521,19 +523,27 @@ export class OAuthProvider {
     return rank(value) <= rank(limit) ? value : limit;
   }
 
-  private issueTokens(grant: GrantPayload): Record<string, unknown> {
-    // Clamp both tokens to whatever is left of the grant's absolute lifetime, so
-    // refreshing cannot extend access beyond GRANT_ABSOLUTE_TTL from the moment
-    // the user actually authorized.
+  /**
+   * Clamp both tokens to what is left of the grant's absolute lifetime.
+   *
+   * `fallbackAuthTime` matters for grants sealed before authTime existed: without
+   * it, each refresh would treat "now" as the authorization time, mint a
+   * replacement that again carried no authTime, and reset the 90-day window
+   * forever -- preserving exactly the indefinite access this is meant to end. The
+   * caller passes the redeemed token's own `iat`, which we sealed and can trust.
+   */
+  private issueTokens(grant: GrantPayload, fallbackAuthTime?: number): Record<string, unknown> {
     const now = Math.floor(Date.now() / 1000);
-    const authTime = grant.authTime ?? now;
+    const authTime = grant.authTime ?? fallbackAuthTime ?? now;
+    // Persist it, so the replacement token is no longer legacy.
+    const sealedGrant: GrantPayload = { ...grant, authTime };
     const remaining = Math.max(0, authTime + GRANT_ABSOLUTE_TTL - now);
 
     const accessTtl = Math.min(ACCESS_TOKEN_TTL, remaining);
     const refreshTtl = Math.min(REFRESH_TOKEN_TTL, remaining);
 
     const out: Record<string, unknown> = {
-      access_token: this.deps.sealer.seal("access", { grant }, accessTtl),
+      access_token: this.deps.sealer.seal("access", { grant: sealedGrant }, accessTtl),
       token_type: "Bearer",
       expires_in: accessTtl,
       scope: "reai",
@@ -541,7 +551,7 @@ export class OAuthProvider {
     // Past the absolute ceiling there is nothing left to refresh with; omitting
     // it tells the client to start a new authorization rather than retry.
     if (refreshTtl > 0) {
-      out.refresh_token = this.deps.sealer.seal("refresh", { grant }, refreshTtl);
+      out.refresh_token = this.deps.sealer.seal("refresh", { grant: sealedGrant }, refreshTtl);
     }
     return out;
   }

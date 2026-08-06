@@ -85,7 +85,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Bookkeeping ---------------------------------------------------------
   {
     id: "voucher-signed-amounts",
-    paths: ["/api/vouchers"],
+    paths: ["/api/vouchers", "/api/vouchers/{id}"],
     methods: ["POST", "PUT"],
     kind: "shape",
     note:
@@ -124,7 +124,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "offer-lines-stricter",
-    paths: ["/api/offers"],
+    paths: ["/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -133,7 +133,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "line-vat-code-subset",
-    paths: ["/api/orders", "/api/offers", "/api/subscriptions"],
+    paths: ["/api/orders", "/api/offers", "/api/offers/{id}", "/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -142,7 +142,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "days-until-due-mandatory",
-    paths: ["/api/orders", "/api/offers"],
+    paths: ["/api/orders", "/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:
@@ -152,7 +152,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "order-send-ehf",
-    paths: ["/api/orders"],
+    paths: ["/api/orders", "/api/orders/{id}"],
     methods: ["POST", "PUT"],
     kind: "irreversible",
     note:
@@ -172,7 +172,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "customer-name-title-cased",
-    paths: ["/api/customers", "/api/suppliers"],
+    paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
     kind: "gotcha",
     note:
@@ -181,7 +181,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "phone-no-plus47",
-    paths: ["/api/customers", "/api/suppliers"],
+    paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
     kind: "validation",
     note:
@@ -211,7 +211,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Subscriptions -------------------------------------------------------
   {
     id: "subscription-self-invoicing",
-    paths: ["/api/subscriptions"],
+    paths: ["/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],
     kind: "irreversible",
     note:
@@ -343,7 +343,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "reconciliation-rule-standing-authority",
-    paths: ["/api/reconciliation-rules"],
+    paths: ["/api/reconciliation-rules", "/api/reconciliation-rules/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:
@@ -354,7 +354,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "company-bank-bban",
-    paths: ["/api/company-banks"],
+    paths: ["/api/company-banks", "/api/company-banks/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:

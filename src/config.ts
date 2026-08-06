@@ -110,13 +110,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // would be sent to the wrong place -- a 404 at best, an unrelated service at
     // worst. Serving under a subpath would need every generated URL to carry the
     // prefix; until that is done, say so instead of failing obscurely.
+    // Every OAuth endpoint is formed by concatenation (`${base}/authorize`), so a
+    // path, query or fragment all corrupt the result rather than being carried.
     const path = parsed.pathname.replace(/\/+$/, "");
-    if (path !== "") {
+    if (path !== "" || parsed.search !== "" || parsed.hash !== "") {
+      const offending = [
+        path !== "" ? "a path" : null,
+        parsed.search !== "" ? "a query string" : null,
+        parsed.hash !== "" ? "a fragment" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
       throw new ReaiConfigError(
-        `PUBLIC_URL must not contain a path (got "${publicUrl}"). Serving under a path prefix is ` +
-          "not supported: the consent form would post the user's ReAI token to " +
-          `"${parsed.origin}/authorize" rather than "${publicUrl}/authorize". Deploy at the root ` +
-          `of a hostname, e.g. "${parsed.origin}".`,
+        `PUBLIC_URL must be a bare origin, but "${publicUrl}" contains ${offending}. ` +
+          `Endpoint URLs are built by appending to it, so this would produce ` +
+          `"${publicUrl}/authorize" instead of a usable authorization endpoint — and the consent ` +
+          `form, which posts to a root-relative /authorize, would send the user's ReAI token ` +
+          `somewhere else entirely. Use "${parsed.origin}".`,
       );
     }
   }

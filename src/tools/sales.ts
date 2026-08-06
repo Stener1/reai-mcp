@@ -740,17 +740,26 @@ const createInvoiceFromOrder = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
-    const res = await ctx.client.request<{ id?: number; invoiceNumber?: string }>({
+    const res = await ctx.client.request<{ id?: number; invoiceNumber?: string; issueDate?: string }>({
       method: "POST",
       path: "/api/invoices",
       body,
       tenantId: resolved,
     });
     const id = res.data?.id;
+    // Report the date the API actually used. Saying "dated from the order" would
+    // be a false assurance whenever the order had no invoice date and the API
+    // fell back to today -- and the accounting period is the whole reason to care.
+    const actualDate = res.data?.issueDate;
+    const dateNote = args.issueDate
+      ? ` dated ${args.issueDate}`
+      : actualDate
+        ? ` dated ${actualDate} (chosen by the API from the order, or today if it had no date)`
+        : " (the API chose the date; check it if the accounting period matters)";
     return ok(res.data, {
       note:
         `Invoice issued${res.data?.invoiceNumber ? ` as ${res.data.invoiceNumber}` : ""}` +
-        `${args.issueDate ? ` dated ${args.issueDate}` : " (dated from the order)"}. ` +
+        `${dateNote}. ` +
         `Delivery to the customer has been started. This is now a numbered legal document — ` +
         `correct any mistake with a credit note, not by deleting it.`,
       ...(id ? { link: ctx.client.deepLink(`/invoices/${id}`, resolved) } : {}),
