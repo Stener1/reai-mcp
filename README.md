@@ -250,9 +250,9 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_offers` | Offers / quotes (*tilbud*) | read |
 | `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
 | `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data | reversible |
-| `reai_create_product` | Create a product (no variants or price — see the tool's note) | reversible |
-| `reai_create_order` | Create an order with lines. Sends nothing to the customer | reversible |
-| `reai_create_offer` | Create an offer. Lines require `itemName` **and** `vatCode` | reversible |
+| `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
+| `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
+| `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
 | `reai_create_invoice_from_order` | Issue an invoice from an order | **irreversible** |
 | `reai_credit_invoice` | Credit note — the correct way to undo an invoice | **irreversible** |
 | `reai_register_invoice_payment` | Record a customer payment | **irreversible** |
@@ -278,7 +278,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_get_bank_transaction` | One transaction by id | read |
 | `reai_list_reconciliation_rules` | Automatic booking rules | read |
 | `reai_get_tax_return` | Skattemelding for a year, with submission status | read |
-| `reai_create_company_bank` | Register a bank account | reversible |
+| `reai_create_company_bank` · `reai_delete_company_bank` | Register a bank account, or remove one. Neither touches anything at the bank | reversible |
 | `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules. A rule is *standing authority to post* — applying it books vouchers, and deleting it does not reverse them | **irreversible** |
 | `reai_match_bank_transactions` | Reconcile transactions against existing postings | **irreversible** |
 | `reai_book_bank_transactions` | Book transactions to a counter-account | **irreversible** |
@@ -287,11 +287,11 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 59 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 63 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
-REAI_TOOLSETS=bookkeeping,sales    # 34 tools
+REAI_TOOLSETS=bookkeeping,sales    # 37 tools
 REAI_TOOLSETS=purchase             # 20 tools
 (unset)                            # all 59
 ```
@@ -314,7 +314,7 @@ Browse them with `reai_api_notes`, or read the highlights:
 - **Voucher postings sharing a `rowNumber` are merged into one row**, so they must agree on the row's fields — notably `description`. An omitted `rowNumber` puts everything in row 0, so two postings with different descriptions fail with an error that blames the *sign convention*. `reai_create_voucher` assigns rows for you.
 - `startDate`/`endDate` are required on vouchers, postings and ledgers even where not marked so.
 - **Offer lines are stricter than order lines** — `itemName` and `vatCode` are both required on an offer.
-- Order, offer and subscription lines accept only VAT codes from `?usage=customer-invoice`.
+- **Order** and subscription lines accept only VAT codes from `?usage=customer-invoice`; **offer** lines are not checked against it, so an offer can be accepted carrying a code that fails once the work becomes an order or invoice.
 - A **`+47` prefix on a Norwegian phone number is rejected**.
 - `POST /api/customers` silently discards `invoiceEmail`, `phone` and `daysUntilDue` — those live on the `PATCH`.
 - **`GET /api/timesheets` is unusable without the Project module** — `projectId` is a *required* query parameter, and supplying it returns `400 "projectId cannot be used when the Project module is disabled"`. Required and rejected at once, so no request succeeds.

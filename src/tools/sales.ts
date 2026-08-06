@@ -251,6 +251,89 @@ const deleteCustomer = defineTool({
   },
 });
 
+
+/**
+ * Deleting what this server can create.
+ *
+ * `reversible` mode is defined as "reads, plus master data that can be cleanly
+ * deleted", and it registers tools that create products, orders and offers — but
+ * shipped no way to remove any of them. A walkthrough as an agent would experience
+ * it hit this immediately: it drafted an offer and then had nothing to call. The
+ * DELETE endpoints exist and classify as reversible, so the capability was always
+ * permitted; only the curated tool was missing, leaving the agent to discover the
+ * escape hatch to undo something the default mode had just encouraged it to do.
+ */
+const deleteProduct = defineTool({
+  name: "reai_delete_product",
+  title: "Delete or archive a product",
+  description:
+    "Delete a product. As with customers, ReAI archives instead of deleting once the product has " +
+    "been used on an order or invoice, which keeps the audit trail intact — the response says " +
+    "which happened.",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/products/{id}"]],
+  destructive: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Product id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "DELETE",
+      path: `/api/products/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? `Product ${args.id} deleted or archived (HTTP ${res.status}).`);
+  },
+});
+
+const deleteOrder = defineTool({
+  name: "reai_delete_order",
+  title: "Delete an order",
+  description:
+    "Delete an order that has not been invoiced. Once an order has been invoiced the invoice is " +
+    "the legal document and the order cannot be removed — credit the invoice instead " +
+    "(reai_credit_invoice, which requires external send to be enabled).",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/orders/{id}"]],
+  destructive: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Order id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "DELETE",
+      path: `/api/orders/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? `Order ${args.id} deleted (HTTP ${res.status}).`);
+  },
+});
+
+const deleteOffer = defineTool({
+  name: "reai_delete_offer",
+  title: "Delete an offer",
+  description:
+    "Delete an offer. An offer is a draft quotation, so this removes it outright — nothing has " +
+    "been posted to the books and, unless it was sent, the customer never saw it.",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/offers/{id}"]],
+  destructive: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Offer id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "DELETE",
+      path: `/api/offers/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? `Offer ${args.id} deleted (HTTP ${res.status}).`);
+  },
+});
+
 const customerLedger = defineTool({
   name: "reai_customer_ledger",
   title: "Customer ledger (kundereskontro)",
@@ -862,6 +945,9 @@ export const salesTools: ToolDef[] = [
   updateCustomer,
   setCustomerAddress,
   deleteCustomer,
+  deleteProduct,
+  deleteOrder,
+  deleteOffer,
   customerLedger,
   listProducts,
   createProduct,

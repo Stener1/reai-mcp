@@ -118,6 +118,35 @@ const createCompanyBank = defineTool({
   },
 });
 
+/**
+ * Registering a bank account is `reversible`, so removing one has to be reachable
+ * in the same mode. It was not: the default configuration could add an account and
+ * then had no tool to take it away.
+ */
+const deleteCompanyBank = defineTool({
+  name: "reai_delete_company_bank",
+  title: "Remove a company bank account",
+  description:
+    "Remove a company bank account. ReAI archives the account instead of deleting it once " +
+    "postings or reconciliations refer to it, which keeps those references intact — the response " +
+    "says which happened. Removing the record does not touch anything at the bank.",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/company-banks/{id}"]],
+  destructive: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Company bank account id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "DELETE",
+      path: `/api/company-banks/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? `Company bank account ${args.id} deleted or archived (HTTP ${res.status}).`);
+  },
+});
+
 // --- Reconciliation --------------------------------------------------------
 
 const getBankReconciliation = defineTool({
@@ -516,6 +545,7 @@ const getTaxReturn = defineTool({
 export const bankVatTools: ToolDef[] = [
   listCompanyBanks,
   createCompanyBank,
+  deleteCompanyBank,
   getBankReconciliation,
   getBankTransaction,
   listReconciliationRules,
