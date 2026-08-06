@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   defineTool,
+  fail,
   isoDate,
   ok,
   okText,
@@ -30,6 +31,7 @@ const listAccounts = defineTool({
     "Use this to find the right account number before booking a voucher — every posting must " +
     "reference an account that exists in this list.",
   risk: "read",
+  apiPaths: [["GET", "/api/chart-of-accounts/accounts"]],
   inputSchema: {
     query: z
       .string()
@@ -68,6 +70,7 @@ const listVatCodes = defineTool({
     "Postings to revenue and cost accounts generally require a VAT code; look it up here rather " +
     "than guessing, because the valid set depends on the tenant's VAT registration.",
   risk: "read",
+  apiPaths: [["GET", "/api/vat-codes"]],
   inputSchema: {
     usage: z
       .enum(["customer-invoice"])
@@ -94,6 +97,7 @@ const listVouchers = defineTool({
     "Norwegian bookkeeping: a dated, balanced set of debit and credit postings. " +
     "Defaults to the current calendar year if no dates are given.",
   risk: "read",
+  apiPaths: [["GET", "/api/vouchers"]],
   inputSchema: {
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
     endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
@@ -127,6 +131,7 @@ const getVoucher = defineTool({
   title: "Get one voucher",
   description: "Fetch a single voucher by id, including all its postings and attachments.",
   risk: "read",
+  apiPaths: [["GET", "/api/vouchers/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Voucher id."),
     tenantId: tenantIdArg,
@@ -199,6 +204,7 @@ const createVoucher = defineTool({
     "This posts to the general ledger and is NOT freely reversible — under Norwegian bookkeeping " +
     "rules a voucher in a closed period cannot be deleted. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/vouchers"]],
   inputSchema: {
     date: isoDate.describe("Voucher date. Determines the accounting period."),
     description: z
@@ -219,7 +225,7 @@ const createVoucher = defineTool({
       const lines = args.postings
         .map((p) => `  ${p.accountNumber}: ${p.amount > 0 ? "debit" : "credit"} ${Math.abs(p.amount)}`)
         .join("\n");
-      return okText(
+      return fail(
         `Voucher is not balanced — the postings sum to ${diff}, but must sum to exactly 0.\n\n${lines}\n\n` +
           `Remember: positive amounts debit, negative amounts credit. ` +
           `Add or correct a posting of ${-diff} to balance it. Nothing was sent to ReAI.`,
@@ -261,6 +267,7 @@ const deleteVoucher = defineTool({
     "no posting is locked — otherwise ReAI rejects it, and the correct remedy is a reversing voucher " +
     "instead. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["DELETE", "/api/vouchers/{id}"]],
   destructive: true,
   inputSchema: {
     id: z.number().int().positive().describe("Voucher id to delete."),
@@ -285,6 +292,7 @@ const listPostings = defineTool({
     "`lockReasons`, which tell you whether it can still be changed. " +
     "Defaults to the current calendar year.",
   risk: "read",
+  apiPaths: [["GET", "/api/postings"]],
   inputSchema: {
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
     endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
@@ -330,6 +338,7 @@ const generalLedger = defineTool({
     "'what is the balance of account 1920'. Narrow with accountNumber or an account range, since " +
     "a full-year ledger for an active tenant can be large.",
   risk: "read",
+  apiPaths: [["GET", "/api/ledger/general"]],
   inputSchema: {
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
     endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),

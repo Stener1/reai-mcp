@@ -1,9 +1,9 @@
 import { z } from "zod";
 import {
   defineTool,
+  fail,
   isoDate,
   ok,
-  okText,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -41,6 +41,7 @@ const listCustomers = defineTool({
     "List or search customers (kunder). Filter by name, organisation number or email. " +
     "Archived customers are excluded unless you ask for them.",
   risk: "read",
+  apiPaths: [["GET", "/api/customers"]],
   inputSchema: {
     name: z.string().optional().describe("Filter by name (partial match)."),
     organizationNumber: z.string().optional().describe("Filter by Norwegian organisation number."),
@@ -66,6 +67,7 @@ const getCustomer = defineTool({
   title: "Get one customer",
   description: "Fetch a single customer by id, including addresses and invoicing settings.",
   risk: "read",
+  apiPaths: [["GET", "/api/customers/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
     tenantId: tenantIdArg,
@@ -93,6 +95,7 @@ const createCustomer = defineTool({
     "Creation accepts only the fields listed here. Invoice email, phone and payment terms are not " +
     "among them — set those with reai_update_customer afterwards.",
   risk: "reversible",
+  apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
     name: z.string().describe("Customer or company name."),
     organizationNumber: z
@@ -141,6 +144,7 @@ const updateCustomer = defineTool({
     "Update customer details. Only the fields you pass are changed. " +
     "Note that the postal address is a separate call — use reai_set_customer_address for that.",
   risk: "reversible",
+  apiPaths: [["PATCH", "/api/customers/{id}"]],
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
@@ -162,7 +166,7 @@ const updateCustomer = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     if (Object.keys(body).length === 0) {
-      return okText("Nothing to update — pass at least one field to change.");
+      return fail("Nothing to update — pass at least one field to change.");
     }
     const resolved = requireTenantId(tenantId, ctx);
     const res = await ctx.client.request({
@@ -182,6 +186,7 @@ const setCustomerAddress = defineTool({
     "Replace a customer's postal address, or their delivery address. This is a full replacement, " +
     "not a partial update, so pass every field you want kept.",
   risk: "reversible",
+  apiPaths: [["PUT", "/api/customers/{id}/address"], ["PUT", "/api/customers/{id}/delivery-address"]],
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
@@ -218,6 +223,7 @@ const deleteCustomer = defineTool({
     "transactions, which keeps the audit trail intact — the response tells you which happened. " +
     "Archiving is reversible via reai_request POST /api/customers/{id}/unarchive.",
   risk: "reversible",
+  apiPaths: [["DELETE", "/api/customers/{id}"]],
   destructive: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
@@ -242,6 +248,7 @@ const customerLedger = defineTool({
     "unsettled items — that is the answer to 'who owes us money'. " +
     "Defaults to the current calendar year.",
   risk: "read",
+  apiPaths: [["GET", "/api/ledger/customer"], ["GET", "/api/ledger/customer/{customerId}"]],
   inputSchema: {
     customerId: z.number().int().positive().optional().describe("Restrict to one customer."),
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
@@ -274,6 +281,7 @@ const listProducts = defineTool({
     "List products (varer og tjenester) with their variants. Order lines can reference a variant " +
     "by variantId, which is how a line inherits the product's price and VAT code.",
   risk: "read",
+  apiPaths: [["GET", "/api/products"]],
   inputSchema: { tenantId: tenantIdArg },
   handler: async (args, ctx) => {
     const res = await ctx.client.request<unknown[]>({
@@ -297,6 +305,7 @@ const createProduct = defineTool({
     "variants, stock or pricing, check the schema with reai_describe_endpoint POST /api/products " +
     "and use reai_request.",
   risk: "reversible",
+  apiPaths: [["POST", "/api/products"]],
   inputSchema: {
     title: z.string().describe("Product name."),
     description: z.string().optional().describe("Product description."),
@@ -401,6 +410,7 @@ const listOrders = defineTool({
     "List orders (ordrer) with their lines. An order is the document that carries the line items; " +
     "invoicing it later creates the invoice. Filter by status, customer, date range or reference.",
   risk: "read",
+  apiPaths: [["GET", "/api/orders"]],
   inputSchema: {
     status: z.enum(["all", "open", "closed"]).optional().describe("Filter by order status."),
     customerId: z.number().int().optional().describe("Filter by customer."),
@@ -428,6 +438,7 @@ const getOrder = defineTool({
   title: "Get one order",
   description: "Fetch a single order by id, with its lines and totals.",
   risk: "read",
+  apiPaths: [["GET", "/api/orders/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Order id."),
     tenantId: tenantIdArg,
@@ -454,6 +465,7 @@ const createOrder = defineTool({
     "which cannot be recalled once it happens, so setting it requires REAI_WRITE_MODE=full via " +
     "reai_request.",
   risk: "reversible",
+  apiPaths: [["POST", "/api/orders"], ["GET", "/api/customers/{id}"]],
   inputSchema: {
     customerId: z.number().int().positive().describe("Customer to bill. Find one with reai_list_customers."),
     orderLines: z.array(orderLine).min(1).describe("At least one line item."),
@@ -515,6 +527,7 @@ const listOffers = defineTool({
   title: "List offers",
   description: "List offers/quotes (tilbud), optionally filtered by customer, number or date range.",
   risk: "read",
+  apiPaths: [["GET", "/api/offers"]],
   inputSchema: {
     customerId: z.number().int().optional().describe("Filter by customer."),
     offerNumber: z.string().optional().describe("Filter by offer number."),
@@ -543,6 +556,7 @@ const createOffer = defineTool({
     "separate step.\n\n" +
     "Offer lines are stricter than order lines: itemName and vatCode are both required.",
   risk: "reversible",
+  apiPaths: [["POST", "/api/offers"], ["GET", "/api/customers/{id}"]],
   inputSchema: {
     customerId: z.number().int().positive().describe("Customer the offer is for."),
     offerLines: z
@@ -600,6 +614,7 @@ const listInvoices = defineTool({
     "(unpaid) and dueDateStatus=overdue — together they answer 'what is overdue'. " +
     "Use type to separate invoices from credit notes.",
   risk: "read",
+  apiPaths: [["GET", "/api/invoices"]],
   inputSchema: {
     paymentStatus: z
       .enum(["all", "outstanding", "closed"])
@@ -640,6 +655,7 @@ const getInvoice = defineTool({
     "Fetch a single invoice by id, with lines, totals and payment status. " +
     "For the PDF use reai_request GET /api/invoices/{id}/pdf with binary=true.",
   risk: "read",
+  apiPaths: [["GET", "/api/invoices/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Invoice id."),
     tenantId: tenantIdArg,
@@ -666,6 +682,7 @@ const createInvoiceFromOrder = defineTool({
     "It cannot be deleted; the remedy for a mistake is a credit note. Requires " +
     "REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/invoices"]],
   inputSchema: {
     orderId: z.number().int().positive().describe("Order to invoice. Find one with reai_list_orders."),
     issueDate: isoDate.optional().describe("Invoice date. Determines the accounting period. Defaults to today."),
@@ -700,6 +717,7 @@ const creditInvoice = defineTool({
     "an invoice: it posts an offsetting entry and leaves both documents in the audit trail, which is " +
     "what Norwegian bookkeeping rules require. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/invoices/{id}/credit"]],
   inputSchema: {
     id: z.number().int().positive().describe("Id of the invoice to credit."),
     issueDate: isoDate.describe("Date of the credit note. Determines the accounting period."),
@@ -731,6 +749,7 @@ const registerInvoicePayment = defineTool({
     "account, so it moves money in the books. A partial amount is allowed and leaves the rest " +
     "outstanding. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/invoices/{id}/payments"]],
   inputSchema: {
     id: z.number().int().positive().describe("Invoice id."),
     paymentDate: isoDate.describe("Date the money was received."),
@@ -739,7 +758,7 @@ const registerInvoicePayment = defineTool({
       .number()
       .int()
       .optional()
-      .describe("Bank account that received it. List them with reai_list_company_banks."),
+      .describe("Bank account that received it. List them with reai_request GET /api/company-banks."),
     paidInvoiceCurrencyAmount: z
       .number()
       .optional()

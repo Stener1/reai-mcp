@@ -9,16 +9,37 @@ import { metaTools } from "./tools/meta.js";
 import { discoveryTools } from "./tools/discovery.js";
 import { bookkeepingTools } from "./tools/bookkeeping.js";
 import { salesTools } from "./tools/sales.js";
+import { purchaseTools } from "./tools/purchase.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.1.0";
 
+/**
+ * Curated tools grouped by domain, so an operator can narrow the surface with
+ * REAI_TOOLSETS. `meta` and `discovery` are not groupable — orientation and the
+ * escape hatch are what make the rest usable.
+ */
+export const TOOL_GROUPS: Record<string, ToolDef[]> = {
+  bookkeeping: bookkeepingTools,
+  sales: salesTools,
+  purchase: purchaseTools,
+};
+
+export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];
+
 export const allTools: ToolDef[] = [
-  ...metaTools,
-  ...discoveryTools,
-  ...bookkeepingTools,
-  ...salesTools,
+  ...alwaysOnTools,
+  ...Object.values(TOOL_GROUPS).flat(),
 ];
+
+/** The tools enabled by a given toolset selection. An empty selection means all. */
+export function selectTools(toolsets: readonly string[]): ToolDef[] {
+  if (toolsets.length === 0) return allTools;
+  const enabled = Object.entries(TOOL_GROUPS)
+    .filter(([name]) => toolsets.includes(name))
+    .flatMap(([, tools]) => tools);
+  return [...alwaysOnTools, ...enabled];
+}
 
 export type BuildServerOptions = {
   config: ServerConfig;
@@ -59,12 +80,14 @@ export function buildServer(opts: BuildServerOptions): McpServer {
 
   const ctx: ToolContext = { client, config, session };
 
-  const visible = allTools.filter((t) => isAllowed(t.risk, config.writeMode));
-  const hidden = allTools.length - visible.length;
+  const selected = selectTools(config.toolsets);
+  const visible = selected.filter((t) => isAllowed(t.risk, config.writeMode));
+  const hiddenByPolicy = selected.length - visible.length;
+  const hiddenByToolset = allTools.length - selected.length;
 
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { instructions: buildInstructions(config, visible.length, hidden) },
+    { instructions: buildInstructions(config, visible.length, hiddenByPolicy, hiddenByToolset) },
   );
 
   for (const tool of visible) {
@@ -120,7 +143,30 @@ function toolError(err: unknown, toolName: string): ToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
-function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCount: number): string {
+const GROUP_BLURBS: Record<string, string> = {
+  bookkeeping:
+    "the bookkeeping core (accounts, VAT codes, vouchers, postings, general ledger)",
+  sales: "the sales side (customers, products, orders, offers, invoices, customer ledger)",
+  purchase:
+    "the purchase side (suppliers, supplier invoices, the document inbox, EHF parsing, expenses)",
+};
+
+function describeEnabledGroups(toolsets: readonly string[]): string {
+  const enabled = Object.keys(TOOL_GROUPS).filter(
+    (name) => toolsets.length === 0 || toolsets.includes(name),
+  );
+  const blurbs = enabled.map((name) => GROUP_BLURBS[name] ?? name);
+  if (blurbs.length === 0) return "no domain-specific operations — use the discovery tools";
+  if (blurbs.length === 1) return blurbs[0] as string;
+  return `${blurbs.slice(0, -1).join(", ")} and ${blurbs[blurbs.length - 1]}`;
+}
+
+function buildInstructions(
+  config: ServerConfig,
+  visibleCount: number,
+  hiddenByPolicy: number,
+  hiddenByToolset: number,
+): string {
   const index = getSpecIndex();
   const lines = [
     `ReAI (${config.baseUrl}) is a Norwegian cloud accounting system. This server exposes its API ` +
@@ -129,11 +175,12 @@ function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCou
     "Getting oriented:",
     "- Call reai_whoami first. Almost everything is tenant-scoped, and the tenant id selects which " +
       "company's books you are in. Set it once with reai_use_tenant.",
-    "- Curated tools cover the chart of accounts, VAT codes, vouchers, postings, the general ledger, " +
-      "and the sales side: customers, products, orders, offers, invoices and the customer ledger.",
-    "- For anything else — suppliers, supplier invoices, expenses, bank reconciliation, leads, " +
-      "agreements, salary, assets — use reai_search_endpoints to find the endpoint, " +
-      "reai_describe_endpoint for its schema, then reai_request to call it.",
+    // Built from the groups actually enabled: claiming coverage a disabled
+    // toolset removed would have the model plan around tools that are not there.
+    `- Curated tools cover ${describeEnabledGroups(config.toolsets)}.`,
+    "- For anything else — and for every domain not listed above — use reai_search_endpoints to " +
+      "find the endpoint, reai_describe_endpoint for its schema, then reai_request to call it. " +
+      "Nothing in the API is out of reach that way.",
     "",
     "Bookkeeping conventions:",
     "- Dates are ISO yyyy-MM-dd.",
@@ -144,6 +191,11 @@ function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCou
     "- Billing a customer is a two-step chain: an ORDER carries the line items, and invoicing that " +
       "order creates the invoice. There is no endpoint that builds an invoice from lines directly.",
     "- To undo an issued invoice, raise a credit note. Do not attempt to delete it.",
+    "- Supplier invoice COST LINES do not use the voucher sign convention: each line names its debit " +
+      "and credit account, and the amount is positive on an invoice, negative on a credit note.",
+    "- Incoming supplier invoices usually arrive in the reception inbox as PDF or EHF. Registering " +
+      "them from there keeps the original document attached to the posting, which is what the " +
+      "documentation rules require — prefer that over building one from scratch.",
     "- When you link a user to a created object, include the tenant: " +
       "https://app.reai.no/...?tenantId=<id>",
     "",
@@ -170,8 +222,14 @@ function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCou
     );
   }
 
-  if (hiddenCount > 0) {
-    lines.push(`${hiddenCount} tool(s) are hidden by the current write policy.`);
+  if (hiddenByPolicy > 0) {
+    lines.push(`${hiddenByPolicy} tool(s) are hidden by the current write policy.`);
+  }
+  if (hiddenByToolset > 0) {
+    lines.push(
+      `${hiddenByToolset} tool(s) are disabled by REAI_TOOLSETS=${config.toolsets.join(",")}. ` +
+        `Those API endpoints remain reachable through reai_search_endpoints and reai_request.`,
+    );
   }
 
   return lines.join("\n");

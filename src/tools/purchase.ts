@@ -1,0 +1,597 @@
+import { z } from "zod";
+import {
+  defineTool,
+  fail,
+  isoDate,
+  ok,
+  requireTenantId,
+  startOfYear,
+  tenantIdArg,
+  today,
+  type ToolDef,
+} from "./registry.js";
+
+/**
+ * The purchase side: suppliers, supplier invoices, the document inbox, expenses.
+ *
+ * Two things shape this domain and are not obvious from the endpoint names.
+ *
+ * First, **cost lines use explicit debit and credit accounts**, not the signed
+ * single-amount convention that vouchers use. A supplier invoice line names the
+ * cost account it debits, and `amount` is positive for an invoice and negative
+ * for a credit note.
+ *
+ * Second, a supplier invoice usually does not start life as an API payload — it
+ * arrives as a PDF or an EHF document in the *reception* inbox, and is then
+ * registered from there. That path preserves the original document as the
+ * attachment, which is what bokføringsloven actually requires, so it is the one
+ * worth reaching for.
+ */
+
+const COUNTRY_CODE = z
+  .string()
+  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
+
+// --- Suppliers -------------------------------------------------------------
+
+const listSuppliers = defineTool({
+  name: "reai_list_suppliers",
+  title: "List suppliers",
+  description:
+    "List or search suppliers (leverandører). Archived suppliers are excluded unless asked for.",
+  risk: "read",
+  apiPaths: [["GET", "/api/suppliers"]],
+  inputSchema: {
+    name: z.string().optional().describe("Filter by name (partial match)."),
+    archived: z.boolean().optional().describe("Include archived suppliers instead of active ones."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, ...query } = args;
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/suppliers",
+      query,
+      tenantId: requireTenantId(tenantId, ctx),
+    });
+    const count = Array.isArray(res.data) ? res.data.length : 0;
+    return ok(res.data, { note: `${count} supplier(s).` });
+  },
+});
+
+const getSupplier = defineTool({
+  name: "reai_get_supplier",
+  title: "Get one supplier",
+  description: "Fetch a single supplier by id, including bank details and address.",
+  risk: "read",
+  apiPaths: [["GET", "/api/suppliers/{id}"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
+    const res = await ctx.client.request({
+      method: "GET",
+      path: `/api/suppliers/${args.id}`,
+      tenantId,
+    });
+    return ok(res.data, { link: ctx.client.deepLink(`/suppliers/${args.id}`, tenantId) });
+  },
+});
+
+const createSupplier = defineTool({
+  name: "reai_create_supplier",
+  title: "Create a supplier",
+  description:
+    "Create a supplier. As with customers, a Norwegian company is looked up in " +
+    "Brønnøysundregistrene from its organizationNumber, so that plus a name is usually enough. " +
+    "Set privateContact=true for a private individual.\n\n" +
+    "Bank details are not accepted here — set them afterwards with reai_update_supplier.",
+  risk: "reversible",
+  apiPaths: [["POST", "/api/suppliers"]],
+  inputSchema: {
+    name: z.string().describe("Supplier or company name."),
+    organizationNumber: z.string().optional().describe("Norwegian organisation number."),
+    privateContact: z.boolean().optional().describe("True for a private individual."),
+    email: z.string().optional().describe("Email address."),
+    countryCode: COUNTRY_CODE.optional().describe('ISO country code. Defaults to "NO".'),
+    addressPart1: z.string().optional().describe("Street address."),
+    addressPart2: z.string().optional().describe("Second address line."),
+    postalCode: z.string().optional().describe("Postal code."),
+    city: z.string().optional().describe("City."),
+    province: z.string().optional().describe("Province or region."),
+    skipRegistryLookup: z
+      .boolean()
+      .optional()
+      .describe("Skip the Brønnøysund lookup and use exactly the details supplied."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, ...body } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const res = await ctx.client.request<{ id?: number; name?: string }>({
+      method: "POST",
+      path: "/api/suppliers",
+      body,
+      tenantId: resolved,
+    });
+    const id = res.data?.id;
+    return ok(res.data, {
+      note: `Supplier created${res.data?.name ? `: ${res.data.name}` : ""}.`,
+      ...(id ? { link: ctx.client.deepLink(`/suppliers/${id}`, resolved) } : {}),
+    });
+  },
+});
+
+const updateSupplier = defineTool({
+  name: "reai_update_supplier",
+  title: "Update a supplier",
+  description:
+    "Update supplier details, including the bank account used to pay them. " +
+    "Only the fields you pass are changed.",
+  risk: "reversible",
+  apiPaths: [["PATCH", "/api/suppliers/{id}"]],
+  idempotent: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier id."),
+    name: z.string().optional().describe("New name."),
+    email: z.string().optional().describe("Email address."),
+    phone: z
+      .string()
+      .optional()
+      .describe('Phone number. A "+47" prefix on a Norwegian number is rejected — write it plain.'),
+    iban: z.string().optional().describe("IBAN, for foreign payments."),
+    bankAccountNumber: z.string().optional().describe("Norwegian bank account number."),
+    swiftCode: z.string().optional().describe("SWIFT/BIC code."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...body } = args;
+    if (Object.keys(body).length === 0) {
+      return fail("Nothing to update — pass at least one field to change.");
+    }
+    const resolved = requireTenantId(tenantId, ctx);
+    const res = await ctx.client.request({
+      method: "PATCH",
+      path: `/api/suppliers/${id}`,
+      body,
+      tenantId: resolved,
+    });
+    return ok(res.data, { link: ctx.client.deepLink(`/suppliers/${id}`, resolved) });
+  },
+});
+
+const deleteSupplier = defineTool({
+  name: "reai_delete_supplier",
+  title: "Delete or archive a supplier",
+  description:
+    "Delete a supplier. ReAI archives instead of deleting when the supplier already has " +
+    "transactions, so the audit trail survives — the response says which happened.",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/suppliers/{id}"]],
+  destructive: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "DELETE",
+      path: `/api/suppliers/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? `Supplier ${args.id} deleted or archived (HTTP ${res.status}).`);
+  },
+});
+
+const supplierLedger = defineTool({
+  name: "reai_supplier_ledger",
+  title: "Supplier ledger (leverandørreskontro)",
+  description:
+    "Read the supplier ledger: what the company owes each supplier, with the postings behind it. " +
+    "isUnpaid answers 'what do we still owe', showDisputed surfaces invoices flagged as disputed. " +
+    "Omit supplierId for all suppliers. Defaults to the current calendar year.",
+  risk: "read",
+  apiPaths: [["GET", "/api/ledger/supplier"], ["GET", "/api/ledger/supplier/{supplierId}"]],
+  inputSchema: {
+    supplierId: z.number().int().positive().optional().describe("Restrict to one supplier."),
+    startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
+    endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
+    isOpenPosting: z.boolean().optional().describe("Only unsettled (open) postings."),
+    isUnpaid: z.boolean().optional().describe("Only unpaid invoices."),
+    showDisputed: z.boolean().optional().describe("Include invoices marked as disputed."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const startDate = args.startDate ?? startOfYear();
+    const endDate = args.endDate ?? today();
+    const path = args.supplierId ? `/api/ledger/supplier/${args.supplierId}` : "/api/ledger/supplier";
+    const res = await ctx.client.request({
+      method: "GET",
+      path,
+      query: {
+        startDate,
+        endDate,
+        isOpenPosting: args.isOpenPosting,
+        isUnpaid: args.isUnpaid,
+        showDisputed: args.showDisputed,
+      },
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data, { note: `Supplier ledger ${startDate} to ${endDate}.` });
+  },
+});
+
+// --- Supplier invoices -----------------------------------------------------
+
+/**
+ * Cost lines do NOT follow the voucher sign convention. Each line names its
+ * debit and credit account explicitly, and `amount` is positive on an invoice,
+ * negative on a credit note.
+ */
+const costLine = z.object({
+  amount: z
+    .number()
+    .describe(
+      "Line amount. At least 0.01 on an invoice, at most -0.01 on a credit note. " +
+        "Unlike voucher postings, the sign here indicates document type, not debit versus credit.",
+    ),
+  debitAccount: z
+    .string()
+    .optional()
+    .describe("Account to debit — the cost account. From reai_list_accounts."),
+  creditAccount: z
+    .string()
+    .optional()
+    .describe("Account to credit. Usually left to ReAI, which uses the supplier's payable account."),
+  description: z.string().optional().describe("Line description."),
+  debitVatCode: z.string().optional().describe("VAT code on the debit side, from reai_list_vat_codes."),
+  creditVatCode: z.string().optional().describe("VAT code on the credit side."),
+  projectId: z.number().int().optional().describe("Link the line to a project."),
+  departmentId: z.number().int().optional().describe("Link the line to a department."),
+  assetId: z
+    .number()
+    .int()
+    .optional()
+    .describe("Asset id, required when the chosen account uses the asset sub-ledger."),
+  rowNumber: z.number().int().optional().describe("Explicit row ordering."),
+});
+
+const listSupplierInvoices = defineTool({
+  name: "reai_list_supplier_invoices",
+  title: "List supplier invoices",
+  description:
+    "List registered supplier invoices (leverandørfakturaer) and credit notes. " +
+    "For what is still unpaid, reai_supplier_ledger with isUnpaid=true is the better question.",
+  risk: "read",
+  apiPaths: [["GET", "/api/supplier-invoices"]],
+  inputSchema: {
+    documentType: z
+      .enum(["invoice", "credit_note"])
+      .optional()
+      .describe("Filter to invoices or credit notes."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/supplier-invoices",
+      query: { documentType: args.documentType },
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const count = Array.isArray(res.data) ? res.data.length : 0;
+    return ok(res.data, { note: `${count} supplier invoice(s).` });
+  },
+});
+
+const getSupplierInvoice = defineTool({
+  name: "reai_get_supplier_invoice",
+  title: "Get one supplier invoice",
+  description:
+    "Fetch a registered supplier invoice by id, with its cost lines, payment state and attachments.",
+  risk: "read",
+  apiPaths: [["GET", "/api/supplier-invoices/{id}"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier invoice id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
+    const res = await ctx.client.request({
+      method: "GET",
+      path: `/api/supplier-invoices/${args.id}`,
+      tenantId,
+    });
+    return ok(res.data, { link: ctx.client.deepLink(`/supplier-invoices/${args.id}`, tenantId) });
+  },
+});
+
+const createSupplierInvoice = defineTool({
+  name: "reai_create_supplier_invoice",
+  title: "Register a supplier invoice",
+  description:
+    "Register a supplier invoice directly from its details. This posts the cost and the payable to " +
+    "the ledger, so it is not freely reversible — DELETE on a supplier invoice *reverses* it rather " +
+    "than removing it.\n\n" +
+    "Prefer registering from the reception inbox instead when the document exists as a file: see " +
+    "reai_list_reception_documents. That route keeps the original PDF or EHF attached to the " +
+    "posting, which is what the bookkeeping rules on documentation actually require. Use this tool " +
+    "when there is no document to attach. Requires REAI_WRITE_MODE=full.",
+  risk: "irreversible",
+  apiPaths: [["POST", "/api/supplier-invoices"]],
+  inputSchema: {
+    supplierId: z.number().int().positive().describe("Supplier being invoiced by. From reai_list_suppliers."),
+    date: isoDate.describe("Invoice date. Determines the accounting period."),
+    dueDate: isoDate.describe("Payment due date."),
+    costLines: z.array(costLine).min(1).describe("At least one cost line."),
+    number: z.string().optional().describe("The supplier's own invoice number."),
+    documentType: z
+      .enum(["invoice", "credit_note"])
+      .optional()
+      .describe('Defaults to "invoice". A credit note needs negative cost-line amounts.'),
+    currency: z.string().optional().describe('ISO 4217 code. Defaults to the tenant currency.'),
+    kidNumber: z.string().optional().describe("Norwegian KID payment reference."),
+    paymentReference: z.string().optional().describe("Free-text payment reference."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, ...body } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+
+    // The sign convention is easy to get backwards, and the API's own message is
+    // less specific than this check can be.
+    // Zero is rejected as well as the wrong sign: the spec asks for at least 0.01
+    // on an invoice and at most -0.01 on a credit note, but declares no `minimum`,
+    // so a zero-amount line may well be accepted and posted.
+    const isCredit = args.documentType === "credit_note";
+    const wrongSign = args.costLines.filter((l) =>
+      isCredit ? l.amount > -0.01 : l.amount < 0.01,
+    );
+    if (wrongSign.length > 0) {
+      return fail(
+        `Cost-line amounts do not match documentType=${args.documentType ?? "invoice"}.\n` +
+          `An invoice needs amounts of at least 0.01; a credit note needs at most -0.01. ` +
+          `Zero is not valid either way.\n` +
+          `Offending amounts: ${wrongSign.map((l) => l.amount).join(", ")}.\n` +
+          `Nothing was sent to ReAI.`,
+      );
+    }
+
+    const res = await ctx.client.request<{ id?: number }>({
+      method: "POST",
+      path: "/api/supplier-invoices",
+      body,
+      tenantId: resolved,
+    });
+    const id = res.data?.id;
+    return ok(res.data, {
+      note:
+        `Supplier ${args.documentType === "credit_note" ? "credit note" : "invoice"} registered and ` +
+        `posted to the ledger. Reverse it with DELETE if it was wrong — it cannot be deleted outright.`,
+      ...(id ? { link: ctx.client.deepLink(`/supplier-invoices/${id}`, resolved) } : {}),
+    });
+  },
+});
+
+const paySupplierInvoice = defineTool({
+  name: "reai_register_supplier_invoice_payment",
+  title: "Register a payment of a supplier invoice",
+  description:
+    "Record that a supplier invoice was paid. This settles the supplier ledger and posts against the " +
+    "bank account, so it moves money in the books. Partial amounts are allowed. " +
+    "Requires REAI_WRITE_MODE=full.",
+  risk: "irreversible",
+  apiPaths: [["POST", "/api/supplier-invoices/{id}/payments"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier invoice id."),
+    paymentDate: isoDate.describe("Date the payment left the account."),
+    invoiceAmount: z
+      .number()
+      .min(0.01)
+      .describe("Amount applied to the invoice. Must be positive — at least 0.01."),
+    companyBankId: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "Bank account it was paid from. List them with reai_request GET /api/company-banks. " +
+          "Omit this (and bankDebitAmount) when paidPrivately is true.",
+      ),
+    bankDebitAmount: z
+      .number()
+      .optional()
+      .describe("Amount actually debited from the bank, when it differs (currency or fees)."),
+    manualPayment: z
+      .boolean()
+      .optional()
+      .describe("The payment was made outside ReAI rather than through its payment flow."),
+    paidPrivately: z.boolean().optional().describe("An owner paid this privately."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...body } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const res = await ctx.client.request({
+      method: "POST",
+      path: `/api/supplier-invoices/${id}/payments`,
+      body,
+      tenantId: resolved,
+    });
+    return ok(res.data, {
+      note: `Payment of ${args.invoiceAmount} registered on supplier invoice ${id} dated ${args.paymentDate}.`,
+      link: ctx.client.deepLink(`/supplier-invoices/${id}`, resolved),
+    });
+  },
+});
+
+// --- The document inbox ----------------------------------------------------
+
+const listReceptionDocuments = defineTool({
+  name: "reai_list_reception_documents",
+  title: "List the document inbox",
+  description:
+    "List documents waiting in the reception inbox — the incoming supplier invoices and receipts " +
+    "that have arrived as PDF or EHF but are not yet booked. This is the natural starting point for " +
+    "'what still needs processing'.\n\n" +
+    "Two separate inboxes exist: invoices (supplier invoices awaiting registration) and receipts " +
+    "(purchase receipts awaiting registration plus payment confirmation).\n\n" +
+    "Inspect an EHF attachment first with reai_parse_ehf_attachment to read the supplier and amounts " +
+    "straight off the document. Then register it with reai_request POST " +
+    "/api/invoice-reception-documents/{id}/supplier-invoice — note that registering posts to the " +
+    "ledger, so it is classified irreversible and needs REAI_WRITE_MODE=full.",
+  risk: "read",
+  apiPaths: [["GET", "/api/invoice-reception-documents"], ["GET", "/api/receipt-reception-documents"]],
+  inputSchema: {
+    kind: z
+      .enum(["invoice", "receipt", "both"])
+      .optional()
+      .describe('Which inbox to read. Defaults to "both".'),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
+    const kind = args.kind ?? "both";
+
+    const wanted: Array<"invoice" | "receipt"> =
+      kind === "both" ? ["invoice", "receipt"] : [kind];
+
+    // Fetched together, and a failure on one must not discard the other: the
+    // receipt inbox can 403 on a tenant without that module, and losing eight
+    // real invoices to it would be a lie by omission.
+    const results = await Promise.allSettled(
+      wanted.map((which) =>
+        ctx.client
+          .request<unknown[]>({
+            method: "GET",
+            path:
+              which === "invoice"
+                ? "/api/invoice-reception-documents"
+                : "/api/receipt-reception-documents",
+            tenantId,
+          })
+          .then((res) => ({ which, res })),
+      ),
+    );
+
+    const out: Record<string, unknown> = {};
+    const notes: string[] = [];
+    let failures = 0;
+    for (const [i, settled] of results.entries()) {
+      const which = wanted[i] as "invoice" | "receipt";
+      const key = which === "invoice" ? "invoiceInbox" : "receiptInbox";
+      if (settled.status === "fulfilled") {
+        const count = Array.isArray(settled.value.res.data) ? settled.value.res.data.length : 0;
+        out[key] = settled.value.res.data;
+        notes.push(`${count} ${which} document(s) awaiting processing`);
+      } else {
+        failures++;
+        const message =
+          settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+        out[`${key}Error`] = message;
+        notes.push(`the ${which} inbox could not be read`);
+      }
+    }
+
+    // Only a total failure is an error; a partial one is reported honestly.
+    if (failures === wanted.length) {
+      return fail(
+        `Could not read the reception inbox.\n${Object.entries(out)
+          .filter(([k]) => k.endsWith("Error"))
+          .map(([, v]) => v)
+          .join("\n")}`,
+      );
+    }
+    return ok(out, { note: notes.join("; ") + "." });
+  },
+});
+
+const parseEhfAttachment = defineTool({
+  name: "reai_parse_ehf_attachment",
+  title: "Parse an EHF invoice attachment",
+  description:
+    "Parse an attachment as EHF (the Norwegian electronic invoice format) and return its structured " +
+    "contents — supplier, invoice number, dates, lines, totals and VAT. Use this to read an incoming " +
+    "electronic invoice before registering it, rather than guessing at the values.\n\n" +
+    "The attachment id comes from a reception document listed by reai_list_reception_documents. " +
+    "If the EHF carries embedded files (often a human-readable PDF), fetch them with reai_request " +
+    "GET /api/attachments/{id}/embedded-files.",
+  risk: "read",
+  apiPaths: [["GET", "/api/attachments/{id}/ehf"]],
+  inputSchema: {
+    attachmentId: z
+      .number()
+      .int()
+      .positive()
+      .describe("Attachment id, from a reception document's attachment reference."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request({
+      method: "GET",
+      path: `/api/attachments/${args.attachmentId}/ehf`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data, {
+      note: "Parsed EHF document. Register it with POST /api/invoice-reception-documents/{id}/supplier-invoice.",
+    });
+  },
+});
+
+// --- Expenses --------------------------------------------------------------
+
+const listExpenses = defineTool({
+  name: "reai_list_expenses",
+  title: "List expense claims",
+  description:
+    "List employee expense claims (utgiftsrapporter), including travel claims with per diems and " +
+    "mileage. Filter by status, date range, employee, or whether they have been paid out.\n\n" +
+    "The lifecycle is create → deliver → approve → book the voucher, and each of those steps is a " +
+    "separate call. Everything past listing is treated as irreversible here because approving and " +
+    "booking post to the ledger and drive a reimbursement; drive them via reai_request with " +
+    "REAI_WRITE_MODE=full.",
+  risk: "read",
+  apiPaths: [["GET", "/api/expenses"]],
+  inputSchema: {
+    keyword: z.string().optional().describe("Free-text search."),
+    status: z
+      .enum(["open", "for_approval", "approved"])
+      .optional()
+      .describe("Filter by claim status."),
+    paidOut: z
+      .enum(["true", "false"])
+      .optional()
+      .describe('Whether the claim has been reimbursed. The API takes this as a string, not a boolean.'),
+    employeeIds: z.string().optional().describe("Comma-separated employee ids."),
+    startDate: isoDate.optional().describe("Inclusive start date."),
+    endDate: isoDate.optional().describe("Inclusive end date."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, ...query } = args;
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/expenses",
+      query,
+      tenantId: requireTenantId(tenantId, ctx),
+    });
+    const count = Array.isArray(res.data) ? res.data.length : 0;
+    return ok(res.data, { note: `${count} expense claim(s).` });
+  },
+});
+
+export const purchaseTools: ToolDef[] = [
+  listSuppliers,
+  getSupplier,
+  createSupplier,
+  updateSupplier,
+  deleteSupplier,
+  supplierLedger,
+  listSupplierInvoices,
+  getSupplierInvoice,
+  createSupplierInvoice,
+  paySupplierInvoice,
+  listReceptionDocuments,
+  parseEhfAttachment,
+  listExpenses,
+] as ToolDef[];

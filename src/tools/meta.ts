@@ -17,6 +17,7 @@ const whoami = defineTool({
     "tenant-scoped, and the tenant id is what selects which company's books you are working in. " +
     "Also reports the active tenant and the server's current write policy.",
   risk: "read",
+  apiPaths: [["GET", "/api/me"]],
   inputSchema: {},
   handler: async (_args, ctx) => {
     const res = await ctx.client.request<MeResponse>({
@@ -76,7 +77,8 @@ const useTenant = defineTool({
     "The id is validated against the tenants this token can actually reach, so a typo fails here " +
     "rather than silently writing into the wrong company's books. " +
     "Individual tools can still override it with their own tenantId argument.",
-  risk: "read", // Session-local state only; it changes no data in ReAI.
+  risk: "read",
+  apiPaths: [["GET", "/api/me"]], // Session-local state only; it changes no data in ReAI.
   idempotent: true,
   inputSchema: {
     tenantId: z
