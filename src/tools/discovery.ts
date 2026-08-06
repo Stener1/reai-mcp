@@ -222,6 +222,9 @@ const apiNotes = defineTool({
  * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
  * guessing at required fields there would be noise.
  */
+/** Statuses where the request's own shape is a plausible explanation. */
+const PAYLOAD_STATUSES = new Set([400, 415, 422]);
+
 function enrichRequestFailure(
   err: unknown,
   method: HttpMethod,
@@ -236,7 +239,15 @@ function enrichRequestFailure(
   if (!op) return err;
 
   const extra: string[] = [];
-  const { params, bodyFields, bodyMissing } = missingRequired(op, query, body);
+  // Payload analysis belongs only to the statuses that are ABOUT the payload. On a
+  // 401, 403, 404, 409 or 429 the request shape is not the problem, and "these
+  // required parameters were not sent" is a true sentence pointing away from the
+  // actual cause — an exhausted rate limit was being answered with a list of
+  // missing query parameters.
+  const explainsPayload = PAYLOAD_STATUSES.has(err.status);
+  const { params, bodyFields, bodyMissing } = explainsPayload
+    ? missingRequired(op, query, body)
+    : { params: [], bodyFields: [], bodyMissing: false };
   if (params.length > 0) {
     extra.push(
       `The spec marks these query parameters as required on ${op.method} ${op.path}, and they were ` +
@@ -269,7 +280,14 @@ function enrichRequestFailure(
   // The quirks are the point. Several exist because an endpoint's own error
   // message points the wrong way -- a voucher whose rows cannot merge is reported
   // as a sign-convention problem, for instance.
-  const quirks = quirksFor(method, op.path);
+  //
+  // Filtered by status, because a note written about one outcome states something
+  // FALSE when attached to another. A 403 was being answered with the 404
+  // empty-state quirk ("report it as empty"), which would have had an agent tell a
+  // user their company has no opening balances when it simply could not read them.
+  const quirks = quirksFor(method, op.path).filter(
+    (q) => q.statuses === undefined || q.statuses.includes(err.status),
+  );
   for (const q of quirks) extra.push(`Known quirk [${q.kind}]: ${q.note}`);
 
   if (extra.length === 0) return err;
@@ -345,6 +363,23 @@ const request = defineTool({
     }
     const path = canonical.pathname;
 
+    // A query string in `path` used to be dropped silently: only `pathname` is kept,
+    // so "/api/timesheets?projectId=7" reached the API with no parameters at all and
+    // the resulting 400 said the parameters were missing without mentioning that
+    // this server had thrown them away. Refused with the values spelled out, rather
+    // than merged, so there is no ambiguity about precedence against `query`.
+    if (canonical.search) {
+      const pairs = [...new URLSearchParams(canonical.search).entries()]
+        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        .join(", ");
+      return okText(
+        `Put query parameters in the "query" argument, not in the path.\n` +
+          `Path: "${path}"\nquery: { ${pairs} }\n` +
+          `A query string inside "path" is discarded, which would have produced a confusing ` +
+          `rejection about missing parameters.`,
+      );
+    }
+
     // Path first, then the body: a flag like `sendEhf: true` transmits the
     // document to a counterparty, which no amount of path inspection reveals.
     const pathRisk = classifyRequest(method, path);
@@ -403,9 +438,25 @@ const request = defineTool({
     // failure because nothing was actually called.
     // Checked regardless of `binary`: in binary mode ReaiClient.parseBody would
     // base64-encode the HTML shell and this would report a successful attachment
-    // download, which is the exact false success the check exists to prevent. A
-    // genuine PDF or attachment never comes back as text/html.
-    if (/^text\/html/i.test(res.contentType ?? "")) {
+    // download, which is the exact false success the check exists to prevent.
+    //
+    // But "HTML means the SPA answered" is not quite true. Attachment endpoints
+    // declare */* and ReAI stores whatever was uploaded or arrived by email, so an
+    // HTML invoice or a saved HTML receipt is an ordinary, successful download. The
+    // discriminator is Content-Disposition: the SPA shell never sends one, and
+    // parseBody surfaces it as `filename`. A named payload is a real file.
+    //
+    // The content-type being ABSENT is treated as suspicious rather than fine —
+    // ReAI is known to omit it (see the module-gating quirk), and letting undefined
+    // fall through left open exactly the false success this guard exists to close.
+    // So when it is missing, the body itself is sniffed.
+    const contentType = res.contentType ?? "";
+    const looksHtml =
+      /^text\/html/i.test(contentType) ||
+      (contentType === "" && typeof res.data === "string" && /^\s*<(!doctype html|html[\s>])/i.test(res.data));
+    const named =
+      typeof res.data === "object" && res.data !== null && typeof (res.data as { filename?: unknown }).filename === "string";
+    if (looksHtml && !named) {
       return {
         content: [
           {
@@ -414,8 +465,8 @@ const request = defineTool({
               `${method} ${path} returned HTTP ${res.status} with an HTML page, not JSON.\n` +
               `Nothing was called: this path matched no API route, so ReAI served the web ` +
               `application's shell instead. Check the path and its capitalisation — routes are ` +
-              `case-sensitive and must begin with "/api/". Use reai_search_endpoints to find the ` +
-              `real one.`,
+              `case-sensitive, and most public ones live under "/api/". Use reai_search_endpoints ` +
+              `to find the real one.`,
           },
         ],
         isError: true,

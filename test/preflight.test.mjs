@@ -27,10 +27,41 @@ test("a concrete path resolves to its templated operation", () => {
 });
 
 test("a literal segment beats a placeholder at the same position", () => {
-  // "/api/vat-returns/reopen" must not be read as an id called "reopen".
-  const op = resolveOperation("POST", "/api/vat-returns/reopen");
-  assert.ok(op);
-  assert.equal(op.path, "/api/vat-returns/reopen");
+  // Uses a REAL overlap. The previous fixture was POST /api/vat-returns/reopen,
+  // where no "/api/vat-returns/{id}" exists at all — so there was no placeholder to
+  // beat and deleting the preference entirely left the test passing.
+  //
+  // These GETs are the genuine collisions in the current spec: each literal shares a
+  // segment count with an {id} sibling.
+  for (const [concrete, expected] of [
+    ["/api/users/permissions", "/api/users/permissions"],
+    ["/api/users/roles", "/api/users/roles"],
+    ["/api/users/invitations", "/api/users/invitations"],
+    ["/api/warehouses/inventory", "/api/warehouses/inventory"],
+    ["/api/leads/person-profiles", "/api/leads/person-profiles"],
+    ["/api/projects/activities", "/api/projects/activities"],
+    ["/api/accountant-clients/missing-annual-control", "/api/accountant-clients/missing-annual-control"],
+  ]) {
+    const op = resolveOperation("GET", concrete);
+    assert.ok(op, `${concrete} did not resolve`);
+    assert.equal(op.path, expected, `${concrete} resolved to the {id} sibling instead`);
+  }
+
+  // And the placeholder still wins when the segment is genuinely an id.
+  assert.equal(resolveOperation("GET", "/api/users/1234")?.path, "/api/users/{id}");
+  assert.equal(resolveOperation("GET", "/api/warehouses/9")?.path, "/api/warehouses/{id}");
+});
+
+test("a non-numeric segment does not match an integer path parameter", () => {
+  // This is what actually disambiguates the collisions above, and it is worth
+  // stating plainly: with it in place the literal-vs-placeholder preference is a
+  // backstop rather than the deciding rule, so no black-box test can distinguish
+  // whether that preference is present. The type check can be tested, and is.
+  assert.equal(resolveOperation("GET", "/api/users/notanumber"), undefined);
+  assert.equal(resolveOperation("GET", "/api/customers/abc"), undefined);
+  // Negative and multi-digit ids are still ids.
+  assert.equal(resolveOperation("GET", "/api/users/0")?.path, "/api/users/{id}");
+  assert.equal(resolveOperation("GET", "/api/users/999999")?.path, "/api/users/{id}");
 });
 
 test("resolution is method-specific and fails closed", () => {
@@ -72,11 +103,11 @@ test("a present-but-falsy parameter counts as supplied", () => {
   assert.deepEqual(result.params, []);
 });
 
-test("missing required body fields are reported, and only for objects", () => {
-  const op = [...allTools] && resolveOperation("POST", "/api/vouchers");
+test("missing required body fields are reported", () => {
+  const op = resolveOperation("POST", "/api/vouchers");
   assert.ok(op, "POST /api/vouchers should resolve");
   const required = op.body?.required ?? [];
-  if (required.length === 0) return; // nothing to assert against for this operation
+  assert.ok(required.length > 0, "POST /api/vouchers should declare required body fields");
 
   const empty = missingRequired(op, undefined, {});
   assert.deepEqual(empty.bodyFields, required, "an empty body is missing all of them");
@@ -85,7 +116,7 @@ test("missing required body fields are reported, and only for objects", () => {
   assert.deepEqual(full.bodyFields, [], "a complete body reports nothing");
 });
 
-test("a non-object body does not produce spurious field reports", () => {
+test("a non-object body reports the spec's required fields rather than crashing", () => {
   // `body` is typed unknown on reai_request, so it can be an array or a string.
   const op = resolveOperation("POST", "/api/vouchers");
   const required = op.body?.required ?? [];
@@ -235,4 +266,177 @@ test("every curated tool's declared apiPaths still resolve", () => {
     }
   }
   assert.deepEqual(unresolved, [], `tool apiPaths not found in the spec:\n  ${unresolved.join("\n  ")}`);
+});
+
+/**
+ * The enrichment itself, which had no test at all: replacing the whole of
+ * `enrichRequestFailure` with `return err` left the suite green, so none of the
+ * shipped behaviour of this feature was verified.
+ */
+
+const REQUEST_CTX = {
+  config: { boundTenantId: undefined, defaultTenantId: 1, writeMode: "reversible", allowExternalSend: false },
+  session: {},
+  client: { deepLink: () => "https://app.reai.no/" },
+};
+
+/** Drive the real reai_request handler against a client that fails as given. */
+async function callFailing(args, { status, detail, contentType = "application/problem+json" }) {
+  const { ReaiApiError } = await import("../dist/reai/errors.js");
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const ctx = {
+    ...REQUEST_CTX,
+    client: {
+      ...REQUEST_CTX.client,
+      request: async () => {
+        throw new ReaiApiError({
+          status,
+          method: args.method,
+          path: args.path,
+          rawBody: JSON.stringify({ detail }),
+          problem: { detail, status },
+          ...(contentType ? {} : {}),
+        });
+      },
+    },
+  };
+  // The handler RETHROWS the enriched error — server.ts turns it into a tool error
+  // by reading err.message — so the message is what has to be inspected.
+  try {
+    const res = await tool.handler(args, ctx);
+    return res.content.map((c) => c.text).join("\n");
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+test("a 400 is enriched with the required parameters and the matching quirk", async () => {
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 400, detail: "projectId is required" },
+  );
+  assert.match(text, /projectId, startDate, endDate/, "all three should be named at once");
+  assert.match(text, /Known quirk/, "the endpoint's 400 quirk should be attached");
+});
+
+test("a 403 does NOT get the 404 empty-state quirk", async () => {
+  // This stated something false about a customer's books: it told the agent to
+  // "report it as empty" when the real answer was that it may not read them.
+  const text = await callFailing(
+    { method: "GET", path: "/api/opening-balances" },
+    { status: 403, detail: "Forbidden" },
+  );
+  assert.doesNotMatch(text, /NOTHING HAS BEEN SET UP YET/);
+  assert.doesNotMatch(text, /Report it as empty/);
+});
+
+test("a 404 DOES get the empty-state quirk", async () => {
+  const text = await callFailing(
+    { method: "GET", path: "/api/opening-balances" },
+    { status: 404, detail: "Opening balance not found" },
+  );
+  assert.match(text, /NOTHING HAS BEEN SET UP YET/);
+});
+
+test("a 401 gets no module-disabled advice and no payload analysis", async () => {
+  // An expired token read as "the Project module is disabled, stop retrying" —
+  // burying the one action that would have worked.
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 401, detail: "Unauthorized" },
+  );
+  assert.doesNotMatch(text, /module is (off|disabled)/i);
+  assert.doesNotMatch(text, /were not sent/, "the payload is not the problem on a 401");
+});
+
+test("a 429 is not answered with a list of missing parameters", async () => {
+  // The client has already exhausted its retries; the request shape is irrelevant.
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 429, detail: "Too many requests" },
+  );
+  assert.doesNotMatch(text, /were not sent/);
+});
+
+test("a 5xx is passed through untouched", async () => {
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 503, detail: "Service unavailable" },
+  );
+  assert.doesNotMatch(text, /Known quirk/);
+  assert.doesNotMatch(text, /were not sent/);
+});
+
+test("an unresolvable path is not enriched with another endpoint's advice", async () => {
+  const text = await callFailing(
+    { method: "GET", path: "/api/definitely-not-a-real-endpoint" },
+    { status: 404, detail: "No static resource" },
+  );
+  assert.doesNotMatch(text, /Known quirk/);
+});
+
+test("a query string in the path is refused rather than silently dropped", async () => {
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const res = await tool.handler(
+    { method: "GET", path: "/api/timesheets?projectId=7&startDate=2026-01-01" },
+    { ...REQUEST_CTX, client: { ...REQUEST_CTX.client, request: async () => ({ status: 200, data: [] }) } },
+  );
+  const text = res.content.map((c) => c.text).join("\n");
+  assert.match(text, /Put query parameters in the "query" argument/);
+  assert.match(text, /projectId/);
+});
+
+test("a genuine HTML attachment is not mistaken for a routing miss", async () => {
+  // Attachment endpoints declare */* and ReAI stores whatever was uploaded, so an
+  // HTML invoice is an ordinary successful download. Content-Disposition — surfaced
+  // by parseBody as `filename` — is what distinguishes it from the SPA shell.
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const res = await tool.handler(
+    { method: "GET", path: "/api/attachments/42/content", binary: true },
+    {
+      ...REQUEST_CTX,
+      client: {
+        ...REQUEST_CTX.client,
+        request: async () => ({
+          status: 200,
+          contentType: "text/html",
+          data: { base64: "PGh0bWw+", contentType: "text/html", filename: "invoice-from-supplier.html" },
+        }),
+      },
+    },
+  );
+  assert.notEqual(res.isError, true, "a named payload is a real file, not the app shell");
+});
+
+test("an HTML body with no content-type is still caught", async () => {
+  // ReAI omits content-type in the wild, and letting undefined fall through left the
+  // false success this guard exists to close.
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const res = await tool.handler(
+    { method: "GET", path: "/api/opening-balances" },
+    {
+      ...REQUEST_CTX,
+      client: {
+        ...REQUEST_CTX.client,
+        request: async () => ({ status: 200, data: "<!DOCTYPE html>\n<html lang=\"no\"></html>" }),
+      },
+    },
+  );
+  assert.equal(res.isError, true);
+  assert.match(res.content.map((c) => c.text).join("\n"), /matched no API route/);
+});
+
+test("charset on the content-type does not defeat the guard", async () => {
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const res = await tool.handler(
+    { method: "GET", path: "/api/opening-balances" },
+    {
+      ...REQUEST_CTX,
+      client: {
+        ...REQUEST_CTX.client,
+        request: async () => ({ status: 200, contentType: "text/html; charset=utf-8", data: "<html></html>" }),
+      },
+    },
+  );
+  assert.equal(res.isError, true);
 });
