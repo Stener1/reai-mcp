@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: node --test test/
+
+      # Proves the packaged server actually starts and speaks MCP without any
+      # ReAI credentials: it must fail with a clear configuration error rather
+      # than a stack trace.
+      - name: Startup error is actionable without a token
+        run: |
+          set +e
+          output=$(node dist/index.js 2>&1)
+          code=$?
+          set -e
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::server should exit non-zero when REAI_USER_API_TOKEN is unset"
+            exit 1
+          fi
+          echo "$output" | grep -q "REAI_USER_API_TOKEN" || {
+            echo "::error::startup error must name the missing variable"
+            exit 1
+          }
+
+  package:
+    name: Verify published package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Pack and inspect
+        run: |
+          npm pack --dry-run 2>&1 | tee pack.log
+          for required in dist/index.js spec/index.json spec/reai-openapi.json LICENSE README.md; do
+            grep -q "$required" pack.log || {
+              echo "::error::$required is missing from the published package"
+              exit 1
+            }
+          done

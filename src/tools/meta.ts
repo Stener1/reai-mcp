@@ -1,0 +1,112 @@
+import { z } from "zod";
+import { defineTool, ok, okText, resolveTenantId, type ToolDef } from "./registry.js";
+import { WRITE_MODES } from "../policy.js";
+
+type MeResponse = {
+  email?: string;
+  name?: string;
+  tenants?: Array<{ id: number; slug?: string; companyName?: string; currencyCode?: string }>;
+};
+
+const whoami = defineTool({
+  name: "reai_whoami",
+  title: "Who am I and which companies can I reach",
+  description:
+    "Identify the authenticated ReAI user and list every tenant (company) the token can access, " +
+    "with each tenant's id, slug and currency. Call this first in any session: most other tools are " +
+    "tenant-scoped, and the tenant id is what selects which company's books you are working in. " +
+    "Also reports the active tenant and the server's current write policy.",
+  risk: "read",
+  inputSchema: {},
+  handler: async (_args, ctx) => {
+    const res = await ctx.client.request<MeResponse>({
+      method: "GET",
+      path: "/api/me",
+      omitTenant: true,
+    });
+    const me = res.data;
+    const active = resolveTenantId(undefined, ctx);
+    const tenants = me.tenants ?? [];
+
+    const notes: string[] = [];
+    if (active !== undefined) {
+      const match = tenants.find((t) => t.id === active);
+      notes.push(
+        match
+          ? `Active tenant: ${active} (${match.companyName ?? match.slug ?? "unnamed"}).`
+          : `Active tenant is set to ${active}, but that id is NOT in this token's tenant list — ` +
+              `calls will fail with 403 or 404. Pick one of the ids below.`,
+      );
+    } else if (tenants.length === 1) {
+      notes.push(
+        `No active tenant set, but this token reaches exactly one company: ${tenants[0]?.id} ` +
+          `(${tenants[0]?.companyName ?? "unnamed"}). Call reai_use_tenant to select it.`,
+      );
+    } else {
+      notes.push(
+        `No active tenant set and this token reaches ${tenants.length} companies. ` +
+          `Call reai_use_tenant before using tenant-scoped tools.`,
+      );
+    }
+    notes.push(
+      `Write policy: REAI_WRITE_MODE=${ctx.config.writeMode} ` +
+        `(available modes: ${WRITE_MODES.join(", ")}).`,
+    );
+
+    return ok(
+      {
+        user: { email: me.email, name: me.name },
+        activeTenantId: active ?? null,
+        writeMode: ctx.config.writeMode,
+        tenants: tenants.map((t) => ({
+          ...t,
+          url: ctx.client.deepLink("/", t.id),
+        })),
+      },
+      { note: notes.join("\n") },
+    );
+  },
+});
+
+const useTenant = defineTool({
+  name: "reai_use_tenant",
+  title: "Select the active company",
+  description:
+    "Set the tenant (company) that subsequent tool calls apply to, for the rest of this session. " +
+    "The id is validated against the tenants this token can actually reach, so a typo fails here " +
+    "rather than silently writing into the wrong company's books. " +
+    "Individual tools can still override it with their own tenantId argument.",
+  risk: "read", // Session-local state only; it changes no data in ReAI.
+  idempotent: true,
+  inputSchema: {
+    tenantId: z
+      .number()
+      .int()
+      .positive()
+      .describe("Tenant id to make active. Get valid ids from reai_whoami."),
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<MeResponse>({
+      method: "GET",
+      path: "/api/me",
+      omitTenant: true,
+    });
+    const tenants = res.data.tenants ?? [];
+    const match = tenants.find((t) => t.id === args.tenantId);
+    if (!match) {
+      const list = tenants.map((t) => `  ${t.id} — ${t.companyName ?? t.slug ?? "unnamed"}`).join("\n");
+      return okText(
+        `Tenant ${args.tenantId} is not accessible with this token. Available tenants:\n${list || "  (none)"}`,
+      );
+    }
+
+    ctx.session.activeTenantId = args.tenantId;
+    return okText(
+      `Active tenant is now ${match.id} — ${match.companyName ?? match.slug} ` +
+        `(currency ${match.currencyCode ?? "unknown"}).\n` +
+        `${ctx.client.deepLink("/", match.id)}`,
+    );
+  },
+});
+
+export const metaTools: ToolDef[] = [whoami, useTenant] as ToolDef[];

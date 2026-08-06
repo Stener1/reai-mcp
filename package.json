@@ -1,0 +1,59 @@
+{
+  "name": "reai-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for ReAI (app.reai.no) — Norwegian accounting. Curated bookkeeping tools plus full-API escape hatch. Runs as local stdio or self-hosted remote connector.",
+  "license": "MIT",
+  "author": "Stener Torstensen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Stener1/reai-mcp.git"
+  },
+  "homepage": "https://github.com/Stener1/reai-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Stener1/reai-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "reai",
+    "accounting",
+    "regnskap",
+    "norway",
+    "bookkeeping",
+    "claude"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "reai-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "spec/index.json",
+    "spec/reai-openapi.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:spec": "node scripts/build-spec-index.mjs",
+    "build": "npm run build:spec && tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3"
+  }
+}
