@@ -83,7 +83,12 @@ export function buildServer(opts: BuildServerOptions): McpServer {
   const ctx: ToolContext = { client, config, session };
 
   const selected = selectTools(config.toolsets);
-  const visible = selected.filter((t) => isAllowed(t.risk, config.writeMode));
+  const allowedByWriteMode = selected.filter((t) => isAllowed(t.risk, config.writeMode));
+  // A transmitting tool is hidden unless external send is explicitly enabled,
+  // even in full mode: a posting can be reversed, a sent invoice cannot.
+  const visible = allowedByWriteMode.filter(
+    (t) => config.allowExternalSend || t.transmits !== true,
+  );
   const hiddenByPolicy = selected.length - visible.length;
   const hiddenByToolset = allTools.length - selected.length;
 
@@ -210,6 +215,16 @@ function buildInstructions(
       "https://app.reai.no/...?tenantId=<id>",
     "",
     `Write policy: REAI_WRITE_MODE=${config.writeMode}.`,
+    config.allowExternalSend
+      ? "EXTERNAL SEND IS ENABLED: this server may transmit EHF/Peppol invoices, invoice emails, " +
+        "payment reminders and signing requests to real counterparties. Nothing sent can be " +
+        "recalled. Confirm the recipient with the user before sending anything."
+      : "External send is DISABLED on this deployment: nothing reaches a third party — no EHF/Peppol, " +
+        "no invoice email, no reminders, no signing requests, and no invoice issuance (which starts " +
+        "delivery). This is a separate switch from the write mode and is not lifted by " +
+        "REAI_WRITE_MODE=full. If the user wants to send something, say plainly that the operator " +
+        "enables it with REAI_ALLOW_EXTERNAL_SEND=1 — that is normal configuration for a business " +
+        "doing its own invoicing, not something to discourage.",
   ];
 
   if (config.writeMode === "read-only") {

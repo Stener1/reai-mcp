@@ -309,6 +309,124 @@ function normalize(path: string): string {
   return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
 }
 
+/**
+ * Whether a call sends something to a third party.
+ *
+ * Deliberately a SEPARATE axis from Risk. Reversibility and "does this leave the
+ * building" are different questions, and conflating them is what made this
+ * dangerous: every transmitting endpoint is already classified `irreversible`,
+ * so `REAI_WRITE_MODE=full` — which an operator sets to permit ledger postings —
+ * silently also permitted EHF invoices to real counterparties over Peppol.
+ *
+ * That matters concretely in both directions. Testing against a live company
+ * (there is no ReAI sandbox) needs ledger writes but must send nothing to anyone.
+ * A real business doing its invoicing needs the opposite. Neither is served by
+ * one combined setting, so they are independent — and a production deployment
+ * that should send invoices simply sets REAI_ALLOW_EXTERNAL_SEND=1.
+ */
+export type Transmission = "none" | "external";
+
+/**
+ * Paths that transmit a document, email, or signing request outside the tenant.
+ *
+ * `/api/invoices` is on this list because issuing an invoice is not a books-only
+ * operation: the API documents that it "starts invoice delivery asynchronously",
+ * trying eFaktura, then EHF when the order carries sendEhf, then PDF by email.
+ */
+const TRANSMITTING_PREFIXES: readonly string[] = [
+  "/api/peppol",
+  "/api/invoices",
+];
+
+/** Sub-paths that transmit, on resources that otherwise do not. */
+const TRANSMITTING_SEGMENTS: readonly string[] = [
+  "/ehf",
+  "/email",
+  "/reminders",
+  "/sign-request",
+  "/sign-requests",
+  "/send",
+];
+
+/** Body fields that arm an external send even on a non-transmitting path. */
+const TRANSMITTING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  sendehf: (v) => v === true,
+};
+
+/**
+ * Does this call send something to a third party?
+ *
+ * GET is never transmitting. Everything else is judged on path, sub-path and
+ * body, and an unknown path is NOT assumed to transmit — unlike the write
+ * classifier, which fails closed. The asymmetry is deliberate: failing closed
+ * here would block most of the API for no safety gain, because an unrecognised
+ * write is already refused by the write policy.
+ */
+export function classifyTransmission(
+  method: HttpMethod,
+  path: string,
+  body?: unknown,
+): Transmission {
+  if (method === "GET") return "none";
+
+  const canonical = canonicalizeApiPath(path);
+  const normalized = normalize(canonical?.pathname ?? path);
+
+  if (matchesPrefix(normalized, TRANSMITTING_PREFIXES)) return "external";
+  if (
+    TRANSMITTING_SEGMENTS.some(
+      (seg) => normalized.includes(seg + "/") || normalized.endsWith(seg),
+    )
+  ) {
+    return "external";
+  }
+
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+      if (TRANSMITTING_BODY_FIELDS[key.toLowerCase()]?.(value)) return "external";
+    }
+  }
+  return "none";
+}
+
+/** Names the body fields that made a call transmitting, for error messages. */
+export function transmittingBodyFields(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return Object.entries(body as Record<string, unknown>)
+    .filter(([k, v]) => TRANSMITTING_BODY_FIELDS[k.toLowerCase()]?.(v) === true)
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+}
+
+export class ExternalSendBlockedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} sends a document, email or signing request outside this tenant, and ` +
+        `REAI_ALLOW_EXTERNAL_SEND is not enabled on this server.\n\n` +
+        `This is a separate switch from REAI_WRITE_MODE by design. A write mode governs what can be ` +
+        `undone in the books; this governs whether anything reaches a third party, which cannot be ` +
+        `undone at all. Keeping them separate means a server can be trusted with the ledger while ` +
+        `still being unable to email a customer — useful while evaluating, or when working against ` +
+        `a tenant whose real counterparties should not hear from you.\n\n` +
+        `Sending invoices is of course the point of an accounting system. If this deployment is ` +
+        `meant to do that, the operator enables it with REAI_ALLOW_EXTERNAL_SEND=1 and everything ` +
+        `above becomes available. Tell the user that is the fix — it is ordinary configuration, ` +
+        `not a warning sign.`,
+    );
+    this.name = "ExternalSendBlockedError";
+  }
+}
+
+/** Throws unless external transmission is permitted. */
+export function assertTransmitAllowed(
+  transmission: Transmission,
+  allowExternalSend: boolean,
+  what: string,
+): void {
+  if (transmission === "external" && !allowExternalSend) {
+    throw new ExternalSendBlockedError(what);
+  }
+}
+
 export class WriteBlockedError extends Error {
   readonly risk: Risk;
   readonly mode: WriteMode;

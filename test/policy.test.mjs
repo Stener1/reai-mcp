@@ -10,6 +10,10 @@ import {
   canonicalizeApiPath,
   classifyWithBody,
   escalatingBodyFields,
+  classifyTransmission,
+  transmittingBodyFields,
+  assertTransmitAllowed,
+  ExternalSendBlockedError,
 } from "../dist/policy.js";
 import { ReaiClient } from "../dist/reai/client.js";
 
@@ -389,4 +393,87 @@ test("empty and null-only arrays are omitted from the query string", () => {
       assert.ok(!seen[0].includes("b="), seen[0]);
       assert.match(seen[0], /c=keep/);
     });
+});
+
+// --- External transmission -------------------------------------------------
+// A separate axis from Risk. Every transmitting endpoint is already
+// `irreversible`, so REAI_WRITE_MODE=full -- which an operator sets to permit
+// ledger postings -- would otherwise also permit sending EHF invoices to real
+// counterparties. A posting can be reversed; a sent invoice cannot be recalled.
+
+test("transmitting paths are recognised", () => {
+  for (const path of [
+    "/api/peppol/messages/sendsbdh",
+    "/api/invoices/1/ehf",
+    "/api/invoices/1/email",
+    "/api/invoices/1/reminders",
+    "/api/invoices/reminders/bulk",
+    "/api/agreements/1/sign-request",
+    "/api/agreements/1/sign-requests/2/send",
+    // Issuing an invoice starts delivery asynchronously.
+    "/api/invoices",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "external", path);
+  }
+});
+
+test("ordinary writes and all reads are not transmitting", () => {
+  for (const path of [
+    "/api/customers",
+    "/api/suppliers",
+    "/api/vouchers",
+    "/api/orders",
+    "/api/supplier-invoices",
+    "/api/reconciliation-rules",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "none", path);
+  }
+  // Reading an invoice sends nothing, even on a transmitting prefix.
+  assert.equal(classifyTransmission("GET", "/api/invoices"), "none");
+  assert.equal(classifyTransmission("GET", "/api/peppol/messages/phase4ping"), "none");
+});
+
+test("sendEhf in the body makes an otherwise local write transmitting", () => {
+  assert.equal(classifyTransmission("POST", "/api/orders"), "none");
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: true }), "external");
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: false }), "none");
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: "true" }), "none");
+  assert.deepEqual(transmittingBodyFields({ sendEhf: true }), ["sendEhf=true"]);
+  assert.deepEqual(transmittingBodyFields({ sendEhf: false }), []);
+});
+
+test("transmission cannot be smuggled through a traversal path", () => {
+  // The write classifier canonicalizes; this must too, or "/api/customers/../invoices/1/ehf"
+  // would read as a customer write that sends an EHF invoice.
+  assert.equal(classifyTransmission("POST", "/api/customers/../invoices/1/ehf"), "external");
+  assert.equal(classifyTransmission("POST", "/api/customers/../invoices"), "external");
+});
+
+test("assertTransmitAllowed gates on the flag, not on the write mode", () => {
+  assert.doesNotThrow(() => assertTransmitAllowed("none", false, "POST /api/customers"));
+  assert.doesNotThrow(() => assertTransmitAllowed("external", true, "POST /api/invoices/1/ehf"));
+
+  try {
+    assertTransmitAllowed("external", false, "POST /api/invoices/1/ehf");
+    assert.fail("expected ExternalSendBlockedError");
+  } catch (err) {
+    assert.ok(err instanceof ExternalSendBlockedError);
+    assert.match(err.message, /REAI_ALLOW_EXTERNAL_SEND/);
+    // The refusal must read as configuration, not as a prohibition: sending
+    // invoices is the point of an accounting system.
+    assert.match(err.message, /ordinary configuration|the point of an accounting system/i);
+  }
+});
+
+test("the two axes are genuinely independent", () => {
+  // full write mode still cannot transmit...
+  assert.throws(
+    () => assertTransmitAllowed("external", false, "POST /api/invoices/1/ehf"),
+    ExternalSendBlockedError,
+  );
+  // ...and external send does not loosen the write policy.
+  assert.throws(
+    () => assertAllowed("irreversible", "reversible", "POST /api/vouchers"),
+    WriteBlockedError,
+  );
 });

@@ -39,6 +39,11 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
   inputSchema: S;
   /** Signals a genuinely destructive call so clients can prompt the user. */
   destructive?: boolean;
+  /**
+   * True when the tool sends something outside the tenant. Such tools are hidden
+   * unless REAI_ALLOW_EXTERNAL_SEND is set, independently of the write mode.
+   */
+  transmits?: boolean;
   /** True when repeated identical calls have no additional effect. */
   idempotent?: boolean;
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;

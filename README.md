@@ -40,6 +40,27 @@ Two properties make this more than a label:
 
 The default is deliberately the middle setting, not the permissive one.
 
+### Sending things to other people is a separate switch
+
+`REAI_WRITE_MODE` answers *what can be undone in the books*. It deliberately does **not** answer *does this reach someone else* — those are different questions, and one setting cannot serve both.
+
+So `REAI_ALLOW_EXTERNAL_SEND` gates everything that leaves the tenant, independently of the write mode:
+
+- EHF/Peppol transmission, and any order carrying `sendEhf: true`
+- Invoice email, payment reminders, agreement signing requests
+- **Issuing a customer invoice** — `POST /api/invoices` starts delivery asynchronously (eFaktura, then EHF, then PDF by email), so it is not a books-only operation
+
+It is **off by default**, and `REAI_WRITE_MODE=full` does not lift it. A posting can be reversed; an invoice that has gone over Peppol cannot be recalled.
+
+**Turn it on if this deployment does your invoicing.** That is the ordinary case and the reason an accounting integration exists:
+
+```
+REAI_WRITE_MODE=full
+REAI_ALLOW_EXTERNAL_SEND=1
+```
+
+Leave it off while evaluating, or when working against books whose real counterparties should not hear from you — which is exactly the situation when there is no sandbox and you are testing against a live company. The combination `full` + no external send is a genuinely useful place to be: the agent can do real bookkeeping and still cannot email anybody.
+
 ## Install
 
 Requires Node.js 20 or newer, and a ReAI **user API token** (app.reai.no → settings → API tokens). A user token reaches every company your ReAI user can access; the server discovers them for you.
@@ -326,6 +347,7 @@ A test asserts every quirk still matches a real operation in the spec, so they c
 | `REAI_USER_API_TOKEN` | — | **Required.** ReAI user API token. `REAI_TOKEN` is accepted as an alias |
 | `REAI_TENANT_ID` | — | Default tenant, so `tenantId` can be omitted |
 | `REAI_WRITE_MODE` | `reversible` | `read-only`, `reversible` or `full` — see [Safety](#safety-this-writes-to-real-accounting-books) |
+| `REAI_ALLOW_EXTERNAL_SEND` | off | Permit sending to third parties: EHF/Peppol, invoice email, reminders, signing requests, and issuing an invoice. **Enable this for a business doing its own invoicing** — see [below](#sending-things-to-other-people-is-a-separate-switch) |
 | `REAI_BASE_URL` | `https://app.reai.no` | Override for a staging environment |
 | `REAI_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `REAI_MAX_RETRIES` | `2` | Retries on 429/502/503/504, with exponential backoff and jitter |

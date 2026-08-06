@@ -19,6 +19,15 @@ export type ServerConfig = {
    */
   boundTenantId: number | undefined;
   writeMode: WriteMode;
+  /**
+   * Whether this server may send anything to a third party — EHF/Peppol
+   * invoices, invoice emails, payment reminders, signing requests.
+   *
+   * Off by default, and independent of writeMode. Even REAI_WRITE_MODE=full
+   * cannot transmit without this, because a posting can be reversed and a sent
+   * invoice cannot be recalled.
+   */
+  allowExternalSend: boolean;
   timeoutMs: number;
   maxRetries: number;
   /** Log one line per API request to stderr. Never logs tokens. */
@@ -140,6 +149,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // stdio keeps one long-lived server, so session state persists there.
     statelessSession: false,
     writeMode: parseWriteMode(env.REAI_WRITE_MODE),
+    allowExternalSend:
+      env.REAI_ALLOW_EXTERNAL_SEND === "1" || env.REAI_ALLOW_EXTERNAL_SEND === "true",
     timeoutMs: intFromEnv("REAI_TIMEOUT_MS", 30_000),
     maxRetries: intFromEnv("REAI_MAX_RETRIES", 2),
     verbose: env.REAI_VERBOSE === "1" || env.REAI_VERBOSE === "true",

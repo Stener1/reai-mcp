@@ -724,6 +724,9 @@ const createInvoiceFromOrder = defineTool({
     "it, then the invoice PDF by email. So this is not a books-only operation: assume the customer " +
     "will receive it. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  // Issuing an invoice starts delivery to the customer, so it is gated by
+  // REAI_ALLOW_EXTERNAL_SEND as well as by the write mode.
+  transmits: true,
   apiPaths: [["POST", "/api/invoices"]],
   inputSchema: {
     orderId: z.number().int().positive().describe("Order to invoice. Find one with reai_list_orders."),
