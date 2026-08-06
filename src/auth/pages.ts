@@ -54,6 +54,11 @@ const STYLES = `
     margin: 22px 0 0; padding-top: 16px; border-top: 1px solid #eceff2;
     font-size: 12.5px; color: #6b747d;
   }
+  .warn {
+    margin: 20px 0 0; padding: 11px 13px; border-radius: 8px; font-size: 12.5px;
+    background: #fff8e6; border: 1px solid #f0d9a0; color: #6b4e10;
+  }
+  .warn code { background: rgba(0,0,0,.06); word-break: break-all; }
   .meta code { font-size: 12px; background: #f2f4f6; padding: 1px 5px; border-radius: 4px; }
   .modes { display: grid; gap: 8px; margin-top: 8px; }
   .mode {
@@ -75,6 +80,8 @@ const STYLES = `
     button { background: #e6e9ec; color: #101214; }
     button:hover { background: #fff; }
     .err { background: #3b1a19; border-color: #6b2b28; color: #f5b7b4; }
+    .warn { background: #35290d; border-color: #6b551d; color: #f0d9a0; }
+    .warn code { background: rgba(255,255,255,.08); }
     .meta code { background: #22262a; }
     .modes .mode:hover { border-color: #4a5158; }
     .meta { border-top-color: #2b3034; }
@@ -109,7 +116,6 @@ export type ConsentPageOptions = {
 };
 
 export function renderConsentPage(opts: ConsentPageOptions): string {
-  const client = opts.clientName ? escapeHtml(opts.clientName) : "An MCP client";
   const host = safeHost(opts.redirectUri);
   const isTenantStep = Boolean(opts.tenants?.length);
 
@@ -120,8 +126,13 @@ export function renderConsentPage(opts: ConsentPageOptions): string {
     isTenantStep
       ? `<p class="sub">Signed in as <strong>${escapeHtml(opts.subject ?? "your ReAI user")}</strong>. ` +
           `This token can reach several companies — pick the one this connection should use.</p>`
-      : `<p class="sub"><strong>${client}</strong> at <code>${escapeHtml(host)}</code> is requesting ` +
-          `access to your ReAI accounting data.</p>`,
+      : `<p class="sub"><strong>${escapeHtml(host)}</strong> is requesting access to your ReAI ` +
+          `accounting data.${
+            opts.clientName
+              ? ` It calls itself &ldquo;${escapeHtml(opts.clientName)}&rdquo;, which is ` +
+                `self-reported and not verified.`
+              : ""
+          }</p>`,
   );
 
   if (opts.error) parts.push(`<p class="err">${escapeHtml(opts.error)}</p>`);
@@ -138,7 +149,8 @@ export function renderConsentPage(opts: ConsentPageOptions): string {
     parts.push(`<select id="tenantId" name="tenantId" required>`);
     for (const t of opts.tenants ?? []) {
       const label = t.companyName ?? t.slug ?? `Tenant ${t.id}`;
-      parts.push(`<option value="${t.id}">${escapeHtml(label)} (${t.id})</option>`);
+      const id = escapeHtml(String(t.id));
+      parts.push(`<option value="${id}">${escapeHtml(label)} (${id})</option>`);
     }
     parts.push(`</select>`);
   } else {
@@ -169,6 +181,14 @@ export function renderConsentPage(opts: ConsentPageOptions): string {
 
   parts.push(`<button type="submit">${isTenantStep ? "Connect" : "Authorize"}</button>`);
   parts.push(`</form>`);
+
+  if (!isTenantStep) {
+    parts.push(
+      `<p class="warn">Your token will be sent to <code>${escapeHtml(truncate(opts.redirectUri, 120))}</code>. ` +
+        `Anyone who controls that address gains full access to these books. ` +
+        `Only continue if you started this from an application you trust.</p>`,
+    );
+  }
 
   parts.push(
     `<p class="meta">Connecting to <code>${escapeHtml(opts.baseUrl)}</code>. ` +
@@ -206,6 +226,10 @@ export function renderErrorPage(title: string, detail: string): string {
     `<h1>${escapeHtml(title)}</h1><p class="sub">${escapeHtml(detail)}</p>` +
       `<p class="meta"><a href="https://github.com/Stener1/reai-mcp" rel="noreferrer noopener">reai-mcp</a></p>`,
   );
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? value.slice(0, max - 1) + "\u2026" : value;
 }
 
 function safeHost(uri: string): string {

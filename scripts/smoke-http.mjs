@@ -269,6 +269,28 @@ async function main() {
   const vouchers = await client.callTool({ name: "reai_list_vouchers", arguments: {} });
   report("reai_list_vouchers through the connector", !vouchers.isError, firstLine(textOf(vouchers)));
 
+  // The tenant chosen at authorization time must be a boundary, not a default.
+  const crossTenant = await client.callTool({
+    name: "reai_list_accounts",
+    arguments: { tenantId: 999999 },
+  });
+  const crossText = textOf(crossTenant);
+  report(
+    "a bound connection refuses a different tenant",
+    crossTenant.isError === true && /bound to tenant/i.test(crossText),
+    crossTenant.isError ? "refused" : `NOT REFUSED: ${crossText.slice(0, 160)}`,
+  );
+
+  const switchTenant = await client.callTool({
+    name: "reai_use_tenant",
+    arguments: { tenantId: 999999 },
+  });
+  report(
+    "reai_use_tenant cannot escape the bound tenant",
+    /bound to tenant/i.test(textOf(switchTenant)),
+    firstLine(textOf(switchTenant)),
+  );
+
   await client.close();
 
   // 9. A garbage bearer token must be refused.

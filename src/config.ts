@@ -8,6 +8,16 @@ export type ServerConfig = {
   /** Absent in remote mode, where each session supplies its own token. */
   token: string | undefined;
   defaultTenantId: number | undefined;
+  /**
+   * A hard tenant boundary, not a default.
+   *
+   * Set in remote mode from the tenant the user picked on the consent page. When
+   * present, no tool may address a different tenant — otherwise the consent
+   * page's promise ("pick the company this connection should use") would be
+   * cosmetic, since a tool argument could silently reach any other company the
+   * underlying ReAI token happens to unlock.
+   */
+  boundTenantId: number | undefined;
   writeMode: WriteMode;
   timeoutMs: number;
   maxRetries: number;
@@ -31,6 +41,13 @@ export type ServerConfig = {
   allowTokenPassthrough: boolean;
   /** Extra hostnames to accept, for DNS-rebinding protection. */
   allowedHosts: string[];
+  /**
+   * Hosts permitted as OAuth redirect targets. Empty means "any https host",
+   * which is what MCP clients expect but also lets anyone register a client and
+   * drive a genuine-looking consent page at their own callback. Operators who
+   * know which clients they use should set this.
+   */
+  allowedRedirectHosts: string[];
 };
 
 function intFromEnv(name: string, fallback: number): number {
@@ -78,6 +95,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     baseUrl: (env.REAI_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, ""),
     token,
     defaultTenantId,
+    // Only the remote transport binds a tenant; local stdio uses a plain default.
+    boundTenantId: undefined,
     writeMode: parseWriteMode(env.REAI_WRITE_MODE),
     timeoutMs: intFromEnv("REAI_TIMEOUT_MS", 30_000),
     maxRetries: intFromEnv("REAI_MAX_RETRIES", 2),
@@ -87,11 +106,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     encryptionKey: env.REAI_ENCRYPTION_KEY?.trim() || undefined,
     allowTokenPassthrough:
       env.REAI_ALLOW_TOKEN_PASSTHROUGH === "1" || env.REAI_ALLOW_TOKEN_PASSTHROUGH === "true",
-    allowedHosts: (env.REAI_ALLOWED_HOSTS ?? "")
-      .split(",")
-      .map((h) => h.trim())
-      .filter(Boolean),
+    allowedHosts: splitHosts(env.REAI_ALLOWED_HOSTS),
+    allowedRedirectHosts: splitHosts(env.REAI_ALLOWED_REDIRECT_HOSTS),
   };
+}
+
+function splitHosts(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function isLoopbackHost(hostname: string): boolean {

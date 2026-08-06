@@ -16,6 +16,7 @@ function makeProvider(overrides = {}) {
     maxRetries: 0,
     allowTokenPassthrough: false,
     allowedHosts: [],
+    allowedRedirectHosts: [],
     verbose: false,
     port: 8080,
     ...overrides,
@@ -194,6 +195,8 @@ test("authorization_code exchange requires a valid PKCE verifier", async () => {
       grant_type: "authorization_code",
       code: mintCode(sealer, { challenge }),
       code_verifier: randomBytes(40).toString("base64url"),
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
     }),
   );
   assert.equal(wrong.status, 400);
@@ -231,12 +234,24 @@ test("an authorization code cannot be redeemed twice", async () => {
   const code = mintCode(sealer, { challenge });
 
   const first = await provider.handleToken(
-    new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier }),
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
+    }),
   );
   assert.equal(first.status, 200);
 
   const second = await provider.handleToken(
-    new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier }),
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
+    }),
   );
   assert.equal(second.status, 400);
   assert.match(second.json.error_description, /already been redeemed/);
@@ -253,7 +268,13 @@ test("replay protection survives across provider instances", async () => {
   const code = mintCode(first.sealer, { challenge });
 
   const ok = await first.provider.handleToken(
-    new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier }),
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
+    }),
   );
   assert.equal(ok.status, 200);
 
@@ -265,7 +286,13 @@ test("replay protection survives across provider instances", async () => {
     replayGuard: guard,
   });
   const replayed = await second.handleToken(
-    new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier }),
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
+    }),
   );
   assert.equal(replayed.status, 400);
   assert.match(replayed.json.error_description, /already been redeemed/);
@@ -282,6 +309,7 @@ test("code exchange rejects a mismatched redirect_uri or client_id", async () =>
       code: mintCode(sealer, { challenge }),
       code_verifier: verifier,
       redirect_uri: "https://attacker.example.com/cb",
+      client_id: "client-1",
     }),
   );
   assert.equal(badRedirect.json.error, "invalid_grant");
@@ -291,10 +319,107 @@ test("code exchange rejects a mismatched redirect_uri or client_id", async () =>
       grant_type: "authorization_code",
       code: mintCode(sealer, { challenge }),
       code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
       client_id: "someone-else",
     }),
   );
   assert.equal(badClient.json.error, "invalid_grant");
+});
+
+test("redirect_uri and client_id are required, not merely compared when present", async () => {
+  // Previously both checks were guarded on truthiness, so omitting the parameter
+  // skipped the comparison entirely. RFC 6749 4.1.3 makes both REQUIRED here.
+  const { provider, sealer } = makeProvider();
+  const verifier = randomBytes(40).toString("base64url");
+  const challenge = createHash("sha256").update(verifier, "ascii").digest("base64url");
+
+  const noRedirect = await provider.handleToken(
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code: mintCode(sealer, { challenge }),
+      code_verifier: verifier,
+      client_id: "client-1",
+    }),
+  );
+  assert.equal(noRedirect.status, 400);
+  assert.equal(noRedirect.json.error, "invalid_request");
+
+  const noClient = await provider.handleToken(
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code: mintCode(sealer, { challenge }),
+      code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+    }),
+  );
+  assert.equal(noClient.status, 400);
+  assert.equal(noClient.json.error, "invalid_request");
+});
+
+test("a refresh token is only usable by the client it was issued to", async () => {
+  const { provider, sealer } = makeProvider();
+  const refresh = sealer.seal("refresh", { grant: GRANT }, 600);
+
+  const wrongClient = await provider.handleToken(
+    new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refresh,
+      client_id: "a-different-client",
+    }),
+  );
+  assert.equal(wrongClient.status, 400);
+  assert.equal(wrongClient.json.error, "invalid_grant");
+
+  const rightClient = await provider.handleToken(
+    new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: "client-1" }),
+  );
+  assert.equal(rightClient.status, 200);
+});
+
+test("one of our own tokens is never forwarded to ReAI as a credential", () => {
+  // With passthrough enabled, an expired or key-rotated sealed token must still
+  // produce a 401 telling the client to re-authorize -- not be sent upstream as
+  // if it were a ReAI token.
+  const { provider, sealer } = makeProvider({ allowTokenPassthrough: true });
+  const expired = sealer.seal("access", { grant: GRANT }, -1);
+
+  const result = provider.authenticate(`Bearer ${expired}`);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "invalid_token");
+
+  // A genuinely foreign token still passes through when the operator allows it.
+  assert.equal(provider.authenticate("Bearer raw-reai-token").ok, true);
+});
+
+test("the challenge header cannot be broken out of with a quote", () => {
+  const { sealer, config } = makeProvider();
+  const provider = new OAuthProvider({
+    config,
+    sealer,
+    publicUrl: 'https://evil.example.com/", injected="yes',
+    replayGuard: new CodeReplayGuard(),
+  });
+  const header = provider.challengeHeader("invalid_token", 'say "hi"');
+  assert.ok(!header.includes('injected="yes"'), `header must not gain params: ${header}`);
+  // Exactly the three parameters we intend, so no extra quoted pair was injected.
+  assert.equal((header.match(/="/g) ?? []).length, 3, header);
+});
+
+test("the redirect-host allowlist blocks registration of unknown callbacks", () => {
+  const { provider } = makeProvider({ allowedRedirectHosts: ["claude.ai"] });
+
+  assert.equal(provider.register({ redirect_uris: ["https://claude.ai/cb"] }).status, 201);
+  // Loopback stays available for local clients like MCP Inspector.
+  assert.equal(provider.register({ redirect_uris: ["http://localhost:6274/cb"] }).status, 201);
+
+  const blocked = provider.register({ redirect_uris: ["https://evil.example.com/cb"] });
+  assert.equal(blocked.status, 400);
+  assert.match(blocked.json.error_description, /not permitted/);
+});
+
+test("with no allowlist configured any https callback may register", () => {
+  const { provider } = makeProvider();
+  assert.equal(provider.register({ redirect_uris: ["https://anything.example.com/cb"] }).status, 201);
 });
 
 test("expired codes are rejected", async () => {
@@ -306,6 +431,8 @@ test("expired codes are rejected", async () => {
       grant_type: "authorization_code",
       code: mintCode(sealer, { challenge, ttl: -1 }),
       code_verifier: verifier,
+      redirect_uri: "https://claude.ai/cb",
+      client_id: "client-1",
     }),
   );
   assert.equal(res.json.error, "invalid_grant");

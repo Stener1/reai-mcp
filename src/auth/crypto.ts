@@ -36,7 +36,7 @@ const KEY_BYTES = 32;
  * minted for one role cannot be replayed as another — an access token presented
  * as a refresh token fails to decrypt rather than being accepted.
  */
-export type TokenPurpose = "access" | "refresh" | "code" | "client" | "authreq";
+export type TokenPurpose = "access" | "refresh" | "code" | "client" | "authreq" | "verified";
 
 const PREFIX: Record<TokenPurpose, string> = {
   access: "reaimcp_at",
@@ -44,6 +44,10 @@ const PREFIX: Record<TokenPurpose, string> = {
   code: "reaimcp_ac",
   client: "reaimcp_cl",
   authreq: "reaimcp_rq",
+  // Distinct from "authreq" on purpose: this one wraps the user's plaintext ReAI
+  // token, and sharing an AEAD purpose with the authorization request would mean
+  // the two were cryptographically interchangeable.
+  verified: "reaimcp_vt",
 };
 
 /** True when a bearer value was minted by this server rather than by ReAI. */

@@ -7,6 +7,7 @@ import {
   assertAllowed,
   WriteBlockedError,
   DEFAULT_WRITE_MODE,
+  canonicalizeApiPath,
 } from "../dist/policy.js";
 
 test("parseWriteMode defaults to reversible", () => {
@@ -142,4 +143,62 @@ test("assertAllowed explains how to widen the policy", () => {
     assert.equal(err.risk, "irreversible");
     assert.equal(err.mode, "reversible");
   }
+});
+
+// --- Path canonicalization -------------------------------------------------
+// Regression tests for a real bypass: classification ran on the raw string
+// while the request was built with `new URL()`, which resolves dot segments. So
+// "/api/customers/../vouchers" was classified against the reversible
+// "/api/customers" prefix but posted to the general ledger.
+
+test("dot segments cannot smuggle a write past the policy", () => {
+  const smuggles = [
+    "/api/customers/../vouchers",
+    "/api/customers/../../api/vat-returns",
+    "/api/documents/../users",
+    "/api/customers/%2e%2e/vouchers",
+    "/api/customers/%2E%2E/vouchers",
+    "/api/offers/./../vouchers",
+    "/api/products/../../api/salary-payments",
+    "/api/customers/..%2fvouchers",
+  ];
+  for (const path of smuggles) {
+    assert.equal(
+      classifyRequest("POST", path),
+      "irreversible",
+      `${path} must not be classified as reversible`,
+    );
+  }
+});
+
+test("canonicalizeApiPath resolves to what will actually be requested", () => {
+  const cases = [
+    ["/api/customers/../vouchers", "/api/vouchers"],
+    ["/api/customers/./1234", "/api/customers/1234"],
+    ["/api/customers/%2e%2e/vouchers", "/api/vouchers"],
+    ["/api/customers/1234", "/api/customers/1234"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(canonicalizeApiPath(input)?.pathname, expected, input);
+  }
+});
+
+test("canonicalizeApiPath refuses paths that escape our origin", () => {
+  assert.equal(canonicalizeApiPath("https://evil.example.com/api/vouchers"), undefined);
+  assert.equal(canonicalizeApiPath("//evil.example.com/api/vouchers"), undefined);
+  assert.equal(canonicalizeApiPath(""), undefined);
+  assert.equal(canonicalizeApiPath("   "), undefined);
+});
+
+test("canonicalizeApiPath keeps the query string separate", () => {
+  const out = canonicalizeApiPath("/api/vouchers?startDate=2026-01-01");
+  assert.equal(out?.pathname, "/api/vouchers");
+  assert.equal(out?.search, "?startDate=2026-01-01");
+});
+
+test("a legitimate reversible write is still classified reversible", () => {
+  // Guard against over-correcting the fix into blocking everything.
+  assert.equal(classifyRequest("POST", "/api/customers"), "reversible");
+  assert.equal(classifyRequest("PATCH", "/api/customers/1234"), "reversible");
+  assert.equal(classifyRequest("POST", "/api/customers/1234/contact-persons"), "reversible");
 });

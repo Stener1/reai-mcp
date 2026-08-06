@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ReaiClient } from "../reai/client.js";
 import { ReaiApiError } from "../reai/errors.js";
-import { WRITE_MODES, type WriteMode } from "../policy.js";
-import { Sealer, verifyPkceS256, randomId } from "./crypto.js";
+import { parseWriteMode, WRITE_MODES, type WriteMode } from "../policy.js";
+import { Sealer, verifyPkceS256, randomId, isSealedToken } from "./crypto.js";
+import { createHash } from "node:crypto";
 import type { ServerConfig } from "../config.js";
 import { renderConsentPage, renderErrorPage } from "./pages.js";
 
@@ -150,10 +151,26 @@ export class OAuthProvider {
         json: { error: "invalid_redirect_uri", error_description: "redirect_uris is required." },
       };
     }
+    const allowedHosts = this.deps.config.allowedRedirectHosts;
     for (const uri of uris) {
       const problem = validateRedirectUri(uri);
       if (problem) {
         return { status: 400, json: { error: "invalid_redirect_uri", error_description: problem } };
+      }
+      // When the operator has declared which clients they use, an unknown
+      // callback host cannot reach the consent page at all -- which is what
+      // stops a stranger registering a client and phishing a token through this
+      // deployment's own, genuine authorization page.
+      if (allowedHosts.length > 0 && !isRedirectHostAllowed(uri, allowedHosts)) {
+        return {
+          status: 400,
+          json: {
+            error: "invalid_redirect_uri",
+            error_description:
+              `redirect_uri host is not permitted by this deployment. ` +
+              `The operator allows: ${allowedHosts.join(", ")}.`,
+          },
+        };
       }
     }
 
@@ -229,8 +246,27 @@ export class OAuthProvider {
     // sealed, so it never round-trips through the browser in the clear.
     let reaiToken = (form.get("token") ?? "").trim();
     const verified = form.get("verified");
+    let carriedWriteMode: string | undefined;
     if (!reaiToken && verified) {
-      const carried = this.deps.sealer.unseal<{ reaiToken: string }>("authreq", verified);
+      const carried = this.deps.sealer.unseal<{
+        reaiToken: string;
+        requestBinding: string;
+        writeMode: string;
+      }>("verified", verified);
+      // Bound to the authorization request it was issued under, so it cannot be
+      // paired with a different request (e.g. one pointing at an attacker's
+      // redirect URI) to convert someone else's credential into a grant.
+      if (carried && carried.requestBinding !== bindingOf(sealedRequest)) {
+        sendHtml(
+          res,
+          400,
+          renderErrorPage(
+            "This authorization page does not match",
+            "Start the connection again from your MCP client.",
+          ),
+        );
+        return;
+      }
       if (!carried) {
         sendHtml(
           res,
@@ -243,6 +279,7 @@ export class OAuthProvider {
         return;
       }
       reaiToken = carried.reaiToken;
+      carriedWriteMode = carried.writeMode;
     }
 
     if (!reaiToken) {
@@ -292,8 +329,10 @@ export class OAuthProvider {
       return;
     }
 
-    // The consent page may narrow the write mode, never widen it.
-    const writeMode = this.narrowWriteMode(form.get("writeMode"));
+    // The consent page may narrow the write mode, never widen it -- neither past
+    // the operator's ceiling, nor past what was chosen in step 1.
+    let writeMode = this.narrowWriteMode(form.get("writeMode"));
+    if (carriedWriteMode) writeMode = this.narrowWriteMode(carriedWriteMode, writeMode);
 
     const tenants = me.tenants ?? [];
     const rawTenant = (form.get("tenantId") ?? "").trim();
@@ -309,7 +348,11 @@ export class OAuthProvider {
           redirectUri: request.redirectUri,
           serverWriteMode: this.deps.config.writeMode,
           baseUrl: this.deps.config.baseUrl,
-          sealedToken: this.deps.sealer.seal("authreq", { reaiToken }, AUTHREQ_TTL),
+          sealedToken: this.deps.sealer.seal(
+            "verified",
+            { reaiToken, requestBinding: bindingOf(sealedRequest), writeMode },
+            AUTHREQ_TTL,
+          ),
           tenants,
           subject: me.email ?? me.name,
           carriedWriteMode: writeMode,
@@ -387,10 +430,18 @@ export class OAuthProvider {
       if (this.deps.replayGuard.isUsed(payload.nonce)) {
         return err(400, "invalid_grant", "This authorization code has already been redeemed.");
       }
-      if (redirectUri && redirectUri !== payload.redirectUri) {
+      // RFC 6749 4.1.3 makes both REQUIRED for a public client. Comparing them
+      // only when present let a caller skip the check by omitting the parameter.
+      if (!redirectUri) {
+        return err(400, "invalid_request", "redirect_uri is required.");
+      }
+      if (redirectUri !== payload.redirectUri) {
         return err(400, "invalid_grant", "redirect_uri does not match the authorization request.");
       }
-      if (clientId && clientId !== payload.clientId) {
+      if (!clientId) {
+        return err(400, "invalid_request", "client_id is required.");
+      }
+      if (clientId !== payload.clientId) {
         return err(400, "invalid_grant", "client_id does not match the authorization request.");
       }
       if (!verifier) {
@@ -406,9 +457,14 @@ export class OAuthProvider {
 
     if (grantType === "refresh_token") {
       const token = form.get("refresh_token") ?? "";
+      const clientId = form.get("client_id") ?? "";
       const payload = this.deps.sealer.unseal<{ grant: GrantPayload }>("refresh", token);
       if (!payload) {
         return err(400, "invalid_grant", "The refresh token is invalid or has expired.");
+      }
+      // A refresh token is only usable by the client it was issued to.
+      if (clientId && clientId !== payload.grant.clientId) {
+        return err(400, "invalid_grant", "client_id does not match the refresh token.");
       }
       return { status: 200, json: this.issueTokens(payload.grant) };
     }
@@ -424,11 +480,18 @@ export class OAuthProvider {
    * Clamp a user-selected write mode to the server's configured ceiling.
    * The consent page can only tighten what the operator already allowed.
    */
-  private narrowWriteMode(requested: string | null): WriteMode {
-    const ceiling = this.deps.config.writeMode;
-    const value = (requested ?? "").trim() as WriteMode;
-    if (!value || !WRITE_MODES.includes(value)) return ceiling;
-    return rank(value) <= rank(ceiling) ? value : ceiling;
+  private narrowWriteMode(requested: string | null | undefined, ceiling?: WriteMode): WriteMode {
+    const limit = ceiling ?? this.deps.config.writeMode;
+    // Normalized rather than compared raw: "READ-ONLY" or "readonly" previously
+    // fell through to the ceiling, i.e. failed *open* to the widest mode.
+    let value: WriteMode;
+    try {
+      value = parseWriteMode(requested ?? undefined);
+    } catch {
+      return "read-only";
+    }
+    if (!requested) return limit;
+    return rank(value) <= rank(limit) ? value : limit;
   }
 
   private issueTokens(grant: GrantPayload): Record<string, unknown> {
@@ -473,6 +536,19 @@ export class OAuthProvider {
     const sealed = this.deps.sealer.unseal<{ grant: GrantPayload }>("access", bearer);
     if (sealed?.grant) return { ok: true, grant: sealed.grant };
 
+    // A bearer that is unmistakably one of ours but failed to unseal is expired,
+    // tampered with, or sealed under a rotated key. Telling the client to
+    // re-authorize is right; forwarding our own ciphertext to ReAI as a
+    // credential is not.
+    if (isSealedToken(bearer)) {
+      return {
+        ok: false,
+        status: 401,
+        error: "invalid_token",
+        description: "The access token is invalid or has expired. Re-authorize the connector.",
+      };
+    }
+
     if (this.deps.config.allowTokenPassthrough) {
       return {
         ok: true,
@@ -498,9 +574,13 @@ export class OAuthProvider {
 
   /** `WWW-Authenticate` value pointing clients at our metadata (RFC 9728). */
   challengeHeader(error: string, description: string): string {
+    // Every interpolated value is quote-stripped: publicUrl can be derived from
+    // a client-supplied Host header, and an unescaped quote would inject an
+    // extra auth-param into the header.
+    const quoteless = (value: string) => value.replace(/["\\]/g, "");
     return (
-      `Bearer error="${error}", error_description="${description.replace(/"/g, "'")}", ` +
-      `resource_metadata="${this.deps.publicUrl}/.well-known/oauth-protected-resource"`
+      `Bearer error="${quoteless(error)}", error_description="${quoteless(description)}", ` +
+      `resource_metadata="${quoteless(this.deps.publicUrl)}/.well-known/oauth-protected-resource"`
     );
   }
 
@@ -578,6 +658,11 @@ export class OAuthProvider {
 
 }
 
+/** Stable fingerprint of a sealed authorization request, for binding step 2 to step 1. */
+function bindingOf(sealedRequest: string): string {
+  return createHash("sha256").update(sealedRequest, "utf8").digest("base64url").slice(0, 32);
+}
+
 function rank(mode: WriteMode): number {
   return WRITE_MODES.indexOf(mode);
 }
@@ -601,6 +686,18 @@ export function validateRedirectUri(uri: string): string | undefined {
   if (parsed.protocol === "https:") return undefined;
   if (parsed.protocol === "http:" && isLoopback(parsed.hostname)) return undefined;
   return "redirect_uri must use https, or http on localhost for development.";
+}
+
+/** Host (not full URI) membership test; loopback is always permitted for local clients. */
+export function isRedirectHostAllowed(uri: string, allowedHosts: readonly string[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(uri).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (isLoopback(hostname)) return true;
+  return allowedHosts.some((allowed) => allowed === hostname);
 }
 
 function isLoopback(hostname: string): boolean {

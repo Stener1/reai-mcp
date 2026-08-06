@@ -21,6 +21,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
 import { loadConfig, type ServerConfig } from "./config.js";
+import { WRITE_MODES, type WriteMode } from "./policy.js";
 import { Sealer } from "./auth/crypto.js";
 import {
   CodeReplayGuard,
@@ -31,7 +32,7 @@ import {
   ACCESS_TOKEN_TTL,
   type GrantPayload,
 } from "./auth/oauth.js";
-import { renderErrorPage } from "./auth/pages.js";
+import { escapeHtml, renderErrorPage } from "./auth/pages.js";
 import { ReaiConfigError } from "./reai/errors.js";
 
 const MCP_PATH = "/mcp";
@@ -161,6 +162,33 @@ async function handle(
         return;
       }
       if (req.method === "POST") {
+        // A browser cannot forge either of these, so together they reject a
+        // cross-site form post that would send the victim's pasted ReAI token
+        // to an authorization request bound to someone else's redirect URI.
+        const contentType = (firstHeader(req.headers["content-type"]) ?? "").toLowerCase();
+        if (!contentType.startsWith("application/x-www-form-urlencoded")) {
+          sendHtml(
+            res,
+            415,
+            renderErrorPage(
+              "Unsupported content type",
+              "The consent form must be submitted as application/x-www-form-urlencoded.",
+            ),
+          );
+          return;
+        }
+        if (!isSameOriginSubmission(req, publicUrl)) {
+          sendHtml(
+            res,
+            403,
+            renderErrorPage(
+              "Cross-site submission blocked",
+              "This form must be submitted from the authorization page itself. " +
+                "Start the connection again from your MCP client.",
+            ),
+          );
+          return;
+        }
         const body = await readBody(req);
         await oauth.handleAuthorizePost(new URLSearchParams(body), res);
         return;
@@ -204,13 +232,22 @@ async function handleMcp(
 
   const grant: GrantPayload = auth.grant;
 
+  // Re-clamp the grant against the operator's *current* ceiling. Grants are
+  // sealed and unforgeable, but they are minted at authorization time and live
+  // for hours (refreshable for weeks). Without this, an operator who redeploys
+  // with a tighter REAI_WRITE_MODE would keep serving the old, wider mode to
+  // every outstanding token, and key rotation would be the only real remedy.
+  const effectiveWriteMode = narrower(grant.writeMode, config.writeMode);
+
   // A fresh server and transport per request. Stateless mode keeps the deployment
   // horizontally scalable, which matters on platforms that scale to zero.
   const server = buildServer({
     config: {
       ...config,
-      writeMode: grant.writeMode,
-      ...(grant.tenantId !== undefined ? { defaultTenantId: grant.tenantId } : {}),
+      writeMode: effectiveWriteMode,
+      ...(grant.tenantId !== undefined
+        ? { defaultTenantId: grant.tenantId, boundTenantId: grant.tenantId }
+        : {}),
     },
     token: grant.reaiToken,
   });
@@ -232,19 +269,63 @@ async function handleMcp(
   await transport.handleRequest(req, res);
 }
 
+/** The more restrictive of two write modes. */
+function narrower(a: WriteMode, b: WriteMode): WriteMode {
+  return WRITE_MODES.indexOf(a) <= WRITE_MODES.indexOf(b) ? a : b;
+}
+
 /**
  * The canonical public URL. A configured PUBLIC_URL always wins; otherwise it is
  * inferred from forwarding headers, which is what a platform like Cloud Run
  * provides in front of TLS termination.
+ *
+ * `Host` and `X-Forwarded-Host` are client-controlled, so an inferred host is
+ * only honoured when it appears in REAI_ALLOWED_HOSTS (if that is configured).
+ * Anything unexpected falls back to the first allowed host rather than becoming
+ * this deployment's advertised OAuth issuer.
  */
 function resolvePublicUrl(req: IncomingMessage, config: ServerConfig): string {
   if (config.publicUrl) return config.publicUrl;
 
   const forwardedProto = firstHeader(req.headers["x-forwarded-proto"]);
   const forwardedHost = firstHeader(req.headers["x-forwarded-host"]);
-  const host = forwardedHost ?? req.headers.host ?? `localhost:${config.port}`;
-  const proto = forwardedProto ?? (isLocalHost(host) ? "http" : "https");
+  let host = forwardedHost ?? req.headers.host ?? `localhost:${config.port}`;
+
+  if (config.allowedHosts.length > 0) {
+    const hostname = host.split(":")[0] ?? "";
+    const permitted = config.allowedHosts.some(
+      (allowed) => allowed === host || allowed === hostname,
+    );
+    if (!permitted) host = config.allowedHosts[0] as string;
+  }
+
+  const proto = forwardedProto === "http" || forwardedProto === "https"
+    ? forwardedProto
+    : isLocalHost(host)
+      ? "http"
+      : "https";
   return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+/**
+ * True when a form submission demonstrably came from this origin.
+ *
+ * `Sec-Fetch-Site` is set by the browser and cannot be overridden by page
+ * script; `Origin` is likewise unforgeable cross-site. When neither is present
+ * the caller is not a browser (curl, a test harness), which is allowed —
+ * cross-site request forgery requires a browser to be the one submitting.
+ */
+function isSameOriginSubmission(req: IncomingMessage, publicUrl: string): boolean {
+  const fetchSite = firstHeader(req.headers["sec-fetch-site"]);
+  if (fetchSite) return fetchSite === "same-origin" || fetchSite === "none";
+
+  const origin = firstHeader(req.headers.origin);
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === new URL(publicUrl).host;
+  } catch {
+    return false;
+  }
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
@@ -258,7 +339,10 @@ function isLocalHost(host: string): boolean {
 }
 
 function statusPage(config: ServerConfig, publicUrl: string): string {
-  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  // Deliberately the same escaper as the consent page: a second, ad-hoc one here
+  // omitted the apostrophe and would silently be wrong the day this page gains a
+  // single-quoted attribute.
+  const esc = escapeHtml;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

@@ -86,6 +86,15 @@ const useTenant = defineTool({
       .describe("Tenant id to make active. Get valid ids from reai_whoami."),
   },
   handler: async (args, ctx) => {
+    const bound = ctx.config.boundTenantId;
+    if (bound !== undefined && args.tenantId !== bound) {
+      return okText(
+        `This connection is bound to tenant ${bound} and cannot be switched to ${args.tenantId}.\n` +
+          `The company was chosen when the connector was authorized. To work in a different one, ` +
+          `re-authorize the connection and select that company.`,
+      );
+    }
+
     const res = await ctx.client.request<MeResponse>({
       method: "GET",
       path: "/api/me",
