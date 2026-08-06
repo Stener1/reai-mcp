@@ -291,6 +291,101 @@ async function main() {
     firstLine(textOf(switchTenant)),
   );
 
+  // 8b. The transmission guard, asserted against the DEPLOYED instance.
+  //
+  // This is the one property whose failure reaches a third party: an EHF invoice
+  // leaves over Peppol and cannot be recalled, and a tax return filed with
+  // Skatteetaten cannot be unfiled. Every other check here is about who may read
+  // or write which books, which is recoverable by comparison.
+  //
+  // It was verified locally and in the write suites but never against a real
+  // deployment, which is the configuration that actually matters — the guard
+  // depends on an environment variable, and an operator who set
+  // REAI_ALLOW_EXTERNAL_SEND without meaning to would have had nothing tell them.
+  //
+  // CRITICAL, and the reason this reads the posture before touching anything:
+  // these requests must only ever be made when they are certain to be refused
+  // LOCALLY. On a deployment running `full` with external send enabled,
+  // reai_request passes them straight through — the first version of this check
+  // issued all five first and warned afterwards, which on such a deployment would
+  // have emailed invoice 1, pushed it over Peppol, and submitted the 2026 tax
+  // return to Skatteetaten. A verification script must not be the thing that
+  // sends a real document.
+  //
+  // The posture is therefore established from tools/list, which sends nothing. A
+  // transmitting tool is registered only when the write mode allows it AND
+  // external send is on, so a visible one means exactly the dangerous
+  // configuration — and every path below classifies as irreversible, so in any
+  // other configuration the refusal happens before a request is built.
+  const TRANSMITTING_TOOLS = ["reai_create_invoice_from_order", "reai_credit_invoice"];
+  const registeredTools = new Set(tools.map((t) => t.name));
+  const visibleTransmitters = TRANSMITTING_TOOLS.filter((n) => registeredTools.has(n));
+  const sendingEnabled = visibleTransmitters.length > 0;
+
+  const sendingPaths = [
+    ["POST /api/invoices/{id}/ehf", "POST", "/api/invoices/1/ehf", {}],
+    ["POST /api/invoices/{id}/email", "POST", "/api/invoices/1/email", { email: "x@example.invalid" }],
+    ["POST /api/peppol/messages/sendsbdh", "POST", "/api/peppol/messages/sendsbdh", {}],
+    ["POST /api/tax-returns/{year}/submit", "POST", "/api/tax-returns/2026/submit", {}],
+    ["POST /api/orders with sendEhf", "POST", "/api/orders", { customerId: 1, sendEhf: true, orderLines: [] }],
+  ];
+  // Two independent gates can refuse these, and which one fires depends on the
+  // deployment's write mode. In `reversible` the write policy rejects them as
+  // irreversible before transmission is ever considered; only in `full` mode is
+  // the external-send switch the thing standing between a call and Peppol. An
+  // earlier version of this check demanded the external-send gate specifically
+  // and reported a correctly-locked-down deployment as having sending ENABLED —
+  // exactly the wrong thing to tell an operator. So accept either gate, and say
+  // which one answered.
+  let allowedThrough = 0;
+  const gates = new Set();
+  if (sendingEnabled) {
+    // Do not probe. Report the posture from what tools/list already told us.
+    console.log(
+      `\n  SKIPPED the transmission probe: this deployment has external sending ENABLED\n` +
+        `  (${visibleTransmitters.join(", ")} ${visibleTransmitters.length === 1 ? "is" : "are"} registered).\n` +
+        "  These calls would NOT be refused here — they would really send an EHF invoice, email a\n" +
+        "  customer, or submit a tax return to Skatteetaten. That is a legitimate configuration for a\n" +
+        "  business doing its own invoicing, but it cannot be verified by trying it, so this check\n" +
+        "  does not run. Never point such a deployment at books you are only testing with.\n",
+    );
+    for (const [label] of sendingPaths) {
+      console.log(`  [SKIP] ${label} — not probed; external sending is enabled here`);
+    }
+  } else {
+    for (const [label, method, path, body] of sendingPaths) {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: { method, path, body },
+      });
+      const text = textOf(res);
+      // Requiring the refusal to name its own gate is what separates "blocked by
+      // policy" from "the API happened to reject it" — a 404 for a nonexistent
+      // invoice must not read as a pass.
+      const byExternalSend = /REAI_ALLOW_EXTERNAL_SEND/.test(text);
+      const byWriteMode = /REAI_WRITE_MODE/.test(text);
+      const refused = res.isError === true && (byExternalSend || byWriteMode);
+      if (!refused) allowedThrough += 1;
+      if (byExternalSend) gates.add("external-send switch");
+      else if (byWriteMode) gates.add("write policy");
+      report(
+        `refused before it could transmit: ${label}`,
+        refused,
+        refused
+          ? `refused by the ${byExternalSend ? "external-send switch" : "write policy"}`
+          : `NOT REFUSED — ${firstLine(text).slice(0, 130)}`,
+      );
+    }
+    console.log(
+      allowedThrough === 0
+        ? `\n  Nothing can transmit from this deployment. Refused by: ${[...gates].join(" and ")}.\n`
+        : `\n  WARNING: ${allowedThrough} of ${sendingPaths.length} transmitting paths were NOT refused,\n` +
+            "  and tools/list did not indicate that external sending was enabled. That combination is\n" +
+            "  not supposed to be possible — treat this deployment as able to transmit and check its\n" +
+            "  configuration before using it against real books.\n",
+    );
+  }
+
   await client.close();
 
   // 9. A garbage bearer token must be refused.
