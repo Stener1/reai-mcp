@@ -104,6 +104,41 @@ export const QUIRKS: readonly Quirk[] = [
       "startDate and endDate are required, even where the schema does not mark them so. Omitting " +
       'them returns 400 "startDate is required".',
   },
+  {
+    id: "timesheets-need-project-module",
+    paths: ["/api/timesheets"],
+    methods: ["GET"],
+    kind: "validation",
+    note:
+      "Requires projectId, startDate AND endDate — the schema marks none of them required, and the " +
+      "API reveals them one at a time, so it takes four calls to discover. Worse, on a tenant " +
+      "WITHOUT the Project module the endpoint cannot be called at all: projectId is mandatory and " +
+      'simultaneously rejected with 400 "projectId cannot be used when the Project module is ' +
+      'disabled". Check GET /api/projects first — a 403 there means do not bother with timesheets.',
+  },
+  {
+    id: "empty-state-is-404",
+    paths: ["/api/opening-balances", "/api/annual-accounts/{year}"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "A 404 here means NOTHING HAS BEEN SET UP YET, not a wrong path — the normal state for most " +
+      'companies. The detail says so ("Opening balance not found", "No annual-accounts submission ' +
+      'exists for fiscal year 2025"). Report it as empty rather than retrying or hunting for ' +
+      "another endpoint.",
+  },
+  {
+    id: "salary-lives-under-salary-payments",
+    match: "descendants",
+    paths: ["/api/salary-payments"],
+    methods: ["GET", "POST"],
+    kind: "workflow",
+    note:
+      "Payroll is under /api/salary-payments; there is no /api/salaries. A run is built in steps: " +
+      "POST /api/salary-payments creates it, POST /api/salary-payments/{id}/wage-specs adds each " +
+      "line, and POST /api/salary-payments/{id}/complete finalises it. That last call reports pay " +
+      "to the authorities and is treated as an external send, so it needs REAI_ALLOW_EXTERNAL_SEND.",
+  },
 
   // --- Bookkeeping ---------------------------------------------------------
   {

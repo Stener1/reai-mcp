@@ -300,7 +300,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **38 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **41 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
@@ -317,6 +317,11 @@ Browse them with `reai_api_notes`, or read the highlights:
 - Order, offer and subscription lines accept only VAT codes from `?usage=customer-invoice`.
 - A **`+47` prefix on a Norwegian phone number is rejected**.
 - `POST /api/customers` silently discards `invoiceEmail`, `phone` and `daysUntilDue` — those live on the `PATCH`.
+- **`GET /api/timesheets` is unusable without the Project module.** It requires `projectId`, `startDate` *and* `endDate` — none marked required, each revealed by a separate 400 — and then rejects `projectId` outright when the module is off. Required and forbidden at once, so check `GET /api/projects` first.
+
+**Empty states that look like errors**
+- **A 404 from `/api/opening-balances` or `/api/annual-accounts/{year}` means "nothing set up yet"**, which is the normal state for most companies — not a wrong path. The `detail` says as much; report it as empty instead of hunting for another endpoint.
+- Payroll lives under **`/api/salary-payments`**; `/api/salaries` does not exist. A run is assembled in steps, and `…/{id}/complete` reports pay to the authorities, so it counts as an external send.
 
 **Things harder to undo than they look**
 - **Settling a VAT period locks it but files nothing.** There is no submission endpoint in the public API; `/complete-manually` exists to record that a return was filed elsewhere. Never report a VAT return as submitted.
