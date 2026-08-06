@@ -241,7 +241,16 @@ async function main() {
     for (const [name, args, check] of [
       // Assert on fields the API returns, not on the note strings this codebase
       // emits itself — the latter is only "the call did not throw".
-      ["reai_list_company_banks", { tenantId }, (t) => /"providerType"|"bban"/.test(t)],
+      // An empty tenant genuinely has no bank accounts, so requiring a
+      // providerType/bban field made this suite unrunnable against a fresh
+      // company — the state every new user of this server starts in. Accept an
+      // empty list; only a response that is neither empty nor shaped like a bank
+      // account is a failure.
+      [
+        "reai_list_company_banks",
+        { tenantId },
+        (t) => /"providerType"|"bban"/.test(t) || /\b0 bank account\(s\)/.test(t),
+      ],
       ["reai_list_reconciliation_rules", { tenantId }, (t) => /reconciliation rule\(s\)/.test(t)],
     ]) {
       try {
