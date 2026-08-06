@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { defineTool, ok, okText, tenantIdArg, resolveTenantId, type ToolDef } from "./registry.js";
 import { describeOperation, findOperation, getSpecIndex, searchOperations } from "../reai/spec.js";
-import { assertAllowed, canonicalizeApiPath, classifyRequest } from "../policy.js";
+import {
+  assertAllowed,
+  canonicalizeApiPath,
+  classifyRequest,
+  classifyWithBody,
+  escalatingBodyFields,
+} from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -200,8 +206,18 @@ const request = defineTool({
     }
     const path = canonical.pathname;
 
-    const risk = classifyRequest(method, path);
-    assertAllowed(risk, ctx.config.writeMode, `${method} ${path}`);
+    // Path first, then the body: a flag like `sendEhf: true` transmits the
+    // document to a counterparty, which no amount of path inspection reveals.
+    const pathRisk = classifyRequest(method, path);
+    const risk = classifyWithBody(pathRisk, args.body);
+    const escalated = risk !== pathRisk ? escalatingBodyFields(args.body) : [];
+    assertAllowed(
+      risk,
+      ctx.config.writeMode,
+      escalated.length > 0
+        ? `${method} ${path} with ${escalated.join(", ")}=true (this transmits the document externally)`
+        : `${method} ${path}`,
+    );
 
     const isMeta = path === "/api/me" || path === "/api/tenants";
     const res = await ctx.client.request({

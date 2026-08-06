@@ -233,6 +233,46 @@ export function classifyRequest(method: HttpMethod, path: string): Risk {
   return "irreversible";
 }
 
+/**
+ * Some request *bodies* are more dangerous than their path suggests.
+ *
+ * Creating an order is ordinary reversible master data — unless it carries
+ * `sendEhf: true`, which transmits the document to the counterparty over the
+ * Peppol network. That cannot be recalled, and path-based classification cannot
+ * see it. Any field here escalates the call to irreversible.
+ */
+const ESCALATING_BODY_FIELDS: readonly string[] = ["sendehf", "sendemail", "senddirectly"];
+
+/**
+ * Re-classify a call once its body is known. Returns the more severe of the
+ * path-based risk and anything the body implies.
+ *
+ * Only inspects the top level: these are flat flags in the ReAI API, and
+ * recursing into arbitrary nested payloads would invite false positives on
+ * fields that merely record whether something was sent.
+ */
+export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
+  // Only a reversible write can be escalated. A read stays a read — blocking one
+  // because a stray field was passed alongside it would be a false positive —
+  // and an irreversible call is already at the ceiling.
+  if (pathRisk !== "reversible") return pathRisk;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return pathRisk;
+
+  for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+    if (value !== true) continue;
+    if (ESCALATING_BODY_FIELDS.includes(key.toLowerCase())) return "irreversible";
+  }
+  return pathRisk;
+}
+
+/** Names of body fields that escalate risk, for use in error messages. */
+export function escalatingBodyFields(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return Object.entries(body as Record<string, unknown>)
+    .filter(([key, value]) => value === true && ESCALATING_BODY_FIELDS.includes(key.toLowerCase()))
+    .map(([key]) => key);
+}
+
 /** Strip the query string and trailing slash; lowercase for prefix comparison. */
 function normalize(path: string): string {
   const withoutQuery = path.split("?")[0] ?? path;

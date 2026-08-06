@@ -8,11 +8,17 @@ import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/reg
 import { metaTools } from "./tools/meta.js";
 import { discoveryTools } from "./tools/discovery.js";
 import { bookkeepingTools } from "./tools/bookkeeping.js";
+import { salesTools } from "./tools/sales.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.1.0";
 
-export const allTools: ToolDef[] = [...metaTools, ...discoveryTools, ...bookkeepingTools];
+export const allTools: ToolDef[] = [
+  ...metaTools,
+  ...discoveryTools,
+  ...bookkeepingTools,
+  ...salesTools,
+];
 
 export type BuildServerOptions = {
   config: ServerConfig;
@@ -123,10 +129,11 @@ function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCou
     "Getting oriented:",
     "- Call reai_whoami first. Almost everything is tenant-scoped, and the tenant id selects which " +
       "company's books you are in. Set it once with reai_use_tenant.",
-    "- Curated tools cover the chart of accounts, VAT codes, vouchers, postings and the general ledger.",
-    "- For anything else — invoices, suppliers, leads, agreements, salary, assets, bank " +
-      "reconciliation — use reai_search_endpoints to find the endpoint, reai_describe_endpoint for " +
-      "its schema, then reai_request to call it.",
+    "- Curated tools cover the chart of accounts, VAT codes, vouchers, postings, the general ledger, " +
+      "and the sales side: customers, products, orders, offers, invoices and the customer ledger.",
+    "- For anything else — suppliers, supplier invoices, expenses, bank reconciliation, leads, " +
+      "agreements, salary, assets — use reai_search_endpoints to find the endpoint, " +
+      "reai_describe_endpoint for its schema, then reai_request to call it.",
     "",
     "Bookkeeping conventions:",
     "- Dates are ISO yyyy-MM-dd.",
@@ -134,6 +141,9 @@ function buildInstructions(config: ServerConfig, visibleCount: number, hiddenCou
       "Postings must sum to exactly zero.",
     "- Look up account numbers with reai_list_accounts and VAT codes with reai_list_vat_codes " +
       "rather than assuming; both are tenant-specific.",
+    "- Billing a customer is a two-step chain: an ORDER carries the line items, and invoicing that " +
+      "order creates the invoice. There is no endpoint that builds an invoice from lines directly.",
+    "- To undo an issued invoice, raise a credit note. Do not attempt to delete it.",
     "- When you link a user to a created object, include the tenant: " +
       "https://app.reai.no/...?tenantId=<id>",
     "",

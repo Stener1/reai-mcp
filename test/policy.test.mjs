@@ -8,6 +8,8 @@ import {
   WriteBlockedError,
   DEFAULT_WRITE_MODE,
   canonicalizeApiPath,
+  classifyWithBody,
+  escalatingBodyFields,
 } from "../dist/policy.js";
 
 test("parseWriteMode defaults to reversible", () => {
@@ -201,4 +203,54 @@ test("a legitimate reversible write is still classified reversible", () => {
   assert.equal(classifyRequest("POST", "/api/customers"), "reversible");
   assert.equal(classifyRequest("PATCH", "/api/customers/1234"), "reversible");
   assert.equal(classifyRequest("POST", "/api/customers/1234/contact-persons"), "reversible");
+});
+
+// --- Body-aware escalation -------------------------------------------------
+// Creating an order looks like ordinary master data, but `sendEhf: true`
+// transmits the document to the counterparty over Peppol. Path-based
+// classification cannot see that, so the body is inspected too.
+
+test("a transmitting flag escalates an otherwise reversible write", () => {
+  assert.equal(classifyRequest("POST", "/api/orders"), "reversible");
+  assert.equal(classifyWithBody("reversible", { customerId: 1, orderLines: [] }), "reversible");
+  assert.equal(classifyWithBody("reversible", { customerId: 1, sendEhf: true }), "irreversible");
+  assert.equal(classifyWithBody("reversible", { sendEmail: true }), "irreversible");
+});
+
+test("escalation only triggers on an explicit true", () => {
+  for (const body of [
+    { sendEhf: false },
+    { sendEhf: "true" },
+    { sendEhf: 1 },
+    { sendEhf: null },
+    {},
+  ]) {
+    assert.equal(classifyWithBody("reversible", body), "reversible", JSON.stringify(body));
+  }
+});
+
+test("escalation is case-insensitive on the field name", () => {
+  assert.equal(classifyWithBody("reversible", { SENDEHF: true }), "irreversible");
+  assert.equal(classifyWithBody("reversible", { sendEHF: true }), "irreversible");
+});
+
+test("a non-object body is passed through untouched", () => {
+  for (const body of [undefined, null, "string", 42, [{ sendEhf: true }]]) {
+    assert.equal(classifyWithBody("reversible", body), "reversible", JSON.stringify(body) ?? "undefined");
+  }
+});
+
+test("escalation never downgrades an already-irreversible call", () => {
+  assert.equal(classifyWithBody("irreversible", {}), "irreversible");
+  assert.equal(classifyWithBody("irreversible", { sendEhf: false }), "irreversible");
+});
+
+test("reads are unaffected by the body", () => {
+  assert.equal(classifyWithBody("read", { sendEhf: true }), "read");
+});
+
+test("escalatingBodyFields names the offending field for the error message", () => {
+  assert.deepEqual(escalatingBodyFields({ sendEhf: true, customerId: 1 }), ["sendEhf"]);
+  assert.deepEqual(escalatingBodyFields({ sendEhf: false }), []);
+  assert.deepEqual(escalatingBodyFields(undefined), []);
 });
