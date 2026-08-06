@@ -85,10 +85,23 @@ test("master-data writes are reversible", () => {
     ["POST", "/api/orders"],
     ["POST", "/api/documents"],
     ["POST", "/api/attachments"],
-    ["POST", "/api/reconciliation-rules"],
   ]) {
     assert.equal(classifyRequest(method, path), "reversible", `${method} ${path}`);
   }
+});
+
+test("a reconciliation rule is standing authority to post, so it is irreversible", () => {
+  // It looks like master data and creates no posting immediately. But applying a
+  // rule books vouchers, the API documents a sync-time auto-reconciliation step
+  // that may act on it with no further call, and deleting the rule does not
+  // reverse what it booked. "Books nothing yet" is not the same as reversible.
+  assert.equal(classifyRequest("POST", "/api/reconciliation-rules"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/reconciliation-rules/3"), "irreversible");
+  // Deletion is dragged along by the shared prefix. Accepted: it is safe in
+  // itself, but a rule cannot be created in reversible mode either.
+  assert.equal(classifyRequest("DELETE", "/api/reconciliation-rules/3"), "irreversible");
+  // Reading them stays available in every mode.
+  assert.equal(classifyRequest("GET", "/api/reconciliation-rules"), "read");
 });
 
 test("sub-paths that settle money or transmit documents escalate to irreversible", () => {
@@ -320,10 +333,7 @@ test("bank reconciliation mutations are irreversible, reads are not", () => {
     assert.equal(classifyRequest("POST", path), "irreversible", path);
     assert.equal(classifyRequest("GET", path), "read", path);
   }
-  // Reconciliation RULES are master data: creating one books nothing.
-  assert.equal(classifyRequest("POST", "/api/reconciliation-rules"), "reversible");
-  assert.equal(classifyRequest("DELETE", "/api/reconciliation-rules/3"), "reversible");
-  // Company bank accounts likewise.
+  // Company bank accounts are genuine master data.
   assert.equal(classifyRequest("POST", "/api/company-banks"), "reversible");
 });
 

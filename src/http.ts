@@ -245,6 +245,9 @@ async function handleMcp(
     config: {
       ...config,
       writeMode: effectiveWriteMode,
+      // Stateless mode: a fresh server per request means session-local state does
+      // not survive, and reai_use_tenant must not claim otherwise.
+      statelessSession: true,
       ...(grant.tenantId !== undefined
         ? { defaultTenantId: grant.tenantId, boundTenantId: grant.tenantId }
         : {}),

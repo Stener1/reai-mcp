@@ -264,7 +264,15 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-Narrow the surface with `REAI_TOOLSETS=bookkeeping,sales,purchase,bank` if 59 tools is more than your client wants to see. Discovery is never disabled, so nothing becomes unreachable.
+If 59 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+
+```
+REAI_TOOLSETS=bookkeeping          # 14 tools
+REAI_TOOLSETS=bookkeeping,sales    # 33 tools
+(unset)                            # all 59
+```
+
+Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 

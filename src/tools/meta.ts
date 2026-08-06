@@ -74,6 +74,8 @@ const useTenant = defineTool({
   title: "Select the active company",
   description:
     "Set the tenant (company) that subsequent tool calls apply to, for the rest of this session. " +
+    "Only works where the session persists — a stateless remote deployment will tell you to pass " +
+    "tenantId per call instead. " +
     "The id is validated against the tenants this token can actually reach, so a typo fails here " +
     "rather than silently writing into the wrong company's books. " +
     "Individual tools can still override it with their own tenantId argument.",
@@ -88,6 +90,19 @@ const useTenant = defineTool({
       .describe("Tenant id to make active. Get valid ids from reai_whoami."),
   },
   handler: async (args, ctx) => {
+    // In stateless remote mode a new server -- and a new empty session -- is built
+    // for every request, so setting an active tenant here would report success and
+    // then be silently discarded before the next call. Say so instead of lying.
+    if (ctx.config.statelessSession && ctx.config.boundTenantId === undefined) {
+      return okText(
+        `This connection cannot remember a tenant selection: it is served statelessly, so each ` +
+          `request gets a fresh session.\n\n` +
+          `Pass tenantId explicitly on each tool call instead — reai_whoami lists the ids. ` +
+          `Alternatively the operator can set REAI_TENANT_ID on the deployment, or bind a tenant ` +
+          `when authorizing the connector, and then no tenantId argument is needed at all.`,
+      );
+    }
+
     const bound = ctx.config.boundTenantId;
     if (bound !== undefined && args.tenantId !== bound) {
       return okText(

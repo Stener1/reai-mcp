@@ -211,22 +211,20 @@ const createReconciliationRule = defineTool({
   description:
     "Create a rule that books matching bank transactions to an account automatically — the " +
     "mechanism behind recurring costs booking themselves.\n\n" +
-    "Creating a rule posts nothing by itself, which is why this is reversible — but understand what " +
-    "you are creating: a rule is STANDING AUTHORITY to post. Applying it books vouchers, and " +
-    "deleting the rule afterwards does NOT reverse anything it already booked. The API also " +
-    "documents an 'auto-reconciliation' step at bank-sync time without saying whether that step " +
-    "consults these rules, so treat a new rule as something that may be acted on without a further " +
-    "explicit call, and check the result with reai_get_bank_reconciliation.\n\n" +
+    "A rule is STANDING AUTHORITY TO POST, which is why this is irreversible even though creating " +
+    "it books nothing immediately. Applying it creates vouchers, the API documents an " +
+    "'auto-reconciliation' step at bank-sync time that may act on the rule with no further call, " +
+    "and deleting the rule afterwards does NOT reverse anything it already booked. Requires " +
+    "REAI_WRITE_MODE=full.\n\n" +
     "matchText is matched against the bank transaction's description, so use a stable fragment of " +
     "the payee name rather than a whole line that varies by month.",
-  // Deliberately left aligned with classifyRequest, which calls
-  // /api/reconciliation-rules reversible. Escalating only the tool would be
-  // theatre -- reai_request would still permit the identical call -- and
-  // escalating the path would drag rule DELETION out of reversible mode too,
-  // even though deleting a rule can only ever reduce future automation. The
-  // residual risk (sync-time auto-reconciliation possibly applying rules) is
-  // documented in the description instead, where an agent will actually read it.
-  risk: "reversible",
+  // Escalated together with the path in classifyRequest. I initially kept this
+  // reversible, reasoning that creation books nothing; two independent reviews
+  // pushed back, and they are right that "books nothing YET" is not the same as
+  // reversible when the API may act on the rule unprompted. Deletion is dragged
+  // along -- it shares the prefix -- which is an accepted cost: a rule cannot be
+  // removed in reversible mode, but nor can one be created there.
+  risk: "irreversible",
   apiPaths: [["POST", "/api/reconciliation-rules"]],
   inputSchema: {
     matchText: z
@@ -251,9 +249,9 @@ const createReconciliationRule = defineTool({
     });
     return ok(res.data, {
       note:
-        `Rule created. Run reai_apply_reconciliation_rules to apply it to a period — and note it ` +
-        `may also be picked up by the next bank sync. Deleting the rule later does not reverse ` +
-        `anything it has booked.`,
+        `Rule created. It may be applied explicitly with reai_apply_reconciliation_rules, and may ` +
+        `also be picked up by the next bank sync. Deleting it later does not reverse anything it ` +
+        `has booked.`,
     });
   },
 });
@@ -262,9 +260,11 @@ const deleteReconciliationRule = defineTool({
   name: "reai_delete_reconciliation_rule",
   title: "Delete a reconciliation rule",
   description:
-    "Delete a reconciliation rule. Postings the rule already created are unaffected — this only " +
-    "stops it matching future transactions.",
-  risk: "reversible",
+    "Delete a reconciliation rule, stopping it matching future transactions. Postings it already " +
+    "created are unaffected — deleting a rule is not a way to undo its bookings.\n\n" +
+    "Classified irreversible only because it shares a path prefix with rule creation. Deleting a " +
+    "rule is itself safe; it can only reduce future automation.",
+  risk: "irreversible",
   apiPaths: [["DELETE", "/api/reconciliation-rules/{id}"]],
   destructive: true,
   inputSchema: {

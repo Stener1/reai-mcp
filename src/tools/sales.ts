@@ -23,6 +23,18 @@ import {
  * get nowhere. Every tool description below points along that chain.
  */
 
+/**
+ * Floor date for open-item questions.
+ *
+ * Both the customer ledger and the invoice list are period-scoped: the ledger
+ * returns customers "with activity in the period", and the invoice list defaults
+ * startDate to one year before endDate. So asking "who owes us money" with a
+ * current-year window silently omits an invoice that went unpaid in an earlier
+ * year -- the single case the question most cares about. When the caller filters
+ * for open or overdue items and gives no start date, reach back instead.
+ */
+const OPEN_ITEM_FLOOR = "2000-01-01";
+
 const CURRENCY = z
   .string()
   .regex(/^[A-Z]{3}$/, 'Must be an uppercase ISO 4217 code, e.g. "NOK".')
@@ -245,8 +257,10 @@ const customerLedger = defineTool({
   description:
     "Read the customer ledger: what each customer owes, with the postings behind it. Omit " +
     "customerId for every customer, or pass one to drill in. Set isOpenPosting to see only " +
-    "unsettled items — that is the answer to 'who owes us money'. " +
-    "Defaults to the current calendar year.",
+    "unsettled items — that is the answer to 'who owes us money'.\n\n" +
+    "Defaults to the current calendar year, EXCEPT with isOpenPosting, where the window reaches " +
+    "back to 2000 instead. The ledger only returns customers with activity in the period, so a " +
+    "current-year default would hide an invoice that went unpaid in an earlier year.",
   risk: "read",
   apiPaths: [["GET", "/api/ledger/customer"], ["GET", "/api/ledger/customer/{customerId}"]],
   inputSchema: {
@@ -257,7 +271,10 @@ const customerLedger = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const startDate = args.startDate ?? startOfYear();
+    // The ledger only returns customers with activity IN the period, so defaulting
+    // an open-items query to the current year would hide exactly the old unpaid
+    // invoices it is being asked about.
+    const startDate = args.startDate ?? (args.isOpenPosting ? OPEN_ITEM_FLOOR : startOfYear());
     const endDate = args.endDate ?? today();
     const path = args.customerId ? `/api/ledger/customer/${args.customerId}` : "/api/ledger/customer";
     const res = await ctx.client.request({
@@ -267,7 +284,9 @@ const customerLedger = defineTool({
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     return ok(res.data, {
-      note: `Customer ledger ${startDate} to ${endDate}${args.isOpenPosting ? " (open postings only)" : ""}.`,
+      note:
+        `Customer ledger ${startDate} to ${endDate}` +
+        `${args.isOpenPosting ? " (open postings only — window widened to catch older unpaid items)" : ""}.`,
     });
   },
 });
@@ -612,7 +631,10 @@ const listInvoices = defineTool({
   description:
     "List customer invoices and credit notes. The useful filters are paymentStatus=outstanding " +
     "(unpaid) and dueDateStatus=overdue — together they answer 'what is overdue'. " +
-    "Use type to separate invoices from credit notes.",
+    "Use type to separate invoices from credit notes.\n\n" +
+    "The API restricts an undated query to the last year. When you filter for outstanding or " +
+    "overdue invoices without a startDate, this tool reaches back to 2000 instead, so a long-" +
+    "overdue invoice is not silently omitted.",
   risk: "read",
   apiPaths: [["GET", "/api/invoices"]],
   inputSchema: {
@@ -637,6 +659,16 @@ const listInvoices = defineTool({
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+
+    // The API defaults startDate to one year before endDate, so asking for
+    // outstanding or overdue invoices without dates silently excludes anything
+    // more than a year old -- i.e. the worst debts.
+    const wantsOpenItems =
+      args.paymentStatus === "outstanding" || args.dueDateStatus === "overdue";
+    const widened =
+      wantsOpenItems && args.startDate === undefined && args.updatedSince === undefined;
+    if (widened) query.startDate = OPEN_ITEM_FLOOR;
+
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/invoices",
@@ -644,7 +676,14 @@ const listInvoices = defineTool({
       tenantId: requireTenantId(tenantId, ctx),
     });
     const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} invoice(s).` });
+    return ok(res.data, {
+      note:
+        `${count} invoice(s).` +
+        (widened
+          ? ` Searched from ${OPEN_ITEM_FLOOR}: the API would otherwise default to the last year ` +
+            `only, hiding invoices overdue for longer than that.`
+          : ""),
+    });
   },
 });
 
@@ -679,13 +718,22 @@ const createInvoiceFromOrder = defineTool({
     "there is no endpoint that builds one from line items directly, so create an order first with " +
     "reai_create_order.\n\n" +
     "Issuing an invoice posts revenue and VAT to the ledger and produces a numbered legal document. " +
-    "It cannot be deleted; the remedy for a mistake is a credit note. Requires " +
-    "REAI_WRITE_MODE=full.",
+    "It cannot be deleted; the remedy for a mistake is a credit note.\n\n" +
+    "It also STARTS DELIVERY TO THE CUSTOMER asynchronously — ReAI tries eFaktura for eligible " +
+    "Norwegian private customers, then EHF if the order has sendEhf and the customer can receive " +
+    "it, then the invoice PDF by email. So this is not a books-only operation: assume the customer " +
+    "will receive it. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/invoices"]],
   inputSchema: {
     orderId: z.number().int().positive().describe("Order to invoice. Find one with reai_list_orders."),
-    issueDate: isoDate.optional().describe("Invoice date. Determines the accounting period. Defaults to today."),
+    issueDate: isoDate
+      .optional()
+      .describe(
+        "Invoice date, which determines the accounting period. If omitted the API uses the " +
+          "ORDER's invoice date, falling back to today only when the order has none — so an old " +
+          "order can post into an unexpected period. Pass this explicitly when the period matters.",
+      ),
     comment: z.string().optional().describe("Comment on the invoice."),
     tenantId: tenantIdArg,
   },
@@ -701,9 +749,10 @@ const createInvoiceFromOrder = defineTool({
     const id = res.data?.id;
     return ok(res.data, {
       note:
-        `Invoice issued${res.data?.invoiceNumber ? ` as ${res.data.invoiceNumber}` : ""}. ` +
-        `This is now a numbered legal document — correct any mistake with a credit note, ` +
-        `not by deleting it.`,
+        `Invoice issued${res.data?.invoiceNumber ? ` as ${res.data.invoiceNumber}` : ""}` +
+        `${args.issueDate ? ` dated ${args.issueDate}` : " (dated from the order)"}. ` +
+        `Delivery to the customer has been started. This is now a numbered legal document — ` +
+        `correct any mistake with a credit note, not by deleting it.`,
       ...(id ? { link: ctx.client.deepLink(`/invoices/${id}`, resolved) } : {}),
     });
   },
