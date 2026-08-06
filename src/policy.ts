@@ -136,6 +136,14 @@ const REVERSIBLE_PREFIXES: readonly string[] = [
 const ESCALATING_SEGMENTS: readonly string[] = [
   "/payments",
   "/payment",
+  // Subscription billing: /generate issues a numbered invoice for one
+  // subscription, /generate-due does it for every due subscription in the
+  // tenant, and activating one arms that schedule. All reachable under
+  // /api/subscriptions, which is otherwise reversible master data.
+  "/generate",
+  "/generate-due",
+  "/activate",
+  "/deactivate",
   "/sign-request",
   "/sign-requests",
   "/send",
@@ -236,12 +244,24 @@ export function classifyRequest(method: HttpMethod, path: string): Risk {
 /**
  * Some request *bodies* are more dangerous than their path suggests.
  *
- * Creating an order is ordinary reversible master data — unless it carries
- * `sendEhf: true`, which transmits the document to the counterparty over the
- * Peppol network. That cannot be recalled, and path-based classification cannot
- * see it. Any field here escalates the call to irreversible.
+ * Creating an order or a subscription is ordinary reversible master data — until
+ * a field in the body arms invoice issuance or external transmission. Path-based
+ * classification cannot see that.
+ *
+ * Deliberately a predicate map rather than a list of field names: the most
+ * consequential trigger in this API is `outputMode: "create_invoice"`, a string,
+ * so a "flag is true" test would miss it by construction. Every entry below was
+ * checked against the OpenAPI document — earlier guesses at plausible-sounding
+ * names (`sendEmail`, `sendDirectly`) do not exist as body fields at all.
  */
-const ESCALATING_BODY_FIELDS: readonly string[] = ["sendehf", "sendemail", "senddirectly"];
+const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  // Arms EHF/Peppol transmission of the resulting invoice.
+  sendehf: (v) => v === true,
+  // Lets ReAI issue numbered invoices on a recurring schedule with no further call.
+  automaticbillinggeneration: (v) => v === true,
+  // Decides whether a subscription produces a draft order or a real invoice.
+  outputmode: (v) => v === "create_invoice",
+};
 
 /**
  * Re-classify a call once its body is known. Returns the more severe of the
@@ -259,8 +279,8 @@ export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
   if (!body || typeof body !== "object" || Array.isArray(body)) return pathRisk;
 
   for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
-    if (value !== true) continue;
-    if (ESCALATING_BODY_FIELDS.includes(key.toLowerCase())) return "irreversible";
+    const trigger = ESCALATING_BODY_FIELDS[key.toLowerCase()];
+    if (trigger?.(value)) return "irreversible";
   }
   return pathRisk;
 }
@@ -269,8 +289,8 @@ export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
 export function escalatingBodyFields(body: unknown): string[] {
   if (!body || typeof body !== "object" || Array.isArray(body)) return [];
   return Object.entries(body as Record<string, unknown>)
-    .filter(([key, value]) => value === true && ESCALATING_BODY_FIELDS.includes(key.toLowerCase()))
-    .map(([key]) => key);
+    .filter(([key, value]) => ESCALATING_BODY_FIELDS[key.toLowerCase()]?.(value) === true)
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
 }
 
 /** Strip the query string and trailing slash; lowercase for prefix comparison. */

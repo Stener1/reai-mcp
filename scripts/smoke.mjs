@@ -222,6 +222,27 @@ async function main() {
       [...names].filter((n) => /invoice_from_order|credit_invoice|register_invoice/.test(n)).join(", ") || "hidden",
     );
 
+    for (const [label, body] of [
+      ["POST /api/subscriptions with outputMode=create_invoice", { customerId: 1, outputMode: "create_invoice" }],
+      ["POST /api/subscriptions with automaticBillingGeneration", { customerId: 1, automaticBillingGeneration: true }],
+    ]) {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "POST", path: "/api/subscriptions", tenantId, body },
+      });
+      const blocked = res.isError === true && /write policy/i.test(textOf(res));
+      report(`self-invoicing subscription blocked: ${label}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+    }
+
+    for (const path of ["/api/subscriptions/7/generate", "/api/subscriptions/generate-due"]) {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "POST", path, tenantId, body: {} },
+      });
+      const blocked = res.isError === true && /write policy/i.test(textOf(res));
+      report(`subscription billing blocked: POST ${path}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+    }
+
     try {
       const res = await client.callTool({
         name: "reai_request",

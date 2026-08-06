@@ -214,7 +214,34 @@ test("a transmitting flag escalates an otherwise reversible write", () => {
   assert.equal(classifyRequest("POST", "/api/orders"), "reversible");
   assert.equal(classifyWithBody("reversible", { customerId: 1, orderLines: [] }), "reversible");
   assert.equal(classifyWithBody("reversible", { customerId: 1, sendEhf: true }), "irreversible");
-  assert.equal(classifyWithBody("reversible", { sendEmail: true }), "irreversible");
+});
+
+test("a self-invoicing subscription escalates, including via a string value", () => {
+  // POST /api/subscriptions is reversible master data, but these two fields let
+  // ReAI issue numbered invoices on a schedule with no further call. outputMode
+  // is a STRING, which a boolean-only check would miss entirely.
+  assert.equal(classifyRequest("POST", "/api/subscriptions"), "reversible");
+  assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: true }), "irreversible");
+  assert.equal(classifyWithBody("reversible", { outputMode: "create_invoice" }), "irreversible");
+  // Producing a draft order instead is genuinely reversible.
+  assert.equal(classifyWithBody("reversible", { outputMode: "create_order" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: false }), "reversible");
+});
+
+test("subscription billing sub-paths are irreversible", () => {
+  // /generate issues an invoice for one subscription; /generate-due does it for
+  // every due subscription in the tenant at once.
+  for (const path of [
+    "/api/subscriptions/7/generate",
+    "/api/subscriptions/generate-due",
+    "/api/subscriptions/7/activate",
+    "/api/subscriptions/7/deactivate",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+  }
+  // Plain subscription master data is still reversible.
+  assert.equal(classifyRequest("PUT", "/api/subscriptions/7"), "reversible");
+  assert.equal(classifyRequest("DELETE", "/api/subscriptions/7"), "reversible");
 });
 
 test("escalation only triggers on an explicit true", () => {
@@ -222,6 +249,7 @@ test("escalation only triggers on an explicit true", () => {
     { sendEhf: false },
     { sendEhf: "true" },
     { sendEhf: 1 },
+    { outputMode: "create_order" },
     { sendEhf: null },
     {},
   ]) {
@@ -249,8 +277,10 @@ test("reads are unaffected by the body", () => {
   assert.equal(classifyWithBody("read", { sendEhf: true }), "read");
 });
 
-test("escalatingBodyFields names the offending field for the error message", () => {
-  assert.deepEqual(escalatingBodyFields({ sendEhf: true, customerId: 1 }), ["sendEhf"]);
+test("escalatingBodyFields names the offending field and its value", () => {
+  assert.deepEqual(escalatingBodyFields({ sendEhf: true, customerId: 1 }), ["sendEhf=true"]);
+  assert.deepEqual(escalatingBodyFields({ outputMode: "create_invoice" }), ['outputMode="create_invoice"']);
   assert.deepEqual(escalatingBodyFields({ sendEhf: false }), []);
+  assert.deepEqual(escalatingBodyFields({ outputMode: "create_order" }), []);
   assert.deepEqual(escalatingBodyFields(undefined), []);
 });

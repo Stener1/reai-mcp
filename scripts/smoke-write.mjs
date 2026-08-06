@@ -91,7 +91,7 @@ async function main() {
   await client.connect(transport);
   console.log(`\nReversible write round-trip against tenant ${tenantId} (mode: reversible)\n`);
 
-  const created = { customerId: undefined };
+  const created = { customerId: undefined, offerId: undefined };
 
   try {
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
@@ -105,14 +105,29 @@ async function main() {
         skipRegistryLookup: true,
       },
     });
-    const customer = jsonOf(createRes);
-    created.customerId = customer?.id;
+    // Only adopt an id from a SUCCESSFUL create. An error body could contain an
+    // `id` of its own, and this value is what the cleanup block deletes.
+    const customer = createRes.isError ? undefined : jsonOf(createRes);
+    if (Number.isInteger(customer?.id)) created.customerId = customer.id;
     report(
       "reai_create_customer",
       !createRes.isError && Number.isInteger(created.customerId),
       created.customerId ? `id=${created.customerId}` : textOf(createRes).slice(0, 220),
     );
-    if (!created.customerId) throw new Error("cannot continue without a customer id");
+    if (!created.customerId) {
+      // A create that succeeded but whose id we failed to parse leaves a real
+      // record behind that cleanup cannot reach — say so loudly rather than
+      // exiting quietly.
+      if (!createRes.isError) {
+        report(
+          "customer id could be parsed from the create response",
+          false,
+          `A customer WAS created in tenant ${tenantId} but its id could not be read, so it ` +
+            `cannot be cleaned up automatically. Find and remove it by hand: name starts "${STAMP}".`,
+        );
+      }
+      throw new Error("cannot continue without a customer id");
+    }
 
     // 2. Read it back.
     const getRes = await client.callTool({
@@ -167,7 +182,51 @@ async function main() {
     });
     report("reai_set_customer_address", !addrRes.isError, textOf(addrRes).slice(0, 120));
 
-    // 7. The things this mode must refuse. These matter more than the successes:
+    // 7. Offer round-trip. This exists because offer lines are STRICTER than
+    //    order lines — OfferLineReq requires itemName and vatCode — so a
+    //    line shaped like an order line 400s here. Regression cover for that.
+    const vatRes = await client.callTool({
+      name: "reai_list_vat_codes",
+      arguments: { usage: "customer-invoice" },
+    });
+    const vatCode = /"code":\s*"([^"]+)"/.exec(textOf(vatRes))?.[1];
+    report("a customer-invoice VAT code is available", Boolean(vatCode), `code=${vatCode}`);
+
+    if (vatCode) {
+      const offerRes = await client.callTool({
+        name: "reai_create_offer",
+        arguments: {
+          customerId: created.customerId,
+          offerLines: [
+            { itemName: "Smoke test line", quantity: 2, unitPrice: 1500, vatCode },
+          ],
+        },
+      });
+      const offer = offerRes.isError ? undefined : jsonOf(offerRes);
+      if (Number.isInteger(offer?.id)) created.offerId = offer.id;
+      report(
+        "reai_create_offer with a properly shaped offer line",
+        !offerRes.isError && Number.isInteger(created.offerId),
+        created.offerId ? `id=${created.offerId}` : textOf(offerRes).slice(0, 260),
+      );
+
+      // Payment terms should come from the customer record (30 days, set above),
+      // not the hardcoded 14-day fallback.
+      report(
+        "payment terms are taken from the customer, not defaulted to 14",
+        /terms 30 days .*customer's default/.test(textOf(offerRes)),
+        (textOf(offerRes).match(/payment terms[^.]*/i) ?? ["(no terms note)"])[0],
+      );
+
+      const listOffersRes = await client.callTool({ name: "reai_list_offers", arguments: {} });
+      report(
+        "reai_list_offers sees it",
+        !listOffersRes.isError && /offer\(s\)/.test(textOf(listOffersRes)),
+        textOf(listOffersRes).split("\n")[0],
+      );
+    }
+
+    // 8. The things this mode must refuse. These matter more than the successes:
     //    they are the guarantee the consent page and README advertise.
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
     report(
@@ -189,7 +248,19 @@ async function main() {
       report(`escape hatch refuses ${label}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
     }
   } finally {
-    // 8. Clean up whatever was created, even if an assertion above threw.
+    // 9. Clean up whatever was created, even if an assertion above threw.
+    //    Offer first: it references the customer.
+    if (created.offerId) {
+      try {
+        const res = await client.callTool({
+          name: "reai_request",
+          arguments: { method: "DELETE", path: `/api/offers/${created.offerId}`, tenantId },
+        });
+        report("the test offer is deleted", !res.isError, textOf(res).slice(0, 120));
+      } catch (err) {
+        report("offer cleanup", false, `remove offer ${created.offerId} by hand: ${err}`);
+      }
+    }
     if (created.customerId) {
       try {
         const delRes = await client.callTool({
@@ -208,8 +279,11 @@ async function main() {
           name: "reai_get_customer",
           arguments: { id: created.customerId },
         });
-        const goneOrArchived =
-          after.isError === true || /archived|"archived":\s*true/i.test(textOf(after));
+        // Parse rather than pattern-match: CustomerRes always carries an
+        // `archived` field, so a regex for /archived/ also matches
+        // `"archived": false` and the warning branch became unreachable.
+        const stillThere = after.isError === true ? undefined : jsonOf(after);
+        const goneOrArchived = after.isError === true || stillThere?.archived === true;
         report(
           "the test customer is gone or archived afterwards",
           goneOrArchived,

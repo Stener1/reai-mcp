@@ -9,6 +9,7 @@ import {
   tenantIdArg,
   today,
   type ToolDef,
+  type ToolContext,
 } from "./registry.js";
 
 /**
@@ -24,8 +25,12 @@ import {
 
 const CURRENCY = z
   .string()
-  .length(3)
+  .regex(/^[A-Z]{3}$/, 'Must be an uppercase ISO 4217 code, e.g. "NOK".')
   .describe('ISO 4217 currency code, e.g. "NOK". Use reai_request GET /api/currencies for the full list.');
+
+const COUNTRY_CODE = z
+  .string()
+  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
 
 // --- Customers -------------------------------------------------------------
 
@@ -84,7 +89,9 @@ const createCustomer = defineTool({
     "otherwise a company is created and a Norwegian company requires a valid organizationNumber. " +
     "ReAI looks the company up in Brønnøysundregistrene and fills in the name and address, so " +
     "supplying just the organisation number is usually enough — pass skipRegistryLookup to opt out.\n\n" +
-    "Note that ReAI normalizes the stored name to title case, so it may not come back exactly as sent.",
+    "Note that ReAI normalizes the stored name to title case, so it may not come back exactly as sent.\n\n" +
+    "Creation accepts only the fields listed here. Invoice email, phone and payment terms are not " +
+    "among them — set those with reai_update_customer afterwards.",
   risk: "reversible",
   inputSchema: {
     name: z.string().describe("Customer or company name."),
@@ -97,19 +104,13 @@ const createCustomer = defineTool({
       .optional()
       .describe("True for a private individual rather than a company."),
     email: z.string().optional().describe("General email address."),
-    invoiceEmail: z.string().optional().describe("Where invoices should be sent, if different."),
-    phone: z
-      .string()
-      .optional()
-      .describe('Phone number. ReAI validates the format and rejects a "+47" prefix on Norwegian numbers — write them plain, e.g. "22334455".'),
     nationalIdentityNumber: z.string().optional().describe("Fødselsnummer, for private customers."),
-    countryCode: z.string().optional().describe('ISO country code. Defaults to "NO".'),
+    countryCode: COUNTRY_CODE.optional().describe('ISO country code. Defaults to "NO".'),
     addressPart1: z.string().optional().describe("Street address."),
     addressPart2: z.string().optional().describe("Second address line."),
     postalCode: z.string().optional().describe("Postal code."),
     city: z.string().optional().describe("City."),
     province: z.string().optional().describe("Province or region."),
-    daysUntilDue: z.number().int().optional().describe("Default payment terms in days."),
     skipRegistryLookup: z
       .boolean()
       .optional()
@@ -190,7 +191,7 @@ const setCustomerAddress = defineTool({
       .describe('Which address to set. Defaults to "postal".'),
     addressPart1: z.string().describe("Street address."),
     city: z.string().describe("City."),
-    countryCode: z.string().describe('ISO country code, e.g. "NO".'),
+    countryCode: COUNTRY_CODE.describe('ISO country code, e.g. "NO".'),
     addressPart2: z.string().optional().describe("Second address line."),
     postalCode: z.string().optional().describe("Postal code."),
     province: z.string().optional().describe("Province or region."),
@@ -290,9 +291,11 @@ const createProduct = defineTool({
   title: "Create a product",
   description:
     "Create a product or service. Set stockItem=true for something tracked in inventory. " +
-    "For anything involving variants or stock, check the schema first with " +
-    "reai_describe_endpoint POST /api/products — the variant model is more involved than the " +
-    "fields here.",
+    "This creates a product with NO variants and no selling price — those live in the `variants` " +
+    "array, which is not exposed here. Since order lines reference a variantId to inherit price and " +
+    "VAT code, a product created this way may not be usable on a line yet. For anything involving " +
+    "variants, stock or pricing, check the schema with reai_describe_endpoint POST /api/products " +
+    "and use reai_request.",
   risk: "reversible",
   inputSchema: {
     title: z.string().describe("Product name."),
@@ -315,15 +318,81 @@ const createProduct = defineTool({
 
 // --- Orders ----------------------------------------------------------------
 
-const documentLine = z.object({
-  quantity: z.number().describe("Quantity. Zero or positive, at most 99999999.99."),
+/**
+ * Shared line fields. Order and offer lines differ in what is REQUIRED: an order
+ * line needs only quantity and unitPrice, while an offer line also demands
+ * itemName and vatCode. Sending an order-shaped line to /api/offers is a 400, so
+ * the two are built separately below rather than shared wholesale.
+ */
+const LINE_VAT_CODE = z
+  .string()
+  .describe(
+    'VAT code. Order and offer lines accept ONLY the codes returned by reai_list_vat_codes with ' +
+      'usage="customer-invoice" — a purchase-side code is rejected.',
+  );
+
+const lineBase = {
+  quantity: z
+    .number()
+    .min(0)
+    .max(99_999_999.99)
+    .describe("Quantity. Zero or positive, at most 99999999.99."),
   unitPrice: z.number().describe("Unit price. Must not be exactly zero; negative is allowed."),
-  itemName: z.string().optional().describe("Line text. Falls back to the product name when variantId is set."),
   comment: z.string().optional().describe("Extra line comment."),
-  discount: z.number().min(0).max(100).optional().describe("Discount percentage, a whole number 0–100."),
-  vatCode: z.string().optional().describe("VAT code from reai_list_vat_codes."),
+  discount: z
+    .number()
+    .int()
+    .min(0)
+    .max(100)
+    .optional()
+    .describe("Discount percentage, a whole number 0–100."),
   variantId: z.number().int().optional().describe("Product variant id, from reai_list_products."),
+};
+
+const orderLine = z.object({
+  ...lineBase,
+  itemName: z.string().optional().describe("Line text. Falls back to the product name when variantId is set."),
+  vatCode: LINE_VAT_CODE.optional(),
 });
+
+const offerLine = z.object({
+  ...lineBase,
+  // Both required by OfferLineReq, unlike on an order line.
+  itemName: z.string().min(1).describe("Line text. Required on offer lines."),
+  vatCode: LINE_VAT_CODE,
+});
+
+/**
+ * Resolve the payment terms to send on an order or offer.
+ *
+ * The API requires `daysUntilDue` and it is non-nullable, so something must
+ * supply a number — it can never fall through to the customer record on ReAI's
+ * side. To avoid silently overriding terms the user already configured, read the
+ * customer's own `daysUntilDue` first and only then fall back to 14.
+ */
+async function resolveDaysUntilDue(
+  explicit: number | undefined,
+  customerId: number,
+  tenantId: number,
+  ctx: ToolContext,
+): Promise<{ days: number; source: "argument" | "customer" | "fallback" }> {
+  if (explicit !== undefined) return { days: explicit, source: "argument" };
+  try {
+    const res = await ctx.client.request<{ daysUntilDue?: number | null }>({
+      method: "GET",
+      path: `/api/customers/${customerId}`,
+      tenantId,
+    });
+    const fromCustomer = res.data?.daysUntilDue;
+    if (typeof fromCustomer === "number" && fromCustomer > 0) {
+      return { days: fromCustomer, source: "customer" };
+    }
+  } catch {
+    // A failed lookup must not block creating the document; 14 days is the
+    // conventional Norwegian default.
+  }
+  return { days: 14, source: "fallback" };
+}
 
 const listOrders = defineTool({
   name: "reai_list_orders",
@@ -381,18 +450,24 @@ const createOrder = defineTool({
     "Create an order with line items. This is the first half of billing a customer: the order holds " +
     "the lines, and reai_create_invoice_from_order then turns it into an invoice.\n\n" +
     "An order on its own sends nothing to the customer, which is why it is reversible. Note that " +
-    "sendEhf is deliberately NOT offered here — transmitting a document over Peppol cannot be " +
-    "recalled, so it requires REAI_WRITE_MODE=full via reai_request.",
+    "sendEhf is deliberately NOT offered here: it arms EHF/Peppol transmission at invoicing time, " +
+    "which cannot be recalled once it happens, so setting it requires REAI_WRITE_MODE=full via " +
+    "reai_request.",
   risk: "reversible",
   inputSchema: {
     customerId: z.number().int().positive().describe("Customer to bill. Find one with reai_list_customers."),
-    orderLines: z.array(documentLine).min(1).describe("At least one line item."),
+    orderLines: z.array(orderLine).min(1).describe("At least one line item."),
     currencyCode: CURRENCY.optional().describe('ISO 4217 code. Defaults to "NOK".'),
     daysUntilDue: z
       .number()
       .int()
+      .positive()
       .optional()
-      .describe("Payment terms in days. Defaults to 14 if the customer has no default."),
+      .describe(
+        "Payment terms in days. The API requires a value, so when omitted this reads the customer's " +
+          "own daysUntilDue and falls back to 14 — meaning anything you pass here OVERRIDES the " +
+          "customer's default terms.",
+      ),
     issueDate: isoDate.optional().describe("Order date. Defaults to today."),
     comment: z.string().optional().describe("Comment visible to the customer."),
     internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
@@ -404,22 +479,23 @@ const createOrder = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, ...rest } = args;
     const resolved = requireTenantId(tenantId, ctx);
-    const body = {
-      ...rest,
-      currencyCode: args.currencyCode ?? "NOK",
-      daysUntilDue: args.daysUntilDue ?? 14,
-      issueDate: args.issueDate ?? today(),
-    };
+    const terms = await resolveDaysUntilDue(args.daysUntilDue, args.customerId, resolved, ctx);
     const res = await ctx.client.request<{ id?: number; orderNumber?: string }>({
       method: "POST",
       path: "/api/orders",
-      body,
+      body: {
+        ...rest,
+        currencyCode: args.currencyCode ?? "NOK",
+        daysUntilDue: terms.days,
+        issueDate: args.issueDate ?? today(),
+      },
       tenantId: resolved,
     });
     const id = res.data?.id;
     return ok(res.data, {
       note:
         `Order created${res.data?.orderNumber ? ` (${res.data.orderNumber})` : ""}. ` +
+        `Payment terms ${terms.days} days (${describeTermsSource(terms.source)}). ` +
         `Nothing has been sent to the customer yet — invoice it with reai_create_invoice_from_order.`,
       ...(id ? { link: ctx.client.deepLink(`/orders/${id}`, resolved) } : {}),
     });
@@ -427,6 +503,12 @@ const createOrder = defineTool({
 });
 
 // --- Offers ----------------------------------------------------------------
+
+function describeTermsSource(source: "argument" | "customer" | "fallback"): string {
+  if (source === "argument") return "as requested, overriding the customer's default";
+  if (source === "customer") return "from the customer's default terms";
+  return "default, as the customer has no terms set";
+}
 
 const listOffers = defineTool({
   name: "reai_list_offers",
@@ -458,13 +540,25 @@ const createOffer = defineTool({
   title: "Create an offer",
   description:
     "Create an offer/quote (tilbud) for a customer. Creating it does not send it; delivery is a " +
-    "separate step. Lines use the same shape as order lines.",
+    "separate step.\n\n" +
+    "Offer lines are stricter than order lines: itemName and vatCode are both required.",
   risk: "reversible",
   inputSchema: {
     customerId: z.number().int().positive().describe("Customer the offer is for."),
-    offerLines: z.array(documentLine).min(1).describe("At least one line item."),
+    offerLines: z
+      .array(offerLine)
+      .min(1)
+      .describe("At least one line item. Offer lines require itemName and vatCode, unlike order lines."),
     currencyCode: CURRENCY.optional().describe('ISO 4217 code. Defaults to "NOK".'),
-    daysUntilDue: z.number().int().optional().describe("Payment terms in days. Defaults to 14."),
+    daysUntilDue: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "Payment terms in days. Required by the API, so when omitted the customer's own " +
+          "daysUntilDue is used, falling back to 14.",
+      ),
     issueDate: isoDate.optional().describe("Offer date. Defaults to today."),
     comment: z.string().optional().describe("Comment visible to the customer."),
     internalComment: z.string().optional().describe("Internal note."),
@@ -474,20 +568,23 @@ const createOffer = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, ...rest } = args;
     const resolved = requireTenantId(tenantId, ctx);
+    const terms = await resolveDaysUntilDue(args.daysUntilDue, args.customerId, resolved, ctx);
     const res = await ctx.client.request<{ id?: number }>({
       method: "POST",
       path: "/api/offers",
       body: {
         ...rest,
         currencyCode: args.currencyCode ?? "NOK",
-        daysUntilDue: args.daysUntilDue ?? 14,
+        daysUntilDue: terms.days,
         issueDate: args.issueDate ?? today(),
       },
       tenantId: resolved,
     });
     const id = res.data?.id;
     return ok(res.data, {
-      note: "Offer created. It has not been sent to the customer.",
+      note:
+        `Offer created with payment terms ${terms.days} days ` +
+        `(${describeTermsSource(terms.source)}). It has not been sent to the customer.`,
       ...(id ? { link: ctx.client.deepLink(`/offers/${id}`, resolved) } : {}),
     });
   },
