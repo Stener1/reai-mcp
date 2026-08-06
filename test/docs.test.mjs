@@ -140,3 +140,34 @@ test("the changelog does not claim an npm release that has not happened", () => 
     "the changelog should state plainly that nothing is published to npm yet",
   );
 });
+
+test("the lockfile version tracks package.json", () => {
+  // `npm pkg set version` does not touch the lockfile, so a bump silently left
+  // it behind — making release metadata inconsistent and producing a surprise
+  // diff on the next ordinary `npm install`.
+  const lock = JSON.parse(readFileSync(join(repo, "package-lock.json"), "utf8"));
+  assert.equal(lock.version, PKG.version, "package-lock.json root version");
+  assert.equal(lock.packages[""].version, PKG.version, 'package-lock.json packages[""] version');
+});
+
+test("tool counts stated in the changelog match the groups", () => {
+  // The changelog said "59 curated tools across four domains, plus discovery",
+  // which read as 59 domain tools with discovery on top. It is 52 + 7.
+  const domainTotal = Object.values(TOOL_GROUPS).flat().length;
+  assert.ok(
+    CHANGELOG.includes(`${domainTotal} across four accounting domains`),
+    `changelog should say ${domainTotal} domain tools`,
+  );
+  assert.ok(
+    CHANGELOG.includes(`${alwaysOnTools.length} always-on`),
+    `changelog should say ${alwaysOnTools.length} always-on tools`,
+  );
+  // Per-group subtotals, written as "(8)" after the group name.
+  for (const [name, tools] of Object.entries(TOOL_GROUPS)) {
+    const label = name === "bank" ? "Bank & VAT" : name[0].toUpperCase() + name.slice(1);
+    const m = new RegExp(`\\\\*${label}\\\\*\\\\s*\\\\((\\\\d+)\\\\)`).exec(CHANGELOG);
+    if (m) {
+      assert.equal(Number(m[1]), tools.length, `changelog subtotal for ${name}`);
+    }
+  }
+});

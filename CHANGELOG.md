@@ -15,18 +15,20 @@ connector, and has been verified against live ReAI data throughout.
 
 ### Added
 
-- **59 curated tools** across four domains, plus discovery:
-  - *Bookkeeping* — chart of accounts, VAT codes, vouchers, postings, general
+- **59 tools**: 52 across four accounting domains, plus 7 always-on
+  (orientation and discovery, which no configuration can disable).
+  - *Bookkeeping* (8) — chart of accounts, VAT codes, vouchers, postings, general
     ledger. `reai_create_voucher` checks the debit/credit balance locally and
     reports the exact imbalance rather than letting the API return a bare 422.
-  - *Sales* — customers, products, orders, offers, invoices, customer ledger.
-  - *Purchase* — suppliers, supplier invoices, the document inbox, EHF parsing,
-    expenses, supplier ledger.
-  - *Bank & VAT* — company accounts, the reconciliation view, reconciliation
+  - *Sales* (19) — customers, products, orders, offers, invoices, customer ledger.
+  - *Purchase* (13) — suppliers, supplier invoices, the document inbox, EHF
+    parsing, expenses, supplier ledger.
+  - *Bank & VAT* (12) — company accounts, the reconciliation view, reconciliation
     rules, transaction matching and booking, VAT settlement, tax return.
-- **Discovery escape hatch** — `reai_search_endpoints`, `reai_describe_endpoint`,
-  `reai_list_api_tags`, `reai_api_notes` and `reai_request` reach all 313
-  documented operations, so the 256 with no curated tool are still usable.
+- **Discovery escape hatch** (part of the 7 always-on) —
+  `reai_search_endpoints`, `reai_describe_endpoint`, `reai_list_api_tags`,
+  `reai_api_notes` and `reai_request` reach all 313 documented operations, so the
+  256 with no curated tool are still usable.
 - **A write policy**, which is the core safety contract. Every operation is
   classified `read` / `reversible` / `irreversible` and gated by
   `REAI_WRITE_MODE` (default `reversible`). Tools a mode forbids are never
