@@ -38,6 +38,38 @@ if (!tenantId) {
   process.exit(2);
 }
 
+// --- Write-tenant allowlist -------------------------------------------------
+// A tenant id alone is not consent. This script must never be able to write to a
+// real business just because someone passed its id, so the tenant has to be
+// declared a test tenant OUT OF BAND, in the environment, before any write.
+//
+// Added after a full-write run went against a live company: the intended test
+// tenant was unreachable, and "--tenant <the other one>" was all it took.
+const declaredTestTenants = (process.env.REAI_WRITE_TEST_TENANTS ?? "")
+  .split(",")
+  .map((t) => t.trim())
+  .filter(Boolean);
+
+if (declaredTestTenants.length === 0) {
+  console.error(
+    "REAI_WRITE_TEST_TENANTS is not set.\n\n" +
+      "This script writes to a live ReAI tenant, so it will only run against a tenant that has\n" +
+      "been explicitly declared safe to write to:\n\n" +
+      "  REAI_WRITE_TEST_TENANTS=2783 node " + process.argv[1].split("/").pop() + " --tenant 2783 ...\n\n" +
+      "Do not list a tenant that holds a real business's books.",
+  );
+  process.exit(2);
+}
+if (!declaredTestTenants.includes(String(tenantId))) {
+  console.error(
+    `Refusing to write to tenant ${tenantId}: it is not in REAI_WRITE_TEST_TENANTS ` +
+      `(${declaredTestTenants.join(", ")}).\n\n` +
+      `If ${tenantId} really is a test tenant, add it there deliberately. If it belongs to a real\n` +
+      `business, this refusal is the point.`,
+  );
+  process.exit(2);
+}
+
 let passed = 0;
 let failed = 0;
 function report(name, okFlag, detail) {

@@ -59,10 +59,12 @@ connector, and has been verified against live ReAI data throughout.
   account with no project-level roles, pinning `PUBLIC_URL` and every hostname
   Cloud Run serves, and failing non-zero when the result is not actually
   reachable.
-- **Three live verification harnesses**: `smoke.mjs` (read-only, safe against
-  production books), `smoke-write.mjs` (a reversible round-trip that cleans up
-  after itself) and `smoke-http.mjs` (the whole OAuth flow as a real client).
-  All three assert the negative cases too, not just the happy path.
+- **Four live verification harnesses**: `smoke.mjs` (read-only, safe against
+  production books), `smoke-write.mjs` (a reversible round-trip), `smoke-http.mjs`
+  (the whole OAuth flow as a real client) and `smoke-full-write.mjs` (posts and
+  deletes a real voucher). All assert the negative cases too, not just the happy
+  path. Both write scripts refuse to run unless the tenant is named in
+  `REAI_WRITE_TEST_TENANTS` — a tenant id on the command line is not consent.
 - A build step compressing the 907 KB OpenAPI snapshot into a 195 KB searchable
   index.
 - CI across Node 20, 22 and 24, plus a check that the published package contains
