@@ -198,6 +198,42 @@ test("the resource endpoint wins over a better-documented sub-resource", () => {
   }
 });
 
+test("a verb naming one method demotes the other writes", () => {
+  // Giving every write a small boost when the verb was specific meant
+  // "create fixed asset" ranked DELETE /api/assets/{id} above POST /api/assets.
+  for (const [query, method, path] of [
+    ["create fixed asset", "POST", "/api/assets"],
+    ["create a new order", "POST", "/api/orders"],
+    ["register a supplier invoice", "POST", "/api/supplier-invoices"],
+    ["delete a customer", "DELETE", "/api/customers/{id}"],
+    ["post a voucher", "POST", "/api/vouchers"],
+  ]) {
+    const top = searchOperations({ query, limit: 1 })[0];
+    assert.ok(top, `"${query}" returned nothing`);
+    assert.equal(`${top.method} ${top.path}`, `${method} ${path}`, `"${query}"`);
+  }
+});
+
+test('"fixed asset" maps to the resource, not to depreciation', () => {
+  // The phrase expansion injected "depreciation" into every fixed-asset query, so
+  // the nested write endpoint dominated: "list fixed assets" returned
+  // PUT /api/assets/{id}/depreciation. The top-3 resource test missed it because
+  // that path still starts with /api/assets.
+  for (const query of ["fixed assets", "list fixed assets"]) {
+    const top = searchOperations({ query, limit: 1 })[0];
+    assert.equal(top.path, "/api/assets", `"${query}" -> ${top.method} ${top.path}`);
+    assert.equal(top.method, "GET");
+  }
+});
+
+test("an explicit method filter narrows without re-ranking by a default", () => {
+  // The GET-default demotion was still applied under an explicit non-GET filter,
+  // so it re-ordered results the caller had already constrained.
+  const hits = searchOperations({ query: "archive", method: "DELETE", limit: 5 });
+  assert.ok(hits.length > 0, "an explicit DELETE filter should still return hits");
+  for (const h of hits) assert.equal(h.method, "DELETE");
+});
+
 test("an explicit method filter still wins over any verb in the query", () => {
   // The verb heuristic must not fight an instruction.
   const hits = searchOperations({ query: "delete a customer", method: "GET", limit: 5 });

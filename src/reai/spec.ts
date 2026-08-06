@@ -250,13 +250,16 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // A write request demotes reads, mirroring the way a question demotes writes.
       // Boosting the write alone was not enough: "post a voucher" still returned
       // GET /api/vouchers, which simply carried a higher base score.
-      if (score > 0 && writeIntent && op.method === "GET") score *= 0.7;
-      if (score > 0 && op.method !== "GET") {
+      if (score > 0 && !wantMethod && writeIntent && op.method === "GET") score *= 0.7;
+      if (score > 0 && !wantMethod && op.method !== "GET") {
         const risk = classifyRequest(op.method, op.path);
         if (writeIntent) {
-          // The user asked to change something; prefer writes, and prefer the
-          // specific method their verb implies.
-          score += impliedMethods?.has(op.method) ? 2 : 0.5;
+          // The user asked to change something. Where their verb names a specific
+          // method, other writes are DEMOTED rather than given a smaller boost:
+          // giving every write +0.5 meant "create fixed asset" ranked
+          // DELETE /api/assets/{id} above POST /api/assets.
+          if (impliedMethods) score = impliedMethods.has(op.method) ? score + 2 : score * 0.7;
+          else score += 0.5;
         } else if (risk === "irreversible") {
           score *= 0.4;
         } else {
@@ -546,14 +549,20 @@ function hasWriteIntent(tokens: readonly string[]): boolean {
 }
 
 function impliedMethodsFor(tokens: readonly string[]): Set<HttpMethod> | undefined {
+  // Counted by GROUP, not by resulting method. Allowing any set of up to two
+  // methods let "list and delete customers" produce {GET, DELETE} — which then
+  // exempted DELETE from its penalty and ranked DELETE /api/customers/{id} first,
+  // the opposite of what the comment promised. One update group legitimately maps
+  // to two methods (PUT and PATCH), so the limit belongs on groups.
+  const groups = new Set<number>();
   const methods = new Set<HttpMethod>();
-  for (const token of tokens) {
-    for (const [verbs, ms] of METHOD_INTENT) {
-      if (verbs.includes(token)) for (const m of ms) methods.add(m);
+  METHOD_INTENT.forEach(([verbs, ms], index) => {
+    if (tokens.some((t) => verbs.includes(t))) {
+      groups.add(index);
+      for (const m of ms) methods.add(m);
     }
-  }
-  // Conflicting verbs ("list and create") carry no usable signal.
-  return methods.size > 0 && methods.size <= 2 ? methods : undefined;
+  });
+  return groups.size === 1 ? methods : undefined;
 }
 
 /**
@@ -571,7 +580,11 @@ function impliedMethodsFor(tokens: readonly string[]): Set<HttpMethod> | undefin
  */
 const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bcost\s*(centre|center)s?\b/g, "department"],
-  [/\bfixed\s+assets?\b/g, "asset depreciation"],
+  // Maps to the resource only. Injecting "depreciation" here made the nested
+  // write endpoint dominate: even "create fixed asset" ranked
+  // PUT /api/assets/{id}/depreciation above POST /api/assets. A user who means
+  // depreciation says so, and that word matches on its own.
+  [/\bfixed\s+assets?\b/g, "asset"],
   [/\b(recurring|repeating)\b[^.]{0,24}\b(invoice|billing)/g, "subscription"],
   [/\bcredit\s+notes?\b/g, "credit invoice"],
   [/\bopening\s+balances?\b/g, "opening-balances"],
