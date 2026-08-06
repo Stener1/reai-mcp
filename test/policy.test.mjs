@@ -728,3 +728,28 @@ test("changing a counterparty's bank details escalates; changing its name does n
   assert.deepEqual(paymentRoutingFields({ name: "x", iban: "NO93" }), ["iban"]);
   assert.deepEqual(paymentRoutingFields({ name: "x" }), []);
 });
+
+test("overwriting an attachment is irreversible; uploading one is not", async () => {
+  // The spec: "Replacing content updates the bytes for every owner that references
+  // this attachment id." So overwriting the file on a posted voucher destroys the
+  // documentation of every voucher pointing at it, and no DELETE exists under
+  // /api/attachments to undo it. It sat in the tier whose criterion is "can be
+  // cleanly deleted".
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(classifyRequest("PATCH", "/api/attachments/1"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/attachments/1"), "irreversible");
+  // Uploading a NEW attachment is additive, so a path prefix would have been too
+  // blunt — it briefly made this irreversible too, which a test caught.
+  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
+  assert.equal(classifyRequest("GET", "/api/attachments/1/content"), "read");
+});
+
+test("an inventory adjustment is irreversible", async () => {
+  // quantityChange and unitCost restate stock quantity and valuation, which is a
+  // balance-sheet input, and the only correction is an offsetting adjustment — the
+  // same reverse-don't-delete property that puts vouchers in this tier.
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(classifyRequest("POST", "/api/warehouses/inventory/adjust"), "irreversible");
+  // Creating a warehouse is ordinary master data.
+  assert.equal(classifyRequest("POST", "/api/warehouses"), "reversible");
+});

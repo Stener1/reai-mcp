@@ -909,13 +909,23 @@ const registerInvoicePayment = defineTool({
   description:
     "Record that a customer paid an invoice. This settles the customer ledger and posts to the bank " +
     "account, so it moves money in the books. A partial amount is allowed and leaves the rest " +
-    "outstanding. Requires REAI_WRITE_MODE=full.",
+    "outstanding. Requires REAI_WRITE_MODE=full.\n\n" +
+    "companyBankId is required unless paidPrivately is true, and registerRestAsBankFee must be " +
+    "false when it is. For a foreign-currency invoice, receivedAmount is what landed in the " +
+    "company account and paidInvoiceCurrencyAmount is what the customer paid.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/invoices/{id}/payments"]],
   inputSchema: {
     id: z.number().int().positive().describe("Invoice id."),
     paymentDate: isoDate.describe("Date the money was received."),
-    receivedAmount: z.number().describe("Amount received. May be less than the invoice total."),
+    receivedAmount: z
+      .number()
+      .min(0.01)
+      .max(99_999_999.99)
+      .describe(
+        "Amount received, in the company's currency. May be less than the invoice total, leaving " +
+          "the rest outstanding. Must be positive — this endpoint records money arriving.",
+      ),
     companyBankId: z
       .number()
       .int()
@@ -923,8 +933,13 @@ const registerInvoicePayment = defineTool({
       .describe("Bank account that received it. List them with reai_request GET /api/company-banks."),
     paidInvoiceCurrencyAmount: z
       .number()
+      .min(0.01)
+      .max(99_999_999.99)
       .optional()
-      .describe("Amount in the invoice's currency, when it differs from the tenant's."),
+      .describe(
+        "Amount the customer paid in the INVOICE's currency, required when that differs from the " +
+          "tenant's currency.",
+      ),
     registerRestAsBankFee: z
       .boolean()
       .optional()
@@ -938,6 +953,28 @@ const registerInvoicePayment = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
+
+    // The same pairings the supplier-side tool enforces, which this one had none of —
+    // and this is a money endpoint. Checked locally so the failure explains itself
+    // instead of arriving as a generic 400 from a call that has already been made.
+    if (args.paidPrivately === true) {
+      const offenders = [
+        args.companyBankId !== undefined ? "companyBankId" : null,
+        args.registerRestAsBankFee === true ? "registerRestAsBankFee=true" : null,
+      ].filter(Boolean);
+      if (offenders.length > 0) {
+        return fail(
+          `paidPrivately=true records the payment against the owner's private account, so ` +
+            `${offenders.join(" and ")} must be omitted. Nothing was sent to ReAI.`,
+        );
+      }
+    } else if (args.companyBankId === undefined) {
+      return fail(
+        "companyBankId is required unless paidPrivately is true — the payment has to land " +
+          "somewhere. List the accounts with reai_list_company_banks. Nothing was sent to ReAI.",
+      );
+    }
+
     const res = await ctx.client.request({
       method: "POST",
       path: `/api/invoices/${id}/payments`,

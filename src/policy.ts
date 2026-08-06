@@ -72,6 +72,10 @@ export function isAllowed(risk: Risk, mode: WriteMode): boolean {
  * Matched before the reversible list, so more specific entries win.
  */
 const IRREVERSIBLE_PREFIXES: readonly string[] = [
+  // Restates stock quantity and valuation, which is a balance-sheet input. The only
+  // correction is an offsetting adjustment, which is precisely the reverse-don't-delete
+  // property that puts vouchers in this tier.
+  "/api/warehouses/inventory/adjust",
   "/api/vouchers",
   "/api/postings",
   "/api/invoices",
@@ -267,6 +271,16 @@ export function hasAmbiguousSegments(path: string): boolean {
  */
 export function classifyRequest(method: HttpMethod, path: string): Risk {
   if (method === "GET") return "read";
+
+  // Method-specific, because the same path differs sharply by verb. Replacing an
+  // attachment's bytes "updates the bytes for every owner that references this
+  // attachment id" — the spec's own words — so overwriting the file on a posted
+  // voucher destroys the accounting documentation of every voucher pointing at it,
+  // and no DELETE exists under /api/attachments to undo it. UPLOADING a new
+  // attachment is additive and stays reversible, so a prefix would be too blunt.
+  if ((method === "PATCH" || method === "PUT") && /^\/api\/attachments\/[^/]+$/i.test(path.replace(/\/+$/, ""))) {
+    return "irreversible";
+  }
 
   // Canonicalize first: classifying a raw string that resolves to a different
   // path is how a reversible-looking call reaches the ledger. A path we cannot
