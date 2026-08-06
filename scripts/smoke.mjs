@@ -235,6 +235,49 @@ async function main() {
       }
     }
 
+    // 7bb. Bank & VAT reads. Bank transactions have no list endpoint, so the
+    //      reconciliation view is the entry point — and it needs a real bank
+    //      account id, so this chains off reai_list_company_banks.
+    for (const [name, args, check] of [
+      ["reai_list_company_banks", { tenantId }, (t) => /bank account\(s\)/.test(t)],
+      ["reai_list_reconciliation_rules", { tenantId }, (t) => /reconciliation rule\(s\)/.test(t)],
+      ["reai_get_tax_return", { tenantId, year: String(new Date().getUTCFullYear() - 1) }, (t) => /Tax return/.test(t)],
+    ]) {
+      try {
+        const res = await client.callTool({ name, arguments: args });
+        const text = textOf(res);
+        const okFlag = !res.isError && check(text);
+        report(name, okFlag, okFlag ? firstLine(text) : text.slice(0, 200));
+      } catch (err) {
+        report(name, false, String(err));
+      }
+    }
+
+    try {
+      const banksRes = await client.callTool({
+        name: "reai_list_company_banks",
+        arguments: { tenantId },
+      });
+      const bankId = Number(/"id":\s*(\d+)/.exec(textOf(banksRes))?.[1]);
+      if (Number.isInteger(bankId)) {
+        const thisMonth = new Date().toISOString().slice(0, 7);
+        const rec = await client.callTool({
+          name: "reai_get_bank_reconciliation",
+          arguments: { tenantId, bankAccountId: bankId, month: thisMonth, include: ["summary"] },
+        });
+        const okFlag = !rec.isError && /Reconciliation for bank account/.test(textOf(rec));
+        report(
+          `reai_get_bank_reconciliation (account ${bankId}, ${thisMonth})`,
+          okFlag,
+          okFlag ? firstLine(textOf(rec)) : textOf(rec).slice(0, 220),
+        );
+      } else {
+        console.log("  [SKIP] reai_get_bank_reconciliation — no company bank account on this tenant");
+      }
+    } catch (err) {
+      report("reai_get_bank_reconciliation", false, String(err));
+    }
+
     // 7c. If the reception inbox has an EHF document, parse it for real. This is
     //     the only check here that exercises a document the tenant actually
     //     received, so it is skipped rather than failed when the inbox is empty.
@@ -294,6 +337,10 @@ async function main() {
       "reai_register_invoice_payment",
       "reai_create_supplier_invoice",
       "reai_register_supplier_invoice_payment",
+      "reai_match_bank_transactions",
+      "reai_book_bank_transactions",
+      "reai_apply_reconciliation_rules",
+      "reai_create_vat_return",
     ];
     const names = new Set(tools.map((t) => t.name));
     const leaked = mustBeHidden.filter((n) => names.has(n));
@@ -315,13 +362,19 @@ async function main() {
       report(`self-invoicing subscription blocked: ${label}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
     }
 
-    for (const path of ["/api/subscriptions/7/generate", "/api/subscriptions/generate-due"]) {
+    for (const path of [
+      "/api/subscriptions/7/generate",
+      "/api/subscriptions/generate-due",
+      "/api/manual-reconciliations/1/close",
+      "/api/vat-returns",
+      "/api/bank-reconciliations/1/vouchers",
+    ]) {
       const res = await client.callTool({
         name: "reai_request",
         arguments: { method: "POST", path, tenantId, body: {} },
       });
       const blocked = res.isError === true && /write policy/i.test(textOf(res));
-      report(`subscription billing blocked: POST ${path}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+      report(`irreversible write blocked: POST ${path}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
     }
 
     try {

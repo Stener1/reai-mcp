@@ -10,6 +10,7 @@ import { discoveryTools } from "./tools/discovery.js";
 import { bookkeepingTools } from "./tools/bookkeeping.js";
 import { salesTools } from "./tools/sales.js";
 import { purchaseTools } from "./tools/purchase.js";
+import { bankVatTools } from "./tools/bankvat.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.1.0";
@@ -23,6 +24,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   bookkeeping: bookkeepingTools,
   sales: salesTools,
   purchase: purchaseTools,
+  bank: bankVatTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];
@@ -149,6 +151,7 @@ const GROUP_BLURBS: Record<string, string> = {
   sales: "the sales side (customers, products, orders, offers, invoices, customer ledger)",
   purchase:
     "the purchase side (suppliers, supplier invoices, the document inbox, EHF parsing, expenses)",
+  bank: "bank reconciliation and VAT (company accounts, reconciliation rules, matching, VAT periods)",
 };
 
 function describeEnabledGroups(toolsets: readonly string[]): string {
@@ -191,6 +194,9 @@ function buildInstructions(
     "- Billing a customer is a two-step chain: an ORDER carries the line items, and invoicing that " +
       "order creates the invoice. There is no endpoint that builds an invoice from lines directly.",
     "- To undo an issued invoice, raise a credit note. Do not attempt to delete it.",
+    "- There is NO endpoint that lists bank transactions. They are seen through " +
+      "reai_get_bank_reconciliation for one account and one month (yyyy-MM), which is therefore the " +
+      "entry point for any bank work.",
     "- Supplier invoice COST LINES do not use the voucher sign convention: each line names its debit " +
       "and credit account, and the amount is positive on an invoice, negative on a credit note.",
     "- Incoming supplier invoices usually arrive in the reception inbox as PDF or EHF. Registering " +

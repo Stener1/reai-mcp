@@ -291,3 +291,50 @@ test("only booleans that are true, and the one string value, escalate", () => {
   assert.equal(classifyWithBody("reversible", { outputMode: "" }), "reversible");
   assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: "true" }), "reversible");
 });
+
+test("manual reconciliation endpoints are matched by prefix, not by fail-closed accident", () => {
+  // The policy previously listed "/api/manual-bank-reconciliations", which does
+  // not exist — the real path has no "bank" segment. Those endpoints came out
+  // irreversible only because unknown write paths fail closed, so the intended
+  // protection would have silently vanished if anyone later listed the real path
+  // as reversible.
+  for (const path of [
+    "/api/manual-reconciliations/5/close",
+    "/api/manual-reconciliations/5/reopen",
+    "/api/manual-reconciliations/5/ending-balance",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+    assert.equal(classifyRequest("PUT", path), "irreversible", path);
+  }
+});
+
+test("bank reconciliation mutations are irreversible, reads are not", () => {
+  for (const path of [
+    "/api/bank-reconciliations/5/matches",
+    "/api/bank-reconciliations/5/vouchers",
+    "/api/bank-reconciliations/5/apply-rules",
+    "/api/bank-reconciliations/5/close",
+    "/api/bank-transactions/9",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+    assert.equal(classifyRequest("GET", path), "read", path);
+  }
+  // Reconciliation RULES are master data: creating one books nothing.
+  assert.equal(classifyRequest("POST", "/api/reconciliation-rules"), "reversible");
+  assert.equal(classifyRequest("DELETE", "/api/reconciliation-rules/3"), "reversible");
+  // Company bank accounts likewise.
+  assert.equal(classifyRequest("POST", "/api/company-banks"), "reversible");
+});
+
+test("VAT and tax filing are irreversible", () => {
+  for (const path of [
+    "/api/vat-returns",
+    "/api/vat-returns/reopen",
+    "/api/vat-returns/complete-manually",
+    "/api/tax-returns/2026/submit",
+    "/api/tax-returns/2026/validate",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+  }
+  assert.equal(classifyRequest("GET", "/api/tax-returns/2026"), "read");
+});
