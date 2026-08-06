@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import type { HttpMethod } from "./client.js";
+import { quirksFor, type Quirk } from "./quirks.js";
 
 export type SpecParam = {
   name: string;
@@ -182,6 +183,12 @@ export type DescribedOperation = {
   parameters: SpecParam[];
   requestBody?: { contentType: string; schema: unknown };
   responses: Array<{ status: string; description?: string; schema?: unknown }>;
+  /**
+   * Known quirks for this operation. Listed first in the tool output because a
+   * schema alone has repeatedly proved insufficient — several of these were
+   * learned from a 400 or from a surprising success.
+   */
+  quirks?: Array<{ kind: Quirk["kind"]; note: string }>;
 };
 
 /**
@@ -220,7 +227,14 @@ export function describeOperation(op: SpecOperation, maxDepth = 4): DescribedOpe
     });
   }
 
+  const knownQuirks = quirksFor(op.method, op.path);
+
   const result: DescribedOperation = {
+    // Quirks first, deliberately: a resolved response schema runs to hundreds of
+    // lines, and anything placed after it is effectively hidden.
+    ...(knownQuirks.length > 0
+      ? { quirks: knownQuirks.map((q) => ({ kind: q.kind, note: q.note })) }
+      : {}),
     id: op.id,
     method: op.method,
     path: op.path,
