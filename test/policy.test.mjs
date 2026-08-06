@@ -284,3 +284,10 @@ test("escalatingBodyFields names the offending field and its value", () => {
   assert.deepEqual(escalatingBodyFields({ outputMode: "create_order" }), []);
   assert.deepEqual(escalatingBodyFields(undefined), []);
 });
+
+test("only booleans that are true, and the one string value, escalate", () => {
+  // Guards the predicate map against regressing to a "field name is present" test.
+  assert.equal(classifyWithBody("reversible", { outputMode: "CREATE_INVOICE" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { outputMode: "" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: "true" }), "reversible");
+});

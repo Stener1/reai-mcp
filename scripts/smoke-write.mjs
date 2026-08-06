@@ -238,6 +238,14 @@ async function main() {
       !supRes.isError && Number.isInteger(created.supplierId),
       created.supplierId ? `id=${created.supplierId}` : textOf(supRes).slice(0, 240),
     );
+    if (!created.supplierId && !supRes.isError) {
+      report(
+        "supplier id could be parsed from the create response",
+        false,
+        `A supplier WAS created in tenant ${tenantId} but its id could not be read, so cleanup ` +
+          `cannot reach it. Remove it by hand: name starts "${STAMP}".`,
+      );
+    }
 
     if (created.supplierId) {
       const supPatch = await client.callTool({
@@ -301,6 +309,18 @@ async function main() {
           arguments: { id: created.supplierId },
         });
         report("the test supplier is deleted", !res.isError, textOf(res).slice(0, 120));
+
+        const after = await client.callTool({
+          name: "reai_get_supplier",
+          arguments: { id: created.supplierId },
+        });
+        const remaining = after.isError === true ? undefined : jsonOf(after);
+        const goneOrArchived = after.isError === true || remaining?.archived === true;
+        report(
+          "the test supplier is gone or archived afterwards",
+          goneOrArchived,
+          goneOrArchived ? "verified" : `STILL ACTIVE — clean up supplier ${created.supplierId} by hand`,
+        );
       } catch (err) {
         report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
       }

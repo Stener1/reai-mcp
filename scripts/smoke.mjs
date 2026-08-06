@@ -243,9 +243,25 @@ async function main() {
         name: "reai_list_reception_documents",
         arguments: { tenantId, kind: "invoice" },
       });
-      const attachmentId = Number(/"attachmentId":\s*(\d+)/.exec(textOf(inbox))?.[1]);
-      const isXml = /"attachmentMimeType":\s*"[^"]*xml/i.test(textOf(inbox));
-      if (Number.isInteger(attachmentId) && isXml) {
+      // Pick a document whose OWN mime type is XML. Matching the two fields
+      // independently across the whole payload could pair a PDF's attachmentId
+      // with a different document's xml type, and fail on a healthy server.
+      const text = textOf(inbox);
+      const parsedInbox = (() => {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start === -1 || end <= start) return undefined;
+        try {
+          return JSON.parse(text.slice(start, end + 1));
+        } catch {
+          return undefined;
+        }
+      })();
+      const ehfDoc = (parsedInbox?.invoiceInbox ?? []).find((d) =>
+        /xml/i.test(d?.attachmentMimeType ?? ""),
+      );
+      const attachmentId = Number(ehfDoc?.attachmentId);
+      if (Number.isInteger(attachmentId)) {
         const res = await client.callTool({
           name: "reai_parse_ehf_attachment",
           arguments: { tenantId, attachmentId },
@@ -260,7 +276,7 @@ async function main() {
             : text.slice(0, 220),
         );
       } else {
-        console.log("  [SKIP] reai_parse_ehf_attachment — no EHF document in the reception inbox");
+        console.log("  [SKIP] reai_parse_ehf_attachment — no XML/EHF document in the reception inbox");
       }
     } catch (err) {
       report("reai_parse_ehf_attachment", false, String(err));
@@ -268,15 +284,23 @@ async function main() {
 
     // 8. Irreversible sales tools must be hidden in this mode, and the escape
     // hatch must refuse a transmitting flag on an otherwise-reversible path.
+    // Derive the diagnostic from the same list the assertion uses, so a genuine
+    // regression names the offending tool instead of printing "hidden".
+    const mustBeHidden = [
+      "reai_create_voucher",
+      "reai_delete_voucher",
+      "reai_create_invoice_from_order",
+      "reai_credit_invoice",
+      "reai_register_invoice_payment",
+      "reai_create_supplier_invoice",
+      "reai_register_supplier_invoice_payment",
+    ];
     const names = new Set(tools.map((t) => t.name));
+    const leaked = mustBeHidden.filter((n) => names.has(n));
     report(
-      "irreversible sales tools are not advertised in this write mode",
-      !names.has("reai_create_invoice_from_order") &&
-        !names.has("reai_credit_invoice") &&
-        !names.has("reai_register_invoice_payment") &&
-        !names.has("reai_create_supplier_invoice") &&
-        !names.has("reai_register_supplier_invoice_payment"),
-      [...names].filter((n) => /invoice_from_order|credit_invoice|register_invoice/.test(n)).join(", ") || "hidden",
+      "irreversible tools are not advertised in this write mode",
+      leaked.length === 0,
+      leaked.length === 0 ? `all ${mustBeHidden.length} hidden` : `LEAKED: ${leaked.join(", ")}`,
     );
 
     for (const [label, body] of [

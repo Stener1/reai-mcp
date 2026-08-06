@@ -1,9 +1,9 @@
 import { z } from "zod";
 import {
   defineTool,
+  fail,
   isoDate,
   ok,
-  okText,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -40,6 +40,7 @@ const listSuppliers = defineTool({
   description:
     "List or search suppliers (leverandører). Archived suppliers are excluded unless asked for.",
   risk: "read",
+  apiPaths: [["GET", "/api/suppliers"]],
   inputSchema: {
     name: z.string().optional().describe("Filter by name (partial match)."),
     archived: z.boolean().optional().describe("Include archived suppliers instead of active ones."),
@@ -63,6 +64,7 @@ const getSupplier = defineTool({
   title: "Get one supplier",
   description: "Fetch a single supplier by id, including bank details and address.",
   risk: "read",
+  apiPaths: [["GET", "/api/suppliers/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
     tenantId: tenantIdArg,
@@ -87,6 +89,7 @@ const createSupplier = defineTool({
     "Set privateContact=true for a private individual.\n\n" +
     "Bank details are not accepted here — set them afterwards with reai_update_supplier.",
   risk: "reversible",
+  apiPaths: [["POST", "/api/suppliers"]],
   inputSchema: {
     name: z.string().describe("Supplier or company name."),
     organizationNumber: z.string().optional().describe("Norwegian organisation number."),
@@ -128,6 +131,7 @@ const updateSupplier = defineTool({
     "Update supplier details, including the bank account used to pay them. " +
     "Only the fields you pass are changed.",
   risk: "reversible",
+  apiPaths: [["PATCH", "/api/suppliers/{id}"]],
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
@@ -145,7 +149,7 @@ const updateSupplier = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     if (Object.keys(body).length === 0) {
-      return okText("Nothing to update — pass at least one field to change.");
+      return fail("Nothing to update — pass at least one field to change.");
     }
     const resolved = requireTenantId(tenantId, ctx);
     const res = await ctx.client.request({
@@ -165,6 +169,7 @@ const deleteSupplier = defineTool({
     "Delete a supplier. ReAI archives instead of deleting when the supplier already has " +
     "transactions, so the audit trail survives — the response says which happened.",
   risk: "reversible",
+  apiPaths: [["DELETE", "/api/suppliers/{id}"]],
   destructive: true,
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
@@ -188,6 +193,7 @@ const supplierLedger = defineTool({
     "isUnpaid answers 'what do we still owe', showDisputed surfaces invoices flagged as disputed. " +
     "Omit supplierId for all suppliers. Defaults to the current calendar year.",
   risk: "read",
+  apiPaths: [["GET", "/api/ledger/supplier"], ["GET", "/api/ledger/supplier/{supplierId}"]],
   inputSchema: {
     supplierId: z.number().int().positive().optional().describe("Restrict to one supplier."),
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
@@ -259,6 +265,7 @@ const listSupplierInvoices = defineTool({
     "List registered supplier invoices (leverandørfakturaer) and credit notes. " +
     "For what is still unpaid, reai_supplier_ledger with isUnpaid=true is the better question.",
   risk: "read",
+  apiPaths: [["GET", "/api/supplier-invoices"]],
   inputSchema: {
     documentType: z
       .enum(["invoice", "credit_note"])
@@ -284,6 +291,7 @@ const getSupplierInvoice = defineTool({
   description:
     "Fetch a registered supplier invoice by id, with its cost lines, payment state and attachments.",
   risk: "read",
+  apiPaths: [["GET", "/api/supplier-invoices/{id}"]],
   inputSchema: {
     id: z.number().int().positive().describe("Supplier invoice id."),
     tenantId: tenantIdArg,
@@ -311,6 +319,7 @@ const createSupplierInvoice = defineTool({
     "posting, which is what the bookkeeping rules on documentation actually require. Use this tool " +
     "when there is no document to attach. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/supplier-invoices"]],
   inputSchema: {
     supplierId: z.number().int().positive().describe("Supplier being invoiced by. From reai_list_suppliers."),
     date: isoDate.describe("Invoice date. Determines the accounting period."),
@@ -332,12 +341,18 @@ const createSupplierInvoice = defineTool({
 
     // The sign convention is easy to get backwards, and the API's own message is
     // less specific than this check can be.
+    // Zero is rejected as well as the wrong sign: the spec asks for at least 0.01
+    // on an invoice and at most -0.01 on a credit note, but declares no `minimum`,
+    // so a zero-amount line may well be accepted and posted.
     const isCredit = args.documentType === "credit_note";
-    const wrongSign = args.costLines.filter((l) => (isCredit ? l.amount > 0 : l.amount < 0));
+    const wrongSign = args.costLines.filter((l) =>
+      isCredit ? l.amount > -0.01 : l.amount < 0.01,
+    );
     if (wrongSign.length > 0) {
-      return okText(
-        `Cost-line signs do not match documentType=${args.documentType ?? "invoice"}.\n` +
-          `An invoice needs positive amounts; a credit note needs negative ones.\n` +
+      return fail(
+        `Cost-line amounts do not match documentType=${args.documentType ?? "invoice"}.\n` +
+          `An invoice needs amounts of at least 0.01; a credit note needs at most -0.01. ` +
+          `Zero is not valid either way.\n` +
           `Offending amounts: ${wrongSign.map((l) => l.amount).join(", ")}.\n` +
           `Nothing was sent to ReAI.`,
       );
@@ -367,15 +382,22 @@ const paySupplierInvoice = defineTool({
     "bank account, so it moves money in the books. Partial amounts are allowed. " +
     "Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  apiPaths: [["POST", "/api/supplier-invoices/{id}/payments"]],
   inputSchema: {
     id: z.number().int().positive().describe("Supplier invoice id."),
     paymentDate: isoDate.describe("Date the payment left the account."),
-    invoiceAmount: z.number().describe("Amount applied to the invoice."),
+    invoiceAmount: z
+      .number()
+      .min(0.01)
+      .describe("Amount applied to the invoice. Must be positive — at least 0.01."),
     companyBankId: z
       .number()
       .int()
       .optional()
-      .describe("Bank account it was paid from. List them with reai_list_company_banks."),
+      .describe(
+        "Bank account it was paid from. List them with reai_request GET /api/company-banks. " +
+          "Omit this (and bankDebitAmount) when paidPrivately is true.",
+      ),
     bankDebitAmount: z
       .number()
       .optional()
@@ -413,11 +435,13 @@ const listReceptionDocuments = defineTool({
     "that have arrived as PDF or EHF but are not yet booked. This is the natural starting point for " +
     "'what still needs processing'.\n\n" +
     "Two separate inboxes exist: invoices (supplier invoices awaiting registration) and receipts " +
-    "(purchase receipts awaiting registration plus payment confirmation). Register an invoice one " +
-    "with reai_request POST /api/invoice-reception-documents/{id}/supplier-invoice, and inspect an " +
-    "EHF attachment first with reai_parse_ehf_attachment to read the supplier and amounts straight " +
-    "off the document.",
+    "(purchase receipts awaiting registration plus payment confirmation).\n\n" +
+    "Inspect an EHF attachment first with reai_parse_ehf_attachment to read the supplier and amounts " +
+    "straight off the document. Then register it with reai_request POST " +
+    "/api/invoice-reception-documents/{id}/supplier-invoice — note that registering posts to the " +
+    "ledger, so it is classified irreversible and needs REAI_WRITE_MODE=full.",
   risk: "read",
+  apiPaths: [["GET", "/api/invoice-reception-documents"], ["GET", "/api/receipt-reception-documents"]],
   inputSchema: {
     kind: z
       .enum(["invoice", "receipt", "both"])
@@ -432,15 +456,51 @@ const listReceptionDocuments = defineTool({
     const wanted: Array<"invoice" | "receipt"> =
       kind === "both" ? ["invoice", "receipt"] : [kind];
 
+    // Fetched together, and a failure on one must not discard the other: the
+    // receipt inbox can 403 on a tenant without that module, and losing eight
+    // real invoices to it would be a lie by omission.
+    const results = await Promise.allSettled(
+      wanted.map((which) =>
+        ctx.client
+          .request<unknown[]>({
+            method: "GET",
+            path:
+              which === "invoice"
+                ? "/api/invoice-reception-documents"
+                : "/api/receipt-reception-documents",
+            tenantId,
+          })
+          .then((res) => ({ which, res })),
+      ),
+    );
+
     const out: Record<string, unknown> = {};
     const notes: string[] = [];
-    for (const which of wanted) {
-      const path =
-        which === "invoice" ? "/api/invoice-reception-documents" : "/api/receipt-reception-documents";
-      const res = await ctx.client.request<unknown[]>({ method: "GET", path, tenantId });
-      const count = Array.isArray(res.data) ? res.data.length : 0;
-      out[which === "invoice" ? "invoiceInbox" : "receiptInbox"] = res.data;
-      notes.push(`${count} ${which} document(s) awaiting processing`);
+    let failures = 0;
+    for (const [i, settled] of results.entries()) {
+      const which = wanted[i] as "invoice" | "receipt";
+      const key = which === "invoice" ? "invoiceInbox" : "receiptInbox";
+      if (settled.status === "fulfilled") {
+        const count = Array.isArray(settled.value.res.data) ? settled.value.res.data.length : 0;
+        out[key] = settled.value.res.data;
+        notes.push(`${count} ${which} document(s) awaiting processing`);
+      } else {
+        failures++;
+        const message =
+          settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+        out[`${key}Error`] = message;
+        notes.push(`the ${which} inbox could not be read`);
+      }
+    }
+
+    // Only a total failure is an error; a partial one is reported honestly.
+    if (failures === wanted.length) {
+      return fail(
+        `Could not read the reception inbox.\n${Object.entries(out)
+          .filter(([k]) => k.endsWith("Error"))
+          .map(([, v]) => v)
+          .join("\n")}`,
+      );
     }
     return ok(out, { note: notes.join("; ") + "." });
   },
@@ -457,6 +517,7 @@ const parseEhfAttachment = defineTool({
     "If the EHF carries embedded files (often a human-readable PDF), fetch them with reai_request " +
     "GET /api/attachments/{id}/embedded-files.",
   risk: "read",
+  apiPaths: [["GET", "/api/attachments/{id}/ehf"]],
   inputSchema: {
     attachmentId: z
       .number()
@@ -490,10 +551,17 @@ const listExpenses = defineTool({
     "booking post to the ledger and drive a reimbursement; drive them via reai_request with " +
     "REAI_WRITE_MODE=full.",
   risk: "read",
+  apiPaths: [["GET", "/api/expenses"]],
   inputSchema: {
     keyword: z.string().optional().describe("Free-text search."),
-    status: z.string().optional().describe("Filter by claim status."),
-    paidOut: z.string().optional().describe("Filter by whether the claim has been reimbursed."),
+    status: z
+      .enum(["open", "for_approval", "approved"])
+      .optional()
+      .describe("Filter by claim status."),
+    paidOut: z
+      .enum(["true", "false"])
+      .optional()
+      .describe('Whether the claim has been reimbursed. The API takes this as a string, not a boolean.'),
     employeeIds: z.string().optional().describe("Comma-separated employee ids."),
     startDate: isoDate.optional().describe("Inclusive start date."),
     endDate: isoDate.optional().describe("Inclusive end date."),

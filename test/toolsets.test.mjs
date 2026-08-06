@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { allTools, alwaysOnTools, selectTools, TOOL_GROUPS } from "../dist/server.js";
 import { loadConfig, TOOLSETS } from "../dist/config.js";
+import { classifyRequest } from "../dist/policy.js";
+import { findOperation } from "../dist/reai/spec.js";
 
 /**
  * The premise of this server is that 313 API operations cannot all be tools. As
@@ -78,5 +80,62 @@ test("every tool declares a risk the policy knows", () => {
     assert.ok(["read", "reversible", "irreversible"].includes(t.risk), `${t.name}: ${t.risk}`);
     assert.ok(t.description.length > 40, `${t.name} needs a real description`);
     assert.ok(t.title.length > 0, `${t.name} needs a title`);
+  }
+});
+
+// --- The guard that matters most -------------------------------------------
+
+test("no curated tool is more permissive than the escape hatch would be", () => {
+  // The worst bug class in this codebase is a curated tool that quietly does
+  // what reai_request refuses -- it would silently defeat REAI_WRITE_MODE. Each
+  // tool declares the API paths it calls so this can be checked mechanically
+  // rather than by eye, which is how the previous reviews had to do it.
+  const rank = { read: 0, reversible: 1, irreversible: 2 };
+
+  for (const tool of allTools) {
+    if (!tool.apiPaths) continue;
+    for (const [method, path] of tool.apiPaths) {
+      // Substitute the template parameters, since classifyRequest sees concrete paths.
+      const concrete = path.replace(/\{[^}]+\}/g, "1");
+      const fromPolicy = classifyRequest(method, concrete);
+      assert.ok(
+        rank[tool.risk] >= rank[fromPolicy],
+        `${tool.name} declares risk="${tool.risk}" but ${method} ${concrete} classifies as ` +
+          `"${fromPolicy}" — the tool would be usable in a mode that forbids the same call ` +
+          `through reai_request.`,
+      );
+    }
+  }
+});
+
+test("every curated tool declares the API paths it calls", () => {
+  // Not decoration: an undeclared tool silently opts out of the check above.
+  const missing = allTools
+    .filter((t) => !alwaysOnTools.includes(t) || t.name.startsWith("reai_whoami"))
+    .filter((t) => !t.apiPaths)
+    .map((t) => t.name);
+  const exempt = new Set([
+    // Discovery reads the bundled spec, or targets a path chosen at call time and
+    // classified per-call inside the handler.
+    "reai_search_endpoints",
+    "reai_describe_endpoint",
+    "reai_list_api_tags",
+    "reai_request",
+    // Session-local state only; touches no API path of its own beyond /api/me.
+    "reai_use_tenant",
+  ]);
+  const unexpected = missing.filter((n) => !exempt.has(n));
+  assert.deepEqual(unexpected, [], `tools missing apiPaths: ${unexpected.join(", ")}`);
+});
+
+test("declared API paths exist in the OpenAPI spec", () => {
+  // Catches a typo'd path, which would make the guard above check nothing.
+  for (const tool of allTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      assert.ok(
+        findOperation(method, path),
+        `${tool.name} declares ${method} ${path}, which is not in the spec`,
+      );
+    }
   }
 });

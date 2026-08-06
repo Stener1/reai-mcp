@@ -2,6 +2,7 @@ import { z, type ZodRawShape } from "zod";
 import type { ReaiClient } from "../reai/client.js";
 import type { ServerConfig } from "../config.js";
 import type { Risk } from "../policy.js";
+import type { HttpMethod } from "../reai/client.js";
 
 export type SessionState = {
   /** Tenant chosen at runtime via `reai_use_tenant`; overrides the env default. */
@@ -25,6 +26,16 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
   title: string;
   description: string;
   risk: Risk;
+  /**
+   * The API operations this tool calls, as [method, spec path] pairs.
+   *
+   * Declared so a test can assert that `risk` is never more permissive than what
+   * `classifyRequest` would say about the same paths. Without it, the worst bug
+   * class in this codebase — a curated tool that quietly does what the escape
+   * hatch refuses — has no automated guard, because the method and path are
+   * buried inside each handler where nothing can introspect them.
+   */
+  apiPaths?: ReadonlyArray<readonly [HttpMethod, string]>;
   inputSchema: S;
   /** Signals a genuinely destructive call so clients can prompt the user. */
   destructive?: boolean;

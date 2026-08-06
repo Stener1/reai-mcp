@@ -143,6 +143,24 @@ function toolError(err: unknown, toolName: string): ToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
+const GROUP_BLURBS: Record<string, string> = {
+  bookkeeping:
+    "the bookkeeping core (accounts, VAT codes, vouchers, postings, general ledger)",
+  sales: "the sales side (customers, products, orders, offers, invoices, customer ledger)",
+  purchase:
+    "the purchase side (suppliers, supplier invoices, the document inbox, EHF parsing, expenses)",
+};
+
+function describeEnabledGroups(toolsets: readonly string[]): string {
+  const enabled = Object.keys(TOOL_GROUPS).filter(
+    (name) => toolsets.length === 0 || toolsets.includes(name),
+  );
+  const blurbs = enabled.map((name) => GROUP_BLURBS[name] ?? name);
+  if (blurbs.length === 0) return "no domain-specific operations — use the discovery tools";
+  if (blurbs.length === 1) return blurbs[0] as string;
+  return `${blurbs.slice(0, -1).join(", ")} and ${blurbs[blurbs.length - 1]}`;
+}
+
 function buildInstructions(
   config: ServerConfig,
   visibleCount: number,
@@ -157,12 +175,12 @@ function buildInstructions(
     "Getting oriented:",
     "- Call reai_whoami first. Almost everything is tenant-scoped, and the tenant id selects which " +
       "company's books you are in. Set it once with reai_use_tenant.",
-    "- Curated tools cover the bookkeeping core (accounts, VAT codes, vouchers, postings, general " +
-      "ledger), the sales side (customers, products, orders, offers, invoices, customer ledger) and " +
-      "the purchase side (suppliers, supplier invoices, the document inbox, EHF parsing, expenses).",
-    "- For anything else — bank reconciliation, VAT returns, leads, agreements, salary, assets, " +
-      "subscriptions — use reai_search_endpoints to find the endpoint, reai_describe_endpoint for " +
-      "its schema, then reai_request to call it.",
+    // Built from the groups actually enabled: claiming coverage a disabled
+    // toolset removed would have the model plan around tools that are not there.
+    `- Curated tools cover ${describeEnabledGroups(config.toolsets)}.`,
+    "- For anything else — and for every domain not listed above — use reai_search_endpoints to " +
+      "find the endpoint, reai_describe_endpoint for its schema, then reai_request to call it. " +
+      "Nothing in the API is out of reach that way.",
     "",
     "Bookkeeping conventions:",
     "- Dates are ISO yyyy-MM-dd.",
