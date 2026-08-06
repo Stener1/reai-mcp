@@ -291,6 +291,67 @@ async function main() {
     firstLine(textOf(switchTenant)),
   );
 
+  // 8b. The transmission guard, asserted against the DEPLOYED instance.
+  //
+  // This is the one property whose failure reaches a third party: an EHF invoice
+  // leaves over Peppol and cannot be recalled, and a tax return filed with
+  // Skatteetaten cannot be unfiled. Every other check here is about who may read
+  // or write which books, which is recoverable by comparison.
+  //
+  // It was verified locally and in the write suites but never against a real
+  // deployment, which is the configuration that actually matters — the guard
+  // depends on an environment variable, and an operator who set
+  // REAI_ALLOW_EXTERNAL_SEND without meaning to would have had nothing tell them.
+  // So this reports the deployment's posture either way rather than only passing.
+  const sendingPaths = [
+    ["POST /api/invoices/{id}/ehf", "POST", "/api/invoices/1/ehf", {}],
+    ["POST /api/invoices/{id}/email", "POST", "/api/invoices/1/email", { email: "x@example.invalid" }],
+    ["POST /api/peppol/messages/sendsbdh", "POST", "/api/peppol/messages/sendsbdh", {}],
+    ["POST /api/tax-returns/{year}/submit", "POST", "/api/tax-returns/2026/submit", {}],
+    ["POST /api/orders with sendEhf", "POST", "/api/orders", { customerId: 1, sendEhf: true, orderLines: [] }],
+  ];
+  // Two independent gates can refuse these, and which one fires depends on the
+  // deployment's write mode. In `reversible` the write policy rejects them as
+  // irreversible before transmission is ever considered; only in `full` mode is
+  // the external-send switch the thing standing between a call and Peppol. An
+  // earlier version of this check demanded the external-send gate specifically
+  // and reported a correctly-locked-down deployment as having sending ENABLED —
+  // exactly the wrong thing to tell an operator. So accept either gate, and say
+  // which one answered.
+  let allowedThrough = 0;
+  const gates = new Set();
+  for (const [label, method, path, body] of sendingPaths) {
+    const res = await client.callTool({
+      name: "reai_request",
+      arguments: { method, path, body },
+    });
+    const text = textOf(res);
+    // Requiring the refusal to name its own gate is what separates "blocked by
+    // policy" from "the API happened to reject it" — a 404 for a nonexistent
+    // invoice must not read as a pass.
+    const byExternalSend = /REAI_ALLOW_EXTERNAL_SEND/.test(text);
+    const byWriteMode = /REAI_WRITE_MODE/.test(text);
+    const refused = res.isError === true && (byExternalSend || byWriteMode);
+    if (!refused) allowedThrough += 1;
+    if (byExternalSend) gates.add("external-send switch");
+    else if (byWriteMode) gates.add("write policy");
+    report(
+      `refused before it could transmit: ${label}`,
+      refused,
+      refused
+        ? `refused by the ${byExternalSend ? "external-send switch" : "write policy"}`
+        : `NOT REFUSED — ${firstLine(text).slice(0, 130)}`,
+    );
+  }
+  console.log(
+    allowedThrough === 0
+      ? `\n  Nothing can transmit from this deployment. Refused by: ${[...gates].join(" and ")}.\n`
+      : `\n  WARNING: ${allowedThrough} of ${sendingPaths.length} transmitting paths were NOT refused.\n` +
+          "  EHF/Peppol, invoice email or a government filing can leave this deployment. That is a\n" +
+          "  legitimate setup for a business doing its own invoicing, but never point it at books\n" +
+          "  you are only testing with — an EHF invoice cannot be recalled.\n",
+  );
+
   await client.close();
 
   // 9. A garbage bearer token must be refused.
