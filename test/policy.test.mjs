@@ -590,3 +590,54 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
   assert.equal(rows[0], 7, "an explicit rowNumber must be respected");
   assert.ok(rows[1] !== undefined && rows[1] !== 7, `the second posting needs its own row, got ${rows[1]}`);
 });
+
+test("anything creatable in reversible mode is also deletable in it", async () => {
+  // `reversible` is documented as "reads, plus master data that can be cleanly
+  // deleted". It shipped registering create tools for products, orders, offers and
+  // company bank accounts with no way to remove any of them — found by walking a
+  // session as an agent would: it drafted an offer and then had nothing to call.
+  //
+  // The DELETE endpoints existed and classified as reversible the whole time, so the
+  // capability was permitted; only the curated tool was missing, which left the
+  // agent to discover the escape hatch to undo what the default mode had just
+  // encouraged.
+  const { allTools } = await import("../dist/server.js");
+  const { isAllowed } = await import("../dist/policy.js");
+
+  const visible = allTools.filter((t) => isAllowed(t.risk, "reversible"));
+  const names = new Set(visible.map((t) => t.name));
+  const gaps = visible
+    .filter((t) => t.name.startsWith("reai_create_"))
+    .filter((t) => !names.has(t.name.replace("reai_create_", "reai_delete_")))
+    .map((t) => t.name);
+
+  assert.deepEqual(
+    gaps,
+    [],
+    `these can be created in the default mode but not removed in it:\n  ${gaps.join("\n  ")}`,
+  );
+});
+
+test("every delete tool's endpoint is classified no worse than the tool claims", async () => {
+  // A delete tool advertising `reversible` while its path classifies irreversible
+  // would be registered in the default mode and then refused at call time.
+  const { allTools } = await import("../dist/server.js");
+  const { classifyRequest, isAllowed } = await import("../dist/policy.js");
+
+  // The narrowest write mode that permits a given risk. "irreversible" is a RISK,
+  // not a mode — passing it as one is how this test first failed.
+  const minimumMode = { read: "read-only", reversible: "reversible", irreversible: "full" };
+
+  for (const tool of allTools.filter((t) => t.name.startsWith("reai_delete_"))) {
+    const mode = minimumMode[tool.risk];
+    assert.ok(mode, `${tool.name} has an unrecognised risk "${tool.risk}"`);
+    for (const [method, path] of tool.apiPaths ?? []) {
+      const risk = classifyRequest(method, path);
+      assert.ok(
+        isAllowed(risk, mode),
+        `${tool.name} declares risk="${tool.risk}" (registered in ${mode} mode) but ` +
+          `${method} ${path} classifies "${risk}", so calling it would be refused`,
+      );
+    }
+  }
+});

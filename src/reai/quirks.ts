@@ -273,8 +273,14 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
-      'Order, offer and subscription lines accept only the VAT codes from GET ' +
-      '/api/vat-codes?usage=customer-invoice — a purchase-side code is rejected.',
+      'ORDER and subscription lines accept only the VAT codes from GET ' +
+      '/api/vat-codes?usage=customer-invoice — a purchase-side code is rejected with ' +
+      '"Mva-kode N er ikke tillatt. Tillatte koder: ...".\n' +
+      'OFFER lines are NOT checked against that list. Verified on a tenant where the list is just ' +
+      '["0"]: an offer line with vatCode "3" was accepted, stored as "3", and read back unchanged, ' +
+      'while an identical order line was rejected. So an offer can carry a code that fails later, ' +
+      'when the same work becomes an order or an invoice. Validate an offer line against ' +
+      '?usage=customer-invoice yourself rather than trusting acceptance.',
   },
   {
     id: "days-until-due-mandatory",
