@@ -69,7 +69,7 @@ jobs:
       - name: Pack and inspect
         run: |
           npm pack --dry-run 2>&1 | tee pack.log
-          for required in dist/index.js spec/index.json spec/reai-openapi.json LICENSE README.md; do
+          for required in dist/index.js dist/http.js spec/index.json spec/reai-openapi.json LICENSE README.md; do
             grep -q "$required" pack.log || {
               echo "::error::$required is missing from the published package"
               exit 1

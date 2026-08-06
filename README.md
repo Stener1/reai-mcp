@@ -76,6 +76,70 @@ npm run build
 REAI_USER_API_TOKEN=your-token npm start
 ```
 
+## Self-hosting as a remote connector
+
+The same server also speaks MCP over Streamable HTTP, so it can be added as a **custom connector** rather than spawned locally. There is no hosted instance — you run your own, which means your ReAI token never leaves infrastructure you control.
+
+It implements OAuth 2.1 as its own authorization server: dynamic client registration (RFC 7591), authorization code + PKCE (S256 only), resource metadata (RFC 9728), and refresh tokens. ReAI itself uses static API tokens and has no OAuth endpoints, so the flow bridges the two — the user pastes a ReAI token on the consent page, the server verifies it against `GET /api/me`, and then mints its own tokens carrying it.
+
+### Docker
+
+```bash
+docker build -t reai-mcp .
+docker run -p 8080:8080 \
+  -e REAI_ENCRYPTION_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")" \
+  -e PUBLIC_URL=https://reai-mcp.example.com \
+  -e REAI_WRITE_MODE=reversible \
+  reai-mcp
+```
+
+Then add `https://reai-mcp.example.com/mcp` as a custom connector. No `REAI_USER_API_TOKEN` is needed in remote mode — each user supplies their own during authorization.
+
+### Google Cloud Run
+
+```bash
+gcloud run deploy reai-mcp \
+  --source . \
+  --region europe-north1 \
+  --allow-unauthenticated \
+  --set-env-vars "REAI_WRITE_MODE=reversible" \
+  --set-secrets "REAI_ENCRYPTION_KEY=reai-mcp-encryption-key:latest"
+
+# Then pin PUBLIC_URL to the URL Cloud Run assigned:
+gcloud run services update reai-mcp --region europe-north1 \
+  --set-env-vars "PUBLIC_URL=$(gcloud run services describe reai-mcp --region europe-north1 --format='value(status.url)')"
+```
+
+`--allow-unauthenticated` is required — the MCP client must be able to reach the OAuth endpoints. The server does its own authentication; every `/mcp` request needs a valid token, and unauthenticated requests get a `401` with a `WWW-Authenticate` challenge.
+
+### Why there is no database
+
+Access tokens are **sealed**: the user's ReAI token is encrypted into the token itself with AES-256-GCM, along with the tenant and write mode chosen at authorization time. Any instance can therefore serve any request with no shared session store — which is what makes a scale-to-zero, multi-instance deployment practical.
+
+The trade-offs are worth stating plainly:
+
+- **`REAI_ENCRYPTION_KEY` is required in production.** Without it a random key is generated at startup, so every existing authorization breaks on restart, and separate instances reject each other's tokens. The server warns loudly.
+- **Individual tokens cannot be revoked** before they expire (8 hours). Rotating `REAI_ENCRYPTION_KEY` invalidates all of them at once, which is the intended remedy.
+- **Treat the key like a credential.** It decrypts every user's ReAI token. Use Secret Manager, not an env var in source control.
+
+### Verify a deployment
+
+```bash
+REAI_USER_API_TOKEN=your-token node scripts/smoke-http.mjs --url https://reai-mcp.example.com
+```
+
+This walks the entire OAuth flow the way a real client does — discovery, registration, PKCE authorization, token exchange, refresh — then connects over Streamable HTTP and calls read-only tools. It also asserts the negative cases: that PKCE is mandatory, that an authorization code cannot be replayed, that a forged token is refused, and that the ReAI token is never echoed back.
+
+### Remote configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8080` | Listen port |
+| `PUBLIC_URL` | inferred from `Host` | **Set in production.** Published in OAuth metadata, so it must match what clients connect to |
+| `REAI_ENCRYPTION_KEY` | random per boot | **Set in production.** 32 bytes, base64 or hex. Seals access tokens |
+| `REAI_ALLOWED_HOSTS` | — | Comma-separated hostnames to accept; enables DNS-rebinding protection |
+| `REAI_ALLOW_TOKEN_PASSTHROUGH` | off | Accept a raw ReAI token in the `Authorization` header, skipping OAuth. Convenient behind Tailscale or IAP; **anyone who reaches the URL acts as whoever's token they present**, so never enable it on a public deployment |
+
 ## Verify it works
 
 ```bash
