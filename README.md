@@ -386,7 +386,18 @@ npm run smoke        # read-only, end-to-end against the live API (needs a token
 
 Unit tests cover the write-policy classifier and spec search/describe, and need no network access or credentials.
 
-Two live harnesses, both of which assert the **negatives** as well as the happy path:
+### Running CI's checks locally
+
+```bash
+./scripts/ci-local.sh          # the working tree
+./scripts/ci-local.sh main     # a specific ref
+```
+
+This runs everything `.github/workflows/ci.yml` runs — typecheck, build, the unit tests, and the published-package check — against every Node version in the matrix, and exits non-zero if any of it would fail.
+
+It was written during a multi-hour GitHub Actions outage, when no workflow could start at all: "wait for a green tick" stops being a quality gate while the service producing the tick is down. It is **not** a substitute for CI, because it cannot reproduce the clean-room `npm ci` on Linux, and it says so on every run. If a Node version in the matrix is not installed locally it warns and tells you not to treat the result as equivalent.
+
+Live harnesses, all of which assert the **negatives** as well as the happy path:
 
 ```bash
 # Read-only. Safe against production books.
