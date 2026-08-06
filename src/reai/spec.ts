@@ -363,7 +363,9 @@ export function missingRequired(
   // A wholly absent body when the operation demands one. Reported separately
   // because the field list cannot express it: those 51 operations have a mandatory
   // body and no mandatory property inside it.
-  const bodyMissing = op.body?.bodyRequired === true && body === undefined;
+  // `null` counts as absent too: ReaiClient.request serialises a payload only when
+  // the body is neither undefined nor null, so `body: null` sends nothing at all.
+  const bodyMissing = op.body?.bodyRequired === true && (body === undefined || body === null);
 
   return { params, bodyFields, bodyMissing };
 }

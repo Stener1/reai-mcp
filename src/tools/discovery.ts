@@ -245,13 +245,18 @@ function enrichRequestFailure(
     );
   }
   if (bodyMissing) {
-    // Distinct from a missing FIELD: these operations require a body while every
-    // property inside it is optional, so the field list cannot express the problem.
     const shape = Object.keys(op.body?.fields ?? {});
+    // Only claim the properties are all optional when they actually are. An
+    // operation can require a body AND require fields within it -- POST /api/assets
+    // needs accountNumber and name -- and asserting "every property is optional"
+    // immediately before listing those as required contradicts itself.
+    const allOptional = bodyFields.length === 0;
     extra.push(
-      `${op.method} ${op.path} requires a request body and none was sent. Every property in it is ` +
-        `optional, which is why no individual field is named` +
-        `${shape.length > 0 ? `; the accepted properties are: ${shape.join(", ")}` : ""}.`,
+      `${op.method} ${op.path} requires a request body and none was sent.` +
+        (allOptional
+          ? ` Every property in it is optional, which is why no individual field is named` +
+            `${shape.length > 0 ? `; the accepted properties are: ${shape.join(", ")}` : ""}.`
+          : ""),
     );
   }
   if (bodyFields.length > 0) {
@@ -396,7 +401,11 @@ const request = defineTool({
     // agent: a success status carrying a login page. Within /api/ a wrong path does
     // 404 properly; this only catches the fall-through, and it is reported as a
     // failure because nothing was actually called.
-    if (!args.binary && /^text\/html/i.test(res.contentType ?? "")) {
+    // Checked regardless of `binary`: in binary mode ReaiClient.parseBody would
+    // base64-encode the HTML shell and this would report a successful attachment
+    // download, which is the exact false success the check exists to prevent. A
+    // genuine PDF or attachment never comes back as text/html.
+    if (/^text\/html/i.test(res.contentType ?? "")) {
       return {
         content: [
           {

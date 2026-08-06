@@ -168,6 +168,46 @@ test("an HTML response is reported as a routing miss, not a success", async () =
   assert.match(text, /case-sensitive/);
 });
 
+test("HTML is detected even in binary mode", async () => {
+  // Following the documented guidance and setting binary: true for a PDF endpoint
+  // must not bypass this: parseBody would base64-encode the HTML shell and the call
+  // would be reported as a successful attachment download — the exact false success
+  // the check exists to prevent.
+  const tool = allTools.find((t) => t.name === "reai_request");
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1, writeMode: "reversible", allowExternalSend: false },
+    session: {},
+    client: {
+      request: async () => ({ status: 200, data: "PGh0bWw+", contentType: "text/html" }),
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+  const res = await tool.handler({ method: "GET", path: "/api/documents/1/content", binary: true }, ctx);
+  assert.equal(res.isError, true, "an HTML body must fail even when binary was requested");
+  assert.match(res.content.map((c) => c.text).join("\n"), /matched no API route/);
+});
+
+test("a required body with required fields is not called all-optional", async () => {
+  // POST /api/assets requires a body AND requires accountNumber and name inside it.
+  // Saying "every property is optional" immediately before listing those two as
+  // required contradicts itself.
+  const op = resolveOperation("POST", "/api/assets");
+  assert.ok(op);
+  assert.equal(op.body?.bodyRequired, true);
+  const result = missingRequired(op, undefined, undefined);
+  assert.equal(result.bodyMissing, true);
+  assert.ok(result.bodyFields.length > 0, "this operation should have required fields too");
+});
+
+test("a null body counts as absent, matching the client", async () => {
+  // ReaiClient.request serialises a payload only when the body is neither undefined
+  // nor null, so `body: null` transmits nothing.
+  const op = resolveOperation("PUT", "/api/leads/5/notes");
+  assert.equal(missingRequired(op, undefined, null).bodyMissing, true);
+  assert.equal(missingRequired(op, undefined, undefined).bodyMissing, true);
+  assert.equal(missingRequired(op, undefined, {}).bodyMissing, false);
+});
+
 test("a JSON response is still reported as success", async () => {
   const tool = allTools.find((t) => t.name === "reai_request");
   const ctx = {
