@@ -435,11 +435,24 @@ const createProduct = defineTool({
  * itemName and vatCode. Sending an order-shaped line to /api/offers is a 400, so
  * the two are built separately below rather than shared wholesale.
  */
-const LINE_VAT_CODE = z
+// Orders and offers differ here, and the difference only shows up later, so each
+// gets its own wording rather than sharing one description that is wrong for one of
+// them. Someone using the curated tool reads this schema, not the quirks registry.
+const ORDER_VAT_CODE = z
   .string()
   .describe(
-    'VAT code. Order and offer lines accept ONLY the codes returned by reai_list_vat_codes with ' +
-      'usage="customer-invoice" — a purchase-side code is rejected.',
+    'VAT code. Order lines accept ONLY the codes returned by reai_list_vat_codes with ' +
+      'usage="customer-invoice"; anything else is rejected outright with "Mva-kode N er ikke ' +
+      'tillatt".',
+  );
+
+const OFFER_VAT_CODE = z
+  .string()
+  .describe(
+    'VAT code. Offer lines are NOT validated against usage="customer-invoice", so a code outside ' +
+      'that list is accepted and stored here and then rejected later, when the offer becomes an ' +
+      'order or invoice. Acceptance is not confirmation: check the code against ' +
+      'reai_list_vat_codes with usage="customer-invoice" yourself.',
   );
 
 const lineBase = {
@@ -463,14 +476,14 @@ const lineBase = {
 const orderLine = z.object({
   ...lineBase,
   itemName: z.string().optional().describe("Line text. Falls back to the product name when variantId is set."),
-  vatCode: LINE_VAT_CODE.optional(),
+  vatCode: ORDER_VAT_CODE.optional(),
 });
 
 const offerLine = z.object({
   ...lineBase,
   // Both required by OfferLineReq, unlike on an order line.
   itemName: z.string().min(1).describe("Line text. Required on offer lines."),
-  vatCode: LINE_VAT_CODE,
+  vatCode: OFFER_VAT_CODE,
 });
 
 /**
