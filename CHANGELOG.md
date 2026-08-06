@@ -48,7 +48,7 @@ connector, and has been verified against live ReAI data throughout.
 - **A tenant bound at authorization time is a boundary, not a default** — a grant
   scoped to one company cannot address another, even though the underlying ReAI
   token may reach dozens.
-- **37 known API quirks** keyed to the operations they affect, surfacing
+- **38 known API quirks** keyed to the operations they affect, surfacing
   automatically in discovery. Request shapes that differ from what an endpoint
   name suggests, constraints the schema omits, multi-step workflows, and
   operations that are harder to undo than they look.

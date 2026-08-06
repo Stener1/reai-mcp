@@ -193,6 +193,46 @@ function imbalance(postings: Array<{ amount: number }>): number {
   return Math.round(sum * 100) / 100;
 }
 
+/**
+ * Assign voucher row numbers when the caller has not.
+ *
+ * Postings that share a `rowNumber` are MERGED into one voucher row, which
+ * requires them to agree on what that row carries — including the description.
+ * Since an omitted rowNumber puts every posting in row 0, giving two postings
+ * different descriptions makes the merge impossible and the API rejects the whole
+ * voucher with "postings with rowNumber 0 cannot be merged into one voucher row.
+ * Book the debit side as a positive amount and the credit side as a negative
+ * amount" — which blames the sign convention even when the signs are correct, so
+ * it sends you looking in the wrong place entirely.
+ *
+ * Verified against the live API: identical (or absent) descriptions merge fine;
+ * differing ones need distinct row numbers.
+ *
+ * So: respect any explicit rowNumber, leave them out when the descriptions agree
+ * (which produces a tidier single-row voucher), and otherwise give each posting
+ * its own row so per-line descriptions survive.
+ */
+function assignRowNumbers<T extends { rowNumber?: number | undefined; description?: string | undefined }>(
+  postings: T[],
+): T[] {
+  if (postings.some((p) => p.rowNumber !== undefined)) return postings;
+
+  const descriptions = new Set(postings.map((p) => p.description ?? ""));
+  if (descriptions.size <= 1) return postings;
+
+  // Group by description: postings sharing one still share a row.
+  const rowByDescription = new Map<string, number>();
+  return postings.map((p) => {
+    const key = p.description ?? "";
+    let row = rowByDescription.get(key);
+    if (row === undefined) {
+      row = rowByDescription.size;
+      rowByDescription.set(key, row);
+    }
+    return { ...p, rowNumber: row };
+  });
+}
+
 const createVoucher = defineTool({
   name: "reai_create_voucher",
   title: "Book a voucher",
@@ -235,7 +275,7 @@ const createVoucher = defineTool({
     const body = {
       date: args.date,
       ...(args.description !== undefined ? { description: args.description } : {}),
-      postings: args.postings.map((p) => ({
+      postings: assignRowNumbers(args.postings).map((p) => ({
         ...p,
         postingDate: p.postingDate ?? args.date,
         currency: p.currency ?? "NOK",

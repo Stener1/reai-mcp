@@ -117,6 +117,20 @@ export const QUIRKS: readonly Quirk[] = [
       "lines, which name debit and credit accounts explicitly.",
   },
   {
+    id: "voucher-row-merge",
+    paths: ["/api/vouchers", "/api/vouchers/{id}"],
+    methods: ["POST", "PUT"],
+    kind: "validation",
+    note:
+      "Postings sharing a `rowNumber` are MERGED into one voucher row and must therefore agree on " +
+      "what that row carries — notably `description`. An omitted rowNumber puts every posting in " +
+      "row 0, so giving two postings different descriptions makes the voucher fail with " +
+      '"postings with rowNumber 0 cannot be merged into one voucher row. Book the debit side as a ' +
+      'positive amount and the credit side as a negative amount" — which blames the sign convention ' +
+      "even when the signs are already correct. Either give the postings the same description, or " +
+      "distinct rowNumbers. Verified against the live API.",
+  },
+  {
     id: "voucher-not-deletable",
     paths: ["/api/vouchers/{id}"],
     methods: ["DELETE"],
