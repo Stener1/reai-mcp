@@ -188,7 +188,8 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 |---|---|
 | `reai_list_api_tags` | All 51 API domains with operation counts — a map of what the system can do |
 | `reai_search_endpoints` | Keyword search across all 313 public operations |
-| `reai_describe_endpoint` | Full schema for one endpoint, nested objects resolved |
+| `reai_describe_endpoint` | Full schema for one endpoint, nested objects resolved — **with known quirks first** |
+| `reai_api_notes` | Browse the known API quirks (see [below](#api-quirks-worth-knowing)) |
 | `reai_request` | Call any endpoint. Auth and tenant handled; writes are policy-checked |
 
 ### Bookkeeping
@@ -220,18 +221,81 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_credit_invoice` | Credit note — the correct way to undo an invoice | **irreversible** |
 | `reai_register_invoice_payment` | Record a customer payment | **irreversible** |
 
-Anything not listed — suppliers, supplier invoices, expenses, bank reconciliation, leads, agreements, salary, assets, subscriptions — is reachable through `reai_search_endpoints` + `reai_request` today, and more curated tools are landing.
+### Purchase
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_suppliers` · `reai_get_supplier` | Find and read suppliers (*leverandører*) | read |
+| `reai_supplier_ledger` | Leverandørreskontro — `isUnpaid` answers "what do we owe" | read |
+| `reai_list_supplier_invoices` · `reai_get_supplier_invoice` | Registered supplier invoices and credit notes | read |
+| `reai_list_reception_documents` | The document inbox — incoming invoices and receipts not yet booked | read |
+| `reai_parse_ehf_attachment` | Parse an incoming EHF invoice into structured data | read |
+| `reai_list_expenses` | Employee expense claims, incl. per diems and mileage | read |
+| `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data and bank details | reversible |
+| `reai_create_supplier_invoice` | Register a supplier invoice directly | **irreversible** |
+| `reai_register_supplier_invoice_payment` | Record paying a supplier | **irreversible** |
 
-## Bookkeeping conventions worth knowing
+### Bank & VAT
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_company_banks` | The company's own accounts; the `id` is the `companyBankId` others need | read |
+| `reai_get_bank_reconciliation` | Reconciliation state for one account and month — **the only way to see bank transactions** | read |
+| `reai_get_bank_transaction` | One transaction by id | read |
+| `reai_list_reconciliation_rules` | Automatic booking rules | read |
+| `reai_get_tax_return` | Skattemelding for a year, with submission status | read |
+| `reai_create_company_bank` | Register a bank account | reversible |
+| `reai_create_reconciliation_rule` · `reai_delete_reconciliation_rule` | Manage booking rules | reversible |
+| `reai_match_bank_transactions` | Reconcile transactions against existing postings | **irreversible** |
+| `reai_book_bank_transactions` | Book transactions to a counter-account | **irreversible** |
+| `reai_apply_reconciliation_rules` | Run the rules over a period (background job) | **irreversible** |
+| `reai_create_vat_return` | Settle and **lock** a VAT term — does *not* file with Skatteetaten | **irreversible** |
 
-- **Dates** are ISO `yyyy-MM-dd`.
-- **Signs**: in a voucher a **positive** amount *debits* an account, a **negative** amount *credits* it, and all postings must sum to exactly zero. `reai_create_voucher` checks this locally and tells you the exact imbalance.
-- **Account numbers and VAT codes are tenant-specific.** Look them up rather than assuming; which VAT codes are valid depends on the tenant's VAT registration.
-- **Billing is a two-step chain**: an **order** carries the line items, and invoicing that order creates the invoice. There is no endpoint that builds an invoice from lines directly — this surprises everyone once.
-- **To undo an issued invoice, raise a credit note.** An invoice is a numbered legal document; it is not deletable.
-- **Order lines and offer lines differ.** An offer line requires `itemName` and `vatCode`; an order line does not. Both accept only VAT codes from `reai_list_vat_codes` with `usage="customer-invoice"`.
-- **`daysUntilDue` is mandatory** on orders and offers, so the API can never apply the customer's own terms by itself. The tools read the customer's terms for you and say which source they used.
-- **Deep links** need the tenant: `https://app.reai.no/vouchers/123?tenantId=2634`. The tools return these already formed.
+Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+Narrow the surface with `REAI_TOOLSETS=bookkeeping,sales,purchase,bank` if 58 tools is more than your client wants to see. Discovery is never disabled, so nothing becomes unreachable.
+
+## API quirks worth knowing
+
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **35 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
+
+Browse them with `reai_api_notes`, or read the highlights:
+
+**Shapes that aren't what the name suggests**
+- **An invoice is created from an ORDER, not from line items.** `POST /api/invoices` takes an `orderId`. There is no endpoint that builds an invoice from lines — the order carries them.
+- **There is no endpoint that lists bank transactions.** Only get-by-id. Transactions are visible solely through the reconciliation view for one account and one month, which makes that view the entry point for all bank work.
+- **Voucher postings and supplier-invoice cost lines use different conventions.** A voucher posting is one *signed* amount (positive debits, negative credits, summing to zero). A cost line names debit and credit accounts explicitly, and its sign encodes *document type* — positive on an invoice, negative on a credit note.
+- **`POST /api/vat-returns` takes `year` and `period` as query parameters**, not a body.
+
+**Constraints the schema omits**
+- `startDate`/`endDate` are required on vouchers, postings and ledgers even where not marked so.
+- **Offer lines are stricter than order lines** — `itemName` and `vatCode` are both required on an offer.
+- Order, offer and subscription lines accept only VAT codes from `?usage=customer-invoice`.
+- A **`+47` prefix on a Norwegian phone number is rejected**.
+- `POST /api/customers` silently discards `invoiceEmail`, `phone` and `daysUntilDue` — those live on the `PATCH`.
+
+**Things harder to undo than they look**
+- **Settling a VAT period locks it but files nothing.** There is no submission endpoint in the public API; `/complete-manually` exists to record that a return was filed elsewhere. Never report a VAT return as submitted.
+- `period` is a **term index, not a month**: 1 = Jan–Feb … 6 = Nov–Dec. Passing `4` for April locks Jul–Aug.
+- An **issued invoice cannot be deleted** — credit it.
+- `sendEhf: true` on an order **arms Peppol transmission** to a real counterparty at invoicing time.
+- A subscription with `outputMode: "create_invoice"` and `automaticBillingGeneration: true` **issues invoices on a schedule with no further call**.
+- `DELETE` on a supplier invoice **reverses** it rather than removing it.
+
+**Surprises**
+- ReAI **title-cases stored names**, so a round-trip is not byte-equal.
+- `DELETE` **archives instead of deleting** when a record has transactions; the response says which.
+- A **403 is often a disabled module**, not a permissions problem — read the `detail`.
+- `apply-rules` is a **background job** returning `started` or `already_running`; the work isn't done when the call returns.
+- Two reconciliation views exist: synced accounts use `/api/bank-reconciliations/{id}`, accounts with `providerType: "manual"` use `/api/manual-reconciliations/{id}`.
+
+**Conventions that are simply true everywhere**
+- Dates are ISO `yyyy-MM-dd`; reconciliation months are `yyyy-MM`.
+- Account numbers and VAT codes are **tenant-specific** — look them up, never assume.
+- `daysUntilDue` is mandatory on orders and offers, so the API can never apply the customer's own terms by itself. The curated tools read the customer's terms for you and report which source they used.
+- Deep links need the tenant: `https://app.reai.no/vouchers/123?tenantId=2634`. The tools return these already formed.
+
+Where a curated tool exists, it enforces what it can locally so you get an explanation instead of a `400`: `reai_create_voucher` checks the debit/credit balance and reports the exact imbalance, `reai_create_supplier_invoice` checks cost-line signs against the document type, and `reai_apply_reconciliation_rules` refuses to run without a bounded period.
+
+A test asserts every quirk still matches a real operation in the spec, so they can't quietly rot as the API changes.
 
 ## Configuration
 

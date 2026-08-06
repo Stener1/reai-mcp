@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineTool, ok, okText, tenantIdArg, resolveTenantId, type ToolDef } from "./registry.js";
 import { describeOperation, findOperation, getSpecIndex, searchOperations } from "../reai/spec.js";
+import { findQuirks, quirksFor } from "../reai/quirks.js";
 import {
   assertAllowed,
   canonicalizeApiPath,
@@ -58,10 +59,17 @@ const searchEndpoints = defineTool({
       );
     }
 
-    const results = hits.map((h) => ({
+    const results = hits.map((h) => {
+      const quirks = quirksFor(h.method, h.path);
+      return {
       call: `${h.method} ${h.path}`,
       tag: h.tag,
       ...(h.summary ? { summary: h.summary } : {}),
+      // Surfaced here rather than only in describe, so an agent choosing between
+      // endpoints can see which ones have a trap in them.
+      ...(quirks.length > 0
+        ? { knownQuirks: quirks.map((q) => `[${q.kind}] ${q.note}`) }
+        : {}),
       ...(h.params?.length
         ? {
             params: h.params.map(
@@ -72,7 +80,8 @@ const searchEndpoints = defineTool({
       ...(h.body ? { body: h.body } : {}),
       ...(h.deprecated ? { deprecated: true } : {}),
       ...(h.internal ? { internal: true } : {}),
-    }));
+      };
+    });
 
     return ok(results, {
       note:
@@ -118,8 +127,15 @@ const describeEndpoint = defineTool({
           `Paths must match the spec exactly, including {braces} around path parameters.${suggestion}`,
       );
     }
-    return ok(describeOperation(op, args.depth ?? 4), {
-      note: `Schema for ${op.method} ${op.path}. Call it with reai_request.`,
+    const described = describeOperation(op, args.depth ?? 4);
+    const quirkCount = described.quirks?.length ?? 0;
+    return ok(described, {
+      note:
+        `Schema for ${op.method} ${op.path}. Call it with reai_request.` +
+        (quirkCount > 0
+          ? `\n${quirkCount} known quirk(s) for this endpoint are listed under "quirks" — read ` +
+            `them before calling; several were learned from a rejected request rather than the schema.`
+          : ""),
     });
   },
 });
@@ -139,6 +155,52 @@ const listApiTags = defineTool({
         `${index.counts.public} public operations across ${Object.keys(index.tags).length} domains ` +
         `(plus ${index.counts.internal} internal endpoints, hidden by default). ` +
         `Search within one using reai_search_endpoints with the tag parameter.`,
+    });
+  },
+});
+
+const apiNotes = defineTool({
+  name: "reai_api_notes",
+  title: "Known ReAI API quirks",
+  description:
+    "Browse the known quirks of the ReAI API: request shapes that differ from what an endpoint name " +
+    "suggests, constraints the schema does not state, multi-step workflows, and operations that are " +
+    "harder to undo than they look.\n\n" +
+    "Worth reading before working in a domain the curated tools do not cover, since those endpoints " +
+    "are reached through raw schemas. Individual quirks also appear automatically on the endpoints " +
+    "they affect in reai_search_endpoints and reai_describe_endpoint.",
+  risk: "read",
+  inputSchema: {
+    query: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by keyword, matched against the note, paths and kind — e.g. "vat", "invoice", ' +
+          '"irreversible", "bank". Omit for all of them.',
+      ),
+  },
+  handler: async (args) => {
+    const quirks = findQuirks(args.query);
+    if (quirks.length === 0) {
+      return okText(
+        `No known quirks matched "${args.query}". That is not a guarantee there are none — ` +
+          `call reai_describe_endpoint for the endpoint's actual schema.`,
+      );
+    }
+    const byKind: Record<string, Array<{ paths: string; note: string }>> = {};
+    for (const q of quirks) {
+      (byKind[q.kind] ??= []).push({
+        paths: q.paths.join(", ") + (q.methods ? ` (${q.methods.join("/")})` : ""),
+        note: q.note,
+      });
+    }
+    return ok(byKind, {
+      note:
+        `${quirks.length} known quirk(s)` +
+        `${args.query ? ` matching "${args.query}"` : ""}, grouped by kind. ` +
+        `"shape" = the payload is not what the name suggests; "validation" = a constraint the ` +
+        `schema omits; "workflow" = needs a specific sequence; "irreversible" = hard or impossible ` +
+        `to undo; "gotcha" = simply surprising.`,
     });
   },
 });
@@ -242,5 +304,6 @@ export const discoveryTools: ToolDef[] = [
   searchEndpoints,
   describeEndpoint,
   listApiTags,
+  apiNotes,
   request,
 ] as ToolDef[];

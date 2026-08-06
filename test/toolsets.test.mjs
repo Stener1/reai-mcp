@@ -120,6 +120,7 @@ test("every curated tool declares the API paths it calls", () => {
     "reai_search_endpoints",
     "reai_describe_endpoint",
     "reai_list_api_tags",
+    "reai_api_notes",
     "reai_request",
     // Session-local state only; touches no API path of its own beyond /api/me.
     "reai_use_tenant",
