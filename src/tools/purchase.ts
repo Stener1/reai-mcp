@@ -12,6 +12,13 @@ import {
 } from "./registry.js";
 
 /**
+ * Floor for open-item queries. Mirrors the customer-side constant: the ledger only
+ * returns parties with activity in the window, so an unpaid invoice from an earlier
+ * year is simply absent unless the window reaches back.
+ */
+const OPEN_ITEM_FLOOR = "2000-01-01";
+
+/**
  * The purchase side: suppliers, supplier invoices, the document inbox, expenses.
  *
  * Two things shape this domain and are not obvious from the endpoint names.
@@ -204,7 +211,14 @@ const supplierLedger = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const startDate = args.startDate ?? startOfYear();
+    // Widened for open-item questions, exactly as the customer ledger already is.
+    // The endpoint returns only suppliers "with activity in the period", so a
+    // current-year default silently hides an invoice that went unpaid in an earlier
+    // year — and "what do we still owe" is precisely the question people ask of this
+    // tool. Understating accounts payable is the failure mode, and it looks like a
+    // clean answer. Both open-item flags need it, not just one.
+    const openItems = args.isUnpaid === true || args.isOpenPosting === true;
+    const startDate = args.startDate ?? (openItems ? OPEN_ITEM_FLOOR : startOfYear());
     const endDate = args.endDate ?? today();
     const path = args.supplierId ? `/api/ledger/supplier/${args.supplierId}` : "/api/ledger/supplier";
     const res = await ctx.client.request({
@@ -219,7 +233,15 @@ const supplierLedger = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data, { note: `Supplier ledger ${startDate} to ${endDate}.` });
+    return ok(res.data, {
+      note:
+        `Supplier ledger ${startDate} to ${endDate}` +
+        (openItems && args.startDate === undefined
+          ? " (open items only — the window was widened back to 2000, because this endpoint returns " +
+            "only suppliers with activity in the period and an older unpaid invoice would otherwise " +
+            "be invisible)."
+          : "."),
+    });
   },
 });
 

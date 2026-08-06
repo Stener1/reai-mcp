@@ -189,7 +189,7 @@ const PATH_RESOLUTION_BASE = "https://reai-mcp.invalid";
  */
 export function canonicalizeApiPath(
   rawPath: string,
-): { pathname: string; search: string } | undefined {
+): { pathname: string; search: string; decodedPathname: string } | undefined {
   const trimmed = rawPath.trim();
   if (!trimmed) return undefined;
   let url: URL;
@@ -206,7 +206,45 @@ export function canonicalizeApiPath(
   // so anything still ambiguous after resolution is refused outright.
   if (hasAmbiguousSegments(url.pathname)) return undefined;
 
-  return { pathname: url.pathname, search: url.search };
+  // The value that gets CLASSIFIED must be the value the upstream server will
+  // ROUTE on, and those are not the same string. `new URL()` leaves percent-escapes
+  // other than %2f/%5c untouched, while ReAI is ASP.NET and decodes the path before
+  // routing — so "/api/agreements/3/sign-reques%74" was classified as an unknown
+  // sub-path of the reversible /api/agreements prefix and then landed on the real
+  // sign-request endpoint, which emails a counterparty. Every guard in this file
+  // reduced to a spelling convention: %66 for f, %65 for e, %74 for t defeated both
+  // the write ladder and the transmission patterns from the default configuration.
+  //
+  // So the decoded form is carried alongside for classification. The raw form is
+  // still what gets sent, because legitimate path parameters (a filename, say) need
+  // their escapes preserved.
+  const decodedPathname = decodePathForRouting(url.pathname);
+  if (decodedPathname === undefined) return undefined;
+
+  return { pathname: url.pathname, search: url.search, decodedPathname };
+}
+
+/**
+ * Percent-decode each path segment the way a router would, or refuse.
+ *
+ * Refuses when decoding changes the SHAPE of the path — introducing a separator or
+ * a dot segment — because then one string means two different routes depending on
+ * who decodes it, which is the ambiguity `hasAmbiguousSegments` exists to reject.
+ */
+function decodePathForRouting(pathname: string): string | undefined {
+  const segments = pathname.split("/");
+  const decoded: string[] = [];
+  for (const segment of segments) {
+    let out: string;
+    try {
+      out = decodeURIComponent(segment);
+    } catch {
+      return undefined; // malformed escape; refuse rather than guess
+    }
+    if (out.includes("/") || out.includes("\\") || out === "." || out === "..") return undefined;
+    decoded.push(out);
+  }
+  return decoded.join("/");
 }
 
 /**

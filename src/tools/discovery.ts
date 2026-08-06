@@ -18,6 +18,7 @@ import {
   classifyWithBody,
   escalatingBodyFields,
   transmittingBodyFields,
+  type Risk,
 } from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
 import { ReaiApiError } from "../reai/errors.js";
@@ -222,6 +223,12 @@ const apiNotes = defineTool({
  * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
  * guessing at required fields there would be noise.
  */
+/** The worse of two classifications, so an ambiguity can only ever tighten. */
+function strictestRisk(a: Risk, b: Risk): Risk {
+  const order: Risk[] = ["read", "reversible", "irreversible"];
+  return order.indexOf(a) >= order.indexOf(b) ? a : b;
+}
+
 /** Statuses where the request's own shape is a plausible explanation. */
 const PAYLOAD_STATUSES = new Set([400, 415, 422]);
 
@@ -380,9 +387,18 @@ const request = defineTool({
       );
     }
 
-    // Path first, then the body: a flag like `sendEhf: true` transmits the
-    // document to a counterparty, which no amount of path inspection reveals.
-    const pathRisk = classifyRequest(method, path);
+    // Classified on BOTH the raw path and its decoded form, taking whichever is
+    // stricter. The raw form is what gets sent; the decoded form is what the upstream
+    // router will match. Percent-encoding a single character of a segment used to
+    // move a call from one classification to another — "sign-reques%74" was treated
+    // as an unknown sub-path of the reversible /api/agreements prefix and then landed
+    // on the endpoint that emails a signing request to a counterparty. Comparing both
+    // and taking the worse means it no longer matters which one an attacker aims at.
+    const decoded = canonical.decodedPathname;
+    const pathRisk = strictestRisk(
+      classifyRequest(method, path),
+      classifyRequest(method, decoded),
+    );
     const risk = classifyWithBody(pathRisk, args.body);
     const escalated = risk !== pathRisk ? escalatingBodyFields(args.body) : [];
     assertAllowed(
@@ -395,7 +411,9 @@ const request = defineTool({
 
     // Separately from reversibility: does this leave the tenant? Checked after
     // the write policy so the more fundamental refusal is reported first.
-    const transmits = classifyTransmission(method, path, args.body);
+    const rawTransmits = classifyTransmission(method, path, args.body);
+    const decodedTransmits = classifyTransmission(method, decoded, args.body);
+    const transmits = rawTransmits !== "none" ? rawTransmits : decodedTransmits;
     const sendFields = transmittingBodyFields(args.body);
     assertTransmitAllowed(
       transmits,

@@ -518,11 +518,12 @@ test("filings with the government count as sending", () => {
   assert.equal(classifyTransmission("POST", "/api/vat-returns/complete-manually"), "none");
 });
 
-test("voucher row numbers are assigned so differing descriptions do not collide", async () => {
-  // Verified against the live API: postings sharing a rowNumber are merged into
-  // one voucher row and must agree on its description. Omitting rowNumber puts
-  // them all in row 0, so differing descriptions fail -- with an error blaming the
-  // sign convention, which sends you looking in the wrong place.
+test("voucher rows follow the API's pairing rule, not description grouping", async () => {
+  // The spec requires a matched debit+credit of equal absolute amount to share ONE
+  // row, and a row to hold at most one debit and one credit. The previous model
+  // grouped by description, which split matched pairs and left multi-debit vouchers
+  // unnumbered. Verified through the real handler, so the body actually sent is what
+  // is asserted.
   const { allTools } = await import("../dist/server.js");
   const tool = allTools.find((t) => t.name === "reai_create_voucher");
   assert.ok(tool, "reai_create_voucher should exist");
@@ -540,23 +541,7 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
     },
   };
 
-  // Differing descriptions must get distinct rows.
-  await tool.handler(
-    {
-      date: "2026-08-06",
-      postings: [
-        { accountNumber: "1576", amount: 1, description: "aaa" },
-        { accountNumber: "1580", amount: -1, description: "bbb" },
-      ],
-    },
-    ctx,
-  );
-  let rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.deepEqual(rows, [0, 1], "differing descriptions need distinct rows");
-
-  // Matching descriptions should be left alone, so ReAI merges them into one
-  // tidy row rather than two.
-  sent.length = 0;
+  // A matched pair stays in one row even though the descriptions differ...
   await tool.handler(
     {
       date: "2026-08-06",
@@ -567,28 +552,43 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
     },
     ctx,
   );
-  rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.deepEqual(rows, [undefined, undefined], "identical descriptions merge fine");
+  let rows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.equal(rows[0], rows[1], "a matched pair must share a row");
 
-  // An explicit rowNumber is respected -- and the *other* posting still has to be
-  // given a row. This assertion previously expected [7, undefined], which pinned a
-  // real bug: leaving the second posting unnumbered defaults it to row 0 at the
-  // API, so a voucher that mixed explicit and implicit rows hit the very merge
-  // failure this logic exists to prevent.
+  // ...and a three-posting purchase voucher gets a row per posting, so no row holds
+  // two debits.
   sent.length = 0;
   await tool.handler(
     {
       date: "2026-08-06",
       postings: [
-        { accountNumber: "1576", amount: 1, description: "aaa", rowNumber: 7 },
-        { accountNumber: "1580", amount: -1, description: "bbb" },
+        { accountNumber: "6700", amount: 800, description: "Kjøp" },
+        { accountNumber: "2710", amount: 200, description: "Kjøp" },
+        { accountNumber: "2400", amount: -1000, description: "Kjøp" },
       ],
     },
     ctx,
   );
   rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.equal(rows[0], 7, "an explicit rowNumber must be respected");
-  assert.ok(rows[1] !== undefined && rows[1] !== 7, `the second posting needs its own row, got ${rows[1]}`);
+  assert.equal(new Set(rows).size, 3, `expected three rows, got ${rows.join(",")}`);
+
+  // A matched pair that would share a row but disagrees on description is refused
+  // locally, since the row carries one description and the pair cannot be split.
+  sent.length = 0;
+  const conflict = await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 5, description: "aaa" },
+        { accountNumber: "1580", amount: -5, description: "bbb" },
+      ],
+    },
+    ctx,
+  );
+  assert.equal(sent.length, 0, "nothing should be sent when the row descriptions conflict");
+  const text = conflict.content.map((c) => c.text).join("\n");
+  assert.match(text, /must share a description/);
+  assert.match(text, /Nothing was sent to ReAI/);
 });
 
 test("anything creatable in reversible mode is also deletable in it", async () => {

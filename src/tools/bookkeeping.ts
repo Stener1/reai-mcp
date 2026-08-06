@@ -4,7 +4,6 @@ import {
   fail,
   isoDate,
   ok,
-  okText,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -66,9 +65,14 @@ const listVatCodes = defineTool({
   name: "reai_list_vat_codes",
   title: "List VAT codes",
   description:
-    "List the VAT (mva) codes available in this tenant, with rate, type and description. " +
-    "Postings to revenue and cost accounts generally require a VAT code; look it up here rather " +
-    "than guessing, because the valid set depends on the tenant's VAT registration.",
+    "List VAT (mva) codes, with rate, type and description. Postings to revenue and cost accounts " +
+    "generally require one; look it up here rather than guessing.\n\n" +
+    "Read the scope carefully, because the unfiltered call is NOT tenant-specific: it returns every " +
+    "code ReAI supports, including ones this tenant cannot use. Only usage=\"customer-invoice\" " +
+    "narrows it to what the tenant may actually write, and only for order and subscription lines. " +
+    "So on a tenant that is not VAT-registered the plain list still shows 25% codes — booking one " +
+    "would invent VAT that does not exist. When in doubt, cross-check against " +
+    "usage=\"customer-invoice\" or ask the user.",
   risk: "read",
   apiPaths: [["GET", "/api/vat-codes"]],
   inputSchema: {
@@ -85,7 +89,13 @@ const listVatCodes = defineTool({
       query: { usage: args.usage },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data);
+    return ok(res.data, {
+      note:
+        args.usage === "customer-invoice"
+          ? "Narrowed to the codes this tenant can write on order and subscription lines."
+          : "Every code ReAI supports — NOT filtered to this tenant. Some may be unusable here; " +
+            'usage="customer-invoice" is the only tenant-narrowed view.',
+    });
   },
 });
 
@@ -196,67 +206,109 @@ function imbalance(postings: Array<{ amount: number }>): number {
 /**
  * Assign voucher row numbers when the caller has not.
  *
- * Postings that share a `rowNumber` are MERGED into one voucher row, which
- * requires them to agree on what that row carries — including the description.
- * Since an omitted rowNumber puts every posting in row 0, giving two postings
- * different descriptions makes the merge impossible and the API rejects the whole
- * voucher with "postings with rowNumber 0 cannot be merged into one voucher row.
- * Book the debit side as a positive amount and the credit side as a negative
- * amount" — which blames the sign convention even when the signs are correct, so
- * it sends you looking in the wrong place entirely.
+ * The rule comes from the API's own schema, and my earlier model of it was
+ * backwards. What it actually says: "A balanced debit+credit entry for the same
+ * amount, currency and date MUST share a single rowNumber so it becomes ONE voucher
+ * row — never split the debit and credit of one entry across two rowNumbers... a
+ * rowNumber holds at most one debit and one credit side, both with the same date,
+ * description, currency and absolute amount. Assign a new rowNumber only for a
+ * separate, unrelated entry."
  *
- * Verified against the live API: identical (or absent) descriptions merge fine;
- * differing ones need distinct row numbers.
+ * So a row is a MATCHED PAIR of equal absolute amount, not "postings that happen to
+ * share a description". Grouping by description got both directions wrong:
  *
- * So: respect any explicit rowNumber, leave them out when the descriptions agree
- * (which produces a tidier single-row voucher), and otherwise give each posting
- * its own row so per-line descriptions survive.
+ *  - It early-returned when every description matched, assigning nothing. The
+ *    ordinary Norwegian purchase voucher — debit cost 800, debit input VAT 200,
+ *    credit payable -1000, one description throughout — was therefore sent with no
+ *    row numbers at all, so two debits of different amounts landed in row 0 and the
+ *    API rejected exactly the merge this function exists to prevent.
+ *  - It split a matched debit/credit pair across two rows whenever their
+ *    descriptions differed, which the schema says MUST NOT happen.
  *
- * A partially numbered voucher is the case worth being careful about. Bailing out
- * as soon as any posting carried a rowNumber reintroduced the very collision this
- * guards against: an explicit row 0 describing A alongside an unnumbered posting
- * describing B left the latter defaulted to row 0 too, so the merge failed again.
- * Explicit rows are therefore honoured and unnumbered postings are fitted into
- * rows nobody has claimed.
+ * Now: pair each debit with a credit of the same absolute amount, give each pair one
+ * row, and give anything unpaired a row of its own (a row may hold a single side).
+ * Explicit row numbers are always respected.
  */
-export function assignRowNumbers<T extends { rowNumber?: number | undefined; description?: string | undefined }>(
-  postings: T[],
-): T[] {
-  const descriptions = new Set(postings.map((p) => p.description ?? ""));
-  // One description throughout means every posting may share a row, so whatever
-  // shape the caller chose already merges cleanly.
-  if (descriptions.size <= 1) return postings;
+export function assignRowNumbers<
+  T extends { rowNumber?: number | undefined; description?: string | undefined; amount: number },
+>(postings: T[]): T[] {
   // Fully numbered: the caller has said exactly what they want.
   if (postings.every((p) => p.rowNumber !== undefined)) return postings;
 
-  // Rows already claimed, and what each carries — an unnumbered posting whose
-  // description matches an explicit row can join it instead of taking a new one.
-  const rowByDescription = new Map<string, number>();
   const takenRows = new Set<number>();
-  for (const p of postings) {
-    if (p.rowNumber === undefined) continue;
-    takenRows.add(p.rowNumber);
-    const key = p.description ?? "";
-    if (!rowByDescription.has(key)) rowByDescription.set(key, p.rowNumber);
-  }
-
+  for (const p of postings) if (p.rowNumber !== undefined) takenRows.add(p.rowNumber);
   let candidate = 0;
-  const claimFreeRow = (): number => {
+  const claimRow = (): number => {
     while (takenRows.has(candidate)) candidate += 1;
     takenRows.add(candidate);
     return candidate;
   };
 
-  return postings.map((p) => {
-    if (p.rowNumber !== undefined) return p;
-    const key = p.description ?? "";
-    let row = rowByDescription.get(key);
-    if (row === undefined) {
-      row = claimFreeRow();
-      rowByDescription.set(key, row);
+  const assigned = new Map<number, number>(); // index -> rowNumber
+  const unnumbered = postings
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.rowNumber === undefined);
+
+  const debits = unnumbered.filter(({ p }) => p.amount > 0);
+  const credits = unnumbered.filter(({ p }) => p.amount < 0);
+  const usedCredits = new Set<number>();
+
+  // Round to øre before comparing: currency arithmetic routinely leaves a matched
+  // pair a fraction apart, and a pair that should share a row must not be split by
+  // floating point.
+  const cents = (n: number): number => Math.round(n * 100);
+
+  for (const debit of debits) {
+    const match = credits.find(
+      ({ p, i }) => !usedCredits.has(i) && cents(Math.abs(p.amount)) === cents(debit.p.amount),
+    );
+    const row = claimRow();
+    assigned.set(debit.i, row);
+    if (match) {
+      usedCredits.add(match.i);
+      assigned.set(match.i, row);
     }
-    return { ...p, rowNumber: row };
+  }
+  // Credits with no debit of the same size get their own rows.
+  for (const credit of credits) {
+    if (usedCredits.has(credit.i) || assigned.has(credit.i)) continue;
+    assigned.set(credit.i, claimRow());
+  }
+  // A zero-amount posting pairs with nothing; give it a row so it cannot collide.
+  for (const { i } of unnumbered) if (!assigned.has(i)) assigned.set(i, claimRow());
+
+  return postings.map((p, i) => {
+    const row = assigned.get(i);
+    return row === undefined ? p : { ...p, rowNumber: row };
   });
+}
+
+/**
+ * A matched pair sharing a row must agree on its description, because the row
+ * carries one. Reported locally rather than left to a 422 that blames the sign
+ * convention.
+ */
+export function rowDescriptionConflicts<
+  T extends { rowNumber?: number | undefined; description?: string | undefined },
+>(postings: T[]): string[] {
+  const byRow = new Map<number, Set<string>>();
+  for (const p of postings) {
+    if (p.rowNumber === undefined) continue;
+    const set = byRow.get(p.rowNumber) ?? new Set<string>();
+    set.add(p.description ?? "");
+    byRow.set(p.rowNumber, set);
+  }
+  const conflicts: string[] = [];
+  for (const [row, descriptions] of byRow) {
+    if (descriptions.size > 1) {
+      conflicts.push(
+        `row ${row} has ${descriptions.size} different descriptions (${[...descriptions]
+          .map((d) => JSON.stringify(d))
+          .join(", ")})`,
+      );
+    }
+  }
+  return conflicts;
 }
 
 const createVoucher = defineTool({
@@ -298,10 +350,26 @@ const createVoucher = defineTool({
       );
     }
 
+    const withRows = assignRowNumbers(args.postings);
+
+    // A voucher row carries ONE description, so a matched debit/credit pair sharing a
+    // row has to agree on it. Reported here rather than left to the API, whose error
+    // for this blames the sign convention and sends you looking in the wrong place.
+    const conflicts = rowDescriptionConflicts(withRows);
+    if (conflicts.length > 0) {
+      return fail(
+        `Postings that form one voucher row must share a description, and ${conflicts.join("; ")}.\n\n` +
+          `A row is a matched debit and credit of the same absolute amount — the API requires them ` +
+          `to stay in one row, so they cannot be separated to keep different descriptions. Either ` +
+          `give the pair the same description, or set rowNumber yourself if these really are ` +
+          `unrelated entries. Nothing was sent to ReAI.`,
+      );
+    }
+
     const body = {
       date: args.date,
       ...(args.description !== undefined ? { description: args.description } : {}),
-      postings: assignRowNumbers(args.postings).map((p) => ({
+      postings: withRows.map((p) => ({
         ...p,
         postingDate: p.postingDate ?? args.date,
         currency: p.currency ?? "NOK",
@@ -329,9 +397,11 @@ const deleteVoucher = defineTool({
   name: "reai_delete_voucher",
   title: "Delete a voucher",
   description:
-    "Delete a voucher and its postings. Only possible while the accounting period is still open and " +
-    "no posting is locked — otherwise ReAI rejects it, and the correct remedy is a reversing voucher " +
-    "instead. Requires REAI_WRITE_MODE=full.",
+    "Delete a voucher, OR reverse it — ReAI decides which, and they are not the same thing. It " +
+    "deletes when no audit history has to be kept; otherwise it books a counter-posting and the " +
+    "original stays in the ledger. The response says which happened, and this tool reports it: on " +
+    '"reversed" the transaction is still there, now with an offsetting entry, so do NOT re-book it. ' +
+    "Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
   apiPaths: [["DELETE", "/api/vouchers/{id}"]],
   destructive: true,
@@ -340,12 +410,34 @@ const deleteVoucher = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request({
+    const res = await ctx.client.request<{ outcome?: string }>({
       method: "DELETE",
       path: `/api/vouchers/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return okText(`Voucher ${args.id} deleted (HTTP ${res.status}).`);
+    // The outcome must be passed through, not assumed. This reported "deleted"
+    // unconditionally while discarding the body, so an agent told a user a voucher
+    // was gone when the ledger actually held the original PLUS a counter-posting —
+    // and might then re-book the transaction, double-posting it. Every other delete
+    // tool here already surfaces its outcome; this was the one that touches the
+    // general ledger.
+    const outcome = res.data?.outcome;
+    if (outcome === "reversed") {
+      return ok(res.data, {
+        note:
+          `Voucher ${args.id} was REVERSED, not deleted. ReAI kept the original and booked an ` +
+          `offsetting counter-posting, because the audit history had to be retained. The ` +
+          `transaction is still in the ledger — do not re-book it. Both entries will appear in ` +
+          `reai_list_postings.`,
+      });
+    }
+    return ok(res.data ?? { outcome: "deleted" }, {
+      note:
+        outcome === "deleted"
+          ? `Voucher ${args.id} was deleted outright; nothing remains in the ledger.`
+          : `Voucher ${args.id}: HTTP ${res.status}, but ReAI did not say whether it was deleted or ` +
+            `reversed. Check reai_list_postings before assuming the transaction is gone.`,
+    });
   },
 });
 
