@@ -1,0 +1,122 @@
+# Changelog
+
+All notable changes to `reai-mcp`. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
+[semantic](https://semver.org/), pre-1.0 while the tool surface settles.
+
+> **Nothing has been published to npm yet.** Install from source or run the
+> Docker image. The version below describes what is on `main`.
+
+## 0.2.0
+
+First version worth using. Covers the bookkeeping core, sales, purchase, and bank
+reconciliation and VAT, runs either locally over stdio or as a self-hosted remote
+connector, and has been verified against live ReAI data throughout.
+
+### Added
+
+- **59 tools**: 52 across four accounting domains, plus 7 always-on
+  (orientation and discovery, which no configuration can disable).
+  - *Bookkeeping* (8) — chart of accounts, VAT codes, vouchers, postings, general
+    ledger. `reai_create_voucher` checks the debit/credit balance locally and
+    reports the exact imbalance rather than letting the API return a bare 422.
+  - *Sales* (19) — customers, products, orders, offers, invoices, customer ledger.
+  - *Purchase* (13) — suppliers, supplier invoices, the document inbox, EHF
+    parsing, expenses, supplier ledger.
+  - *Bank & VAT* (12) — company accounts, the reconciliation view, reconciliation
+    rules, transaction matching and booking, VAT settlement, tax return.
+- **Discovery escape hatch** (part of the 7 always-on) —
+  `reai_search_endpoints`, `reai_describe_endpoint`, `reai_list_api_tags`,
+  `reai_api_notes` and `reai_request` reach all 313 documented operations, so the
+  256 with no curated tool are still usable.
+- **A write policy**, which is the core safety contract. Every operation is
+  classified `read` / `reversible` / `irreversible` and gated by
+  `REAI_WRITE_MODE` (default `reversible`). Tools a mode forbids are never
+  registered, so an agent cannot attempt them, and the escape hatch classifies
+  each call by method *and* request body — an unrecognised write path fails
+  closed.
+- **Remote connector mode** — Streamable HTTP with a full OAuth 2.1
+  authorization server: dynamic client registration (RFC 7591), authorization
+  code + PKCE (S256 only), protected-resource metadata (RFC 9728), AS metadata
+  (RFC 8414), refresh tokens. ReAI issues static API tokens and has no OAuth of
+  its own, so the consent page bridges the two.
+- **Sealed tokens instead of a session store.** The user's ReAI token, the tenant
+  they chose and the write ceiling are encrypted into the access token with
+  AES-256-GCM, purpose-bound so one token type cannot be replayed as another.
+  Any instance can serve any request, which is what makes a scale-to-zero
+  deployment practical with no database.
+- **A tenant bound at authorization time is a boundary, not a default** — a grant
+  scoped to one company cannot address another, even though the underlying ReAI
+  token may reach dozens.
+- **35 known API quirks** keyed to the operations they affect, surfacing
+  automatically in discovery. Request shapes that differ from what an endpoint
+  name suggests, constraints the schema omits, multi-step workflows, and
+  operations that are harder to undo than they look.
+- **`REAI_TOOLSETS`** to narrow the curated surface to
+  `bookkeeping` / `sales` / `purchase` / `bank`. Orientation and discovery are
+  never disabled.
+- **`scripts/deploy-cloud-run.sh`** — one command, running as a dedicated service
+  account with no project-level roles, pinning `PUBLIC_URL` and every hostname
+  Cloud Run serves, and failing non-zero when the result is not actually
+  reachable.
+- **Three live verification harnesses**: `smoke.mjs` (read-only, safe against
+  production books), `smoke-write.mjs` (a reversible round-trip that cleans up
+  after itself) and `smoke-http.mjs` (the whole OAuth flow as a real client).
+  All three assert the negative cases too, not just the happy path.
+- A build step compressing the 907 KB OpenAPI snapshot into a 195 KB searchable
+  index.
+- CI across Node 20, 22 and 24, plus a check that the published package contains
+  what it should.
+
+### Fixed
+
+Found by review — Codex on each pull request, plus independent subagent reviews.
+Recorded because most were reachable in the default configuration:
+
+- **The write policy could be bypassed by path traversal.** Classification ran on
+  the raw string while the URL was built with `new URL()`, which resolves dot
+  segments — so `POST /api/customers/../vouchers` was classified against the
+  reversible `/api/customers` prefix and posted to the general ledger. Paths are
+  now canonicalized once and the same value is both classified and requested.
+- **A supplier payment could start a real bank transfer.** `manualPayment` was
+  optional and the API defaults it to `false`, selecting the bank-integrated flow
+  that can return an approval URL beginning a BankID payment — while the tool
+  described itself as merely recording an already-paid invoice. It is now
+  required, and an approval URL is reported as *not yet paid*.
+- **The VAT tool claimed to file returns.** `POST /api/vat-returns` settles and
+  locks the period; it submits nothing to Skatteetaten. Retitled, with the
+  distinction stated in the description and the success message.
+- **Refresh tokens could be rolled forward indefinitely.** Grants now carry an
+  authorization time and are clamped to a 90-day absolute ceiling.
+- Two questions the tools advertised answering were answered wrongly: "who owes
+  us money" and "what is overdue" both silently excluded items older than a
+  recent window.
+- Subscriptions with `outputMode: "create_invoice"` and reconciliation rules are
+  now treated as irreversible, because both let ReAI issue postings with no
+  further call.
+- Quirks matched by prefix, so parent advice leaked onto unrelated
+  sub-operations — `POST /api/invoices/{id}/email` was told to send an `orderId`.
+  Matching is exact unless a quirk opts into descendants.
+- Cloud Run serves a service on more than one hostname, and the OAuth flow
+  completed on an alias before every MCP call failed with `Invalid Host header`.
+  All hostnames are now allowed.
+- `reai_use_tenant` was a no-op in stateless remote mode: it reported success and
+  the next request discarded it.
+
+### Known limitations
+
+- **Individual tokens cannot be revoked** before they expire. Sealed tokens carry
+  no server-side record, so rotating `REAI_ENCRYPTION_KEY` — which invalidates
+  every authorization at once — is the remedy.
+- **Serving under a path prefix is unsupported.** A `PUBLIC_URL` containing a
+  path, query or fragment is rejected at startup rather than half-working.
+- **Two `npm audit` advisories** come from transitive dependencies of
+  `@modelcontextprotocol/sdk` (`hono`, `fast-uri`). Neither is on this server's
+  request path; they clear when the SDK bumps them.
+- **No sandbox exists** for ReAI, so write paths are exercised against a real
+  tenant in `reversible` mode. Ledger postings, invoices, payments, payroll and
+  VAT filings have not been executed end to end against live books.
+
+## 0.1.0
+
+Initial scaffold. Never published.

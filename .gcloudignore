@@ -1,0 +1,14 @@
+# gcloud falls back to .gitignore inside a git repo, but not outside one — and
+# `gcloud run deploy --source` uploads whatever is left. Being explicit keeps a
+# 48 MB node_modules and a stale dist/ out of the build context regardless.
+.git
+.github
+node_modules
+dist
+test
+scripts/smoke*.mjs
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
