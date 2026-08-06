@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineTool, ok, okText, tenantIdArg, resolveTenantId, type ToolDef } from "./registry.js";
 import { describeOperation, findOperation, getSpecIndex, searchOperations } from "../reai/spec.js";
-import { assertAllowed, classifyRequest } from "../policy.js";
+import { assertAllowed, canonicalizeApiPath, classifyRequest } from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -174,19 +174,31 @@ const request = defineTool({
   handler: async (args, ctx) => {
     const method = args.method as HttpMethod;
 
-    let path = args.path.trim();
-    if (/^https?:\/\//i.test(path)) {
-      const url = new URL(path);
-      path = url.pathname + url.search;
+    let raw = args.path.trim();
+    if (/^https?:\/\//i.test(raw)) {
+      const url = new URL(raw);
+      raw = url.pathname + url.search;
     }
-    if (!path.startsWith("/")) path = `/${path}`;
+    if (!raw.startsWith("/")) raw = `/${raw}`;
 
-    if (path.includes("{") || path.includes("}")) {
+    if (raw.includes("{") || raw.includes("}")) {
       return okText(
-        `The path still contains a template placeholder: ${path}\n` +
+        `The path still contains a template placeholder: ${raw}\n` +
           `Substitute real values before calling, e.g. "/api/customers/1234".`,
       );
     }
+
+    // Resolve once, then classify and send the *same* resolved path. Doing this
+    // in two places with two different values is precisely how a write policy
+    // gets bypassed.
+    const canonical = canonicalizeApiPath(raw);
+    if (!canonical) {
+      return okText(
+        `Not a usable API path: ${raw}\n` +
+          `Give a path on the ReAI API such as "/api/customers/1234".`,
+      );
+    }
+    const path = canonical.pathname;
 
     const risk = classifyRequest(method, path);
     assertAllowed(risk, ctx.config.writeMode, `${method} ${path}`);

@@ -161,6 +161,31 @@ async function main() {
     } catch (err) {
       report("write policy guard", false, String(err));
     }
+    // 6. The write policy must not be bypassable by path traversal. Regression:
+    // classification ran on the raw string while the request was built with
+    // new URL(), so "/api/customers/../vouchers" was classified against the
+    // reversible /api/customers prefix but posted to the general ledger.
+    for (const smuggle of [
+      "/api/customers/../vouchers",
+      "/api/customers/%2e%2e/vouchers",
+      "/api/documents/../users",
+    ]) {
+      try {
+        const res = await client.callTool({
+          name: "reai_request",
+          arguments: { method: "POST", path: smuggle, tenantId, body: {} },
+        });
+        const text = textOf(res);
+        const blocked = res.isError === true && /write policy|not a usable API path/i.test(text);
+        report(
+          `path traversal blocked: POST ${smuggle}`,
+          blocked,
+          blocked ? "blocked" : `NOT BLOCKED: ${text.slice(0, 160)}`,
+        );
+      } catch (err) {
+        report(`path traversal blocked: POST ${smuggle}`, false, String(err));
+      }
+    }
   } else {
     console.log("  (skipped tenant-scoped checks — no tenant id available)");
   }

@@ -153,6 +153,56 @@ function matchesPrefix(path: string, prefixes: readonly string[]): boolean {
   return prefixes.some((prefix) => p === prefix || p.startsWith(prefix + "/"));
 }
 
+/** Opaque base used only to resolve relative paths; never contacted. */
+const PATH_RESOLUTION_BASE = "https://reai-mcp.invalid";
+
+/**
+ * Resolve a caller-supplied path to the exact form the HTTP layer will request.
+ *
+ * This must be applied *before* classification, and the same result must be the
+ * path actually sent. `new URL()` resolves `..`, `.`, backslashes and
+ * percent-encoded dot segments, so classifying the raw string while requesting
+ * the resolved one lets a caller straddle two different paths: the string
+ * `/api/customers/../vouchers` matches the reversible `/api/customers` prefix
+ * but lands on `/api/vouchers`, posting to the general ledger from a mode that
+ * forbids it.
+ *
+ * Returns undefined for anything that does not resolve to a path on our own
+ * origin — which also rejects an absolute URL pointing at another host.
+ */
+export function canonicalizeApiPath(
+  rawPath: string,
+): { pathname: string; search: string } | undefined {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return undefined;
+  let url: URL;
+  try {
+    url = new URL(trimmed, PATH_RESOLUTION_BASE);
+  } catch {
+    return undefined;
+  }
+  if (url.origin !== PATH_RESOLUTION_BASE) return undefined;
+
+  // `new URL()` resolves literal dot segments but deliberately leaves an
+  // *encoded* slash alone, so "/api/customers/..%2fvouchers" survives resolution
+  // intact. Whether the upstream server then collapses it is not ours to assume,
+  // so anything still ambiguous after resolution is refused outright.
+  if (hasAmbiguousSegments(url.pathname)) return undefined;
+
+  return { pathname: url.pathname, search: url.search };
+}
+
+/**
+ * Detects path segments whose meaning depends on who decodes them: encoded
+ * slashes and backslashes, and any surviving `.`/`..` segment.
+ */
+export function hasAmbiguousSegments(path: string): boolean {
+  if (/%2f|%5c/i.test(path)) return true;
+  const decoded = path.replace(/%2e/gi, ".");
+  if (decoded.includes("\\")) return true;
+  return decoded.split("/").some((segment) => segment === "." || segment === "..");
+}
+
 /**
  * Classify an arbitrary API call. Used by the generic `reai_request` escape
  * hatch, where the target is not known ahead of time.
@@ -163,7 +213,12 @@ function matchesPrefix(path: string, prefixes: readonly string[]): boolean {
 export function classifyRequest(method: HttpMethod, path: string): Risk {
   if (method === "GET") return "read";
 
-  const normalized = normalize(path);
+  // Canonicalize first: classifying a raw string that resolves to a different
+  // path is how a reversible-looking call reaches the ledger. A path we cannot
+  // resolve is treated as the most dangerous case.
+  const canonical = canonicalizeApiPath(path);
+  if (!canonical) return "irreversible";
+  const normalized = normalize(canonical.pathname);
 
   if (matchesPrefix(normalized, IRREVERSIBLE_PREFIXES)) return "irreversible";
 

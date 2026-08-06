@@ -1,4 +1,5 @@
 import { ReaiApiError, ReaiConfigError, ReaiTransportError, type ProblemDetails } from "./errors.js";
+import { hasAmbiguousSegments } from "../policy.js";
 
 export const DEFAULT_BASE_URL = "https://app.reai.no";
 
@@ -197,6 +198,16 @@ export class ReaiClient {
     if (/^https?:\/\//i.test(path)) {
       throw new ReaiConfigError(
         `Expected an API path such as "/api/customers", got an absolute URL: ${path}`,
+      );
+    }
+    // Defence in depth. Callers are expected to have canonicalized already
+    // (see canonicalizeApiPath); a dot segment or backslash arriving here means
+    // the path the write policy classified is not the path about to be
+    // requested, so refuse rather than resolve it silently.
+    if (hasAmbiguousSegments(path)) {
+      throw new ReaiConfigError(
+        `Refusing a path containing relative or encoded path segments: ${path}. ` +
+          `Pass a fully resolved path such as "/api/customers/1234".`,
       );
     }
     const url = new URL(this.baseUrl + (path.startsWith("/") ? path : `/${path}`));

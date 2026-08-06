@@ -122,6 +122,21 @@ export const tenantIdArg = z
  * ambiguous call fails loudly instead.
  */
 export function resolveTenantId(explicit: number | undefined, ctx: ToolContext): number | undefined {
+  const bound = ctx.config.boundTenantId;
+  if (bound !== undefined) {
+    // A bound tenant is a boundary, not a preference. Reject rather than
+    // silently redirect, so the caller learns why instead of quietly reading
+    // the wrong company's books.
+    const requested = explicit ?? ctx.session.activeTenantId;
+    if (requested !== undefined && requested !== bound) {
+      throw new Error(
+        `This connection is bound to tenant ${bound}, so it cannot address tenant ${requested}.\n` +
+          `The tenant was chosen when the connector was authorized. To work in a different ` +
+          `company, re-authorize the connection and select that company.`,
+      );
+    }
+    return bound;
+  }
   return explicit ?? ctx.session.activeTenantId ?? ctx.config.defaultTenantId;
 }
 
