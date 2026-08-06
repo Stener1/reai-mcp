@@ -317,11 +317,11 @@ Browse them with `reai_api_notes`, or read the highlights:
 - Order, offer and subscription lines accept only VAT codes from `?usage=customer-invoice`.
 - A **`+47` prefix on a Norwegian phone number is rejected**.
 - `POST /api/customers` silently discards `invoiceEmail`, `phone` and `daysUntilDue` — those live on the `PATCH`.
-- **`GET /api/timesheets` is unusable without the Project module.** It requires `projectId`, `startDate` *and* `endDate` — none marked required, each revealed by a separate 400 — and then rejects `projectId` outright when the module is off. Required and forbidden at once, so check `GET /api/projects` first.
+- **`GET /api/timesheets` is unusable without the Project module** — `projectId` is a *required* query parameter, and supplying it returns `400 "projectId cannot be used when the Project module is disabled"`. Required and rejected at once, so no request succeeds.
 
 **Empty states that look like errors**
 - **A 404 from `/api/opening-balances` or `/api/annual-accounts/{year}` means "nothing set up yet"**, which is the normal state for most companies — not a wrong path. The `detail` says as much; report it as empty instead of hunting for another endpoint.
-- Payroll lives under **`/api/salary-payments`**; `/api/salaries` does not exist. A run is assembled in steps, and `…/{id}/complete` reports pay to the authorities, so it counts as an external send.
+- Payroll lives under **`/api/salary-payments`**; `/api/salaries` does not exist. A new run **already contains wage lines derived from expense postings** — read it back before adding any, because `…/wage-specs` adds a *manual* line and re-entering existing ones inflates salary and expenses, and expense-derived lines cannot be edited or deleted to fix it. `…/{id}/complete` starts A-melding submission to Skatteetaten, so it counts as an external send.
 
 **Things harder to undo than they look**
 - **Settling a VAT period locks it but files nothing.** There is no submission endpoint in the public API; `/complete-manually` exists to record that a return was filed elsewhere. Never report a VAT return as submitted.

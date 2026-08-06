@@ -108,13 +108,13 @@ export const QUIRKS: readonly Quirk[] = [
     id: "timesheets-need-project-module",
     paths: ["/api/timesheets"],
     methods: ["GET"],
-    kind: "validation",
+    kind: "gotcha",
     note:
-      "Requires projectId, startDate AND endDate — the schema marks none of them required, and the " +
-      "API reveals them one at a time, so it takes four calls to discover. Worse, on a tenant " +
-      "WITHOUT the Project module the endpoint cannot be called at all: projectId is mandatory and " +
-      'simultaneously rejected with 400 "projectId cannot be used when the Project module is ' +
-      'disabled". Check GET /api/projects first — a 403 there means do not bother with timesheets.',
+      "Unreachable on a tenant without the Project module, in a way no schema can express: " +
+      "projectId is a REQUIRED query parameter, and supplying it returns 400 " +
+      '"projectId cannot be used when the Project module is disabled". Required and rejected at ' +
+      "the same time, so no request succeeds. On that exact message, stop — the module is off and " +
+      "no combination of parameters helps. Say so instead of retrying.",
   },
   {
     id: "empty-state-is-404",
@@ -134,10 +134,15 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["GET", "POST"],
     kind: "workflow",
     note:
-      "Payroll is under /api/salary-payments; there is no /api/salaries. A run is built in steps: " +
-      "POST /api/salary-payments creates it, POST /api/salary-payments/{id}/wage-specs adds each " +
-      "line, and POST /api/salary-payments/{id}/complete finalises it. That last call reports pay " +
-      "to the authorities and is treated as an external send, so it needs REAI_ALLOW_EXTERNAL_SEND.",
+      "Payroll is under /api/salary-payments; there is no /api/salaries. POST /api/salary-payments " +
+      "creates a run that ALREADY CONTAINS wage lines derived from expense postings — read it back " +
+      "before adding anything. POST /api/salary-payments/{id}/wage-specs adds a MANUAL line only " +
+      "(a commission, say); using it to re-enter lines that are already there inflates both salary " +
+      "and the expense amounts, and the expense-derived lines cannot be edited or deleted to " +
+      "correct it. Add only what is genuinely missing. " +
+      "POST /api/salary-payments/{id}/complete then creates the voucher, the payslips and one " +
+      "payment per payable employee, and on Norwegian tenants starts A-melding submission to " +
+      "Skatteetaten — so it is treated as an external send and needs REAI_ALLOW_EXTERNAL_SEND.",
   },
 
   // --- Bookkeeping ---------------------------------------------------------
