@@ -223,6 +223,49 @@ const apiNotes = defineTool({
  * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
  * guessing at required fields there would be noise.
  */
+/**
+ * Tenant ids the caller put in the PATH or QUERY, which the bound-tenant check would
+ * otherwise never see.
+ *
+ * `resolveTenantId` governs exactly one thing: the value that becomes the X-Tenant-Id
+ * header. But twelve operations name a tenant as a path or query parameter, and
+ * `/api/accountant-clients/{clientTenantId}` plus its notes endpoints are PUBLIC —
+ * which is precisely the accountant case the README describes, one token reaching
+ * every client company. So a grant bound to one tenant could still address another by
+ * naming it in the path, making the consent page's promise narrower than it reads.
+ * Found independently by two reviewers, which is usually a sign it is real.
+ */
+function tenantIdsInRequest(
+  method: HttpMethod,
+  path: string,
+  query: Record<string, unknown> | undefined,
+): number[] {
+  const op = resolveOperation(method, path);
+  if (!op) return [];
+
+  const found: number[] = [];
+  const specSegments = op.path.split("/").filter(Boolean);
+  const actualSegments = path.split("/").filter(Boolean);
+
+  for (const param of op.params ?? []) {
+    if (!/tenant/i.test(param.name)) continue;
+    if (param.in === "path") {
+      const index = specSegments.indexOf(`{${param.name}}`);
+      const value = index >= 0 ? actualSegments[index] : undefined;
+      if (value !== undefined && /^\d+$/.test(value)) found.push(Number(value));
+    } else if (param.in === "query") {
+      // Query keys bind case-insensitively on this API.
+      const entry = Object.entries(query ?? {}).find(
+        ([k]) => k.toLowerCase() === param.name.toLowerCase(),
+      );
+      const raw = entry?.[1];
+      if (typeof raw === "number" && Number.isInteger(raw)) found.push(raw);
+      else if (typeof raw === "string" && /^\d+$/.test(raw)) found.push(Number(raw));
+    }
+  }
+  return found;
+}
+
 /** The worse of two classifications, so an ambiguity can only ever tighten. */
 function strictestRisk(a: Risk, b: Risk): Risk {
   const order: Risk[] = ["read", "reversible", "irreversible"];
@@ -385,6 +428,24 @@ const request = defineTool({
           `A query string inside "path" is discarded, which would have produced a confusing ` +
           `rejection about missing parameters.`,
       );
+    }
+
+    // A bound tenant is a boundary, so it must cover every way a tenant can be named,
+    // not just the header. Checked before classification, so the refusal is about the
+    // boundary rather than about the write ladder.
+    const boundTenant = ctx.config.boundTenantId;
+    if (boundTenant !== undefined) {
+      const named = tenantIdsInRequest(method, canonical.decodedPathname, args.query).filter(
+        (id) => id !== boundTenant,
+      );
+      if (named.length > 0) {
+        return okText(
+          `This connection is bound to tenant ${boundTenant}, and this request names tenant ` +
+            `${named.join(", ")} in its path or query. Refused.\n` +
+            `The tenant chosen at authorization is a boundary, not a default, so it cannot be ` +
+            `overridden per call — including by an endpoint that takes a tenant id as a parameter.`,
+        );
+      }
     }
 
     // Classified on BOTH the raw path and its decoded form, taking whichever is

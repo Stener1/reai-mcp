@@ -440,3 +440,56 @@ test("charset on the content-type does not defeat the guard", async () => {
   );
   assert.equal(res.isError, true);
 });
+
+test("a bound tenant cannot be overridden via the path or query", async () => {
+  // resolveTenantId governs only the X-Tenant-Id header, but twelve operations name a
+  // tenant as a path or query parameter — and /api/accountant-clients/{clientTenantId}
+  // plus its notes endpoints are public. That is exactly the accountant case the README
+  // describes, one token reaching every client company, so a grant bound to one tenant
+  // could still address another by naming it in the path.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_request");
+
+  const sent = [];
+  const ctx = (boundTenantId) => ({
+    config: { boundTenantId, defaultTenantId: boundTenantId ?? 1, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 200, data: [] };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  });
+
+  const refused = [
+    { method: "GET", path: "/api/accountant-clients/200" },
+    { method: "POST", path: "/api/accountant-clients/200/oppdragskontroll-notes", body: {} },
+    { method: "POST", path: "/auth/select-tenant", query: { tenantId: 200 } },
+    // Case-insensitive query binding, and a percent-encoded id, must not slip past.
+    { method: "POST", path: "/auth/select-tenant", query: { TenantId: "200" } },
+    { method: "GET", path: "/api/accountant-clients/2%30%30" },
+  ];
+  for (const args of refused) {
+    sent.length = 0;
+    const res = await tool.handler(args, ctx(100));
+    assert.equal(sent.length, 0, `${args.method} ${args.path} should not be sent`);
+    assert.match(res.content.map((c) => c.text).join("\n"), /bound to tenant 100/);
+  }
+
+  // The bound tenant's own id is fine, and so is an ordinary call.
+  for (const args of [
+    { method: "GET", path: "/api/accountant-clients/100" },
+    { method: "GET", path: "/api/customers" },
+  ]) {
+    sent.length = 0;
+    await tool.handler(args, ctx(100));
+    assert.equal(sent.length, 1, `${args.path} should be sent`);
+  }
+
+  // With no bound tenant there is nothing to enforce.
+  sent.length = 0;
+  await tool.handler({ method: "GET", path: "/api/accountant-clients/200" }, ctx(undefined));
+  assert.equal(sent.length, 1);
+});
