@@ -91,7 +91,7 @@ async function main() {
   await client.connect(transport);
   console.log(`\nReversible write round-trip against tenant ${tenantId} (mode: reversible)\n`);
 
-  const created = { customerId: undefined, offerId: undefined };
+  const created = { customerId: undefined, offerId: undefined, supplierId: undefined };
 
   try {
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
@@ -226,6 +226,37 @@ async function main() {
       );
     }
 
+    // 7b. Supplier round-trip: create, read back, update bank details, delete.
+    const supRes = await client.callTool({
+      name: "reai_create_supplier",
+      arguments: { name: `${STAMP} supplier`, privateContact: true, skipRegistryLookup: true },
+    });
+    const supplier = supRes.isError ? undefined : jsonOf(supRes);
+    if (Number.isInteger(supplier?.id)) created.supplierId = supplier.id;
+    report(
+      "reai_create_supplier",
+      !supRes.isError && Number.isInteger(created.supplierId),
+      created.supplierId ? `id=${created.supplierId}` : textOf(supRes).slice(0, 240),
+    );
+
+    if (created.supplierId) {
+      const supPatch = await client.callTool({
+        name: "reai_update_supplier",
+        arguments: { id: created.supplierId, bankAccountNumber: "15201353103" },
+      });
+      report("reai_update_supplier sets bank details", !supPatch.isError, textOf(supPatch).slice(0, 120));
+
+      const supGet = await client.callTool({
+        name: "reai_get_supplier",
+        arguments: { id: created.supplierId },
+      });
+      report(
+        "reai_get_supplier returns it",
+        !supGet.isError && containsStamp(textOf(supGet)),
+        containsStamp(textOf(supGet)) ? "name matches" : textOf(supGet).slice(0, 200),
+      );
+    }
+
     // 8. The things this mode must refuse. These matter more than the successes:
     //    they are the guarantee the consent page and README advertise.
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
@@ -242,6 +273,8 @@ async function main() {
       ["POST /api/invoices", { method: "POST", path: "/api/invoices", body: { orderId: 1 } }],
       ["POST /api/vat-returns", { method: "POST", path: "/api/vat-returns", body: {} }],
       ["POST /api/users", { method: "POST", path: "/api/users", body: {} }],
+      ["POST /api/supplier-invoices", { method: "POST", path: "/api/supplier-invoices", body: { supplierId: 1, costLines: [] } }],
+      ["POST /api/expenses/1/voucher", { method: "POST", path: "/api/expenses/1/voucher", body: {} }],
     ]) {
       const res = await client.callTool({ name: "reai_request", arguments: { ...args, tenantId } });
       const blocked = res.isError === true && /write policy/i.test(textOf(res));
@@ -259,6 +292,17 @@ async function main() {
         report("the test offer is deleted", !res.isError, textOf(res).slice(0, 120));
       } catch (err) {
         report("offer cleanup", false, `remove offer ${created.offerId} by hand: ${err}`);
+      }
+    }
+    if (created.supplierId) {
+      try {
+        const res = await client.callTool({
+          name: "reai_delete_supplier",
+          arguments: { id: created.supplierId },
+        });
+        report("the test supplier is deleted", !res.isError, textOf(res).slice(0, 120));
+      } catch (err) {
+        report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
       }
     }
     if (created.customerId) {

@@ -211,6 +211,61 @@ async function main() {
       }
     }
 
+    // 7b. Purchase-side reads.
+    for (const [name, args, check] of [
+      ["reai_list_suppliers", { tenantId }, (t) => /supplier\(s\)/.test(t)],
+      ["reai_list_supplier_invoices", { tenantId }, (t) => /supplier invoice\(s\)/.test(t)],
+      ["reai_supplier_ledger", { tenantId }, (t) => /Supplier ledger/.test(t)],
+      ["reai_supplier_ledger", { tenantId, isUnpaid: true }, (t) => /Supplier ledger/.test(t)],
+      ["reai_list_reception_documents", { tenantId }, (t) => /document\(s\) awaiting processing/.test(t)],
+      ["reai_list_reception_documents", { tenantId, kind: "invoice" }, (t) => /invoice document\(s\)/.test(t)],
+      ["reai_list_expenses", { tenantId }, (t) => /expense claim\(s\)/.test(t)],
+    ]) {
+      try {
+        const res = await client.callTool({ name, arguments: args });
+        const text = textOf(res);
+        const okFlag = !res.isError && check(text);
+        report(
+          `${name}${args.isUnpaid ? " (unpaid)" : args.kind ? ` (${args.kind})` : ""}`,
+          okFlag,
+          okFlag ? firstLine(text) : text.slice(0, 220),
+        );
+      } catch (err) {
+        report(name, false, String(err));
+      }
+    }
+
+    // 7c. If the reception inbox has an EHF document, parse it for real. This is
+    //     the only check here that exercises a document the tenant actually
+    //     received, so it is skipped rather than failed when the inbox is empty.
+    try {
+      const inbox = await client.callTool({
+        name: "reai_list_reception_documents",
+        arguments: { tenantId, kind: "invoice" },
+      });
+      const attachmentId = Number(/"attachmentId":\s*(\d+)/.exec(textOf(inbox))?.[1]);
+      const isXml = /"attachmentMimeType":\s*"[^"]*xml/i.test(textOf(inbox));
+      if (Number.isInteger(attachmentId) && isXml) {
+        const res = await client.callTool({
+          name: "reai_parse_ehf_attachment",
+          arguments: { tenantId, attachmentId },
+        });
+        const text = textOf(res);
+        const parsed = !res.isError && /"supplier"/.test(text) && /"payableAmount"/.test(text);
+        report(
+          `reai_parse_ehf_attachment on real document ${attachmentId}`,
+          parsed,
+          parsed
+            ? `${/"name":\s*"([^"]+)"/.exec(text)?.[1] ?? "?"} — ${/"payableAmount":\s*([\d.]+)/.exec(text)?.[1] ?? "?"}`
+            : text.slice(0, 220),
+        );
+      } else {
+        console.log("  [SKIP] reai_parse_ehf_attachment — no EHF document in the reception inbox");
+      }
+    } catch (err) {
+      report("reai_parse_ehf_attachment", false, String(err));
+    }
+
     // 8. Irreversible sales tools must be hidden in this mode, and the escape
     // hatch must refuse a transmitting flag on an otherwise-reversible path.
     const names = new Set(tools.map((t) => t.name));
@@ -218,7 +273,9 @@ async function main() {
       "irreversible sales tools are not advertised in this write mode",
       !names.has("reai_create_invoice_from_order") &&
         !names.has("reai_credit_invoice") &&
-        !names.has("reai_register_invoice_payment"),
+        !names.has("reai_register_invoice_payment") &&
+        !names.has("reai_create_supplier_invoice") &&
+        !names.has("reai_register_supplier_invoice_payment"),
       [...names].filter((n) => /invoice_from_order|credit_invoice|register_invoice/.test(n)).join(", ") || "hidden",
     );
 

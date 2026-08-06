@@ -23,6 +23,16 @@ export type ServerConfig = {
   maxRetries: number;
   /** Log one line per API request to stderr. Never logs tokens. */
   verbose: boolean;
+  /**
+   * Which curated tool groups to expose. Empty means all of them.
+   *
+   * The whole premise of this server is that 313 API operations cannot all be
+   * tools; as the curated set grows, the same pressure applies to it. An agent
+   * doing bookkeeping does not need thirteen purchase-side tools competing for
+   * attention, so an operator can narrow the surface without losing coverage —
+   * the discovery escape hatch still reaches everything.
+   */
+  toolsets: string[];
 
   // --- Remote (connector) mode ---
   port: number;
@@ -101,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     timeoutMs: intFromEnv("REAI_TIMEOUT_MS", 30_000),
     maxRetries: intFromEnv("REAI_MAX_RETRIES", 2),
     verbose: env.REAI_VERBOSE === "1" || env.REAI_VERBOSE === "true",
+    toolsets: parseToolsets(env.REAI_TOOLSETS),
     port: intFromEnv("PORT", 8080),
     publicUrl: publicUrl ? publicUrl.replace(/\/+$/, "") : undefined,
     encryptionKey: env.REAI_ENCRYPTION_KEY?.trim() || undefined,
@@ -109,6 +120,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: splitHosts(env.REAI_ALLOWED_HOSTS),
     allowedRedirectHosts: splitHosts(env.REAI_ALLOWED_REDIRECT_HOSTS),
   };
+}
+
+/** Known curated tool groups. `meta` and `discovery` are always on. */
+export const TOOLSETS = ["bookkeeping", "sales", "purchase"] as const;
+export type Toolset = (typeof TOOLSETS)[number];
+
+function parseToolsets(raw: string | undefined): string[] {
+  const requested = (raw ?? "")
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  if (requested.length === 0) return [];
+
+  const unknown = requested.filter((t) => !(TOOLSETS as readonly string[]).includes(t));
+  if (unknown.length > 0) {
+    throw new ReaiConfigError(
+      `REAI_TOOLSETS contains unknown group(s): ${unknown.join(", ")}. ` +
+        `Valid groups are ${TOOLSETS.join(", ")}. Leave it unset to enable all of them.`,
+    );
+  }
+  return requested;
 }
 
 function splitHosts(raw: string | undefined): string[] {
