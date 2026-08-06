@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { defineTool, ok, okText, tenantIdArg, resolveTenantId, type ToolDef } from "./registry.js";
-import { describeOperation, findOperation, getSpecIndex, searchOperations } from "../reai/spec.js";
+import {
+  describeOperation,
+  findOperation,
+  getSpecIndex,
+  missingRequired,
+  resolveOperation,
+  searchOperations,
+} from "../reai/spec.js";
 import { findQuirks, quirksFor } from "../reai/quirks.js";
 import {
   assertAllowed,
@@ -13,6 +20,7 @@ import {
   transmittingBodyFields,
 } from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
+import { ReaiApiError } from "../reai/errors.js";
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
@@ -208,6 +216,54 @@ const apiNotes = defineTool({
   },
 });
 
+/**
+ * Add spec-derived guidance to a failed `reai_request` call.
+ *
+ * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
+ * guessing at required fields there would be noise.
+ */
+function enrichRequestFailure(
+  err: unknown,
+  method: HttpMethod,
+  path: string,
+  query: Record<string, unknown> | undefined,
+  body: unknown,
+): unknown {
+  if (!(err instanceof ReaiApiError)) return err;
+  if (err.status < 400 || err.status >= 500) return err;
+
+  const op = resolveOperation(method, path);
+  if (!op) return err;
+
+  const extra: string[] = [];
+  const { params, bodyFields } = missingRequired(op, query, body);
+  if (params.length > 0) {
+    extra.push(
+      `The spec marks these query parameters as required on ${op.method} ${op.path}, and they were ` +
+        `not sent: ${params.join(", ")}. Sending them all at once avoids discovering them one ` +
+        `rejection at a time.`,
+    );
+  }
+  if (bodyFields.length > 0) {
+    extra.push(
+      `The spec marks these body fields as required on ${op.method} ${op.path}, and they were ` +
+        `absent: ${bodyFields.join(", ")}.`,
+    );
+  }
+
+  // The quirks are the point. Several exist because an endpoint's own error
+  // message points the wrong way -- a voucher whose rows cannot merge is reported
+  // as a sign-convention problem, for instance.
+  const quirks = quirksFor(method, op.path);
+  for (const q of quirks) extra.push(`Known quirk [${q.kind}]: ${q.note}`);
+
+  if (extra.length === 0) return err;
+  // Appended to the existing error rather than rebuilt: reconstructing it would
+  // duplicate the constructor's contract here and drift from it.
+  err.message = `${err.message}\n${extra.join("\n")}`;
+  return err;
+}
+
 const request = defineTool({
   name: "reai_request",
   title: "Call any ReAI API endpoint",
@@ -298,15 +354,31 @@ const request = defineTool({
     );
 
     const isMeta = path === "/api/me" || path === "/api/tenants";
-    const res = await ctx.client.request({
-      method,
-      path,
-      query: args.query,
-      ...(args.body !== undefined ? { body: args.body } : {}),
-      tenantId: resolveTenantId(args.tenantId, ctx),
-      omitTenant: isMeta,
-      ...(args.binary !== undefined ? { binary: args.binary } : {}),
-    });
+    let res;
+    try {
+      res = await ctx.client.request({
+        method,
+        path,
+        query: args.query,
+        ...(args.body !== undefined ? { body: args.body } : {}),
+        tenantId: resolveTenantId(args.tenantId, ctx),
+        omitTenant: isMeta,
+        ...(args.binary !== undefined ? { binary: args.binary } : {}),
+      });
+    } catch (err) {
+      // Enrich a rejected call with what this server already knows about the
+      // endpoint, then rethrow. The escape hatch only ever sees concrete paths, so
+      // until now an agent calling it directly got the API's error and nothing
+      // else -- none of the schema and none of the quirks that exist precisely
+      // because the schema is not enough.
+      //
+      // Additive on purpose. The request is still sent first: this spec
+      // under-states requirements in places (startDate on /api/vouchers is
+      // required by the API and not marked so), which means it may over-state
+      // elsewhere, and refusing a call on its authority could block one that
+      // would have worked.
+      throw enrichRequestFailure(err, method, path, args.query, args.body);
+    }
 
     const notes = [`${method} ${path} → HTTP ${res.status}`];
     if (res.location) notes.push(`Location: ${res.location}`);

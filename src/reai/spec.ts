@@ -276,6 +276,81 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   return hits.slice(0, limit);
 }
 
+/**
+ * Resolve a CONCRETE path — one with real ids substituted — back to its spec
+ * operation.
+ *
+ * `findOperation` compares templates to templates, so "/api/customers/1234" matched
+ * nothing at all. That mattered because the escape hatch only ever sees concrete
+ * paths: an agent calling `reai_request` could not be shown the schema or the known
+ * quirks for the very endpoint it was calling.
+ *
+ * A literal segment is preferred over a placeholder at the same position, so
+ * "/api/vat-returns/reopen" resolves to the literal operation rather than to a
+ * "/api/vat-returns/{id}"-shaped one.
+ */
+export function resolveOperation(method: string, concretePath: string): SpecOperation | undefined {
+  const index = getSpecIndex();
+  const wantMethod = method.toUpperCase();
+  const wanted = concretePath.split("?")[0]?.replace(/\/+$/, "").split("/").filter(Boolean) ?? [];
+
+  let best: SpecOperation | undefined;
+  let bestLiterals = -1;
+  for (const op of index.operations) {
+    if (op.method !== wantMethod) continue;
+    const segments = op.path.replace(/\/+$/, "").split("/").filter(Boolean);
+    if (segments.length !== wanted.length) continue;
+
+    let literals = 0;
+    let matches = true;
+    for (let i = 0; i < segments.length; i++) {
+      const spec = segments[i] ?? "";
+      const actual = wanted[i] ?? "";
+      if (spec.startsWith("{") && spec.endsWith("}")) continue; // placeholder: anything
+      if (spec.toLowerCase() !== actual.toLowerCase()) {
+        matches = false;
+        break;
+      }
+      literals += 1;
+    }
+    if (!matches) continue;
+    // More literal segments means a more specific match.
+    if (literals > bestLiterals) {
+      best = op;
+      bestLiterals = literals;
+    }
+  }
+  return best;
+}
+
+/**
+ * Required parameters and top-level body fields the spec declares but the call
+ * omitted.
+ *
+ * Advisory only, and deliberately so: this spec UNDER-states requirements in
+ * places — startDate on /api/vouchers is required by the API and not marked so —
+ * which means it may over-state elsewhere too. Refusing a call on its authority
+ * could block one that would have worked, so this is used to explain a failure
+ * after the fact rather than to prevent the request.
+ */
+export function missingRequired(
+  op: SpecOperation,
+  query: Record<string, unknown> | undefined,
+  body: unknown,
+): { params: string[]; bodyFields: string[] } {
+  const params = (op.params ?? [])
+    .filter((p) => p.required && p.in === "query")
+    .map((p) => p.name)
+    .filter((name) => query?.[name] === undefined);
+
+  const bodyIsObject = typeof body === "object" && body !== null && !Array.isArray(body);
+  const bodyFields = (op.body?.required ?? []).filter(
+    (name) => !bodyIsObject || (body as Record<string, unknown>)[name] === undefined,
+  );
+
+  return { params, bodyFields };
+}
+
 export function findOperation(methodOrId: string, path?: string): SpecOperation | undefined {
   const index = getSpecIndex();
   if (path) {
