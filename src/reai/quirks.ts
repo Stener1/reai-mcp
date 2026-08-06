@@ -87,12 +87,20 @@ export const QUIRKS: readonly Quirk[] = [
   {
     id: "module-gating",
     match: "descendants",
-    paths: ["/api/projects", "/api/warehouses", "/api/timesheets", "/api/salary-payments"],
+    paths: [
+      "/api/projects",
+      "/api/warehouses",
+      "/api/timesheets",
+      "/api/salary-payments",
+      "/api/share-investments",
+    ],
     kind: "gotcha",
     note:
       'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
-      "this tenant.",
+      "this tenant. /api/share-investments is the exception worth knowing: it returns 403 with an " +
+      "ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
+      "here the same way — the module is off.",
   },
   {
     id: "date-range-required",
@@ -178,6 +186,29 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "Only possible while the period is open and no posting is locked. Postings report canDelete " +
       "and lockReasons — check those first. In a closed period the remedy is a reversing voucher.",
+  },
+
+  {
+    id: "leads-paginated-object",
+    paths: ["/api/leads"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "The ONLY paginated collection in this API, and the only one that does not return a bare " +
+      "array. The response is an object: { items, page, hasPrevious, hasNext, latestRegisteredAt }, " +
+      "50 rows per page — so iterating the response directly, or reading .length, yields nothing. " +
+      "Rows also carry \"id\": null, because these are Brønnøysund register entries rather than " +
+      "stored records; there is no local id to fetch one by.",
+  },
+  {
+    id: "warehouse-inventory-object",
+    paths: ["/api/warehouses/inventory"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "Returns an object, not an array: { warehouseId, rows, totalStockValue, totalRetailValue }. " +
+      "The stock lines are under `rows`, and the two totals are already computed — do not sum rows " +
+      "to get stock value, it is there.",
   },
 
   // --- Sales ---------------------------------------------------------------

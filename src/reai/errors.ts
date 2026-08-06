@@ -68,7 +68,12 @@ export class ReaiApiError extends Error {
 const ERROR_HINTS: Record<number, string> = {
   400: "The request body or query parameters were rejected. Call reai_describe_endpoint for this path to check required fields, types and formats (dates are ISO yyyy-MM-dd).",
   401: "The API token is missing, expired or malformed. Verify REAI_USER_API_TOKEN, or re-authorize the connector.",
-  403: "The token authenticated but lacks permission for this tenant or operation. Confirm the tenantId is one returned by reai_whoami, and that the user's role allows it.",
+  // Module gating is the COMMON cause of a 403 here, not a role problem, so it is
+  // named first: sending an agent to audit permissions for a feature that is simply
+  // switched off wastes calls and misdiagnoses it. The detail usually says which
+  // ("Project module is disabled") — but not always, since /api/share-investments
+  // returns 403 with an entirely empty body and no content-type.
+  403: "Most often a DISABLED MODULE rather than a permission problem — read the detail, which usually names it (\"Project module is disabled\"). Some endpoints return 403 with an empty body, in which case assume the feature is off for this tenant. Otherwise confirm the tenantId is one returned by reai_whoami, and that the user's role allows it.",
   404: "Not found. Either the id does not exist, or the resource belongs to a different tenant than the one requested — check tenantId.",
   409: "Conflict. The resource is in a state that forbids this change (for example a posted voucher in a closed accounting period, or a duplicate number).",
   415: "Unsupported media type. This endpoint likely expects multipart/form-data (a file upload) rather than JSON.",
