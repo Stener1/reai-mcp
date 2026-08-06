@@ -477,3 +477,43 @@ test("the two axes are genuinely independent", () => {
     WriteBlockedError,
   );
 });
+
+test("invoice sub-operations that are local bookkeeping do not count as sending", () => {
+  // A prefix on /api/invoices swept these in, so `full` plus no-external-send
+  // could not register a payment or apply a credit note — ordinary
+  // customer-ledger work with no communication involved.
+  for (const path of [
+    "/api/invoices/9/payments",
+    "/api/invoices/9/refunds",
+    "/api/invoices/9/rounding-adjustment",
+    "/api/invoices/9/manual-credit-note-applications",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "none", path);
+  }
+});
+
+test("the transmitting invoice sub-operations still are", () => {
+  for (const path of [
+    "/api/invoices/9/ehf",
+    "/api/invoices/9/email",
+    "/api/invoices/9/reminders",
+    // Crediting "starts credit note delivery asynchronously".
+    "/api/invoices/9/credit",
+    "/api/invoices/reminders/bulk",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "external", path);
+  }
+});
+
+test("filings with the government count as sending", () => {
+  // As external as it gets. The tax return has no idempotency guard, so a
+  // repeated call re-files.
+  assert.equal(classifyTransmission("POST", "/api/tax-returns/2026/submit"), "external");
+  assert.equal(classifyTransmission("POST", "/api/salary-payments/3/complete"), "external");
+  assert.equal(classifyTransmission("POST", "/api/amelding/1/feedback-raw"), "external");
+
+  // Validating a tax return is a dry run, and marking a VAT period completed
+  // records that it was filed elsewhere — neither sends anything.
+  assert.equal(classifyTransmission("POST", "/api/tax-returns/2026/validate"), "none");
+  assert.equal(classifyTransmission("POST", "/api/vat-returns/complete-manually"), "none");
+});

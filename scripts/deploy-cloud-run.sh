@@ -209,7 +209,14 @@ fi
 # delimiter to a semicolon for this argument.
 build_env_arg() {
   local pairs="REAI_WRITE_MODE=${WRITE_MODE};REAI_ALLOWED_REDIRECT_HOSTS=${ALLOWED_REDIRECT_HOSTS}"
-  if [[ "$ALLOW_EXTERNAL_SEND" == "true" ]]; then pairs="${pairs};REAI_ALLOW_EXTERNAL_SEND=1"; fi
+  # Always explicit. --update-env-vars preserves variables it is not given, so
+  # omitting this on a redeploy would leave a previous "1" in place while the
+  # script cheerfully reported "External send: false".
+  if [[ "$ALLOW_EXTERNAL_SEND" == "true" ]]; then
+    pairs="${pairs};REAI_ALLOW_EXTERNAL_SEND=1"
+  else
+    pairs="${pairs};REAI_ALLOW_EXTERNAL_SEND=0"
+  fi
   if [[ -n "${1:-}" ]]; then pairs="${pairs};PUBLIC_URL=${1}"; fi
   if [[ -n "${2:-}" ]]; then pairs="${pairs};REAI_ALLOWED_HOSTS=${2}"; fi
   local kv

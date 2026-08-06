@@ -776,8 +776,13 @@ const creditInvoice = defineTool({
   description:
     "Create a credit note (kreditnota) reversing an issued invoice. This is the correct way to undo " +
     "an invoice: it posts an offsetting entry and leaves both documents in the audit trail, which is " +
-    "what Norwegian bookkeeping rules require. Requires REAI_WRITE_MODE=full.",
+    "what Norwegian bookkeeping rules require.\n\n" +
+    "It also STARTS DELIVERY of the credit note to the customer, using the original order's " +
+    "settings — so it needs REAI_ALLOW_EXTERNAL_SEND as well as REAI_WRITE_MODE=full.",
   risk: "irreversible",
+  // Creating a credit note "starts credit note delivery asynchronously", using
+  // the original order's settings — so it reaches the customer.
+  transmits: true,
   apiPaths: [["POST", "/api/invoices/{id}/credit"]],
   inputSchema: {
     id: z.number().int().positive().describe("Id of the invoice to credit."),

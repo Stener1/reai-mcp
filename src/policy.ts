@@ -327,25 +327,38 @@ function normalize(path: string): string {
 export type Transmission = "none" | "external";
 
 /**
- * Paths that transmit a document, email, or signing request outside the tenant.
+ * Calls that send something outside the tenant, as precise patterns.
  *
- * `/api/invoices` is on this list because issuing an invoice is not a books-only
- * operation: the API documents that it "starts invoice delivery asynchronously",
- * trying eFaktura, then EHF when the order carries sendEhf, then PDF by email.
+ * Patterns rather than prefixes, because a prefix is wrong in both directions
+ * here. `/api/invoices` as a prefix swept in `/payments`, `/refunds`,
+ * `/rounding-adjustment` and `/manual-credit-note-applications`, which are local
+ * bookkeeping — so `full` plus no-external-send could not do ordinary
+ * customer-ledger work. And a prefix list missed government filings entirely.
  */
-const TRANSMITTING_PREFIXES: readonly string[] = [
-  "/api/peppol",
-  "/api/invoices",
-];
+const TRANSMITTING_PATTERNS: readonly RegExp[] = [
+  // The Peppol transport itself.
+  /^\/api\/peppol(\/|$)/,
 
-/** Sub-paths that transmit, on resources that otherwise do not. */
-const TRANSMITTING_SEGMENTS: readonly string[] = [
-  "/ehf",
-  "/email",
-  "/reminders",
-  "/sign-request",
-  "/sign-requests",
-  "/send",
+  // Issuing a customer invoice starts delivery asynchronously (eFaktura, then
+  // EHF when the order carries sendEhf, then PDF by email). Exact: the
+  // sub-operations below it are mostly local accounting.
+  /^\/api\/invoices$/,
+
+  // Explicitly transmitting invoice sub-operations. `/credit` is here because
+  // creating a credit note "starts credit note delivery asynchronously" using
+  // the original order's settings.
+  /^\/api\/invoices\/[^/]+\/(ehf|email|reminders|credit)(\/|$)/,
+  /^\/api\/invoices\/reminders(\/|$)/,
+
+  // Agreement signing requests are emailed to the signer.
+  /^\/api\/agreements\/[^/]+\/sign-requests?(\/|$)/,
+
+  // Government filings. These leave for Skatteetaten, which is as external as it
+  // gets — and the tax return has no idempotency guard, so a repeated call
+  // re-files.
+  /^\/api\/tax-returns\/[^/]+\/submit$/,
+  /^\/api\/salary-payments\/[^/]+\/complete$/,
+  /^\/api\/amelding(\/|$)/,
 ];
 
 /** Body fields that arm an external send even on a non-transmitting path. */
@@ -372,14 +385,7 @@ export function classifyTransmission(
   const canonical = canonicalizeApiPath(path);
   const normalized = normalize(canonical?.pathname ?? path);
 
-  if (matchesPrefix(normalized, TRANSMITTING_PREFIXES)) return "external";
-  if (
-    TRANSMITTING_SEGMENTS.some(
-      (seg) => normalized.includes(seg + "/") || normalized.endsWith(seg),
-    )
-  ) {
-    return "external";
-  }
+  if (TRANSMITTING_PATTERNS.some((re) => re.test(normalized))) return "external";
 
   if (body && typeof body === "object" && !Array.isArray(body)) {
     for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
