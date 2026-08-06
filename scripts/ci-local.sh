@@ -53,7 +53,10 @@ if [[ -n "$TARGET_REF" ]]; then
     echo "Commit or stash first, or run with no argument to check the tree as it is." >&2
     exit 2
   fi
-  ORIGINAL_REF="$(git rev-parse --abbrev-ref HEAD)"
+  # `--abbrev-ref` yields the literal "HEAD" in detached state, and restoring that
+  # would leave the repo on the target rather than where it started. Fall back to
+  # the commit itself.
+  ORIGINAL_REF="$(git symbolic-ref --quiet --short HEAD || git rev-parse HEAD)"
   git checkout -q "$TARGET_REF" || { echo "No such ref: $TARGET_REF" >&2; exit 2; }
 fi
 
@@ -102,32 +105,58 @@ for major in "${NODE_MAJORS[@]}"; do
     continue
   fi
 
-  # Node 20/22 print "# pass N"; Node 24's reporter prints "ℹ pass N".
+  # The runner's EXIT CODE is authoritative. Parsing output for a summary is only
+  # for the human-readable count: a test whose own message happens to look like a
+  # summary line ("# fail 0") can be picked up by `head -1` instead of the real
+  # aggregate, so a genuinely failing run could have been reported as passing.
   tests="$(PATH="$bin:$PATH" node --test test/*.test.mjs 2>&1)"
-  passed="$(printf '%s\n' "$tests" | grep -E '^(#|ℹ) pass' | head -1 | grep -oE '[0-9]+')"
-  failed="$(printf '%s\n' "$tests" | grep -E '^(#|ℹ) fail' | head -1 | grep -oE '[0-9]+')"
+  test_status=$?
+  # Node 20/22 print "# pass N"; Node 24's reporter prints "ℹ pass N". Take the
+  # LAST match, which is the aggregate, not a line from inside a test.
+  passed="$(printf '%s\n' "$tests" | grep -E '^(#|ℹ) pass ' | tail -1 | grep -oE '[0-9]+')"
 
-  if [[ -z "$passed" || -z "$failed" ]]; then
-    echo "  Node $major ($version): could not read a test summary — treating as failure"
-    printf '%s\n' "$tests" | tail -15 | sed 's/^/      /'
-    failures=$((failures + 1))
-    continue
-  fi
-
-  if [[ "$failed" != "0" ]]; then
-    echo "  Node $major ($version): $failed TEST FAILURE(S) ($passed passed)"
+  if [[ "$test_status" -ne 0 ]]; then
+    echo "  Node $major ($version): TESTS FAILED (exit $test_status)"
     printf '%s\n' "$tests" | grep -A6 '^not ok' | head -40 | sed 's/^/      /'
     failures=$((failures + 1))
     continue
   fi
 
-  echo "  Node $major ($version): typecheck ok, build ok, $passed tests pass"
+  # A clean exit with no readable count is still a pass; say so without inventing
+  # a number.
+  echo "  Node $major ($version): typecheck ok, build ok, ${passed:-?} tests pass"
+
+  # The workflow's fifth step, which this script previously skipped entirely: the
+  # packaged server must refuse to start without credentials, and must name the
+  # variable rather than emit a stack trace.
+  startup="$(PATH="$bin:$PATH" env -u REAI_USER_API_TOKEN -u REAI_TOKEN node dist/index.js 2>&1)"
+  startup_status=$?
+  if [[ "$startup_status" -eq 0 ]]; then
+    echo "  Node $major: startup check FAILED — server exited 0 with no token set"
+    failures=$((failures + 1))
+    continue
+  fi
+  if ! printf '%s\n' "$startup" | grep -q "REAI_USER_API_TOKEN"; then
+    echo "  Node $major: startup check FAILED — error does not name REAI_USER_API_TOKEN"
+    printf '%s\n' "$startup" | head -5 | sed 's/^/      /'
+    failures=$((failures + 1))
+    continue
+  fi
+  echo "  Node $major ($version): startup without a token is actionable"
 done
 
 # The fourth job: what would actually ship to npm.
 echo
+# The workflow pins this job to Node 22, so resolve that rather than using
+# whatever `node` happens to be active.
+pack_bin="$(resolve_node_bin 22 || true)"
+if [[ -z "$pack_bin" ]]; then
+  echo "  package: Node 22 not installed — skipping (CI still covers it)"
+  skipped+=("22/package")
+  pack_log=""
+else
 pack_log="$(mktemp)"
-if npm pack --dry-run >"$pack_log" 2>&1; then
+if PATH="$pack_bin:$PATH" npm pack --dry-run >"$pack_log" 2>&1; then
   missing=0
   for required in "${REQUIRED_IN_PACKAGE[@]}"; do
     grep -q "$required" "$pack_log" || { echo "  package: MISSING $required"; missing=1; }
@@ -142,7 +171,8 @@ else
   tail -15 "$pack_log" | sed 's/^/      /'
   failures=$((failures + 1))
 fi
-rm -f "$pack_log"
+fi
+[[ -n "$pack_log" ]] && rm -f "$pack_log"
 
 echo
 if [[ ${#skipped[@]} -gt 0 ]]; then
