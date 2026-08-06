@@ -165,7 +165,7 @@ This walks the entire OAuth flow the way a real client does — discovery, regis
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8080` | Listen port |
-| `PUBLIC_URL` | inferred from `Host` | **Set in production.** Published in OAuth metadata, so it must match what clients connect to |
+| `PUBLIC_URL` | inferred from `Host` | **Set in production.** Published in OAuth metadata, so it must match what clients connect to. Must be a bare origin — a path, query or fragment is rejected at startup. `REAI_PUBLIC_URL` is accepted as an alias |
 | `REAI_ENCRYPTION_KEY` | random per boot | **Set in production.** 32 bytes, base64 or hex. Seals access tokens |
 | `REAI_ALLOWED_HOSTS` | — | Comma-separated hostnames to accept; enables DNS-rebinding protection and pins the advertised OAuth issuer |
 | `REAI_ALLOWED_REDIRECT_HOSTS` | any https host | Comma-separated hosts allowed as OAuth redirect targets. **Recommended on a public deployment** — see below. Loopback is always permitted |
@@ -199,7 +199,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 ### Discovery — the escape hatch
 | Tool | Purpose |
 |---|---|
-| `reai_list_api_tags` | All 51 API domains with operation counts — a map of what the system can do |
+| `reai_list_api_tags` | All 52 API domains with operation counts — a map of what the system can do |
 | `reai_search_endpoints` | Keyword search across all 313 public operations |
 | `reai_describe_endpoint` | Full schema for one endpoint, nested objects resolved — **with known quirks first** |
 | `reai_api_notes` | Browse the known API quirks (see [below](#api-quirks-worth-knowing)) |
@@ -267,8 +267,9 @@ Anything not listed — leads, agreements, subscriptions, projects, assets, ware
 If 59 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
-REAI_TOOLSETS=bookkeeping          # 14 tools
-REAI_TOOLSETS=bookkeeping,sales    # 33 tools
+REAI_TOOLSETS=bookkeeping          # 15 tools
+REAI_TOOLSETS=bookkeeping,sales    # 34 tools
+REAI_TOOLSETS=purchase             # 20 tools
 (unset)                            # all 59
 ```
 
@@ -322,7 +323,7 @@ A test asserts every quirk still matches a real operation in the spec, so they c
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `REAI_USER_API_TOKEN` | — | **Required.** ReAI user API token |
+| `REAI_USER_API_TOKEN` | — | **Required.** ReAI user API token. `REAI_TOKEN` is accepted as an alias |
 | `REAI_TENANT_ID` | — | Default tenant, so `tenantId` can be omitted |
 | `REAI_WRITE_MODE` | `reversible` | `read-only`, `reversible` or `full` — see [Safety](#safety-this-writes-to-real-accounting-books) |
 | `REAI_BASE_URL` | `https://app.reai.no` | Override for a staging environment |
@@ -376,6 +377,13 @@ Issues and PRs welcome. Adding a curated tool is deliberately mechanical:
 3. Add it to `allTools` in `src/server.ts` if you created a new module.
 
 Declaring `risk` correctly is the part that matters — it is what gates the tool behind `REAI_WRITE_MODE`.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md), which also records the known limitations —
+tokens cannot be individually revoked, path-prefix deployments are unsupported,
+and the irreversible write paths have not been exercised end to end against live
+books because ReAI has no sandbox.
 
 ## License
 

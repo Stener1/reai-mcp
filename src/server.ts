@@ -13,7 +13,7 @@ import { purchaseTools } from "./tools/purchase.js";
 import { bankVatTools } from "./tools/bankvat.js";
 
 export const SERVER_NAME = "reai-mcp";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 
 /**
  * Curated tools grouped by domain, so an operator can narrow the surface with
