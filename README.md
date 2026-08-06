@@ -35,7 +35,8 @@ An agent exploring an API by trial and error is therefore genuinely dangerous he
 Two properties make this more than a label:
 
 - **Tools you cannot use are not advertised.** In `reversible` mode the ledger-write tools are not registered at all, so the agent never sees them and cannot try.
-- **The escape hatch fails closed.** `reai_request` classifies each call by method and path. An *unrecognised* write path is treated as irreversible and blocked — so a future endpoint this server has never heard of cannot slip through as "probably fine".
+- **The escape hatch fails closed.** `reai_request` classifies each call by method and path. An *unrecognised* write path is treated as irreversible and blocked — so a future endpoint this server has never heard of cannot slip through as "probably fine". Dot segments cannot straddle two paths either: `POST /api/customers/../vouchers` is refused, not resolved.
+- **The body is inspected too, not just the path.** Some payloads are more dangerous than their endpoint suggests: an order carrying `sendEhf: true` arms Peppol transmission to a real counterparty, and a subscription with `outputMode: "create_invoice"` issues numbered invoices on a schedule. Both escalate to irreversible.
 
 The default is deliberately the middle setting, not the permissive one.
 
@@ -202,13 +203,34 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_create_voucher` | Book a voucher; balance validated locally first | **irreversible** |
 | `reai_delete_voucher` | Delete a voucher, if the period is still open | **irreversible** |
 
-Anything not listed — invoices, suppliers, expenses, bank reconciliation, leads, agreements, salary, assets — is reachable through `reai_search_endpoints` + `reai_request` today, and more curated tools are landing.
+### Sales
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_customers` · `reai_get_customer` | Find and read customers (*kunder*) | read |
+| `reai_customer_ledger` | Kundereskontro — who owes what; `isOpenPosting` answers "who owes us money" | read |
+| `reai_list_products` | Products and their variants; order lines reference a `variantId` | read |
+| `reai_list_orders` · `reai_get_order` | Orders and their lines | read |
+| `reai_list_offers` | Offers / quotes (*tilbud*) | read |
+| `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
+| `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data | reversible |
+| `reai_create_product` | Create a product (no variants or price — see the tool's note) | reversible |
+| `reai_create_order` | Create an order with lines. Sends nothing to the customer | reversible |
+| `reai_create_offer` | Create an offer. Lines require `itemName` **and** `vatCode` | reversible |
+| `reai_create_invoice_from_order` | Issue an invoice from an order | **irreversible** |
+| `reai_credit_invoice` | Credit note — the correct way to undo an invoice | **irreversible** |
+| `reai_register_invoice_payment` | Record a customer payment | **irreversible** |
+
+Anything not listed — suppliers, supplier invoices, expenses, bank reconciliation, leads, agreements, salary, assets, subscriptions — is reachable through `reai_search_endpoints` + `reai_request` today, and more curated tools are landing.
 
 ## Bookkeeping conventions worth knowing
 
 - **Dates** are ISO `yyyy-MM-dd`.
 - **Signs**: in a voucher a **positive** amount *debits* an account, a **negative** amount *credits* it, and all postings must sum to exactly zero. `reai_create_voucher` checks this locally and tells you the exact imbalance.
 - **Account numbers and VAT codes are tenant-specific.** Look them up rather than assuming; which VAT codes are valid depends on the tenant's VAT registration.
+- **Billing is a two-step chain**: an **order** carries the line items, and invoicing that order creates the invoice. There is no endpoint that builds an invoice from lines directly — this surprises everyone once.
+- **To undo an issued invoice, raise a credit note.** An invoice is a numbered legal document; it is not deletable.
+- **Order lines and offer lines differ.** An offer line requires `itemName` and `vatCode`; an order line does not. Both accept only VAT codes from `reai_list_vat_codes` with `usage="customer-invoice"`.
+- **`daysUntilDue` is mandatory** on orders and offers, so the API can never apply the customer's own terms by itself. The tools read the customer's terms for you and say which source they used.
 - **Deep links** need the tenant: `https://app.reai.no/vouchers/123?tenantId=2634`. The tools return these already formed.
 
 ## Configuration
@@ -241,10 +263,20 @@ npm install
 npm run build        # rebuild the spec index, then compile
 npm test             # build + unit tests (no credentials needed)
 npm run typecheck
-npm run smoke        # end-to-end against the live API (needs a token)
+npm run smoke        # read-only, end-to-end against the live API (needs a token)
 ```
 
 Unit tests cover the write-policy classifier and spec search/describe, and need no network access or credentials.
+
+Two live harnesses, both of which assert the **negatives** as well as the happy path:
+
+```bash
+REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234       # read-only, safe on production books
+REAI_USER_API_TOKEN=... node scripts/smoke-http.mjs --url https://…  # the whole OAuth flow
+REAI_USER_API_TOKEN=... node scripts/smoke-write.mjs --tenant 1234 # WRITES: reversible round-trip
+```
+
+`smoke-write.mjs` creates real master data, reads it back, updates it and deletes it again, cleaning up in a `finally` so a mid-run failure still removes the record. It requires `--tenant` explicitly so it cannot write to the wrong company by accident, and it verifies that the ledger, invoicing, VAT-return and user-admin paths all stay refused.
 
 ### A note on `npm audit`
 
