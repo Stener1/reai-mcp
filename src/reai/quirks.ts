@@ -62,6 +62,29 @@ export const QUIRKS: readonly Quirk[] = [
   // here they would match all 313 operations and drown the endpoint-specific
   // notes that are the point of this registry.
   {
+    id: "tenant-header-ignored-single-tenant",
+    paths: ["/api/me"],
+    kind: "gotcha",
+    note:
+      "Verified against the live API: when a token reaches exactly ONE tenant, X-Tenant-Id is " +
+      "IGNORED — every value returns that one tenant's data, including a tenant id that does not " +
+      "exist and one belonging to another user. Data stays isolated between USERS (two tokens never " +
+      "see each other's books), so this is not a leak; but it means a successful response is NOT " +
+      "evidence that the tenant you asked for is the tenant you got. Trust GET /api/me for what a " +
+      "token can reach, and never infer access from a 200.",
+  },
+  {
+    id: "me-may-under-report-tenants",
+    paths: ["/api/me"],
+    kind: "gotcha",
+    note:
+      "A tenant can exist and be visible in the ReAI UI while GET /api/me does not list it — seen " +
+      "with a company added but not finished onboarding, or not yet granted to the user. Combined " +
+      "with the ignored tenant header, that is a trap: probing the tenant returns 200 with the " +
+      "WRONG tenant's data, which looks like success. Treat /api/me as authoritative and wait for " +
+      "the tenant to appear there.",
+  },
+  {
     id: "module-gating",
     match: "descendants",
     paths: ["/api/projects", "/api/warehouses", "/api/timesheets", "/api/salary-payments"],

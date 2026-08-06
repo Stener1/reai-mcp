@@ -53,6 +53,14 @@ const whoami = defineTool({
       `Write policy: REAI_WRITE_MODE=${ctx.config.writeMode} ` +
         `(available modes: ${WRITE_MODES.join(", ")}).`,
     );
+    if (tenants.length === 1) {
+      notes.push(
+        `This token reaches exactly one company. Note that ReAI IGNORES the tenant header in that ` +
+          `case — any tenant id returns this company's data, including ids that do not exist — so a ` +
+          `successful response is not evidence you reached the tenant you asked for. This list is ` +
+          `authoritative; a company missing from it is not reachable, even if it exists in the UI.`,
+      );
+    }
 
     return ok(
       {
@@ -122,7 +130,14 @@ const useTenant = defineTool({
     if (!match) {
       const list = tenants.map((t) => `  ${t.id} — ${t.companyName ?? t.slug ?? "unnamed"}`).join("\n");
       return okText(
-        `Tenant ${args.tenantId} is not accessible with this token. Available tenants:\n${list || "  (none)"}`,
+        `Tenant ${args.tenantId} is not accessible with this token. Available tenants:\n` +
+          `${list || "  (none)"}\n\n` +
+          `This is checked against GET /api/me rather than by trying the tenant, deliberately: ReAI ` +
+          `ignores the tenant header when a token reaches only one company, so probing ${args.tenantId} ` +
+          `would return 200 with the WRONG company's data and look like success.\n\n` +
+          `If the company exists in the ReAI UI but is missing above, access has not been granted to ` +
+          `this user yet — finish its onboarding, or have its owner grant access. It will appear here ` +
+          `once that is done.`,
       );
     }
 
