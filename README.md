@@ -99,19 +99,32 @@ Then add `https://reai-mcp.example.com/mcp` as a custom connector. No `REAI_USER
 ### Google Cloud Run
 
 ```bash
-gcloud run deploy reai-mcp \
-  --source . \
-  --region europe-north1 \
-  --allow-unauthenticated \
-  --set-env-vars "REAI_WRITE_MODE=reversible" \
-  --set-secrets "REAI_ENCRYPTION_KEY=reai-mcp-encryption-key:latest"
-
-# Then pin PUBLIC_URL to the URL Cloud Run assigned:
-gcloud run services update reai-mcp --region europe-north1 \
-  --set-env-vars "PUBLIC_URL=$(gcloud run services describe reai-mcp --region europe-north1 --format='value(status.url)')"
+./scripts/deploy-cloud-run.sh --project my-gcp-project
 ```
 
-`--allow-unauthenticated` is required — the MCP client must be able to reach the OAuth endpoints. The server does its own authentication; every `/mcp` request needs a valid token, and unauthenticated requests get a `401` with a `WWW-Authenticate` challenge.
+That is a single command because the manual version has three steps that are easy to get wrong, and the script handles all of them:
+
+1. **Creates `REAI_ENCRYPTION_KEY` in Secret Manager** and grants the runtime service account access. Without a stable key, every authorization breaks on each cold start and separate instances reject each other's tokens.
+2. **Sets `PUBLIC_URL` in a second pass.** The URL is not knowable before the first deploy, and if it does not match, the OAuth metadata advertises the wrong issuer.
+3. **Pins `REAI_ALLOWED_HOSTS`** to the deployed host, so a client-supplied `Host` header cannot decide what the deployment claims to be.
+
+It then verifies `/health` and checks the advertised issuer matches the deployed URL.
+
+Useful flags: `--region`, `--service`, `--write-mode` (defaults to `reversible`; `full` prints a warning and pauses), `--allowed-redirect-hosts` (defaults to `claude.ai`).
+
+`--allow-unauthenticated` is required and is not a mistake — the MCP client must reach the OAuth endpoints before it has a token. The server does its own authentication: every `/mcp` request needs a valid token, and anonymous ones get a `401` with a `WWW-Authenticate` challenge.
+
+Two things learned deploying this for real:
+
+- **Cloud Run may serve one service on more than one hostname.** Pinning `PUBLIC_URL` means every hostname advertises the *same* issuer, so a client connecting via an alias follows the metadata to the canonical URL rather than seeing the issuer change per request.
+- **It scales to zero**, so it costs essentially nothing idle — but it is *your* deployment. Anyone who reaches the URL can authorize with their own ReAI token and reach their own books on your compute.
+
+**On locking it down, honestly:** a public MCP connector is reachable by design, and the usual advice does not straightforwardly apply.
+
+- **IAP does not work for this.** It requires an external HTTPS load balancer, and once IAP is enforcing, `claude.ai` cannot authenticate to it — the connector simply stops working. IAP is the right answer only for a *private* deployment you drive yourself, which is the `REAI_ALLOW_TOKEN_PASSTHROUGH` story behind Tailscale.
+- **Cloud Armor alone is bypassable.** Putting a load balancer with Cloud Armor in front does nothing while the default `run.app` URL is still reachable and unauthenticated — callers just use that instead. If you go this route you must also set `--ingress=internal-and-cloud-load-balancing` so the service only accepts traffic arriving through the balancer. Note that Anthropic publishes no stable egress IP ranges, so an IP allowlist cannot reliably permit `claude.ai` anyway.
+
+What actually helps: `--max-instances` caps the spend, `REAI_ALLOWED_REDIRECT_HOSTS` means only your own client's callback can start a flow, `REAI_WRITE_MODE` bounds what any authorized session can do, and not advertising the URL is the practical control. Every authorized user reaches only their *own* books, because the grant carries their own ReAI token — so the exposure is your compute bill, not your data.
 
 ### Why there is no database
 
@@ -251,7 +264,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-Narrow the surface with `REAI_TOOLSETS=bookkeeping,sales,purchase,bank` if 58 tools is more than your client wants to see. Discovery is never disabled, so nothing becomes unreachable.
+Narrow the surface with `REAI_TOOLSETS=bookkeeping,sales,purchase,bank` if 59 tools is more than your client wants to see. Discovery is never disabled, so nothing becomes unreachable.
 
 ## API quirks worth knowing
 
