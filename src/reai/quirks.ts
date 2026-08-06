@@ -87,12 +87,20 @@ export const QUIRKS: readonly Quirk[] = [
   {
     id: "module-gating",
     match: "descendants",
-    paths: ["/api/projects", "/api/warehouses", "/api/timesheets", "/api/salary-payments"],
+    paths: [
+      "/api/projects",
+      "/api/warehouses",
+      "/api/timesheets",
+      "/api/salary-payments",
+      "/api/share-investments",
+    ],
     kind: "gotcha",
     note:
       'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
-      "this tenant.",
+      "this tenant. /api/share-investments is the exception worth knowing: it returns 403 with an " +
+      "ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
+      "here the same way — the module is off.",
   },
   {
     id: "date-range-required",
@@ -178,6 +186,40 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "Only possible while the period is open and no posting is locked. Postings report canDelete " +
       "and lockReasons — check those first. In a closed period the remedy is a reversing voucher.",
+  },
+
+  {
+    id: "leads-paginated-object",
+    paths: ["/api/leads", "/api/leads/person-profiles", "/api/leads/person-role-matches"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "These return a PAGE OBJECT, not the bare array almost every other collection here returns, " +
+      "so iterating the response or reading .length yields nothing. /api/leads gives " +
+      "{ items, page, hasPrevious, hasNext, latestRegisteredAt } and takes page plus pageSize " +
+      "(1-200, default 50); /api/leads/person-profiles gives { items, hasMore, nextStartOrgNo, limit } " +
+      "and pages by nextStartOrgNo rather than by number. Read the wrapper before assuming a count.",
+  },
+  {
+    id: "leads-unsaved-rows-have-no-id",
+    paths: ["/api/leads"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "A row's `id` is null only while the lead is UNSAVED — those rows are live Brønnøysund " +
+      "register entries rather than stored records. Saved leads do have an id, and it is the key to " +
+      "the whole workflow: GET/PATCH /api/leads/{id}, POST /api/leads/{id}/convert, and the notes, " +
+      "status and follow-up endpoints. Filter with leadFilter=saved|unsaved|all, and keep any id you " +
+      "are given rather than discarding it.",
+  },  {
+    id: "warehouse-inventory-object",
+    paths: ["/api/warehouses/inventory"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "Returns an object, not an array: { warehouseId, rows, totalStockValue, totalRetailValue }. " +
+      "The stock lines are under `rows`, and the two totals are already computed — do not sum rows " +
+      "to get stock value, it is there.",
   },
 
   // --- Sales ---------------------------------------------------------------

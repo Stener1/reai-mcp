@@ -68,7 +68,15 @@ export class ReaiApiError extends Error {
 const ERROR_HINTS: Record<number, string> = {
   400: "The request body or query parameters were rejected. Call reai_describe_endpoint for this path to check required fields, types and formats (dates are ISO yyyy-MM-dd).",
   401: "The API token is missing, expired or malformed. Verify REAI_USER_API_TOKEN, or re-authorize the connector.",
-  403: "The token authenticated but lacks permission for this tenant or operation. Confirm the tenantId is one returned by reai_whoami, and that the user's role allows it.",
+  // This hint is keyed on status alone, so it is appended to EVERY 403 regardless
+  // of path — which is why it must not assert a cause. An earlier version said to
+  // assume a disabled module, and ReAI also enforces granular role permissions
+  // (tenant:invoice:read and the like), so that would have told an agent to give up
+  // on a feature when the real problem was an actionable missing role. Both
+  // possibilities are offered, and the detail decides. The module-specific advice,
+  // including the empty-body case, lives in the module-gating quirk instead, where
+  // it is scoped to the endpoints that actually gate.
+  403: "Two quite different causes. Either the tenant does not have the MODULE this endpoint belongs to — the detail usually says so outright (\"Project module is disabled\") — or the user's role lacks a permission for it. Read the detail before deciding which: if it names a module, the feature is off and no role change helps; if it is absent or generic, confirm the tenantId is one returned by reai_whoami and check the role. Call reai_describe_endpoint for known quirks on the path, some of which return 403 with an empty body.",
   404: "Not found. Either the id does not exist, or the resource belongs to a different tenant than the one requested — check tenantId.",
   409: "Conflict. The resource is in a state that forbids this change (for example a posted voucher in a closed accounting period, or a duplicate number).",
   415: "Unsupported media type. This endpoint likely expects multipart/form-data (a file upload) rather than JSON.",
