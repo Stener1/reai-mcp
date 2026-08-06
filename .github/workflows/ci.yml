@@ -35,7 +35,7 @@ jobs:
         run: npm run build
 
       - name: Unit tests
-        run: node --test test/
+        run: node --test test/*.test.mjs
 
       # Proves the packaged server actually starts and speaks MCP without any
       # ReAI credentials: it must fail with a clear configuration error rather

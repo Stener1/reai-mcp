@@ -43,7 +43,7 @@
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/",
+    "test": "npm run build && node --test test/*.test.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
     "smoke": "node scripts/smoke.mjs"
