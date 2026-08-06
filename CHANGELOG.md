@@ -48,7 +48,7 @@ connector, and has been verified against live ReAI data throughout.
 - **A tenant bound at authorization time is a boundary, not a default** — a grant
   scoped to one company cannot address another, even though the underlying ReAI
   token may reach dozens.
-- **35 known API quirks** keyed to the operations they affect, surfacing
+- **37 known API quirks** keyed to the operations they affect, surfacing
   automatically in discovery. Request shapes that differ from what an endpoint
   name suggests, constraints the schema omits, multi-step workflows, and
   operations that are harder to undo than they look.
@@ -104,6 +104,14 @@ Recorded because most were reachable in the default configuration:
   the next request discarded it.
 
 ### Known limitations
+
+- **The tenant boundary is enforced by this server, not by the API.** ReAI ignores
+  `X-Tenant-Id` when a token reaches only one company — every value, including a
+  nonexistent id, returns that company's data. Isolation between *users* is
+  intact, but we could not verify that the API enforces a tenant switch, because
+  every token available for testing reaches exactly one company. The guarantee
+  holds for calls made through these tools and says nothing about the same token
+  used directly.
 
 - **Individual tokens cannot be revoked** before they expire. Sealed tokens carry
   no server-side record, so rotating `REAI_ENCRYPTION_KEY` — which invalidates

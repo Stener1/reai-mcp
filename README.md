@@ -173,6 +173,8 @@ Unknown callback hosts are then refused at registration and never reach the cons
 
 The company selected during authorization is a **boundary, not a default**. A grant bound to tenant 4711 cannot address any other tenant, even though the underlying ReAI token may unlock dozens — relevant for an accountant whose token reaches every client company. Tools that pass a different `tenantId`, and `reai_use_tenant`, are both refused with an explanation. To work in another company, re-authorize and pick it.
 
+**Worth being precise about what this rests on.** The boundary is enforced *here*, in this server — it is not the API refusing the call. ReAI ignores `X-Tenant-Id` for a single-tenant token (see the quirks above), so we could not verify that the API itself enforces a tenant switch, and every tenant we have to test with reaches exactly one company. The guarantee is therefore only as strong as this process: it holds for anything going through these tools, and says nothing about a caller with the same ReAI token talking to ReAI directly. That is the right architecture — the token is the user's own, so they were never prevented from doing that — but do not read it as the API sandboxing them.
+
 ### Verify a deployment
 
 ```bash
@@ -298,7 +300,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **35 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **37 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
@@ -324,6 +326,8 @@ Browse them with `reai_api_notes`, or read the highlights:
 - `DELETE` on a supplier invoice **reverses** it rather than removing it.
 
 **Surprises**
+- **`X-Tenant-Id` is ignored when a token reaches only one company.** Verified live: every tenant id returns that one company's data — including an id that does not exist, and one belonging to another user. Data stays isolated *between users*, so this is not a leak; but **a 200 is not evidence you reached the tenant you asked for.** Treat `GET /api/me` as the only authority on what a token can reach.
+- **`/api/me` can under-report.** A company can exist in the ReAI UI while `/api/me` omits it — seen with one added but not finished onboarding. Combined with the point above this is a trap: probing it returns 200 with the *wrong* company's data, which looks like success.
 - ReAI **title-cases stored names**, so a round-trip is not byte-equal.
 - `DELETE` **archives instead of deleting** when a record has transactions; the response says which.
 - A **403 is often a disabled module**, not a permissions problem — read the `detail`.
