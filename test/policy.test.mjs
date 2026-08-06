@@ -303,11 +303,71 @@ test("escalatingBodyFields names the offending field and its value", () => {
   assert.deepEqual(escalatingBodyFields(undefined), []);
 });
 
-test("only booleans that are true, and the one string value, escalate", () => {
-  // Guards the predicate map against regressing to a "field name is present" test.
-  assert.equal(classifyWithBody("reversible", { outputMode: "CREATE_INVOICE" }), "reversible");
+test("the predicate map is not a 'field name is present' test", () => {
+  // Still guards against regressing to name-presence, but no longer asserts that a
+  // case variant is safe. This test used to require outputMode:"CREATE_INVOICE" to
+  // stay reversible, which PINNED A BYPASS: ReAI is .NET, System.Text.Json matches
+  // enum names case-insensitively, so "CREATE_INVOICE" binds exactly as
+  // "create_invoice" does and would have armed recurring invoice issuance while the
+  // policy called it reversible.
   assert.equal(classifyWithBody("reversible", { outputMode: "" }), "reversible");
-  assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: "true" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { outputMode: "create_order" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { sendEhf: false }), "reversible");
+  assert.equal(classifyWithBody("reversible", { unrelatedField: true }), "reversible");
+});
+
+test("a case variant of an escalating value still escalates", () => {
+  for (const value of ["create_invoice", "CREATE_INVOICE", "Create_Invoice", "cReAtE_iNvOiCe"]) {
+    assert.equal(
+      classifyWithBody("reversible", { outputMode: value }),
+      "irreversible",
+      `outputMode=${value} must escalate`,
+    );
+  }
+  // And the field name binds case-insensitively too, which was already handled.
+  assert.equal(classifyWithBody("reversible", { OutputMode: "create_invoice" }), "irreversible");
+  assert.equal(classifyWithBody("reversible", { SENDEHF: true }), "irreversible");
+});
+
+test("subscription billing is transmission, not merely an irreversible write", async () => {
+  // These were classified irreversible but NOT transmitting, so `full` mode alone
+  // sent them: /generate bills one subscription, /generate-due bills every due
+  // subscription in the tenant, and both issue invoices — which starts delivery.
+  const { classifyTransmission } = await import("../dist/policy.js");
+  assert.equal(classifyTransmission("POST", "/api/subscriptions/7/generate"), "external");
+  assert.equal(classifyTransmission("POST", "/api/subscriptions/generate-due"), "external");
+  assert.equal(
+    classifyTransmission("POST", "/api/subscriptions", { outputMode: "create_invoice" }),
+    "external",
+  );
+  assert.equal(
+    classifyTransmission("POST", "/api/subscriptions", { automaticBillingGeneration: true }),
+    "external",
+  );
+});
+
+test("transmitting operations outside /api/ are covered too", async () => {
+  // Every pattern was /api/-anchored while ~100 indexed operations live outside it,
+  // reachable through reai_request, which never checks a path against the spec.
+  // /salary/{id}/complete is literally the A-melding submission the /api/ pattern
+  // guards.
+  const { classifyTransmission } = await import("../dist/policy.js");
+  for (const path of [
+    "/salary/1/complete",
+    "/salary/1/register-payment",
+    "/ztl/banks/1/approval-reminders",
+    "/ztl/banks/1/failed-payment-notifications",
+    "/kassasystem/mobile/payment-request",
+    "/adyen/payout/session",
+    "/cf-worker/email-warning",
+    "/vat-return/altinn-sync",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "external", `${path} should transmit`);
+  }
+  // Ordinary local writes are unaffected.
+  for (const path of ["/api/customers", "/api/vouchers", "/api/products"]) {
+    assert.equal(classifyTransmission("POST", path), "none", `${path} should not transmit`);
+  }
 });
 
 test("manual reconciliation endpoints are matched by prefix, not by fail-closed accident", () => {
@@ -640,4 +700,31 @@ test("every delete tool's endpoint is classified no worse than the tool claims",
       );
     }
   }
+});
+
+test("changing a counterparty's bank details escalates; changing its name does not", async () => {
+  // `reversible` means "master data that can be cleanly deleted", and that criterion
+  // does not describe "redirects a future payment". The record can be put back; the
+  // transfer cannot, and it happens later, through a legitimate action by a person in
+  // the ReAI UI — entirely outside anything this policy observes. So a prompt-injected
+  // agent in the DEFAULT configuration could repoint a supplier's account.
+  const { classifyRequest, classifyPaymentRouting, paymentRoutingFields } = await import("../dist/policy.js");
+  const risk = (method, path, body) => classifyPaymentRouting(classifyRequest(method, path), path, body);
+
+  assert.equal(risk("PATCH", "/api/suppliers/1", { name: "New name" }), "reversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { bankAccountNumber: "15039012345" }), "irreversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { IBAN: "NO9386011117947" }), "irreversible");
+  assert.equal(risk("PUT", "/api/creditors/1", { bankAccountNumber: "x" }), "irreversible");
+  assert.equal(risk("PATCH", "/api/customers/1", { iban: "NO93" }), "irreversible");
+
+  // An empty value is not a repoint.
+  assert.equal(risk("PATCH", "/api/suppliers/1", { iban: "" }), "reversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { iban: null }), "reversible");
+
+  // Registering the company's OWN bank account carries a swiftCode and is ordinary
+  // work in the default mode — this must stay path-scoped, not field-only.
+  assert.equal(risk("POST", "/api/company-banks", { swiftCode: "DNBANOKK", bban: "15201353103" }), "reversible");
+
+  assert.deepEqual(paymentRoutingFields({ name: "x", iban: "NO93" }), ["iban"]);
+  assert.deepEqual(paymentRoutingFields({ name: "x" }), []);
 });

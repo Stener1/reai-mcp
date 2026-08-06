@@ -307,7 +307,10 @@ const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolea
   // Lets ReAI issue numbered invoices on a recurring schedule with no further call.
   automaticbillinggeneration: (v) => v === true,
   // Decides whether a subscription produces a draft order or a real invoice.
-  outputmode: (v) => v === "create_invoice",
+  // Compared case-insensitively: System.Text.Json falls back to case-insensitive
+  // enum-name matching, so "CREATE_INVOICE" binds just as well and an exact compare
+  // let it through as merely reversible.
+  outputmode: (v) => typeof v === "string" && v.toLowerCase() === "create_invoice",
 };
 
 /**
@@ -397,11 +400,97 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
   /^\/api\/tax-returns\/[^/]+\/submit$/,
   /^\/api\/salary-payments\/[^/]+\/complete$/,
   /^\/api\/amelding(\/|$)/,
+
+  // Subscription billing ISSUES invoices, and issuing one starts delivery — the same
+  // reason /api/invoices is here. These were classified irreversible but not
+  // transmitting, so `full` mode alone sent them: /generate bills one subscription,
+  // /generate-due bills EVERY due subscription in the tenant.
+  /^\/api\/subscriptions\/[^/]+\/generate$/,
+  /^\/api\/subscriptions\/generate-due$/,
+
+  // The same operations under their non-/api aliases. Every pattern above is
+  // /api/-anchored, and ~100 indexed operations live outside it — reachable through
+  // reai_request, which never checks a path against the spec. /salary/{id}/complete
+  // is literally the A-melding submission the /api/ pattern guards.
+  /^\/salary\/[^/]+\/(complete|register-payment)$/,
+  /^\/amelding(\/|$)/,
+  /^\/vat-return(\/|$)/,
+
+  // Notifications and payment rails outside /api/: bank-approval reminders and
+  // failed-payment notices email real approvers; the card and payout endpoints move
+  // money through third parties.
+  /^\/ztl\/.*\/(approval-reminders|failed-payment-notifications)$/,
+  /^\/kassasystem\/mobile\/payment-request(\/|$)/,
+  /^\/adyen\/(payout|payment)(\/|$)/,
+  /^\/cf-worker\/email(-|\/|$)/,
+  /^\/lead\/[^/]+\/person-phone-call$/,
+  /^\/lead\/company\/[^/]+\/phone-call$/,
 ];
+
+
+/**
+ * Paths where a body can change WHERE MONEY GOES, as opposed to changing a record.
+ *
+ * Editing a supplier is reversible — the record can be put back. The payment is not:
+ * a human later pays the invoice in the ReAI UI, to whatever account is on file, and
+ * that transfer is outside anything this policy can see. So a prompt-injected agent
+ * in the DEFAULT configuration could repoint a supplier's bank details and the loss
+ * would happen later, through a legitimate action by a person.
+ *
+ * `reversible` is documented as "master data that can be cleanly deleted", and that
+ * criterion simply does not describe "redirects a future payment".
+ *
+ * Deliberately path-scoped rather than added to the body-field map: registering the
+ * company's OWN bank account (POST /api/company-banks) also carries a swiftCode and
+ * is an ordinary thing to do in the default mode. Only a counterparty's destination
+ * escalates.
+ */
+const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
+  /^\/api\/suppliers(\/|$)/,
+  /^\/api\/creditors(\/|$)/,
+  /^\/api\/customers(\/|$)/,
+  /^\/api\/supplier-invoices\/[^/]+\/payment-details(\/|$)/,
+];
+
+const PAYMENT_ROUTING_FIELDS = new Set(["iban", "bankaccountnumber", "swiftcode", "accountnumber"]);
+
+/** Payment-routing fields present in a body, for use in error messages. */
+export function paymentRoutingFields(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return Object.entries(body as Record<string, unknown>)
+    .filter(
+      ([key, value]) =>
+        PAYMENT_ROUTING_FIELDS.has(key.toLowerCase()) &&
+        value !== undefined &&
+        value !== null &&
+        String(value).trim() !== "",
+    )
+    .map(([key]) => key);
+}
+
+/**
+ * Escalate a counterparty write that changes payment routing.
+ *
+ * Separate from `classifyWithBody` because it needs the path: the same field on
+ * /api/company-banks is benign.
+ */
+export function classifyPaymentRouting(pathRisk: Risk, path: string, body: unknown): Risk {
+  if (pathRisk === "irreversible") return pathRisk;
+  const normalized = path.toLowerCase().replace(/\/+$/, "");
+  if (!PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
+}
 
 /** Body fields that arm an external send even on a non-transmitting path. */
 const TRANSMITTING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
   sendehf: (v) => v === true,
+  // A subscription set to produce invoices, or to bill automatically, will issue and
+  // DELIVER them with no further call. The write ladder already escalated these to
+  // irreversible; transmission said "none", so `full` mode alone armed recurring
+  // delivery to a real customer. That is exactly the case the two-axis design exists
+  // to catch, and it was slipping between the axes.
+  outputmode: (v) => typeof v === "string" && v.toLowerCase() === "create_invoice",
+  automaticbillinggeneration: (v) => v === true,
 };
 
 /**

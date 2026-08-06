@@ -135,7 +135,7 @@ const updateSupplier = defineTool({
   name: "reai_update_supplier",
   title: "Update a supplier",
   description:
-    "Update supplier details, including the bank account used to pay them. " +
+    "Update supplier details. Editing name, address or contact data is ordinary master-data work.\n\nCHANGING THE BANK DETAILS (bankAccountNumber, iban, swiftCode) is different in kind: the record is reversible, but the payment is not. Whoever pays this supplier next — quite possibly a person clicking through the ReAI UI, long after this call — sends money to whatever account is on file. So those fields require REAI_WRITE_MODE=full, and they are worth confirming with the user against something outside the conversation before changing. " +
     "Only the fields you pass are changed.",
   risk: "reversible",
   apiPaths: [["PATCH", "/api/suppliers/{id}"]],

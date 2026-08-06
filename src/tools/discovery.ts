@@ -16,7 +16,9 @@ import {
   classifyRequest,
   classifyTransmission,
   classifyWithBody,
+  classifyPaymentRouting,
   escalatingBodyFields,
+  paymentRoutingFields,
   transmittingBodyFields,
   type Risk,
 } from "../policy.js";
@@ -460,13 +462,28 @@ const request = defineTool({
       classifyRequest(method, path),
       classifyRequest(method, decoded),
     );
-    const risk = classifyWithBody(pathRisk, args.body);
-    const escalated = risk !== pathRisk ? escalatingBodyFields(args.body) : [];
+    const bodyRisk = classifyWithBody(pathRisk, args.body);
+    // Then payment routing, which needs the path: changing a counterparty's bank
+    // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
+    // happens later when a human pays the invoice in the ReAI UI.
+    const risk = classifyPaymentRouting(bodyRisk, decoded, args.body);
+    const routing = risk !== bodyRisk ? paymentRoutingFields(args.body) : [];
+    const escalated =
+      routing.length > 0
+        ? [`${routing.join(", ")} (this changes where a payment will go)`]
+        : bodyRisk !== pathRisk
+          ? escalatingBodyFields(args.body)
+          : [];
     assertAllowed(
       risk,
       ctx.config.writeMode,
       escalated.length > 0
-        ? `${method} ${path} with ${escalated.join(", ")} (this arms an external send)`
+        ? // The reason is carried in the entry itself now: a body can escalate because it
+          // arms a send, or because it repoints a payment, and calling the second one an
+          // external send would be simply untrue.
+          `${method} ${path} with ${escalated.join(", ")}${
+            routing.length > 0 ? "" : " (this arms an external send)"
+          }`
         : `${method} ${path}`,
     );
 
