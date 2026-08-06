@@ -136,6 +136,14 @@ const REVERSIBLE_PREFIXES: readonly string[] = [
 const ESCALATING_SEGMENTS: readonly string[] = [
   "/payments",
   "/payment",
+  // Subscription billing: /generate issues a numbered invoice for one
+  // subscription, /generate-due does it for every due subscription in the
+  // tenant, and activating one arms that schedule. All reachable under
+  // /api/subscriptions, which is otherwise reversible master data.
+  "/generate",
+  "/generate-due",
+  "/activate",
+  "/deactivate",
   "/sign-request",
   "/sign-requests",
   "/send",
@@ -231,6 +239,58 @@ export function classifyRequest(method: HttpMethod, path: string): Risk {
   }
 
   return "irreversible";
+}
+
+/**
+ * Some request *bodies* are more dangerous than their path suggests.
+ *
+ * Creating an order or a subscription is ordinary reversible master data — until
+ * a field in the body arms invoice issuance or external transmission. Path-based
+ * classification cannot see that.
+ *
+ * Deliberately a predicate map rather than a list of field names: the most
+ * consequential trigger in this API is `outputMode: "create_invoice"`, a string,
+ * so a "flag is true" test would miss it by construction. Every entry below was
+ * checked against the OpenAPI document — earlier guesses at plausible-sounding
+ * names (`sendEmail`, `sendDirectly`) do not exist as body fields at all.
+ */
+const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  // Arms EHF/Peppol transmission of the resulting invoice.
+  sendehf: (v) => v === true,
+  // Lets ReAI issue numbered invoices on a recurring schedule with no further call.
+  automaticbillinggeneration: (v) => v === true,
+  // Decides whether a subscription produces a draft order or a real invoice.
+  outputmode: (v) => v === "create_invoice",
+};
+
+/**
+ * Re-classify a call once its body is known. Returns the more severe of the
+ * path-based risk and anything the body implies.
+ *
+ * Only inspects the top level: these are flat flags in the ReAI API, and
+ * recursing into arbitrary nested payloads would invite false positives on
+ * fields that merely record whether something was sent.
+ */
+export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
+  // Only a reversible write can be escalated. A read stays a read — blocking one
+  // because a stray field was passed alongside it would be a false positive —
+  // and an irreversible call is already at the ceiling.
+  if (pathRisk !== "reversible") return pathRisk;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return pathRisk;
+
+  for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+    const trigger = ESCALATING_BODY_FIELDS[key.toLowerCase()];
+    if (trigger?.(value)) return "irreversible";
+  }
+  return pathRisk;
+}
+
+/** Names of body fields that escalate risk, for use in error messages. */
+export function escalatingBodyFields(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return Object.entries(body as Record<string, unknown>)
+    .filter(([key, value]) => ESCALATING_BODY_FIELDS[key.toLowerCase()]?.(value) === true)
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
 }
 
 /** Strip the query string and trailing slash; lowercase for prefix comparison. */

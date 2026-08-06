@@ -190,6 +190,81 @@ async function main() {
     console.log("  (skipped tenant-scoped checks — no tenant id available)");
   }
 
+  // 7. Sales-side reads.
+  if (tenantId) {
+    for (const [name, args, check] of [
+      ["reai_list_customers", { tenantId }, (t) => /customer\(s\)/.test(t)],
+      ["reai_list_products", { tenantId }, (t) => /product\(s\)/.test(t)],
+      ["reai_list_orders", { tenantId }, (t) => /order\(s\)/.test(t)],
+      ["reai_list_invoices", { tenantId }, (t) => /invoice\(s\)/.test(t)],
+      ["reai_list_offers", { tenantId }, (t) => /offer\(s\)/.test(t)],
+      ["reai_customer_ledger", { tenantId }, (t) => /Customer ledger/.test(t)],
+      ["reai_customer_ledger", { tenantId, isOpenPosting: true }, (t) => /open postings only/.test(t)],
+    ]) {
+      try {
+        const res = await client.callTool({ name, arguments: args });
+        const text = textOf(res);
+        const okFlag = !res.isError && check(text);
+        report(`${name}${args.isOpenPosting ? " (open)" : ""}`, okFlag, okFlag ? firstLine(text) : text.slice(0, 200));
+      } catch (err) {
+        report(name, false, String(err));
+      }
+    }
+
+    // 8. Irreversible sales tools must be hidden in this mode, and the escape
+    // hatch must refuse a transmitting flag on an otherwise-reversible path.
+    const names = new Set(tools.map((t) => t.name));
+    report(
+      "irreversible sales tools are not advertised in this write mode",
+      !names.has("reai_create_invoice_from_order") &&
+        !names.has("reai_credit_invoice") &&
+        !names.has("reai_register_invoice_payment"),
+      [...names].filter((n) => /invoice_from_order|credit_invoice|register_invoice/.test(n)).join(", ") || "hidden",
+    );
+
+    for (const [label, body] of [
+      ["POST /api/subscriptions with outputMode=create_invoice", { customerId: 1, outputMode: "create_invoice" }],
+      ["POST /api/subscriptions with automaticBillingGeneration", { customerId: 1, automaticBillingGeneration: true }],
+    ]) {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "POST", path: "/api/subscriptions", tenantId, body },
+      });
+      const blocked = res.isError === true && /write policy/i.test(textOf(res));
+      report(`self-invoicing subscription blocked: ${label}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+    }
+
+    for (const path of ["/api/subscriptions/7/generate", "/api/subscriptions/generate-due"]) {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "POST", path, tenantId, body: {} },
+      });
+      const blocked = res.isError === true && /write policy/i.test(textOf(res));
+      report(`subscription billing blocked: POST ${path}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+    }
+
+    try {
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "POST",
+          path: "/api/orders",
+          tenantId,
+          body: { customerId: 1, orderLines: [], sendEhf: true },
+        },
+      });
+      const text = textOf(res);
+      const blocked = res.isError === true && /write policy/i.test(text) && /sendEhf/.test(text);
+      report(
+        "sendEhf=true escalates a reversible path and is blocked",
+        blocked,
+        blocked ? "blocked, and the flag is named" : `NOT BLOCKED: ${text.slice(0, 200)}`,
+      );
+    } catch (err) {
+      report("sendEhf escalation", false, String(err));
+    }
+  }
+
   await client.close();
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
