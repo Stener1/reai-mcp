@@ -95,9 +95,14 @@ function trim(text, max) {
 function bodyShape(op) {
   const rb = deref(op.requestBody);
   const json = rb?.content?.["application/json"] ?? rb?.content?.["*/*"];
+  // Whether the BODY ITSELF is mandatory, which is separate from which of its
+  // properties are. 51 operations declare a required body whose every property is
+  // optional -- PUT /api/leads/{id}/notes among them -- so a `required` array that
+  // is empty says nothing about whether the body may be omitted entirely.
+  const bodyRequired = rb?.required === true;
   if (!json) {
     const multipart = rb?.content?.["multipart/form-data"];
-    return multipart ? { contentType: "multipart/form-data" } : undefined;
+    return multipart ? { contentType: "multipart/form-data", bodyRequired } : undefined;
   }
   const schema = deref(json.schema);
   const props = schema?.properties ?? {};
@@ -115,6 +120,7 @@ function bodyShape(op) {
   }
   return {
     contentType: "application/json",
+    bodyRequired,
     required: schema?.required ?? [],
     fields: Object.keys(fields).length ? fields : undefined,
   };

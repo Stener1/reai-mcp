@@ -236,12 +236,22 @@ function enrichRequestFailure(
   if (!op) return err;
 
   const extra: string[] = [];
-  const { params, bodyFields } = missingRequired(op, query, body);
+  const { params, bodyFields, bodyMissing } = missingRequired(op, query, body);
   if (params.length > 0) {
     extra.push(
       `The spec marks these query parameters as required on ${op.method} ${op.path}, and they were ` +
         `not sent: ${params.join(", ")}. Sending them all at once avoids discovering them one ` +
         `rejection at a time.`,
+    );
+  }
+  if (bodyMissing) {
+    // Distinct from a missing FIELD: these operations require a body while every
+    // property inside it is optional, so the field list cannot express the problem.
+    const shape = Object.keys(op.body?.fields ?? {});
+    extra.push(
+      `${op.method} ${op.path} requires a request body and none was sent. Every property in it is ` +
+        `optional, which is why no individual field is named` +
+        `${shape.length > 0 ? `; the accepted properties are: ${shape.join(", ")}` : ""}.`,
     );
   }
   if (bodyFields.length > 0) {
@@ -378,6 +388,29 @@ const request = defineTool({
       // elsewhere, and refusing a call on its authority could block one that
       // would have worked.
       throw enrichRequestFailure(err, method, path, args.query, args.body);
+    }
+
+    // A path that matches no API route falls through to the web application, which
+    // answers 200 with its HTML shell — "/notarealpath" and a mis-capitalised
+    // "/API/opening-balances" both do. That is the worst possible shape for an
+    // agent: a success status carrying a login page. Within /api/ a wrong path does
+    // 404 properly; this only catches the fall-through, and it is reported as a
+    // failure because nothing was actually called.
+    if (!args.binary && /^text\/html/i.test(res.contentType ?? "")) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `${method} ${path} returned HTTP ${res.status} with an HTML page, not JSON.\n` +
+              `Nothing was called: this path matched no API route, so ReAI served the web ` +
+              `application's shell instead. Check the path and its capitalisation — routes are ` +
+              `case-sensitive and must begin with "/api/". Use reai_search_endpoints to find the ` +
+              `real one.`,
+          },
+        ],
+        isError: true,
+      };
     }
 
     const notes = [`${method} ${path} → HTTP ${res.status}`];

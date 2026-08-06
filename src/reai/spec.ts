@@ -15,6 +15,13 @@ export type SpecParam = {
 
 export type SpecBody = {
   contentType: string;
+  /**
+   * Whether the request body may be omitted at all — distinct from which of its
+   * properties are required. 51 operations declare a mandatory body whose every
+   * property is optional, so an empty `required` array is not evidence that the
+   * body itself is optional.
+   */
+  bodyRequired?: boolean;
   required?: string[];
   fields?: Record<string, string>;
 };
@@ -307,7 +314,12 @@ export function resolveOperation(method: string, concretePath: string): SpecOper
       const spec = segments[i] ?? "";
       const actual = wanted[i] ?? "";
       if (spec.startsWith("{") && spec.endsWith("}")) continue; // placeholder: anything
-      if (spec.toLowerCase() !== actual.toLowerCase()) {
+      // Compared EXACTLY, because the client sends the path through unchanged and
+      // the API's routes are case-sensitive. Folding case here meant a typo like
+      // "/API/opening-balances" — which really 404s — resolved to the real
+      // operation, and the enrichment then attached its empty-state quirk and told
+      // the agent nothing had been set up, hiding the invalid path.
+      if (spec !== actual) {
         matches = false;
         break;
       }
@@ -337,18 +349,37 @@ export function missingRequired(
   op: SpecOperation,
   query: Record<string, unknown> | undefined,
   body: unknown,
-): { params: string[]; bodyFields: string[] } {
+): { params: string[]; bodyFields: string[]; bodyMissing: boolean } {
   const params = (op.params ?? [])
     .filter((p) => p.required && p.in === "query")
     .map((p) => p.name)
-    .filter((name) => query?.[name] === undefined);
+    .filter((name) => !isTransmittedQueryValue(query?.[name]));
 
   const bodyIsObject = typeof body === "object" && body !== null && !Array.isArray(body);
   const bodyFields = (op.body?.required ?? []).filter(
     (name) => !bodyIsObject || (body as Record<string, unknown>)[name] === undefined,
   );
 
-  return { params, bodyFields };
+  // A wholly absent body when the operation demands one. Reported separately
+  // because the field list cannot express it: those 51 operations have a mandatory
+  // body and no mandatory property inside it.
+  const bodyMissing = op.body?.bodyRequired === true && body === undefined;
+
+  return { params, bodyFields, bodyMissing };
+}
+
+/**
+ * Whether a query value would actually reach the API.
+ *
+ * Mirrors `ReaiClient.buildUrl`, which drops an array once its null and undefined
+ * entries are removed and nothing is left. Treating `[]` as supplied meant a
+ * required parameter that was never transmitted looked present, so the rejection
+ * came back without the guidance that would explain it.
+ */
+function isTransmittedQueryValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.filter((v) => v !== undefined && v !== null).length > 0;
+  return true;
 }
 
 export function findOperation(methodOrId: string, path?: string): SpecOperation | undefined {
