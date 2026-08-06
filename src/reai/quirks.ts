@@ -104,6 +104,46 @@ export const QUIRKS: readonly Quirk[] = [
       "startDate and endDate are required, even where the schema does not mark them so. Omitting " +
       'them returns 400 "startDate is required".',
   },
+  {
+    id: "timesheets-need-project-module",
+    paths: ["/api/timesheets"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "Unreachable on a tenant without the Project module, in a way no schema can express: " +
+      "projectId is a REQUIRED query parameter, and supplying it returns 400 " +
+      '"projectId cannot be used when the Project module is disabled". Required and rejected at ' +
+      "the same time, so no request succeeds. On that exact message, stop — the module is off and " +
+      "no combination of parameters helps. Say so instead of retrying.",
+  },
+  {
+    id: "empty-state-is-404",
+    paths: ["/api/opening-balances", "/api/annual-accounts/{year}"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "A 404 here means NOTHING HAS BEEN SET UP YET, not a wrong path — the normal state for most " +
+      'companies. The detail says so ("Opening balance not found", "No annual-accounts submission ' +
+      'exists for fiscal year 2025"). Report it as empty rather than retrying or hunting for ' +
+      "another endpoint.",
+  },
+  {
+    id: "salary-lives-under-salary-payments",
+    match: "descendants",
+    paths: ["/api/salary-payments"],
+    methods: ["GET", "POST"],
+    kind: "workflow",
+    note:
+      "Payroll is under /api/salary-payments; there is no /api/salaries. POST /api/salary-payments " +
+      "creates a run that ALREADY CONTAINS wage lines derived from expense postings — read it back " +
+      "before adding anything. POST /api/salary-payments/{id}/wage-specs adds a MANUAL line only " +
+      "(a commission, say); using it to re-enter lines that are already there inflates both salary " +
+      "and the expense amounts, and the expense-derived lines cannot be edited or deleted to " +
+      "correct it. Add only what is genuinely missing. " +
+      "POST /api/salary-payments/{id}/complete then creates the voucher, the payslips and one " +
+      "payment per payable employee, and on Norwegian tenants starts A-melding submission to " +
+      "Skatteetaten — so it is treated as an external send and needs REAI_ALLOW_EXTERNAL_SEND.",
+  },
 
   // --- Bookkeeping ---------------------------------------------------------
   {
