@@ -196,7 +196,11 @@ function buildInstructions(
     "- To undo an issued invoice, raise a credit note. Do not attempt to delete it.",
     "- There is NO endpoint that lists bank transactions. They are seen through " +
       "reai_get_bank_reconciliation for one account and one month (yyyy-MM), which is therefore the " +
-      "entry point for any bank work.",
+      "entry point for any bank work — but that view is for bank-SYNCED accounts. An account with " +
+      'providerType "manual" is reconciled against a statement balance through ' +
+      "/api/manual-reconciliations/{id} instead.",
+    "- Settling a VAT period locks the books for it; it does NOT file anything with Skatteetaten. " +
+      "Never tell the user their VAT return has been submitted.",
     "- Supplier invoice COST LINES do not use the voucher sign convention: each line names its debit " +
       "and credit account, and the amount is positive on an invoice, negative on a credit note.",
     "- Incoming supplier invoices usually arrive in the reception inbox as PDF or EHF. Registering " +

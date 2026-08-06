@@ -272,60 +272,53 @@ async function main() {
       );
     }
 
-    // 7c. Reconciliation rule round-trip. A rule is master data: creating one
-    //     books nothing until rules are applied, which is a separate
-    //     irreversible step — so this is safe in reversible mode.
-    const ruleRes = await client.callTool({
-      name: "reai_create_reconciliation_rule",
-      arguments: {
-        matchText: `SMOKE-${Date.now()}`,
-        accountNumber: "7770",
-        description: `${STAMP} rule`,
-      },
+    // 7c. Reconciliation rule round-trip. Creating one is reversible (it posts
+    //     nothing by itself), while APPLYING rules is not — assert both halves.
+    //     The account is looked up rather than hardcoded, since a tenant need not
+    //     have 7770 in its chart of accounts.
+    const acctRes = await client.callTool({
+      name: "reai_list_accounts",
+      arguments: { accountNumberPrefix: "77" },
     });
-    const rule = ruleRes.isError ? undefined : jsonOf(ruleRes);
-    if (Number.isInteger(rule?.id)) created.ruleId = rule.id;
-    report(
-      "reai_create_reconciliation_rule",
-      !ruleRes.isError && Number.isInteger(created.ruleId),
-      created.ruleId ? `id=${created.ruleId}` : textOf(ruleRes).slice(0, 240),
-    );
-    if (!created.ruleId && !ruleRes.isError) {
-      report(
-        "rule id could be parsed from the create response",
-        false,
-        `A rule WAS created in tenant ${tenantId} but its id could not be read. Remove it by ` +
-          `hand: description starts "${STAMP}".`,
-      );
-    }
-    if (created.ruleId) {
-      const listRules = await client.callTool({
-        name: "reai_list_reconciliation_rules",
-        arguments: {},
+    const ruleAccount = /"accountNumber":\s*"(\d+)"/.exec(textOf(acctRes))?.[1];
+    if (!ruleAccount) {
+      console.log("  [SKIP] reconciliation rule round-trip — no 77xx cost account on this tenant");
+    } else {
+      const ruleRes = await client.callTool({
+        name: "reai_create_reconciliation_rule",
+        arguments: {
+          matchText: `SMOKE-${STAMP}`,
+          accountNumber: ruleAccount,
+          description: `${STAMP} rule`,
+        },
       });
+      const rule = ruleRes.isError ? undefined : jsonOf(ruleRes);
+      if (Number.isInteger(rule?.id)) created.ruleId = rule.id;
       report(
-        "reai_list_reconciliation_rules sees it",
-        !listRules.isError && containsStamp(textOf(listRules)),
-        firstLineOf(textOf(listRules)),
+        `reai_create_reconciliation_rule (account ${ruleAccount})`,
+        !ruleRes.isError && Number.isInteger(created.ruleId),
+        created.ruleId ? `id=${created.ruleId}` : textOf(ruleRes).slice(0, 240),
       );
+      if (!created.ruleId && !ruleRes.isError) {
+        report(
+          "rule id could be parsed from the create response",
+          false,
+          `A rule WAS created in tenant ${tenantId} but its id could not be read. Remove it by ` +
+            `hand: description starts "${STAMP}".`,
+        );
+      }
+      if (created.ruleId) {
+        const listRules = await client.callTool({
+          name: "reai_list_reconciliation_rules",
+          arguments: {},
+        });
+        report(
+          "reai_list_reconciliation_rules sees it",
+          !listRules.isError && containsStamp(textOf(listRules)),
+          firstLineOf(textOf(listRules)),
+        );
+      }
     }
-
-    // Applying rules is irreversible and must be refused in this mode, even
-    // though creating one was allowed.
-    const applyRes = await client.callTool({
-      name: "reai_request",
-      arguments: {
-        method: "POST",
-        path: "/api/bank-reconciliations/1/apply-rules",
-        tenantId,
-        body: { month: "2026-08" },
-      },
-    });
-    report(
-      "applying rules is refused though creating one was allowed",
-      applyRes.isError === true && /write policy/i.test(textOf(applyRes)),
-      applyRes.isError ? "blocked" : textOf(applyRes).slice(0, 160),
-    );
 
     // 8. The things this mode must refuse. These matter more than the successes:
     //    they are the guarantee the consent page and README advertise.
@@ -345,6 +338,7 @@ async function main() {
       ["POST /api/users", { method: "POST", path: "/api/users", body: {} }],
       ["POST /api/supplier-invoices", { method: "POST", path: "/api/supplier-invoices", body: { supplierId: 1, costLines: [] } }],
       ["POST /api/expenses/1/voucher", { method: "POST", path: "/api/expenses/1/voucher", body: {} }],
+      ["POST /api/bank-reconciliations/1/apply-rules", { method: "POST", path: "/api/bank-reconciliations/1/apply-rules", body: { month: "2026-08" } }],
     ]) {
       const res = await client.callTool({ name: "reai_request", arguments: { ...args, tenantId } });
       const blocked = res.isError === true && /write policy/i.test(textOf(res));

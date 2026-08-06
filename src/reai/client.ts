@@ -214,7 +214,11 @@ export class ReaiClient {
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value === undefined || value === null) continue;
       if (Array.isArray(value)) {
-        for (const v of value) if (v !== undefined && v !== null) url.searchParams.append(key, String(v));
+        // Comma-joined, not repeated keys. The only array query parameter in the
+        // ReAI API (`include` on the bank-reconciliation view) declares
+        // `style: form, explode: false`, i.e. ?include=a,b.
+        const parts = value.filter((v) => v !== undefined && v !== null).map(String);
+        if (parts.length > 0) url.searchParams.set(key, parts.join(","));
       } else {
         url.searchParams.set(key, String(value));
       }
