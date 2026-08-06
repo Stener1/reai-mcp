@@ -300,7 +300,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **37 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **38 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~256 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
@@ -311,6 +311,7 @@ Browse them with `reai_api_notes`, or read the highlights:
 - **`POST /api/vat-returns` takes `year` and `period` as query parameters**, not a body.
 
 **Constraints the schema omits**
+- **Voucher postings sharing a `rowNumber` are merged into one row**, so they must agree on the row's fields — notably `description`. An omitted `rowNumber` puts everything in row 0, so two postings with different descriptions fail with an error that blames the *sign convention*. `reai_create_voucher` assigns rows for you.
 - `startDate`/`endDate` are required on vouchers, postings and ledgers even where not marked so.
 - **Offer lines are stricter than order lines** — `itemName` and `vatCode` are both required on an offer.
 - Order, offer and subscription lines accept only VAT codes from `?usage=customer-invoice`.
@@ -383,12 +384,24 @@ Unit tests cover the write-policy classifier and spec search/describe, and need 
 Two live harnesses, both of which assert the **negatives** as well as the happy path:
 
 ```bash
-REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234       # read-only, safe on production books
-REAI_USER_API_TOKEN=... node scripts/smoke-http.mjs --url https://…  # the whole OAuth flow
-REAI_USER_API_TOKEN=... node scripts/smoke-write.mjs --tenant 1234 # WRITES: reversible round-trip
+# Read-only. Safe against production books.
+REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234
+
+# The whole OAuth flow against a deployment.
+REAI_USER_API_TOKEN=... node scripts/smoke-http.mjs --url https://…
+
+# WRITES. Reversible master data only.
+REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
+  node scripts/smoke-write.mjs --tenant 1234
+
+# WRITES TO THE GENERAL LEDGER. Posts and deletes a real voucher.
+REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
+  node scripts/smoke-full-write.mjs --tenant 1234 --i-understand-this-posts-to-real-books
 ```
 
-`smoke-write.mjs` creates real master data, reads it back, updates it and deletes it again, cleaning up in a `finally` so a mid-run failure still removes the record. It requires `--tenant` explicitly so it cannot write to the wrong company by accident, and it verifies that the ledger, invoicing, VAT-return and user-admin paths all stay refused.
+**Both write scripts refuse to run unless the tenant is listed in `REAI_WRITE_TEST_TENANTS`.** A tenant id on the command line is not consent — the tenant has to be declared safe to write to, out of band, in the environment. This exists because passing the wrong `--tenant` was once all it took to post a voucher into a live business's books. They also clean up in a `finally` so a mid-run failure still removes what was created, and report loudly enough to act on when they cannot.
+
+`smoke-full-write.mjs` additionally requires `--i-understand-this-posts-to-real-books`, and asserts the whole external-send guard **before** it writes anything: if EHF, invoice email or a tax filing turns out to be reachable, it aborts without touching the ledger.
 
 ### A note on `npm audit`
 

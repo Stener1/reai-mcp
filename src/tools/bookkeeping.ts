@@ -193,6 +193,72 @@ function imbalance(postings: Array<{ amount: number }>): number {
   return Math.round(sum * 100) / 100;
 }
 
+/**
+ * Assign voucher row numbers when the caller has not.
+ *
+ * Postings that share a `rowNumber` are MERGED into one voucher row, which
+ * requires them to agree on what that row carries — including the description.
+ * Since an omitted rowNumber puts every posting in row 0, giving two postings
+ * different descriptions makes the merge impossible and the API rejects the whole
+ * voucher with "postings with rowNumber 0 cannot be merged into one voucher row.
+ * Book the debit side as a positive amount and the credit side as a negative
+ * amount" — which blames the sign convention even when the signs are correct, so
+ * it sends you looking in the wrong place entirely.
+ *
+ * Verified against the live API: identical (or absent) descriptions merge fine;
+ * differing ones need distinct row numbers.
+ *
+ * So: respect any explicit rowNumber, leave them out when the descriptions agree
+ * (which produces a tidier single-row voucher), and otherwise give each posting
+ * its own row so per-line descriptions survive.
+ *
+ * A partially numbered voucher is the case worth being careful about. Bailing out
+ * as soon as any posting carried a rowNumber reintroduced the very collision this
+ * guards against: an explicit row 0 describing A alongside an unnumbered posting
+ * describing B left the latter defaulted to row 0 too, so the merge failed again.
+ * Explicit rows are therefore honoured and unnumbered postings are fitted into
+ * rows nobody has claimed.
+ */
+export function assignRowNumbers<T extends { rowNumber?: number | undefined; description?: string | undefined }>(
+  postings: T[],
+): T[] {
+  const descriptions = new Set(postings.map((p) => p.description ?? ""));
+  // One description throughout means every posting may share a row, so whatever
+  // shape the caller chose already merges cleanly.
+  if (descriptions.size <= 1) return postings;
+  // Fully numbered: the caller has said exactly what they want.
+  if (postings.every((p) => p.rowNumber !== undefined)) return postings;
+
+  // Rows already claimed, and what each carries — an unnumbered posting whose
+  // description matches an explicit row can join it instead of taking a new one.
+  const rowByDescription = new Map<string, number>();
+  const takenRows = new Set<number>();
+  for (const p of postings) {
+    if (p.rowNumber === undefined) continue;
+    takenRows.add(p.rowNumber);
+    const key = p.description ?? "";
+    if (!rowByDescription.has(key)) rowByDescription.set(key, p.rowNumber);
+  }
+
+  let candidate = 0;
+  const claimFreeRow = (): number => {
+    while (takenRows.has(candidate)) candidate += 1;
+    takenRows.add(candidate);
+    return candidate;
+  };
+
+  return postings.map((p) => {
+    if (p.rowNumber !== undefined) return p;
+    const key = p.description ?? "";
+    let row = rowByDescription.get(key);
+    if (row === undefined) {
+      row = claimFreeRow();
+      rowByDescription.set(key, row);
+    }
+    return { ...p, rowNumber: row };
+  });
+}
+
 const createVoucher = defineTool({
   name: "reai_create_voucher",
   title: "Book a voucher",
@@ -235,7 +301,7 @@ const createVoucher = defineTool({
     const body = {
       date: args.date,
       ...(args.description !== undefined ? { description: args.description } : {}),
-      postings: args.postings.map((p) => ({
+      postings: assignRowNumbers(args.postings).map((p) => ({
         ...p,
         postingDate: p.postingDate ?? args.date,
         currency: p.currency ?? "NOK",

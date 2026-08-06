@@ -48,7 +48,7 @@ connector, and has been verified against live ReAI data throughout.
 - **A tenant bound at authorization time is a boundary, not a default** — a grant
   scoped to one company cannot address another, even though the underlying ReAI
   token may reach dozens.
-- **37 known API quirks** keyed to the operations they affect, surfacing
+- **38 known API quirks** keyed to the operations they affect, surfacing
   automatically in discovery. Request shapes that differ from what an endpoint
   name suggests, constraints the schema omits, multi-step workflows, and
   operations that are harder to undo than they look.
@@ -59,10 +59,12 @@ connector, and has been verified against live ReAI data throughout.
   account with no project-level roles, pinning `PUBLIC_URL` and every hostname
   Cloud Run serves, and failing non-zero when the result is not actually
   reachable.
-- **Three live verification harnesses**: `smoke.mjs` (read-only, safe against
-  production books), `smoke-write.mjs` (a reversible round-trip that cleans up
-  after itself) and `smoke-http.mjs` (the whole OAuth flow as a real client).
-  All three assert the negative cases too, not just the happy path.
+- **Four live verification harnesses**: `smoke.mjs` (read-only, safe against
+  production books), `smoke-write.mjs` (a reversible round-trip), `smoke-http.mjs`
+  (the whole OAuth flow as a real client) and `smoke-full-write.mjs` (posts and
+  deletes a real voucher). All assert the negative cases too, not just the happy
+  path. Both write scripts refuse to run unless the tenant is named in
+  `REAI_WRITE_TEST_TENANTS` — a tenant id on the command line is not consent.
 - A build step compressing the 907 KB OpenAPI snapshot into a 195 KB searchable
   index.
 - CI across Node 20, 22 and 24, plus a check that the published package contains
@@ -86,6 +88,19 @@ Recorded because most were reachable in the default configuration:
 - **The VAT tool claimed to file returns.** `POST /api/vat-returns` settles and
   locks the period; it submits nothing to Skatteetaten. Retitled, with the
   distinction stated in the description and the success message.
+- **A lost response could book a voucher twice.** The client retried any request
+  on a gateway error or timeout, including `POST /api/vouchers`, which has no
+  idempotency key — so a write that ReAI had already committed could be repeated,
+  and the duplicate cannot simply be deleted once the period closes. Retries after
+  an *ambiguous* failure are now limited to methods where repeating is harmless;
+  `429` is still retried for every method, because it is rejected before being
+  processed. `REAI_MAX_RETRIES=0` also works now — it was rejected by a shared
+  "must be positive" check, which made the safest setting unexpressible.
+- **A partially numbered voucher hit the row-merge error it was meant to prevent.**
+  Row assignment bailed out as soon as *one* posting carried a `rowNumber`,
+  leaving the others defaulted to row 0; an explicit row 0 plus an unnumbered
+  posting with a different description then failed to merge. Explicit rows are now
+  honoured while unnumbered postings are fitted around them.
 - **Refresh tokens could be rolled forward indefinitely.** Grants now carry an
   authorization time and are clamped to a 90-day absolute ceiling.
 - Two questions the tools advertised answering were answered wrongly: "who owes
@@ -121,9 +136,14 @@ Recorded because most were reachable in the default configuration:
 - **Two `npm audit` advisories** come from transitive dependencies of
   `@modelcontextprotocol/sdk` (`hono`, `fast-uri`). Neither is on this server's
   request path; they clear when the SDK bumps them.
-- **No sandbox exists** for ReAI, so write paths are exercised against a real
-  tenant in `reversible` mode. Ledger postings, invoices, payments, payroll and
-  VAT filings have not been executed end to end against live books.
+- **No sandbox exists** for ReAI. Write paths are therefore verified against a
+  real but empty tenant, and three of them are still untested end to end:
+  issuing an invoice or credit note (it transmits, and cannot be recalled),
+  registering a payment, and settling a VAT period or filing a tax return (both
+  change a real company's period state). Everything else — ledger postings, the
+  supplier-invoice chain, bank accounts and reconciliation rules — has been
+  posted to live books and cleaned up again, with the tenant verified empty
+  afterwards.
 
 ## 0.1.0
 

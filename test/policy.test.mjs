@@ -517,3 +517,76 @@ test("filings with the government count as sending", () => {
   assert.equal(classifyTransmission("POST", "/api/tax-returns/2026/validate"), "none");
   assert.equal(classifyTransmission("POST", "/api/vat-returns/complete-manually"), "none");
 });
+
+test("voucher row numbers are assigned so differing descriptions do not collide", async () => {
+  // Verified against the live API: postings sharing a rowNumber are merged into
+  // one voucher row and must agree on its description. Omitting rowNumber puts
+  // them all in row 0, so differing descriptions fail -- with an error blaming the
+  // sign convention, which sends you looking in the wrong place.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_create_voucher");
+  assert.ok(tool, "reai_create_voucher should exist");
+
+  const sent = [];
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 201, data: { id: 1, number: "MV1-2026" } };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+
+  // Differing descriptions must get distinct rows.
+  await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 1, description: "aaa" },
+        { accountNumber: "1580", amount: -1, description: "bbb" },
+      ],
+    },
+    ctx,
+  );
+  let rows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.deepEqual(rows, [0, 1], "differing descriptions need distinct rows");
+
+  // Matching descriptions should be left alone, so ReAI merges them into one
+  // tidy row rather than two.
+  sent.length = 0;
+  await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 1, description: "same" },
+        { accountNumber: "1580", amount: -1, description: "same" },
+      ],
+    },
+    ctx,
+  );
+  rows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.deepEqual(rows, [undefined, undefined], "identical descriptions merge fine");
+
+  // An explicit rowNumber is respected -- and the *other* posting still has to be
+  // given a row. This assertion previously expected [7, undefined], which pinned a
+  // real bug: leaving the second posting unnumbered defaults it to row 0 at the
+  // API, so a voucher that mixed explicit and implicit rows hit the very merge
+  // failure this logic exists to prevent.
+  sent.length = 0;
+  await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 1, description: "aaa", rowNumber: 7 },
+        { accountNumber: "1580", amount: -1, description: "bbb" },
+      ],
+    },
+    ctx,
+  );
+  rows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.equal(rows[0], 7, "an explicit rowNumber must be respected");
+  assert.ok(rows[1] !== undefined && rows[1] !== 7, `the second posting needs its own row, got ${rows[1]}`);
+});
