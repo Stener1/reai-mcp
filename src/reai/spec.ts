@@ -15,6 +15,13 @@ export type SpecParam = {
 
 export type SpecBody = {
   contentType: string;
+  /**
+   * Whether the request body may be omitted at all — distinct from which of its
+   * properties are required. 51 operations declare a mandatory body whose every
+   * property is optional, so an empty `required` array is not evidence that the
+   * body itself is optional.
+   */
+  bodyRequired?: boolean;
   required?: string[];
   fields?: Record<string, string>;
 };
@@ -292,7 +299,15 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
 export function resolveOperation(method: string, concretePath: string): SpecOperation | undefined {
   const index = getSpecIndex();
   const wantMethod = method.toUpperCase();
-  const wanted = concretePath.split("?")[0]?.replace(/\/+$/, "").split("/").filter(Boolean) ?? [];
+  // Only the leading empty segment (from the leading slash) is dropped. Interior
+  // empties are KEPT, because the client transmits "/api//opening-balances"
+  // verbatim: filtering them made that resolve to the real operation, and the
+  // enrichment then answered a 404 with "nothing has been set up yet" instead of
+  // "your path is wrong". That is exactly the bug fixed for case-folding just below,
+  // reintroduced through a different normalisation.
+  const trimmed = concretePath.split("?")[0]?.replace(/\/+$/, "") ?? "";
+  const wanted = trimmed.split("/");
+  if (wanted[0] === "") wanted.shift();
 
   let best: SpecOperation | undefined;
   let bestLiterals = -1;
@@ -306,8 +321,27 @@ export function resolveOperation(method: string, concretePath: string): SpecOper
     for (let i = 0; i < segments.length; i++) {
       const spec = segments[i] ?? "";
       const actual = wanted[i] ?? "";
-      if (spec.startsWith("{") && spec.endsWith("}")) continue; // placeholder: anything
-      if (spec.toLowerCase() !== actual.toLowerCase()) {
+      if (spec.startsWith("{") && spec.endsWith("}")) {
+        // A placeholder matches, but not unconditionally: the index carries the
+        // declared type, and every colliding path parameter in this spec is an
+        // integer. Rejecting a non-numeric segment removes the ambiguity between
+        // "/api/users/{id}" and "/api/users/permissions" at the source, instead of
+        // leaving it to a tie-break whose correctness depended on the order
+        // operations happen to sit in the index.
+        const name = spec.slice(1, -1);
+        const declared = (op.params ?? []).find((prm) => prm.in === "path" && prm.name === name);
+        if (declared && /^integer|^number/.test(declared.type) && !/^-?\d+$/.test(actual)) {
+          matches = false;
+          break;
+        }
+        continue;
+      }
+      // Compared EXACTLY, because the client sends the path through unchanged and
+      // the API's routes are case-sensitive. Folding case here meant a typo like
+      // "/API/opening-balances" — which really 404s — resolved to the real
+      // operation, and the enrichment then attached its empty-state quirk and told
+      // the agent nothing had been set up, hiding the invalid path.
+      if (spec !== actual) {
         matches = false;
         break;
       }
@@ -337,18 +371,54 @@ export function missingRequired(
   op: SpecOperation,
   query: Record<string, unknown> | undefined,
   body: unknown,
-): { params: string[]; bodyFields: string[] } {
+): { params: string[]; bodyFields: string[]; bodyMissing: boolean } {
+  // Names are compared case-insensitively. ReAI is a .NET API and both query-string
+  // and System.Text.Json body binding are case-insensitive by ASP.NET Core default,
+  // so `?ProjectId=7` binds fine — reporting it as absent would be telling the agent
+  // something untrue about its own request. Note this is the opposite rule from path
+  // segments, which ARE case-sensitive because routes are.
+  const suppliedQueryKeys = new Map(
+    Object.entries(query ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+  );
   const params = (op.params ?? [])
     .filter((p) => p.required && p.in === "query")
     .map((p) => p.name)
-    .filter((name) => query?.[name] === undefined);
+    .filter((name) => !isTransmittedQueryValue(suppliedQueryKeys.get(name.toLowerCase())));
 
   const bodyIsObject = typeof body === "object" && body !== null && !Array.isArray(body);
+  const suppliedBodyKeys = new Set(
+    bodyIsObject
+      ? Object.entries(body as Record<string, unknown>)
+          .filter(([, v]) => v !== undefined) // JSON.stringify drops these
+          .map(([k]) => k.toLowerCase())
+      : [],
+  );
   const bodyFields = (op.body?.required ?? []).filter(
-    (name) => !bodyIsObject || (body as Record<string, unknown>)[name] === undefined,
+    (name) => !bodyIsObject || !suppliedBodyKeys.has(name.toLowerCase()),
   );
 
-  return { params, bodyFields };
+  // A wholly absent body when the operation demands one. Reported separately
+  // because the field list cannot express it: those 51 operations have a mandatory
+  // body and no mandatory property inside it.
+  // `null` counts as absent too: ReaiClient.request serialises a payload only when
+  // the body is neither undefined nor null, so `body: null` sends nothing at all.
+  const bodyMissing = op.body?.bodyRequired === true && (body === undefined || body === null);
+
+  return { params, bodyFields, bodyMissing };
+}
+
+/**
+ * Whether a query value would actually reach the API.
+ *
+ * Mirrors `ReaiClient.buildUrl`, which drops an array once its null and undefined
+ * entries are removed and nothing is left. Treating `[]` as supplied meant a
+ * required parameter that was never transmitted looked present, so the rejection
+ * came back without the guidance that would explain it.
+ */
+function isTransmittedQueryValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.filter((v) => v !== undefined && v !== null).length > 0;
+  return true;
 }
 
 export function findOperation(methodOrId: string, path?: string): SpecOperation | undefined {

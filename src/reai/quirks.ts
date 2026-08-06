@@ -51,6 +51,18 @@ export type Quirk = {
   match?: "exact" | "descendants";
   /** Restrict to specific methods. Omit to apply to all methods on those paths. */
   methods?: readonly HttpMethod[];
+  /**
+   * HTTP statuses this note explains, for quirks whose prose is about one.
+   *
+   * Discovery shows every quirk for a path, which is right — an agent reading a
+   * schema wants all of them. But `reai_request` also appends them to a FAILED
+   * call, and there a status-specific note attached to a different status states
+   * something false. A 403 on /api/opening-balances was being answered with "a 404
+   * here means nothing has been set up yet — report it as empty", so an agent would
+   * report a company as having no opening balances when the truth was that it may
+   * not read them. Omit for notes that hold regardless of outcome.
+   */
+  statuses?: readonly number[];
   kind: QuirkKind;
   note: string;
 };
@@ -95,6 +107,7 @@ export const QUIRKS: readonly Quirk[] = [
       "/api/share-investments",
     ],
     kind: "gotcha",
+    statuses: [403],
     note:
       'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
@@ -108,6 +121,7 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/vouchers", "/api/postings", "/api/ledger"],
     methods: ["GET"],
     kind: "validation",
+    statuses: [400],
     note:
       "startDate and endDate are required, even where the schema does not mark them so. Omitting " +
       'them returns 400 "startDate is required".',
@@ -117,6 +131,7 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/timesheets"],
     methods: ["GET"],
     kind: "gotcha",
+    statuses: [400, 403],
     note:
       "Unreachable on a tenant without the Project module, in a way no schema can express: " +
       "projectId is a REQUIRED query parameter, and supplying it returns 400 " +
@@ -129,6 +144,7 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/opening-balances", "/api/annual-accounts/{year}"],
     methods: ["GET"],
     kind: "gotcha",
+    statuses: [404],
     note:
       "A 404 here means NOTHING HAS BEEN SET UP YET, not a wrong path — the normal state for most " +
       'companies. The detail says so ("Opening balance not found", "No annual-accounts submission ' +
@@ -246,6 +262,7 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
+    statuses: [400, 422],
     note:
       "Offer lines are STRICTER than order lines: itemName and vatCode are both required on an " +
       "offer line, but optional on an order line. Reusing an order-shaped line here returns 400.",
@@ -303,6 +320,7 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
     kind: "validation",
+    statuses: [400, 422],
     note:
       'Phone numbers are validated and a "+47" prefix on a Norwegian number is REJECTED — ' +
       '400 "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +". Send "22334455".',
