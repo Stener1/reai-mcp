@@ -661,6 +661,28 @@ test("a truncated result never contains a partial value", async () => {
   }
   assert.match(arrayText, /showing the first \d+ of 4000 items/);
 
+  // And the truncated body must respect the cap it claims to enforce. Summing
+  // stringify(item) undercounted — it omits the indentation and commas array
+  // serialization adds, and returns string values unquoted — so a "truncated"
+  // response came out LARGER than the limit: 29216 characters for these 4000 objects,
+  // and 60165 for a list of 10000 empty strings.
+  assert.ok(
+    arrayText.length <= 24_000 + 500,
+    `truncated result is ${arrayText.length} characters, over the cap it claims`,
+  );
+  for (const pathological of [
+    Array.from({ length: 10_000 }, () => ""),
+    Array.from({ length: 5_000 }, () => "\t\t\t"),
+  ]) {
+    const out = ok(pathological).content[0].text;
+    assert.ok(out.length <= 24_000 + 500, `pathological array produced ${out.length} characters`);
+  }
+
+  // A single item bigger than the whole budget must say so rather than returning an
+  // empty array under a note about "the first 0 items".
+  const oversized = ok([{ id: 1, blob: "x".repeat(50_000) }]).content[0].text;
+  assert.match(oversized, /FIRST item alone exceeds/);
+
   // A non-array is cut back to a line boundary, so no token is split.
   const ledger = {
     accounts: Array.from({ length: 2000 }, (_, i) => ({

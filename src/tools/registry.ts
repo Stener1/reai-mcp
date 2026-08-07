@@ -82,11 +82,15 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
     if (Array.isArray(data)) {
       // An array can be cut at an ITEM boundary and re-serialised, so what remains is
       // always valid JSON and every value in it is whole.
-      const shown = countFitting(data);
+      const shown = countFittingSerialized(data);
       body = stringify(data.slice(0, shown));
       parts.push(
-        `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
-          `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
+        shown === 0
+          ? `NOTE: nothing is shown — the FIRST item alone exceeds the ${MAX_RESULT_CHARS}-character ` +
+              `limit, so no whole item fits. Fetch it by id, or use a tool that returns a summary ` +
+              `rather than the full record.`
+          : `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
+              `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
       );
     } else {
       // Otherwise drop back to a line boundary and discard the final line, which may
@@ -127,13 +131,29 @@ function stringify(data: unknown): string {
 }
 
 /** How many leading array items fit inside the character budget. */
-function countFitting(items: unknown[]): number {
-  let used = 2;
-  for (let i = 0; i < items.length; i++) {
-    used += stringify(items[i]).length + 2;
-    if (used > MAX_RESULT_CHARS) return i;
+/**
+ * The largest prefix of `items` whose ACTUAL serialization fits the cap.
+ *
+ * Measured by serializing the prefix, not by adding up the items. Summing
+ * `stringify(item)` undercounted badly: it omits the indentation and commas that
+ * array serialization adds, and `stringify` returns a string value unquoted and
+ * unescaped, so a list of strings contributed almost nothing to the estimate. The
+ * effect was a "truncated" response LARGER than the cap — 4000 ordinary objects came
+ * out at 29216 characters against a 24000 limit, and 10000 empty strings at 60165.
+ *
+ * Binary search rather than a linear walk: each probe serializes up to the whole
+ * prefix, so a walk would be quadratic on a long list.
+ */
+function countFittingSerialized(items: unknown[]): number {
+  if (items.length === 0) return 0;
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (stringify(items.slice(0, mid)).length <= MAX_RESULT_CHARS) low = mid;
+    else high = mid - 1;
   }
-  return items.length;
+  return low;
 }
 
 /** Shared `tenantId` argument. Every tenant-scoped tool accepts it. */
