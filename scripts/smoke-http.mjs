@@ -131,8 +131,20 @@ async function main() {
   if (!sealedRequest) throw new Error("could not find the sealed request field on the consent page");
 
   // 5. Submit the consent form the way a browser would.
+  //
+  // The declared tenant is sent UP FRONT, not only chosen from the company picker. A
+  // token reaching exactly one company never sees that picker — the server binds it and
+  // redirects straight away — so the multi-tenant branch below was the only place the
+  // declaration was checked, and a single-company token bound whatever it reached
+  // regardless of what was declared. Naming it here makes the request explicit either
+  // way, and the assertion after the redirect confirms what was actually bound.
+  const declaredTenants = (process.env.REAI_READ_TENANTS ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const wanted = tenantArg ?? (declaredTenants.length === 1 ? declaredTenants[0] : undefined);
   const form = new URLSearchParams({ request: decodeHtml(sealedRequest), token });
-  if (tenantArg) form.set("tenantId", tenantArg);
+  if (wanted) form.set("tenantId", wanted);
 
   let postRes = await fetch(asMeta.authorization_endpoint, {
     method: "POST",
@@ -149,11 +161,8 @@ async function main() {
     // user-scoped token the first option is whatever sorts first, which may be someone
     // else's business, and the whole flow below then reads from it.
     const offered = [...html.matchAll(/<option value="(\d+)"/g)].map((m) => m[1]);
-    const declared = (process.env.REAI_READ_TENANTS ?? "")
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-    const chosen = tenantArg ?? offered.find((id) => declared.includes(id));
+    const declared = declaredTenants;
+    const chosen = wanted ?? offered.find((id) => declared.includes(id));
     report("multi-tenant token prompts for a company", Boolean(verified && offered.length > 0));
     if (!verified || offered.length === 0) throw new Error("unexpected consent response");
     if (!chosen) {
@@ -275,6 +284,24 @@ async function main() {
     !who.isError && whoText.includes("tenants"),
     firstLine(whoText),
   );
+
+  // Confirm what was actually BOUND, not what was asked for. The declaration is a
+  // control over which company gets read, so it has to be checked against the result:
+  // a single-company token never sees the picker, so nothing else in this flow would
+  // have noticed a binding to an undeclared company.
+  if (wanted) {
+    const boundHere = new RegExp(`BOUND to tenant ${wanted}\\b`).test(whoText);
+    report(
+      `the connection is bound to the declared tenant ${wanted}`,
+      boundHere,
+      boundHere ? "confirmed by reai_whoami" : firstLine(whoText),
+    );
+    if (!boundHere) {
+      throw new Error(
+        `Authorization bound a company other than the declared ${wanted}. Refusing to read from it.`,
+      );
+    }
+  }
 
   const accounts = await client.callTool({ name: "reai_list_accounts", arguments: { query: "bank" } });
   report(
