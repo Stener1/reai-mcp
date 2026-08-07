@@ -94,6 +94,20 @@ export const ESCALATION_PROBES: readonly unknown[] = ["probe", true, "create_inv
  * the gate actually reacts to.
  */
 /**
+ * The destructiveHint this server publishes.
+ *
+ * Extracted because the argument for NOT also demanding a static `destructive` flag rests on this
+ * formula — and no test read it. Reducing it to `tool.destructive === true`, dropping both the
+ * irreversible term and the escalating-fields term, left the whole suite green while
+ * reai_update_agreement, reai_create_supplier_invoice and reai_set_supplier_address all silently
+ * flipped to destructiveHint: false. That is the regression the comment in policy.test.mjs
+ * describes as historical, and it was reachable.
+ */
+export function destructiveHintFor(tool: ToolDef): boolean {
+  return tool.destructive === true || tool.risk === "irreversible" || hasEscalatingFields(tool);
+}
+
+/**
  * Exported so the invariant test can assert the REAL probe rather than a copy of it. A test
  * that reimplements this passes on its own reimplementation — the mistake the comment inside
  * the function is about, one level up.
@@ -188,7 +202,7 @@ export function buildServer(opts: BuildServerOptions): McpServer {
           // supplier's bank account" as an ordinary edit — in `full` mode, where the
           // call is permitted, that annotation is the only thing left protecting it.
           destructiveHint:
-            tool.destructive === true || tool.risk === "irreversible" || hasEscalatingFields(tool),
+            destructiveHintFor(tool),
           idempotentHint: tool.idempotent === true,
           openWorldHint: true,
         },

@@ -195,8 +195,13 @@ All notable changes to `reai-mcp`. Format loosely follows
   was the only way, to perform an operation that needs a read-and-merge. The
   agreements work shipped its gate with a merge tool; that one did not.
   - `reai_update_company_bank` reads the account, merges, and writes back the six
-    SETTABLE fields — not the eighteen the response carries. The round-trip was
-    verified lossless before relying on it. It also **refuses to clear `bban`**
+    SETTABLE fields — not the eighteen the response carries. Measured on the half
+    that could actually fail: omitting the twelve response-only fields does NOT
+    reset them — after a rename `manual`, `active`, `providerType` and
+    `eligibleForPaymentCreation` all came back unchanged and only the derived
+    `displayName` moved. `defaultForOutgoingPayment` was false throughout and no
+    endpoint in this API sets it, so that one field is unverified.
+    It also **refuses to clear `bban`**
     even on request: an account with no number cannot be used for payments or
     reconciliation, so `reai_delete_company_bank` is the honest way to retire one.
   - `reai_update_creditor`, with `reai_list_creditors` so the id is findable. What

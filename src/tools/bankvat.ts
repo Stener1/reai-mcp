@@ -680,10 +680,16 @@ const updateCompanyBank = defineTool({
     "like, is accepted with a 200 and EMPTIES the account number. Measured on a live tenant. An " +
     "account with no number cannot be used for payments or reconciliation, and nothing in the " +
     "response says it happened.\n\n" +
-    "So this reads the account first and merges. The round-trip was verified lossless: the six " +
-    "settable fields, read back and written verbatim, changed nothing. It sends only those six — " +
-    "the response carries eighteen, and the twelve extra (id, iban, providerType, and the rest) " +
-    "have no place in the request.\n\n" +
+    "So this reads the account first and merges. It sends only the six settable fields — the " +
+    "response carries eighteen, and the twelve extra (id, iban, providerType, and the rest) have " +
+    "no place in the request.\n\n" +
+    "Both halves of that were measured, because the interesting question is not whether the six " +
+    "survive being written back (they are what is sent) but whether OMITTING the twelve resets " +
+    "them. It does not: after a rename, manual, active, providerType, providerDisplayName, " +
+    "eligibleForPaymentCreation, archived, syncEnabled and hasProviderConnection all came back " +
+    "unchanged, and only displayName moved — correctly, since it is derived from the name. One " +
+    "field is NOT covered: defaultForOutgoingPayment was false before and after, and no endpoint " +
+    "in this API sets it, so whether a replacement would clear a true value is unverified.\n\n" +
     "Needs REAI_WRITE_MODE=full, because the raw PUT can destroy a payment destination and a " +
     "curated tool must not be a softer route to it. Between the read and the write there is a " +
     "lost-update window: an edit made in the ReAI UI in between is silently reverted.",
@@ -745,7 +751,7 @@ const updateCompanyBank = defineTool({
       path: `/api/company-banks/${id}`,
       tenantId: resolved,
     });
-    const { record, problem } = readableRecord(current.data);
+    const { record, problem } = readableRecord(current.data, undefined, COMPANY_BANK_SETTABLE);
     if (!record) {
       return fail(
         `Could not read company bank ${id}: ${problem}. Nothing was written — this endpoint ` +
@@ -779,7 +785,10 @@ const updateCompanyBank = defineTool({
     // "Invalid arguments for tool reai_update_company_bank" — no mention of payments, no pointer
     // at the delete tool. Found by driving the tool live rather than by unit test, because the
     // unit tests call the handler directly and never see validation.
-    if (Object.hasOwn(changes, "bban") && (changes.bban === null || changes.bban === "")) {
+    if (
+      Object.hasOwn(changes, "bban") &&
+      (changes.bban === null || (typeof changes.bban === "string" && changes.bban.trim() === ""))
+    ) {
       return fail(
         `Refusing to clear bban on company bank ${id}: an account with no number cannot be used ` +
           `for payments or reconciliation. Nothing was written. If the account is genuinely gone, ` +
@@ -809,7 +818,11 @@ const updateCompanyBank = defineTool({
         )} that was sent. Read the account back before relying on it.`,
       );
     }
-    if (typeof after.bban === "string" && after.bban === "") {
+    // `== null` covers null AND undefined, and trim() covers whitespace. The first version tested
+    // only `=== ""` — so a response coming back with bban: null, which is exactly what the
+    // creditor measurement produced, emitted no warning at all and the note reported the other
+    // fields as "written back unchanged".
+    if (after.bban == null || (typeof after.bban === "string" && after.bban.trim() === "")) {
       notes.push(
         `WARNING: the account number is now EMPTY. This account cannot be used for payments or ` +
           `reconciliation until it is set again.`,

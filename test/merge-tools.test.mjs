@@ -198,13 +198,61 @@ test("an unreadable read refuses instead of wiping", async () => {
 });
 
 test("a response that did not store the account number sent is called out", async () => {
-  const { text } = await run(
+  // A NON-EMPTY mismatch, so this pins the mismatch warning specifically. With bban: "" both
+  // warnings fired and either assertion was satisfied by the empty-account one alone — deleting
+  // the mismatch check entirely left the test green.
+  const mismatch = await run(
     "reai_update_company_bank",
     { id: 1500, bban: "15202296179" },
-    (req, n) => (n === 1 ? BANK : { ...BANK, bban: "" }),
+    (req, n) => (n === 1 ? BANK : { ...BANK, bban: "15201353103" }),
   );
-  assert.match(text, /WARNING/);
-  assert.match(text, /account number is now EMPTY/);
+  assert.match(mismatch.text, /came back as "15201353103"/);
+  assert.match(mismatch.text, /not the "15202296179" that was sent/);
+  assert.doesNotMatch(mismatch.text, /now EMPTY/, "this one is not the empty-account case");
+
+  // And an empty or null account coming back is its own warning. null is the shape the creditor
+  // measurement produced, and the first version of the check tested only for "".
+  for (const bban of ["", null, "   "]) {
+    const emptied = await run(
+      "reai_update_company_bank",
+      { id: 1500, name: "Drift 2" },
+      (req, n) => (n === 1 ? BANK : { ...BANK, bban }),
+    );
+    assert.match(emptied.text, /account number is now EMPTY/, JSON.stringify(bban));
+  }
+});
+
+test("a whitespace account number is refused like an empty one", async () => {
+  // "   " is as unusable as "", and CompanyBankReq has no minLength or pattern, so the API would
+  // very likely store it. The repo's own requiredName uses trim() for exactly this.
+  for (const bban of ["   ", "\t"]) {
+    const { calls, result, text } = await run("reai_update_company_bank", { id: 1500, bban }, BANK);
+    assert.equal(result.isError, true, JSON.stringify(bban));
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+    assert.match(text, /cannot be used for payments/);
+  }
+});
+
+test("a whole-record read of the wrong shape is refused, not merged into", async () => {
+  // The HIGH finding: readableRecord accepted any object when called without a field, so a 200
+  // carrying an envelope, renamed keys, or {} became a valid base — and for a creditor, whose only
+  // required field is `name`, a rename then supplied everything the API needed. The result was
+  // PUT {"name": ...}, which is precisely the body measured as clearing bankAccountNumber, with
+  // the note reporting the other fields as "written back unchanged".
+  for (const [label, body] of [
+    ["a response envelope", { data: { id: 14, name: "Sparebank 1", bankAccountNumber: "15201353103" } }],
+    ["renamed keys", { Name: "Sparebank 1" }],
+    ["an empty object", {}],
+  ]) {
+    const { calls, result, text } = await run("reai_update_creditor", { id: 14, name: "Renamed AS" }, body);
+    assert.equal(result.isError, true, label);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${label}: nothing may be written`);
+    assert.match(text, /Nothing was written/);
+
+    const bank = await run("reai_update_company_bank", { id: 1500, name: "x", countryCode: "NO", currency: "NOK" }, body);
+    assert.equal(bank.result.isError, true, `${label} (company bank)`);
+    assert.deepEqual(bank.calls.map((c) => c.method), ["GET"]);
+  }
 });
 
 test("the company-bank tool sits at the tier of the PUT it wraps", () => {
@@ -249,7 +297,7 @@ test("the creditor list does not read an empty list as 'no debt'", async () => {
   const empty = await run("reai_list_creditors", {}, []);
   assert.match(empty.text, /does not mean the company has no debt/);
   const some = await run("reai_list_creditors", {}, [CREDITOR, { id: 15, name: "No account" }]);
-  assert.match(some.text, /1 have no bank account number/);
+  assert.match(some.text, /1 has no bank account number/, "one creditor, singular");
 });
 
 // ---------------------------------------------------------------------------

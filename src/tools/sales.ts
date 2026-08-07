@@ -246,7 +246,9 @@ const setCustomerAddress = defineTool({
     "and countryCode — so a body carrying those three is accepted and empties everything else. " +
     "Measured on a live tenant: postalCode \"0150\" became null, province \"Oslo\" became null and " +
     "the second address line was emptied, on a 200. So this tool reads the current address first " +
-    "and merges your changes into it. Pass null for a part you mean to clear.\n\n" +
+    "and merges your changes into it. Pass null to clear one of the OPTIONAL parts — addressPart2, " +
+    "postalCode or province. The other three are required by the endpoint, so there is no way to " +
+    "clear them and null is refused.\n\n" +
     "Between that read and the write there is a lost-update window: an address edited in the " +
     "ReAI UI in between is silently reverted. There is no ETag or version field to prevent it.",
   risk: "reversible",

@@ -831,11 +831,14 @@ const listExpenses = defineTool({
 /**
  * Creditors and debtors: the counterparties on a LOAN.
  *
- * What a "creditor" is here was read off the document rather than guessed: `LoanRes` carries
- * `creditorId` and `debtorId`, and the loan write takes a `counterpartyId` with a `perspective`.
- * So a creditor is the counterparty when the company borrows — the party it owes — and its
- * `bankAccountNumber` is where repayments go. That is also why creditors carry an account number
- * and debtors do not: on a loan the company has made, the money comes back in.
+ * What a "creditor" is here is INFERRED from the document, not stated by it. The ingredients are
+ * real: `LoanRes` carries `creditorId` and `debtorId`, `LoanReq` takes a `counterpartyId`, and
+ * `perspective` is borrower | lender. The step from there to "a creditor is the counterparty when
+ * the company borrows, and its bankAccountNumber is where repayments go" rests on the English
+ * meaning of the word plus that enum — nothing says `creditorId` is the one populated on the
+ * borrower side, and nothing documents what the account number is for. The same goes for the
+ * tidy story about why creditors carry an account number and debtors do not: coherent, and
+ * unverified. Treat it as the best available reading rather than as measured.
  *
  * `creditorId` appears exactly once in the whole document, on LoanRes, so nothing here claims a
  * creditor is used anywhere else.
@@ -864,7 +867,10 @@ const listCreditors = defineTool({
       : 0;
     return okList(rows, {
       noun: "creditor",
-      suffix: missingAccount > 0 ? `. ${missingAccount} have no bank account number.` : ".",
+      suffix:
+        missingAccount > 0
+          ? `. ${missingAccount} ${missingAccount === 1 ? "has" : "have"} no bank account number.`
+          : ".",
       empty:
         "No creditors. A loan can still exist without one — LoanRes.creditorId is nullable — so " +
         "this being empty does not mean the company has no debt.",
@@ -913,7 +919,7 @@ const updateCreditor = defineTool({
       path: `/api/creditors/${id}`,
       tenantId: resolved,
     });
-    const { record, problem } = readableRecord(current.data);
+    const { record, problem } = readableRecord(current.data, undefined, CREDITOR_SETTABLE);
     if (!record) {
       return fail(
         `Could not read creditor ${id}: ${problem}. Nothing was written — this endpoint REPLACES ` +
@@ -979,8 +985,9 @@ const setSupplierAddress = defineTool({
     "The call underneath is a full REPLACEMENT whose required set is only addressPart1, city and " +
     "countryCode — so a body carrying those three is accepted and empties the rest. Measured on " +
     "the customer version of the same endpoint: postalCode and province became null and the second " +
-    "address line was emptied, on a 200. This reads the supplier first and merges. Pass null for a " +
-    "part you mean to clear.\n\n" +
+    "address line was emptied, on a 200. This reads the supplier first and merges. Pass null to " +
+    "clear one of the OPTIONAL parts — addressPart2, postalCode or province. The other three are " +
+    "required by the endpoint, so there is no way to clear them and null is refused.\n\n" +
     "Between the read and the write an address edited in the ReAI UI is silently reverted; there " +
     "is no version field to prevent it.",
   risk: "reversible",

@@ -570,8 +570,15 @@ export function startOfYear(): string {
  * Several endpoints here replace rather than patch, so a body carrying one field clears every
  * other one it omits — measured on agreements (every lease term), company banks and creditors
  * (the account number), and the address sub-resources (the postcode). The safe shape is always
- * the same: read the record, overlay the changes, send back everything settable. This is the
- * pure half of that, so the four tools doing it share one implementation instead of four.
+ * the same: read the record, overlay the changes, send back everything settable.
+ *
+ * Five tools now do that, and THREE use this: reai_update_company_bank, reai_update_creditor and
+ * reai_set_supplier_address. reai_set_customer_address and reai_update_agreement still hand-roll
+ * it — the first predates this helper and keeps its own parts list, the second dispatches on a
+ * template and merges into a sub-object of a wrapper, which is a different enough shape that
+ * folding it in would complicate both. Worth saying rather than claiming the de-duplication is
+ * finished: it is half done, deliberately for the agreement tool and only by inertia for the
+ * customer one.
  *
  * `settable` matters as much as the merge: a response usually carries more than its request
  * accepts — CompanyBankRes has 18 properties against CompanyBankReq's six — so echoing a GET
@@ -603,8 +610,13 @@ export function mergeForReplacement(opts: {
     const value = opts.existing[key];
     if (value !== undefined && value !== null) base[key] = value;
   }
-  const merged = { ...base, ...Object.fromEntries(given) };
-  const givenKeys = given.map(([k]) => k);
+  // The CHANGES half is filtered too. The base was, and this was not — so a key outside
+  // `settable` was sent when supplied and dropped when carried over, which is the one asymmetry
+  // this helper advertises against. No caller can hit it today (every tool's arguments are in its
+  // list), but adding an argument and forgetting the list is exactly how that stops being true.
+  const settableGiven = given.filter(([k]) => opts.settable.includes(k));
+  const merged = { ...base, ...Object.fromEntries(settableGiven) };
+  const givenKeys = settableGiven.map(([k]) => k);
   return {
     merged,
     kept: Object.keys(base).filter((k) => !givenKeys.includes(k)),
@@ -630,13 +642,41 @@ export function mergeForReplacement(opts: {
 export function readableRecord(
   data: unknown,
   field?: string,
+  /**
+   * Keys the record is expected to carry, for the WHOLE-record case.
+   *
+   * Without this, any object passed: a response envelope, a body with renamed keys, or `{}` all
+   * became a valid base, and the write then sent the caller's fields alone. That is the exact
+   * destruction the merge exists to prevent — and for a creditor, whose only required field is
+   * `name`, a rename supplies everything the API needs, so nothing downstream refuses either.
+   * Verified: a GET returning `{"data": {...}}` produced `PUT {"name": "Renamed AS"}` and the
+   * account number was gone, while the note said the other fields were "written back unchanged".
+   *
+   * A record that shares no expected key is therefore treated as unreadable rather than empty.
+   */
+  expect?: readonly string[],
 ): { record?: Record<string, unknown>; problem?: string } {
   const isObject = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === "object" && !Array.isArray(v);
   if (!isObject(data)) {
     return { problem: "the response was not a record object" };
   }
-  if (field === undefined) return { record: data };
+  if (field === undefined) {
+    if (expect !== undefined) {
+      const recognised = expect.filter((key) => Object.hasOwn(data, key));
+      if (recognised.length === 0) {
+        return {
+          problem:
+            Object.keys(data).length === 0
+              ? "the response was an empty object, which is not a record of this kind"
+              : `the response carried none of the fields this record should have ` +
+                `(${expect.slice(0, 4).join(", ")}${expect.length > 4 ? ", …" : ""}) — its keys were ` +
+                `${Object.keys(data).slice(0, 6).join(", ")}`,
+        };
+      }
+    }
+    return { record: data };
+  }
   const nested = data[field];
   // Absent or null genuinely means "not set yet", which is a legitimate starting point.
   if (nested === undefined || nested === null) return { record: {} };
