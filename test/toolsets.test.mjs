@@ -491,6 +491,9 @@ test("the README's payment-routing table matches the classifier", async () => {
 const KEEPS_AN_EXPLICIT_ID = {
   reai_get_bank_reconciliation:
     "queries a PERIOD for an account (bankAccountId + month), rather than fetching a record by id",
+  reai_get_warehouse_inventory:
+    "reports stock lines, which have no id of their own; warehouseId is an OPTIONAL filter and " +
+    "omitting it reports across every warehouse, so `id` would name the wrong thing",
 };
 
 // Seven getters took `id` and the three added in the last two iterations took `<noun>Id`.

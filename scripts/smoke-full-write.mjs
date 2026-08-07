@@ -115,6 +115,33 @@ function jsonOf(result) {
 }
 
 const STAMP = `reai-mcp fullwrite ${new Date().toISOString().replace(/[:.]/g, "-")}`;
+
+/** First non-blank line of a tool's text, which is where ok() puts the note. */
+const firstLineOf = (text) => (text.split("\n").find((l) => l.trim()) ?? "").slice(0, 130);
+
+/**
+ * The ARRAY a list tool returned, or undefined.
+ *
+ * jsonOf takes the first `{` to the last `}`, which cannot read a list — on a voucher list
+ * it silently produced garbage and a count of `undefined`. Parsing the body rather than the
+ * note is deliberate: the note is prose, and a count read out of prose would pass whatever
+ * the tool claimed instead of whatever it returned. Blocks are tried from the end because
+ * ok() puts the note first and the body last.
+ */
+function listOf(result) {
+  const blocks = textOf(result).split("\n\n");
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i].trim();
+    if (!block.startsWith("[")) continue;
+    try {
+      const parsed = JSON.parse(block);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // Truncated or not JSON — keep looking rather than reporting a count of zero.
+    }
+  }
+  return undefined;
+}
 const today = new Date().toISOString().slice(0, 10);
 
 async function main() {
@@ -144,6 +171,9 @@ async function main() {
   console.log(`Stamp: ${STAMP}\n`);
 
   const created = {
+    warehouseId: undefined,
+    productId: undefined,
+    variantId: undefined,
     voucherId: undefined,
     bankId: undefined,
     supplierPaymentId: undefined,
@@ -277,6 +307,149 @@ async function main() {
       !bankRes.isError && Number.isInteger(created.bankId),
       created.bankId ? `id=${created.bankId}` : textOf(bankRes).slice(0, 200),
     );
+
+    // --- 4a. The stock adjustment --------------------------------------------
+    //
+    // Irreversible for a reason no other tool here shares: nothing lists or deletes a stock
+    // transaction, so the only correction is an opposite adjustment. Both the refusal and
+    // the round-trip are exercised, and the ledger is checked either side — an adjustment
+    // posts no voucher, which is the claim the tool makes.
+    console.log("\n  Stock adjustment (posts NO voucher — that is what is being verified):");
+    const whRes = await client.callTool({
+      name: "reai_create_warehouse",
+      arguments: { name: `${STAMP} lager` },
+    });
+    if (!whRes.isError) {
+      const wh = jsonOf(whRes);
+      if (Number.isInteger(wh?.id)) created.warehouseId = wh.id;
+    }
+    report("a warehouse to adjust exists", Number.isInteger(created.warehouseId), `id=${created.warehouseId}`);
+
+    // A stock product needs at least one variant, and reai_create_product does not expose
+    // variants — so this goes through the escape hatch, which is also what the quirk says.
+    if (created.warehouseId) {
+      const prodRes = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "POST",
+          path: "/api/products",
+          body: {
+            title: `${STAMP} stock item`,
+            stockItem: true,
+            variants: [{ sku: `SMOKE-${Date.now()}`, sellingPrice: 200, costPrice: 100 }],
+          },
+        },
+      });
+      const prod = prodRes.isError ? undefined : jsonOf(prodRes);
+      if (Number.isInteger(prod?.id)) created.productId = prod.id;
+      report(
+        "a stock product with a variant exists",
+        Number.isInteger(created.productId),
+        created.productId ? `id=${created.productId}` : textOf(prodRes).slice(0, 200),
+      );
+    }
+
+    if (created.productId && created.warehouseId) {
+      // The variant id is on the stock line, and it is keyed `variantId`, not `id`.
+      const invRes = await client.callTool({
+        name: "reai_get_warehouse_inventory",
+        arguments: { warehouseId: created.warehouseId },
+      });
+      const row = invRes.isError ? undefined : jsonOf(invRes)?.rows?.find((r) => r.productId === created.productId);
+      created.variantId = row?.variantId ?? undefined;
+      report(
+        "the new product appears as a stock line at zero",
+        Number.isInteger(created.variantId) && row?.quantityOnHand === 0,
+        row ? `variantId=${created.variantId} qty=${row.quantityOnHand}` : textOf(invRes).slice(0, 200),
+      );
+
+      // The refusal. Without a variantId the API would answer 200 and move nothing, so the
+      // tool must not send it — and must not have written anything when it declines.
+      const refused = await client.callTool({
+        name: "reai_adjust_inventory",
+        arguments: { productId: created.productId, warehouseId: created.warehouseId, quantityChange: 3 },
+      });
+      report(
+        "an adjustment with no variantId is refused, not silently dropped",
+        refused.isError === true && /Nothing was written/.test(textOf(refused)),
+        firstLineOf(textOf(refused)),
+      );
+      const afterRefusal = await client.callTool({
+        name: "reai_get_warehouse_inventory",
+        arguments: { warehouseId: created.warehouseId },
+      });
+      const stillZero =
+        !afterRefusal.isError &&
+        jsonOf(afterRefusal)?.rows?.find((r) => r.productId === created.productId)?.quantityOnHand === 0;
+      report("the refused adjustment moved no stock", stillZero, stillZero ? "still 0 on hand" : "STOCK MOVED");
+
+      // A bare date is refused by the API itself; the tool completes it. If this passes,
+      // the yyyy-MM-dd form reached the API as a timestamp.
+      const vouchersBefore = await client.callTool({
+        name: "reai_list_vouchers",
+        arguments: { startDate: "2000-01-01", endDate: "2030-12-31" },
+      });
+      const countBefore = vouchersBefore.isError ? undefined : listOf(vouchersBefore)?.length;
+
+      const upRes = await client.callTool({
+        name: "reai_adjust_inventory",
+        arguments: {
+          productId: created.productId,
+          warehouseId: created.warehouseId,
+          variantId: created.variantId,
+          quantityChange: 4,
+          unitCost: 100,
+          occurredAt: "2026-08-01",
+        },
+      });
+      const up = upRes.isError ? undefined : jsonOf(upRes);
+      report(
+        "reai_adjust_inventory +4 with a yyyy-MM-dd occurredAt",
+        !upRes.isError && up?.quantityOnHand === 4,
+        upRes.isError ? textOf(upRes).slice(0, 220) : `onHand=${up?.quantityOnHand} occurredAt=${up?.occurredAt}`,
+      );
+      report(
+        "the date was completed to a timestamp the API accepted",
+        typeof up?.occurredAt === "string" && up.occurredAt.startsWith("2026-08-01T"),
+        String(up?.occurredAt),
+      );
+      report(
+        "the tool did not warn, because the stock actually moved",
+        !upRes.isError && !/WARNING: stock did NOT move/.test(textOf(upRes)),
+        firstLineOf(textOf(upRes)),
+      );
+
+      const vouchersAfter = await client.callTool({
+        name: "reai_list_vouchers",
+        arguments: { startDate: "2000-01-01", endDate: "2030-12-31" },
+      });
+      const countAfter = vouchersAfter.isError ? undefined : listOf(vouchersAfter)?.length;
+      report(
+        "the adjustment posted NO voucher",
+        Number.isInteger(countBefore) && Number.isInteger(countAfter) && countBefore === countAfter,
+        Number.isInteger(countBefore) && Number.isInteger(countAfter)
+          ? `${countBefore} → ${countAfter}`
+          : `COULD NOT COUNT VOUCHERS (${countBefore} → ${countAfter}) — this proves nothing`,
+      );
+
+      // Restore to zero, which is also the only correction this API offers.
+      const downRes = await client.callTool({
+        name: "reai_adjust_inventory",
+        arguments: {
+          productId: created.productId,
+          warehouseId: created.warehouseId,
+          variantId: created.variantId,
+          quantityChange: -4,
+          unitCost: 100,
+        },
+      });
+      const down = downRes.isError ? undefined : jsonOf(downRes);
+      report(
+        "an opposite adjustment brings it back to zero",
+        !downRes.isError && down?.quantityOnHand === 0,
+        downRes.isError ? textOf(downRes).slice(0, 200) : `onHand=${down?.quantityOnHand}`,
+      );
+    }
 
     // --- 4b. The supplier-invoice chain --------------------------------------
     //
@@ -431,6 +604,33 @@ async function main() {
       }
     };
 
+    // The product before the warehouse: deleting a record whose dependents are still
+    // around answers 500 "Referenced record is not accessible", which is how a previous
+    // run stranded four orders. Dependency order, cheapest first.
+    if (created.productId) {
+      await attempt(
+        "stock product deleted",
+        () => client.callTool({ name: "reai_delete_product", arguments: { id: created.productId } }),
+        (r) => textOf(r).slice(0, 90),
+      );
+    }
+    if (created.warehouseId) {
+      const r = await attempt(
+        "warehouse deleted",
+        () => client.callTool({ name: "reai_delete_warehouse", arguments: { warehouseId: created.warehouseId } }),
+        (res) => firstLineOf(textOf(res)),
+      );
+      // "archived" here would mean stock was left on hand — the adjustment did not net to
+      // zero — and an archived warehouse is invisible in the default list. Say so loudly.
+      const outcome = r && !r.isError ? jsonOf(r)?.outcome : undefined;
+      report(
+        "the warehouse was deleted, not archived",
+        outcome === "deleted",
+        outcome === "archived"
+          ? `ARCHIVED — stock was left on hand; warehouse ${created.warehouseId} needs manual cleanup`
+          : `outcome=${outcome}`,
+      );
+    }
     if (created.ruleId) {
       await attempt(
         "reconciliation rule deleted",

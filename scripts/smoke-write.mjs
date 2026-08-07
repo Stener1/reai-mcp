@@ -125,9 +125,80 @@ async function main() {
   await client.connect(transport);
   console.log(`\nReversible write round-trip against tenant ${tenantId} (mode: reversible)\n`);
 
-  const created = { customerId: undefined, offerId: undefined, supplierId: undefined };
+  const created = {
+    customerId: undefined,
+    offerId: undefined,
+    supplierId: undefined,
+    warehouseId: undefined,
+  };
 
   try {
+    // 0. Warehouse round-trip. Nothing else depends on it, and it is the cheapest
+    //    proof that create/rename/read/delete all agree about the same record.
+    const whRes = await client.callTool({
+      name: "reai_create_warehouse",
+      arguments: { name: `${STAMP} lager` },
+    });
+    const wh = whRes.isError ? undefined : jsonOf(whRes);
+    if (Number.isInteger(wh?.id)) created.warehouseId = wh.id;
+    report(
+      "reai_create_warehouse",
+      !whRes.isError && Number.isInteger(created.warehouseId),
+      created.warehouseId ? `id=${created.warehouseId}` : textOf(whRes).slice(0, 200),
+    );
+
+    if (created.warehouseId) {
+      const renameRes = await client.callTool({
+        name: "reai_rename_warehouse",
+        arguments: { warehouseId: created.warehouseId, name: `${STAMP} lager 2` },
+      });
+      report("reai_rename_warehouse", !renameRes.isError, firstLineOf(textOf(renameRes)));
+
+      const getRes = await client.callTool({
+        name: "reai_get_warehouse",
+        arguments: { id: created.warehouseId },
+      });
+      const fetched = getRes.isError ? undefined : jsonOf(getRes);
+      report(
+        "reai_get_warehouse reads back the new name",
+        fetched?.name === `${STAMP} lager 2` && fetched?.archived === false,
+        fetched ? `name=${fetched.name} archived=${fetched.archived}` : textOf(getRes).slice(0, 160),
+      );
+
+      // The empty inventory of a brand-new warehouse: an OBJECT with rows, not an array.
+      // A list-shaped read here would be the bug the quirk exists for.
+      const invRes = await client.callTool({
+        name: "reai_get_warehouse_inventory",
+        arguments: { warehouseId: created.warehouseId },
+      });
+      const inv = invRes.isError ? undefined : jsonOf(invRes);
+      report(
+        "reai_get_warehouse_inventory returns the envelope, not an array",
+        !invRes.isError && Array.isArray(inv?.rows) && inv.rows.length === 0,
+        invRes.isError ? textOf(invRes).slice(0, 160) : `rows=${inv?.rows?.length} totalStockValue=${inv?.totalStockValue}`,
+      );
+
+      // The adjustment is irreversible, so a reversible-mode run must not be able to reach
+      // it. The guarantee turned out to be stronger than a refusal: the tool is not
+      // registered at all at this write ceiling, so there is nothing to call. Asserted by
+      // listing the tools, because calling it and reading the error would have passed on
+      // "tool not found" for the wrong reason — a renamed tool would look like a working gate.
+      const listed = await client.listTools();
+      const names = new Set(listed.tools.map((tool) => tool.name));
+      report(
+        "reai_adjust_inventory is not exposed in reversible mode",
+        !names.has("reai_adjust_inventory"),
+        names.has("reai_adjust_inventory") ? "EXPOSED — an irreversible tool is reachable" : "hidden",
+      );
+      // ...and the read-only ones from the same toolset are, so the absence above is the
+      // write ceiling rather than the whole toolset failing to register.
+      report(
+        "its read-only siblings are exposed",
+        names.has("reai_get_warehouse_inventory") && names.has("reai_list_warehouses"),
+        `${[...names].filter((n) => n.includes("warehouse")).length} warehouse tools visible`,
+      );
+    }
+
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
     //    real company gets attached to the test record.
     const createRes = await client.callTool({
@@ -397,6 +468,36 @@ async function main() {
         );
       } catch (err) {
         report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
+      }
+    }
+    if (created.warehouseId) {
+      try {
+        const delRes = await client.callTool({
+          name: "reai_delete_warehouse",
+          arguments: { warehouseId: created.warehouseId },
+        });
+        // An empty warehouse is deleted outright; one holding stock is archived instead.
+        // This one never held any, so anything but "deleted" is worth seeing.
+        const outcome = delRes.isError ? undefined : jsonOf(delRes)?.outcome;
+        report(
+          "reai_delete_warehouse cleans up",
+          !delRes.isError && outcome === "deleted",
+          outcome ? `outcome=${outcome}` : textOf(delRes).slice(0, 160),
+        );
+
+        const after = await client.callTool({
+          name: "reai_get_warehouse",
+          arguments: { id: created.warehouseId },
+        });
+        const remaining = after.isError === true ? undefined : jsonOf(after);
+        const goneOrArchived = after.isError === true || remaining?.archived === true;
+        report(
+          "the test warehouse is gone or archived afterwards",
+          goneOrArchived,
+          goneOrArchived ? "verified" : `STILL ACTIVE — clean up warehouse ${created.warehouseId} by hand`,
+        );
+      } catch (err) {
+        report("warehouse cleanup", false, `remove warehouse ${created.warehouseId} by hand: ${err}`);
       }
     }
     if (created.customerId) {

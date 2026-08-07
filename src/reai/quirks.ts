@@ -255,6 +255,82 @@ export const QUIRKS: readonly Quirk[] = [
       "The stock lines are under `rows`, and the two totals are already computed — do not sum rows " +
       "to get stock value, it is there.",
   },
+  {
+    id: "inventory-adjust-silent-noop-without-variant",
+    paths: ["/api/warehouses/inventory/adjust"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "variantId is optional in the schema and REQUIRED in practice for any product that has " +
+      "variants. Omitting it answers 200 with a real transactionId and moves NO stock: measured " +
+      "on a live tenant, four consecutive +3 adjustments left quantityOnHand at 0 and stockValue " +
+      "at 0, each returning variantId: null. Nothing in the status or the transaction id says the " +
+      "write did nothing — the only honest signals are `quantityOnHand` in the response and a " +
+      "null `variantId` echoed back, so read them. The field to send is the one a variant carries " +
+      "in ProductRes, which is `variantId`, NOT `id`; reading `.id` yields undefined, " +
+      "JSON.stringify drops it, and the call becomes this no-op. reai_adjust_inventory reads the " +
+      "stock lines first and refuses instead.",
+  },
+  {
+    id: "inventory-adjust-occurredat-needs-time",
+    paths: ["/api/warehouses/inventory/adjust"],
+    methods: ["POST"],
+    statuses: [400],
+    kind: "validation",
+    note:
+      'occurredAt is format date-time and a date-only value is refused: "2026-08-01" answers 400 ' +
+      '{"detail":"Failed to read request"} with NO fieldErrors, because deserialisation fails ' +
+      "before field validation runs — so the error names neither the field nor the reason. " +
+      '"2026-08-01T10:00:00Z" and "2026-08-01T10:00:00+02:00" are both accepted (the offset form ' +
+      'is normalised to UTC, echoed back as "2026-08-01T08:00:00Z"). Every other date field in ' +
+      "this API is yyyy-MM-dd, which is what makes this easy to get wrong.",
+  },
+  {
+    id: "inventory-adjust-not-a-posting",
+    paths: ["/api/warehouses/inventory/adjust"],
+    methods: ["POST"],
+    kind: "irreversible",
+    note:
+      "An adjustment posts NO voucher — measured before and after every adjustment on a live " +
+      "tenant with a voucher lister that throws on a non-200, and the count never left 0. Stock " +
+      "value does not reach the ledger through this call, so book the accounting side separately. " +
+      "It also cannot be undone: DELETE /api/warehouses/inventory/transactions/{id}, DELETE " +
+      "/api/warehouses/inventory/adjust/{id} and GET /api/warehouses/inventory/transactions all " +
+      "404, so no route lists or removes a stock transaction and the only correction is an " +
+      "opposite adjustment, leaving both movements in the history. And stock goes NEGATIVE " +
+      "without complaint: -10 against 4 on hand gives -6 on hand and a stock value of -600, with " +
+      "no clamp and no refusal, so a sign error is absorbed silently.",
+  },
+  {
+    id: "warehouse-archived-is-a-filter",
+    paths: ["/api/warehouses"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "`archived` selects which set to return, it does not widen it. Measured on a tenant with " +
+      "one active and one archived warehouse: omitting it and archived=false both return only the " +
+      "active one, archived=true returns only the archived one. No single call returns both. This " +
+      "matters because a warehouse still holding stock is ARCHIVED rather than deleted, so stock " +
+      "can sit in a warehouse the default list does not show — GET /api/warehouses/inventory " +
+      "still reports it. Names are also not unique: creating a second warehouse with an existing " +
+      "name is accepted and returns a new id, so identify one by id.",
+  },
+  {
+    id: "stock-product-needs-a-variant",
+    paths: ["/api/products"],
+    methods: ["POST"],
+    statuses: [400],
+    kind: "validation",
+    note:
+      "A product with stockItem: true is rejected unless it carries at least one variant: 400 " +
+      'fieldErrors [{field: "stockProductVariantSelectionValid", message: "Stock products must ' +
+      'contain at least one variant."}]. That field name is a synthetic validation flag, not ' +
+      "something to send — the fix is a `variants` array, whose entries require `sku` " +
+      "(ProductVariantReq also takes barcode, costPrice, sellingPrice, options, inventory, " +
+      "warehouseName, inventoryLevels). ProductReq itself only requires `title`, so nothing in " +
+      "the schema hints at this. Note the asymmetry in the response: a created variant comes back " +
+      "keyed `variantId`, not `id`.",
+  },
 
   // --- Sales ---------------------------------------------------------------
   {

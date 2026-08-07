@@ -9,9 +9,46 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**86 tools**: 79 across seven accounting domains, plus 7 always-on.
+**93 tools**: 86 across eight accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Warehouses toolset** (7 tools) — warehouses, stock on hand, and stock
+  adjustments. Everything in the tool text was measured on the test tenant by
+  creating a warehouse and a stock product, adjusting stock, and reading the
+  ledger before and after with a voucher lister that throws on a non-200.
+  - `reai_adjust_inventory` **refuses before writing** when the product has
+    variant rows and no `variantId` was given, listing the variants to choose
+    from. That call is otherwise accepted with `200` and a real `transactionId`
+    while moving no stock at all — four consecutive `+3` adjustments left
+    `quantityOnHand` at 0. It then verifies the resulting quantity against the
+    pre-read plus the delta, and says so when they disagree.
+  - It also accepts `yyyy-MM-dd` for `occurredAt` and completes the timestamp
+    itself: the API's field is `date-time`, and a bare date is refused by the
+    deserialiser with `400 "Failed to read request"` and no `fieldErrors`, so the
+    error names neither the field nor the reason.
+  - Measured and stated in the tool: an adjustment posts **no voucher**, stock
+    goes **negative** without complaint (`-10` against 4 on hand gives `-6`), and
+    no route lists or deletes a stock transaction, so the only correction is an
+    opposite adjustment. That last one is why it is irreversible.
+  - `reai_delete_warehouse` reports deleted vs archived. A warehouse holding 2
+    units was archived and kept its stock; one whose adjustments netted back to
+    zero was deleted outright — the trigger is current stock, not history.
+  - `archived` on the list is a **filter**, not an include-toggle: archived=true
+    returns only archived warehouses, and nothing returns both sets. Combined
+    with the archive-on-delete behaviour, stock can sit in a warehouse the
+    default list does not show.
+- **Five quirks** for the same measurements, so a `reai_request` caller gets the
+  warnings the curated tools give — including `stock-product-needs-a-variant`,
+  which is a `POST /api/products` rejection whose `fieldErrors` name a synthetic
+  flag (`stockProductVariantSelectionValid`) rather than a field you can send.
+
+### Fixed
+
+- The README's `reai_delete_asset` row repeated the spec's claim that a linked
+  acquisition voucher is "deleted **or reversed**", which the paragraph directly
+  below it already contradicted and the tool's own description refutes: the call
+  is refused with `409` and changes nothing.
 
 - **Organisation toolset** (8 tools) — departments, employees and the employee
   ledger. `reai_list_postings`, `reai_general_ledger` and `reai_list_expenses`
