@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { assertTransmitAllowed } from "../policy.js";
 import {
+  fail,
+  mergeForReplacement,
+  optionalShape,
+  readableRecord,
   CURRENCY_CODE,
   COUNTRY_CODE,
   defineTool,
@@ -87,6 +91,56 @@ const subscriptionLine = z
   .describe("One recurring line.");
 
 /** The fields the API requires on every write, shared by create and update. */
+/** Exactly what SubscriptionWriteReq accepts. The response carries ten more. */
+const SUBSCRIPTION_SETTABLE = [
+  "customerId",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "periodAlignment",
+  "outputMode",
+  "automaticBillingGeneration",
+  "daysUntilDue",
+  "currencyCode",
+  "invoiceEmail",
+  "invoiceComment",
+  "internalComment",
+  "sendEhf",
+  "agreementId",
+  "projectId",
+  "serviceRecipients",
+  "subscriptionLines",
+] as const;
+
+/** What the API refuses to do without. Everything else the stored subscription can supply. */
+const SUBSCRIPTION_REQUIRED = [
+  "customerId",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "outputMode",
+  "automaticBillingGeneration",
+  "currencyCode",
+  "subscriptionLines",
+] as const;
+
+/**
+ * What SubscriptionLineReq accepts, of the eleven a response line carries.
+ *
+ * vatTitle, vatRate and amounts are computed and have no place in a write — which is the trap in
+ * "read it first and send back what you do not intend to change".
+ */
+const SUBSCRIPTION_LINE_SETTABLE = [
+  "rowNumber",
+  "itemName",
+  "comment",
+  "quantity",
+  "unitPrice",
+  "discount",
+  "vatCode",
+  "variantId",
+] as const;
+
 const writeFields = {
   customerId: z.number().int().positive().describe("Who is billed, from reai_list_customers."),
   startDate: isoDate.describe("First period start, yyyy-MM-dd."),
@@ -352,29 +406,159 @@ const createSubscription = defineTool({
 
 const updateSubscription = defineTool({
   name: "reai_update_subscription",
-  title: "Replace a subscription",
+  title: "Change a subscription",
   description:
-    "Update a subscription. This is a full REPLACEMENT, not a patch: every field the API " +
-    "requires must be sent, and the lines you send become the lines it has.\n\n" +
-    "So read it with reai_get_subscription first and send back what you do not intend to " +
-    "change. Omitting a value does not leave it alone — and the fields most dangerous to get " +
-    "wrong by omission are the three that decide whether it acts on its own.",
+    "Change one or more things about a subscription, leaving the rest alone.\n\n" +
+    "The call underneath is a full REPLACEMENT, and its own advice — read it first and send back " +
+    "what you do not intend to change — is harder to follow than it sounds, because the read and " +
+    "the write disagree about shape. The response puts the lines under `lines` and the request " +
+    "wants them under `subscriptionLines`; a response line carries eleven fields and the request " +
+    "accepts eight (vatTitle, vatRate and amounts are computed); and a service recipient reads " +
+    "back as `companyName` and writes as `name`. A caller echoing the response verbatim gets none " +
+    "of that right.\n\n" +
+    "Measured on a live subscription: a PUT that carried the eight required fields and one line " +
+    "answered 200 and left invoiceEmail, invoiceComment and internalComment all null, with the " +
+    "second line gone. So this tool reads the subscription, maps it, merges your changes over it " +
+    "and writes the whole thing back. The mapped round-trip was verified lossless — read, map, " +
+    "write, and nothing changed, discounts included.\n\n" +
+    "IT DOES NOT DISARM ANYTHING. outputMode, automaticBillingGeneration and sendEhf are carried " +
+    "over as they are, so a subscription that was invoicing on its own still is after an ordinary " +
+    "edit. Pass those fields explicitly to change them — passing sendEhf: false or " +
+    "automaticBillingGeneration: false is how you stop it, and neither needs " +
+    "REAI_ALLOW_EXTERNAL_SEND because turning a send OFF is not a send.\n\n" +
+    "Between the read and the write an edit made in the ReAI UI is silently reverted; there is no " +
+    "version field to prevent it.",
   risk: "reversible",
-  apiPaths: [["PUT", "/api/subscriptions/{id}"]],
+  apiPaths: [
+    ["GET", "/api/subscriptions/{id}"],
+    ["PUT", "/api/subscriptions/{id}"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Subscription id."),
-    ...writeFields,
+    // Every field optional: the stored subscription supplies whatever the caller does not. The
+    // create tool keeps the required versions, which is where they belong.
+    ...optionalShape(writeFields),
+    // Overridden to ALLOW an empty array, which the create tool's .min(1) rejects. Not because
+    // the API accepts one — it does not — but because "empty the lines to stop the billing" is a
+    // plausible wrong idea, and the handler answers it by naming reai_deactivate_subscription.
+    // With .min(1) here the caller got "Invalid arguments for tool reai_update_subscription" and
+    // no idea what to do instead. Same trade as reai_update_company_bank's bban: accept what the
+    // API would refuse, in the one place where doing so buys a better answer.
+    subscriptionLines: z
+      .array(subscriptionLine)
+      .optional()
+      .describe(
+        "What is billed each period. These REPLACE the existing lines — send them all, or leave " +
+          "the field out and the stored ones are carried over.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const { tenantId, id, ...body } = args;
-    const res = await ctx.client.request({
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const given = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (given.length === 0) {
+      return fail(
+        "No changes were given, so nothing was written. Rewriting a subscription with its own " +
+          "current values is a pointless write to something that bills a customer.",
+      );
+    }
+
+    const current = await ctx.client.request<Record<string, unknown>>({
+      method: "GET",
+      path: `/api/subscriptions/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data, undefined, SUBSCRIPTION_SETTABLE);
+    if (!record) {
+      return fail(
+        `Could not read subscription ${id}: ${problem}. Nothing was written — this endpoint ` +
+          `REPLACES the subscription, so the fields and lines you did not pass would have been ` +
+          `erased, and its billing schedule with them.`,
+      );
+    }
+
+    // The two shapes the read and the write disagree about. Done before the merge so the
+    // caller's own `subscriptionLines` / `serviceRecipients`, if given, simply win.
+    const storedLines = Array.isArray(record.lines)
+      ? (record.lines as Array<Record<string, unknown>>).map((line) =>
+          Object.fromEntries(
+            SUBSCRIPTION_LINE_SETTABLE.filter((k) => line[k] !== undefined && line[k] !== null).map(
+              (k) => [k, line[k]],
+            ),
+          ),
+        )
+      : undefined;
+    const storedRecipients = Array.isArray(record.serviceRecipients)
+      ? (record.serviceRecipients as Array<Record<string, unknown>>).map((r) => ({
+          organizationNumber: r.organizationNumber,
+          // `companyName` on the way out, `name` on the way in.
+          name: r.companyName ?? r.name,
+          countryCode: r.countryCode,
+        }))
+      : undefined;
+
+    const { merged, kept, missing, given: givenKeys } = mergeForReplacement({
+      existing: {
+        ...record,
+        ...(storedLines ? { subscriptionLines: storedLines } : {}),
+        ...(storedRecipients ? { serviceRecipients: storedRecipients } : {}),
+      },
+      changes,
+      settable: SUBSCRIPTION_SETTABLE,
+      required: SUBSCRIPTION_REQUIRED,
+    });
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on a subscription, and neither your change nor ` +
+          `the stored one supplies ${missing.length === 1 ? "it" : "them"}. Nothing was written.`,
+      );
+    }
+
+    // The API wants at least one line, and `missing` only catches undefined/null/"" — an empty
+    // array would have gone through and replaced a billing subscription with one that bills for
+    // nothing. Checked here rather than coerced into a count of zero further down.
+    const lines = merged.subscriptionLines;
+    if (!Array.isArray(lines) || lines.length === 0) {
+      return fail(
+        `Subscription ${id} would be left with no billing lines, and the API requires at least ` +
+          `one. Nothing was written. ${
+            Array.isArray(lines)
+              ? "An empty subscriptionLines array is not a way to pause billing — " +
+                "reai_deactivate_subscription is."
+              : "The stored subscription's lines could not be read, so there was nothing to carry over."
+          }`,
+      );
+    }
+    const lineCount = lines.length;
+
+    const res = await ctx.client.request<Record<string, unknown>>({
       method: "PUT",
       path: `/api/subscriptions/${id}`,
-      body,
-      tenantId: requireTenantId(tenantId, ctx),
+      body: merged,
+      tenantId: resolved,
     });
-    return ok(res.data, { note: `Subscription ${id} replaced with the body sent.` });
+
+    const notes = [
+      `Changed ${givenKeys.join(", ")} on subscription ${id}; the other ${kept.length} field(s) ` +
+        `were read first and written back unchanged, because this endpoint replaces rather than ` +
+        `patches.` +
+        (givenKeys.includes("subscriptionLines")
+          ? ` The ${lineCount} line(s) you sent are now the lines it has.`
+          : ` Its ${lineCount} line(s) were carried over.`),
+    ];
+    const armed: string[] = [];
+    if (merged.outputMode === "create_invoice") armed.push('outputMode="create_invoice"');
+    if (merged.automaticBillingGeneration === true) armed.push("automaticBillingGeneration");
+    if (merged.sendEhf === true) armed.push("sendEhf");
+    if (armed.length > 0) {
+      notes.push(
+        `Still armed: ${armed.join(", ")}. This edit did not change that — it carries over what ` +
+          `was already set, so the subscription goes on billing as it was. Pass those fields ` +
+          `explicitly to stop it.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
   },
 });
 

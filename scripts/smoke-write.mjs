@@ -141,6 +141,7 @@ async function main() {
     supplierId: undefined,
     warehouseId: undefined,
     agreementId: undefined,
+    subscriptionId: undefined,
   };
 
   try {
@@ -250,7 +251,7 @@ async function main() {
         !agRes.isError && Number.isInteger(created.agreementId),
         created.agreementId ? `agreementId=${created.agreementId}` : textOf(agRes).slice(0, 180),
       );
-      if (created.agreementId) {
+    if (created.agreementId) {
         const readRes = await client.callTool({
           name: "reai_get_agreement",
           arguments: { id: created.agreementId },
@@ -271,6 +272,101 @@ async function main() {
           firstLineOf(textOf(signersRes)),
         );
       }
+    }
+
+    // 0c. Subscriptions had no live write coverage at all, which is a gap for the one thing in
+    //     this API that invoices real people unattended. The property under test is the merge:
+    //     change one field, and the lines and comments must survive.
+    //
+    //     outputMode create_order with automaticBillingGeneration false is the harmless
+    //     configuration, and invoiceEmail is deliberately omitted — it is an invoice-delivery
+    //     field, so setting it is refused in this mode, which the suite asserts below.
+    const subCustRes = await client.callTool({
+      name: "reai_create_customer",
+      arguments: { name: `${STAMP} sub customer`, privateContact: true, skipRegistryLookup: true },
+    });
+    const subCustomer = subCustRes.isError ? undefined : jsonOf(subCustRes)?.id;
+    if (Number.isInteger(subCustomer)) {
+      const subRes = await client.callTool({
+        name: "reai_create_subscription",
+        arguments: {
+          customerId: subCustomer,
+          startDate: "2026-09-01",
+          intervalMonths: 1,
+          billingTiming: "in_advance",
+          outputMode: "create_order",
+          automaticBillingGeneration: false,
+          daysUntilDue: 14,
+          currencyCode: "NOK",
+          invoiceComment: `${STAMP} invoice note`,
+          internalComment: `${STAMP} internal note`,
+          subscriptionLines: [
+            // vatCode 0 because this tenant is not VAT-registered and the API allows only that.
+            { rowNumber: 1, itemName: "ZZ line one", quantity: 2, unitPrice: 1500, vatCode: "0" },
+            { rowNumber: 2, itemName: "ZZ line two", quantity: 1, unitPrice: 500, discount: 10, vatCode: "0" },
+          ],
+        },
+      });
+      if (!subRes.isError && Number.isInteger(jsonOf(subRes)?.id)) created.subscriptionId = jsonOf(subRes).id;
+      report(
+        "a subscription exists to edit",
+        Number.isInteger(created.subscriptionId),
+        created.subscriptionId ? `id=${created.subscriptionId}` : textOf(subRes).slice(0, 200),
+      );
+
+      if (created.subscriptionId) {
+        const edit = await client.callTool({
+          name: "reai_update_subscription",
+          arguments: { id: created.subscriptionId, intervalMonths: 3 },
+        });
+        report("reai_update_subscription changes one field", !edit.isError, firstLineOf(textOf(edit)));
+
+        const after = await client.callTool({
+          name: "reai_get_subscription",
+          arguments: { id: created.subscriptionId },
+        });
+        const sub = after.isError ? undefined : jsonOf(after);
+        const survived =
+          sub?.intervalMonths === 3 &&
+          sub?.invoiceComment === `${STAMP} invoice note` &&
+          sub?.internalComment === `${STAMP} internal note` &&
+          sub?.lines?.length === 2 &&
+          sub?.lines?.[1]?.discount === 10;
+        report(
+          "the lines and comments survived an edit that replaces",
+          survived,
+          survived
+            ? "interval changed; 2 lines, the discount and both comments intact"
+            : `LOST — interval=${sub?.intervalMonths} lines=${sub?.lines?.length} ` +
+              `discount=${sub?.lines?.[1]?.discount} comment=${JSON.stringify(sub?.invoiceComment)}`,
+        );
+
+        // Emptying the lines is a plausible wrong way to pause billing, and the refusal has to
+        // reach the caller with the right alternative — through the schema AND the handler, which
+        // is the path a client actually takes.
+        const emptied = await client.callTool({
+          name: "reai_update_subscription",
+          arguments: { id: created.subscriptionId, subscriptionLines: [] },
+        });
+        report(
+          "emptying the billing lines is refused, naming deactivate instead",
+          emptied.isError === true && /reai_deactivate_subscription/.test(textOf(emptied)),
+          firstLineOf(textOf(emptied)),
+        );
+
+        // And the invoice-delivery gate still bites on an explicit change in this mode.
+        const delivery = await client.callTool({
+          name: "reai_update_subscription",
+          arguments: { id: created.subscriptionId, invoiceEmail: "zz@example.invalid" },
+        });
+        report(
+          "changing where invoices are delivered is refused in reversible mode",
+          delivery.isError === true && /delivered/.test(textOf(delivery)),
+          firstLineOf(textOf(delivery)),
+        );
+      }
+      // The customer this subscription belongs to, cleaned up after it below.
+      created.subscriptionCustomerId = subCustomer;
     }
 
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
@@ -576,6 +672,28 @@ async function main() {
         );
       } catch (err) {
         report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
+      }
+    }
+      if (created.subscriptionId) {
+      try {
+        const delRes = await client.callTool({
+          name: "reai_delete_subscription",
+          arguments: { id: created.subscriptionId },
+        });
+        report("reai_delete_subscription cleans up", !delRes.isError, firstLineOf(textOf(delRes)));
+      } catch (err) {
+        report("subscription cleanup", false, `remove subscription ${created.subscriptionId} by hand: ${err}`);
+      }
+    }
+    if (created.subscriptionCustomerId) {
+      try {
+        const delRes = await client.callTool({
+          name: "reai_delete_customer",
+          arguments: { id: created.subscriptionCustomerId },
+        });
+        report("its customer is cleaned up too", !delRes.isError, firstLineOf(textOf(delRes)));
+      } catch (err) {
+        report("subscription customer cleanup", false, `remove customer ${created.subscriptionCustomerId} by hand: ${err}`);
       }
     }
     if (created.agreementId) {

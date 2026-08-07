@@ -222,6 +222,41 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`reai_update_subscription` passed a partial body straight through**, and its
+  own description told the caller to "read it first and send back what you do not
+  intend to change" — advice that could not be followed, because the read and the
+  write disagree about shape in three ways: the response puts the lines under
+  `lines` and the request wants `subscriptionLines`; a response line carries eleven
+  fields where `SubscriptionLineReq` accepts eight (`vatTitle`, `vatRate` and
+  `amounts` are computed); and a service recipient reads back as `companyName` and
+  writes as `name`. A caller echoing the response verbatim gets none of it right.
+
+  Measured on a live subscription: a `PUT` carrying the eight required fields and
+  one line answered `200` and left `invoiceEmail`, `invoiceComment` and
+  `internalComment` all null, with the second line gone. Mapped properly the
+  round-trip is lossless, discounts included — verified before relying on it.
+
+  The tool now reads, maps and merges, with every field optional because the stored
+  subscription supplies the rest. It deliberately does **not** disarm: `outputMode`,
+  `automaticBillingGeneration` and `sendEhf` are carried over, so an ordinary edit
+  leaves a self-invoicing subscription self-invoicing — and the result says so,
+  because silence there would read as "the edit made it safe". The write gate reads
+  the caller's ARGUMENTS, not the merged body, so carrying an armed value over does
+  not misfire, and passing `sendEhf: false` still needs nothing: turning a send off
+  is not a send.
+
+  It also refuses to leave a subscription with no billing lines, naming
+  `reai_deactivate_subscription` as the way to pause billing. That refusal needed
+  the schema loosened to accept `[]` — with `.min(1)` it was unreachable and the
+  caller got a bare validation error, the same trap found in
+  `reai_update_company_bank`'s `bban` check one iteration ago. The create tool keeps
+  the stricter rule, since it has no stored record to fall back on.
+- Subscriptions had **no live write coverage at all** — the one domain in this API
+  that invoices real people unattended. The reversible suite now creates one, edits
+  a field and asserts the lines, the discount and both comments survived, then
+  asserts that emptying the lines is refused with the right alternative and that
+  changing the delivery address is still refused in the default mode.
+
 - **A full-replacement write can erase a payment destination by omitting it, and
   the routing guard could not see that.** Found by sweeping the document for the
   shape that bit on agreements and asking which full-replacement writes the

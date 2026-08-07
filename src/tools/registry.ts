@@ -1,4 +1,4 @@
-import { z, type ZodRawShape } from "zod";
+import { z, type ZodRawShape, type ZodTypeAny } from "zod";
 import type { ReaiClient } from "../reai/client.js";
 import type { ServerConfig } from "../config.js";
 import type { Risk } from "../policy.js";
@@ -682,4 +682,23 @@ export function readableRecord(
   if (nested === undefined || nested === null) return { record: {} };
   if (!isObject(nested)) return { problem: `\`${field}\` was not an object` };
   return { record: nested };
+}
+
+/**
+ * The same argument shape with every field optional.
+ *
+ * A merge tool needs this: the stored record supplies whatever the caller leaves out, so making
+ * the API's required fields required HERE would mean "change the interval" also meant "and retype
+ * the customer, the currency, the start date and every line" — which is the shape that loses data
+ * in the first place. The create tool keeps the required versions, where they belong.
+ */
+export function optionalShape<S extends ZodRawShape>(shape: S): { [K in keyof S]: ZodTypeAny } {
+  return Object.fromEntries(
+    Object.entries(shape).map(([key, schema]) => [
+      key,
+      // isOptional() is true for ZodOptional and for anything already accepting undefined, so an
+      // already-optional field is left exactly as it is rather than double-wrapped.
+      schema.isOptional() ? schema : schema.optional(),
+    ]),
+  ) as { [K in keyof S]: ZodTypeAny };
 }

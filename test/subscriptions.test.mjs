@@ -18,7 +18,10 @@ async function run(name, args, response) {
       client: {
         request: async (req) => {
           calls.push(req);
-          return { data: response, status: 200 };
+          // A function gets (request, callNumber), so a tool that READS before it writes can be
+          // given a different answer per call — which reai_update_subscription now needs.
+          const data = typeof response === "function" ? response(req, calls.length) : response;
+          return { data, status: 200 };
         },
         deepLink: () => "link",
       },
@@ -26,7 +29,7 @@ async function run(name, args, response) {
       session: {},
     },
   );
-  return { calls, text: result.content.find((c) => c.type === "text").text };
+  return { calls, result, text: result.content.find((c) => c.type === "text").text };
 }
 
 const subscription = (over = {}) => ({
@@ -195,34 +198,131 @@ test("billing history distinguishes never-billed from inactive", async () => {
   );
 });
 
-test("the update is described as the replacement it is", async () => {
+// This used to assert the opposite: that every API-required field is required on the update too,
+// "because the API replaces the record". That was the right contract for a pass-through and the
+// wrong one for a merge — requiring them meant "change the interval" also meant "and retype the
+// customer, the currency, the start date and every line", which is precisely how a caller drops
+// invoiceEmail and half the lines. The tool now reads and merges, so the fields are optional and
+// the REPLACEMENT is described as a property of the call underneath.
+test("the update merges, and says the call underneath replaces", async () => {
   const description = tool("reai_update_subscription").description;
-  assert.match(description, /full REPLACEMENT, not a patch/);
-  assert.match(description, /read it with reai_get_subscription first/);
-  // The required fields are required on the update too, because the API replaces the record.
+  assert.match(description, /full REPLACEMENT/);
+  assert.match(description, /reads the subscription, maps it, merges/);
+  // It must also say what it does NOT do, because an ordinary edit leaves the arming alone.
+  assert.match(description, /DOES NOT DISARM/);
   const schema = tool("reai_update_subscription").inputSchema;
   for (const field of ["customerId", "startDate", "intervalMonths", "outputMode", "automaticBillingGeneration", "subscriptionLines"]) {
-    assert.equal(schema[field].isOptional(), false, `${field} must be required on a replacement`);
+    assert.equal(schema[field].isOptional(), true, `${field} must be optional on a merge`);
   }
+  // A stored subscription as the API returns one: lines under `lines`, with the computed fields
+  // a response carries and a request does not.
+  const stored = {
+    id: 4,
+    customerId: 12,
+    startDate: "2026-01-01",
+    intervalMonths: 1,
+    billingTiming: "in_advance",
+    currencyCode: "NOK",
+    outputMode: "create_order",
+    automaticBillingGeneration: false,
+    daysUntilDue: 14,
+    invoiceEmail: "billing@example.invalid",
+    invoiceComment: "Kept",
+    lines: [
+      { rowNumber: 1, itemName: "Drift", quantity: 1, unitPrice: 1000, vatCode: "0", vatTitle: "Fritatt", vatRate: 0, amounts: { totalAmount: 1000 } },
+    ],
+  };
   const { calls } = await run(
     "reai_update_subscription",
-    {
-      id: 4,
-      customerId: 12,
-      startDate: "2026-01-01",
-      intervalMonths: 1,
-      billingTiming: "in_advance",
-      currencyCode: "NOK",
-      outputMode: "create_order",
-      automaticBillingGeneration: false,
-      subscriptionLines: [{ itemName: "Drift", quantity: 1, unitPrice: 1000 }],
-    },
-    { id: 4 },
+    { id: 4, intervalMonths: 3 },
+    (req, n) => (n === 1 ? stored : { ...stored, intervalMonths: 3 }),
   );
-  assert.equal(calls[0].method, "PUT");
-  assert.equal(calls[0].path, "/api/subscriptions/4");
-  assert.equal(calls[0].body.id, undefined, "the id belongs in the path, not the body");
-  assert.equal(calls[0].body.customerId, 12);
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"], "it reads before replacing");
+  assert.equal(calls[1].path, "/api/subscriptions/4");
+  assert.equal(calls[1].body.id, undefined, "the id belongs in the path, not the body");
+  // The change, and everything the caller did not mention.
+  assert.equal(calls[1].body.intervalMonths, 3);
+  assert.equal(calls[1].body.customerId, 12);
+  assert.equal(calls[1].body.invoiceEmail, "billing@example.invalid", "delivery must survive an edit");
+  assert.equal(calls[1].body.invoiceComment, "Kept");
+  // The lines are mapped, not echoed: `lines` becomes `subscriptionLines`, and the three
+  // computed fields a response line carries are dropped.
+  assert.equal(calls[1].body.lines, undefined);
+  assert.deepEqual(calls[1].body.subscriptionLines, [
+    { rowNumber: 1, itemName: "Drift", quantity: 1, unitPrice: 1000, vatCode: "0" },
+  ]);
+});
+
+test("an edit does not disarm a subscription, and says so", async () => {
+  // The merge carries outputMode, automaticBillingGeneration and sendEhf over, so an ordinary
+  // edit leaves a self-invoicing subscription self-invoicing. Silence there would read as
+  // "the edit made it safe".
+  const armed = {
+    id: 9,
+    customerId: 12,
+    startDate: "2026-01-01",
+    intervalMonths: 1,
+    billingTiming: "in_advance",
+    currencyCode: "NOK",
+    outputMode: "create_invoice",
+    automaticBillingGeneration: true,
+    sendEhf: true,
+    lines: [{ rowNumber: 1, itemName: "Drift", quantity: 1, unitPrice: 1000 }],
+  };
+  const { calls, text } = await run(
+    "reai_update_subscription",
+    { id: 9, invoiceComment: "New note" },
+    (req, n) => (n === 1 ? armed : armed),
+  );
+  assert.equal(calls[1].body.sendEhf, true, "carried over, not dropped");
+  assert.equal(calls[1].body.automaticBillingGeneration, true);
+  assert.match(text, /Still armed/);
+  assert.match(text, /did not change that/);
+});
+
+// The refusal below lives in the HANDLER, and these tests call the handler directly — so the
+// schema has to let an empty array through, or the branch is dead code and the caller gets a bare
+// validation error with none of the guidance. Exactly the shape that shipped in
+// reai_update_company_bank's bban check, found there by driving the tool live.
+test("the schema lets an empty line array reach the handler that explains it", () => {
+  const lines = tool("reai_update_subscription").inputSchema.subscriptionLines;
+  assert.equal(lines.safeParse([]).success, true, "an empty array must reach the handler");
+  assert.equal(lines.safeParse(undefined).success, true, "omitting it means 'carry the stored ones over'");
+  // The CREATE tool keeps the stricter rule: there is no stored subscription to fall back on.
+  assert.equal(tool("reai_create_subscription").inputSchema.subscriptionLines.safeParse([]).success, false);
+});
+
+test("an edit that would leave no billing lines is refused", async () => {
+  // `missing` only catches undefined/null/"", so an empty array would have replaced a billing
+  // subscription with one that bills for nothing.
+  const stored = {
+    id: 4,
+    customerId: 12,
+    startDate: "2026-01-01",
+    intervalMonths: 1,
+    billingTiming: "in_advance",
+    currencyCode: "NOK",
+    outputMode: "create_order",
+    automaticBillingGeneration: false,
+    lines: [{ rowNumber: 1, itemName: "Drift", quantity: 1, unitPrice: 1000 }],
+  };
+  const { calls, result, text } = await run(
+    "reai_update_subscription",
+    { id: 4, subscriptionLines: [] },
+    () => stored,
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+  assert.match(text, /no billing lines/);
+  assert.match(text, /reai_deactivate_subscription/, "it must name the right way to pause billing");
+});
+
+test("a read of the wrong shape is refused rather than merged into", async () => {
+  for (const body of [{ data: { id: 4, customerId: 12 } }, {}, "a subscription"]) {
+    const { calls, result } = await run("reai_update_subscription", { id: 4, intervalMonths: 3 }, () => body);
+    assert.equal(result.isError, true, JSON.stringify(body));
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+  }
 });
 
 test("a line is checked against the bounds the API enforces", () => {

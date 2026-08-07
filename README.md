@@ -413,11 +413,14 @@ Create, set-depreciation and write-off post **nothing** on an asset with no acco
 |---|---|---|
 | `reai_list_subscriptions` · `reai_get_subscription` | What bills whom, how often, and whether it goes out on its own. The list calls out how many bill **automatically** | read |
 | `reai_subscription_billing_history` | What a subscription has already produced. Nothing stops you billing the same period twice — this is how you check | read |
-| `reai_create_subscription` · `reai_update_subscription` | Set one up, or replace it. Created **active** — what keeps a new one harmless is `automaticBillingGeneration: false`, not its newness. The update is a full replacement, so read it first | reversible |
+| `reai_create_subscription` | Set one up. Created **active** — what keeps a new one harmless is `automaticBillingGeneration: false`, not its newness | reversible |
+| `reai_update_subscription` | Change one thing and keep the rest, including the lines. It does **not** disarm anything | reversible |
 | `reai_activate_subscription` | Restart a stopped subscription. Reads it first and refuses, when external sending is off, to re-arm one that invoices on its own | **irreversible** |
 | `reai_deactivate_subscription` | Stop it producing anything further. Undoing a standing risk, so available in the default mode | reversible |
 | `reai_generate_subscription_billing` | Bill every DUE period now — a backdated subscription produced eight orders from one call. Reports the counts the API returns | **irreversible** + external send |
 | `reai_delete_subscription` | Remove one that has never billed. One that has is refused with 409 — deactivate it instead | reversible |
+
+`reai_update_subscription` reads, maps and merges rather than passing a body through, because echoing the GET back does not work: the response puts the lines under `lines` and the request wants `subscriptionLines`, a response line carries eleven fields where the request accepts eight, and a service recipient reads back as `companyName` and writes as `name`. Measured — a `PUT` carrying the eight required fields and one line answered `200` and left `invoiceEmail`, `invoiceComment` and `internalComment` all null with the second line gone. Mapped properly the round-trip is lossless, discounts included. It deliberately does **not** disarm: `outputMode`, `automaticBillingGeneration` and `sendEhf` are carried over, so an ordinary edit leaves a self-invoicing subscription self-invoicing, and the tool says so in its result.
 
 Three fields decide whether a subscription reaches a customer on its own: `outputMode: "create_invoice"`, `automaticBillingGeneration`, and `sendEhf`. Together they are a machine that invoices real people while nobody is looking, so a body carrying any of them is treated as irreversible **and** as an external send — needing `REAI_WRITE_MODE=full` *and* `REAI_ALLOW_EXTERNAL_SEND`, because `full` alone does not lift the second. A subscription that produces a draft order and bills on request needs neither, and stays usable in the default mode.
 
@@ -493,7 +496,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **73 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **74 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

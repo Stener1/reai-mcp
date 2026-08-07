@@ -474,6 +474,22 @@ export const QUIRKS: readonly Quirk[] = [
       "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
   },
   {
+    id: "subscription-read-and-write-shapes-differ",
+    paths: ["/api/subscriptions/{id}"],
+    methods: ["PUT"],
+    kind: "shape",
+    note:
+      "This REPLACES the subscription, and echoing the GET back does not work — the read and the " +
+      "write disagree about shape in three ways. The response puts the lines under `lines`; the " +
+      "request wants `subscriptionLines`. A response line carries eleven fields and " +
+      "SubscriptionLineReq accepts eight (vatTitle, vatRate and amounts are computed). A service " +
+      "recipient reads back as `companyName` and writes as `name`.\n\n" +
+      "Measured: a PUT carrying the eight required fields and one line answered 200 and left " +
+      "invoiceEmail, invoiceComment and internalComment all null with the second line gone. Mapped " +
+      "properly the round-trip is lossless, discounts included. reai_update_subscription does the " +
+      "mapping and the merge; a raw caller has to do both.",
+  },
+  {
     id: "swift-code-is-normalised",
     paths: ["/api/company-banks", "/api/company-banks/{id}"],
     methods: ["POST", "PUT"],
