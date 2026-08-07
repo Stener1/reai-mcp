@@ -209,7 +209,7 @@ export const QUIRKS: readonly Quirk[] = [
 
   {
     id: "leads-paginated-object",
-    paths: ["/api/leads", "/api/leads/person-profiles", "/api/leads/person-role-matches"],
+    paths: ["/api/leads", "/api/leads/person-profiles"],
     methods: ["GET"],
     kind: "shape",
     note:
@@ -217,7 +217,10 @@ export const QUIRKS: readonly Quirk[] = [
       "so iterating the response or reading .length yields nothing. /api/leads gives " +
       "{ items, page, hasPrevious, hasNext, latestRegisteredAt } and takes page plus pageSize " +
       "(1-200, default 50); /api/leads/person-profiles gives { items, hasMore, nextStartOrgNo, limit } " +
-      "and pages by nextStartOrgNo rather than by number. Read the wrapper before assuming a count.",
+      "and pages by nextStartOrgNo rather than by number. Read the wrapper before assuming a count. " +
+      "/api/leads/person-role-matches is an object too but a DIFFERENT one — " +
+      "{ matched, companyMatched, items } with no paging fields at all — so do not assume these " +
+      "three share a shape.",
   },
   {
     id: "leads-unsaved-rows-have-no-id",
@@ -331,8 +334,13 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "validation",
     statuses: [400, 422],
     note:
-      'Phone numbers are validated and a "+47" prefix on a Norwegian number is REJECTED — ' +
-      '400 "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +". Send "22334455".',
+      "Two phone fields, opposite rules — check which one you are filling.\n" +
+      'The ENTITY phone (customer.phone, supplier.phone) rejects a "+47" prefix on a Norwegian ' +
+      'number: 400 "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +". Send ' +
+      '"22334455". Observed live.\n' +
+      "A CONTACT PERSON's phone is the reverse: the spec documents contactPersons[].phone as " +
+      '"Phone number in international E.164 format", example +4799999999, so stripping the prefix ' +
+      "there is wrong. Same request body, two conventions.",
   },
   {
     id: "brreg-lookup",
@@ -345,7 +353,16 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "delete-may-archive",
-    paths: ["/api/customers/{id}", "/api/suppliers/{id}", "/api/departments/{id}", "/api/documents/{id}"],
+    paths: [
+      "/api/customers/{id}",
+      "/api/suppliers/{id}",
+      "/api/departments/{id}",
+      "/api/documents/{id}",
+      // Same wording verbatim in the spec, and previously uncovered — so a
+      // reai_request caller got no warning, even though the curated tools say it.
+      "/api/products/{id}",
+      "/api/company-banks/{id}",
+    ],
     methods: ["DELETE"],
     kind: "gotcha",
     note:
@@ -395,14 +412,18 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/supplier-invoices/{id}"],
     methods: ["DELETE"],
     kind: "irreversible",
+    statuses: [200, 204],
     note:
-      "DELETE on a registered supplier invoice is only cleanly reversible while its period is " +
-      "open. Verified on live books: deleting a same-day invoice in an open period removed it " +
-      "and its postings entirely, leaving nothing behind. Once the period is closed, bokføringsloven " +
-      "does not allow that, and the delete becomes a counter-posting that leaves the original in " +
-      "the audit trail. Treat it as irreversible unless you know the period is open.",
-  },
-  {
+      'ALWAYS answers {"outcome":"reversed"} — the spec states it unconditionally, and it does not ' +
+      "offer a \"deleted\" outcome. But the outcome string does NOT tell you what happened to the " +
+      "ledger. Verified end to end on an open period: the invoice was created (one voucher " +
+      'appeared), DELETE returned {"outcome":"reversed"}, and afterwards the tenant had ZERO ' +
+      "vouchers and ZERO postings and GET on the invoice returned 404 — nothing was left behind, " +
+      "despite the word. In a closed period a counter-posting is what remains instead, which is " +
+      "the case the wording is written for. So do not infer ledger state from the outcome: check " +
+      "reai_list_postings. Note also that GET /api/supplier-invoices returns only NON-REVERSED " +
+      "invoices, so absence from that list is not evidence of anything.",
+  },  {
     id: "reception-cost-line-shape",
     paths: [
       "/api/invoice-reception-documents/{id}/supplier-invoice",

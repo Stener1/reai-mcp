@@ -98,7 +98,7 @@ const createSupplier = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/suppliers"]],
   inputSchema: {
-    name: z.string().describe("Supplier or company name."),
+    name: z.string().min(1).max(75).describe("Supplier or company name. At most 75 characters."),
     organizationNumber: z.string().optional().describe("Norwegian organisation number."),
     privateContact: z.boolean().optional().describe("True for a private individual."),
     email: z.string().optional().describe("Email address."),
@@ -142,7 +142,7 @@ const updateSupplier = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
-    name: z.string().optional().describe("New name."),
+    name: z.string().min(1).max(75).optional().describe("New name. At most 75 characters."),
     email: z.string().optional().describe("Email address."),
     phone: z
       .string()
@@ -445,6 +445,7 @@ const paySupplierInvoice = defineTool({
       ),
     bankDebitAmount: z
       .number()
+      .min(0.01)
       .optional()
       .describe(
         "What was actually debited from the bank, when it differs from invoiceAmount (fees, " +

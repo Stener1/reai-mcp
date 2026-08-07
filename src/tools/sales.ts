@@ -109,7 +109,7 @@ const createCustomer = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
-    name: z.string().describe("Customer or company name."),
+    name: z.string().min(1).max(75).describe("Customer or company name. At most 75 characters."),
     organizationNumber: z
       .string()
       .optional()
@@ -160,7 +160,7 @@ const updateCustomer = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
-    name: z.string().optional().describe("New name."),
+    name: z.string().min(1).max(75).optional().describe("New name. At most 75 characters."),
     email: z.string().optional().describe("New email address."),
     invoiceEmail: z.string().optional().describe("Where invoices should be sent."),
     invoiceInEnglish: z.boolean().optional().describe("Issue this customer's invoices in English."),
@@ -460,8 +460,19 @@ const lineBase = {
     .number()
     .min(0)
     .max(99_999_999.99)
-    .describe("Quantity. Zero or positive, at most 99999999.99."),
-  unitPrice: z.number().describe("Unit price. Must not be exactly zero; negative is allowed."),
+    .refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9, {
+      message: "quantity must be in steps of 0.01",
+    })
+    .describe("Quantity. Zero or positive, at most 99999999.99, in steps of 0.01."),
+  unitPrice: z
+    .number()
+    .min(-10_000_000)
+    .max(10_000_000)
+    .refine((v) => v !== 0, { message: "unitPrice must not be exactly zero" })
+    .describe(
+      "Unit price, between -10000000 and 10000000. Must not be exactly zero; negative is allowed " +
+        "(a discount line). The description said so already — now the schema does too.",
+    ),
   comment: z.string().optional().describe("Extra line comment."),
   discount: z
     .number()

@@ -594,3 +594,32 @@ test("no read tool accepts an input it never sends", async () => {
 
   assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
 });
+
+test("constraints the descriptions promise are actually enforced", async () => {
+  // Each of these was stated in prose and unchecked by the schema, so the tool
+  // described a guardrail it did not have. The API rejects them anyway — the point is
+  // that the failure arrives as a clear local message rather than a 400 from a call
+  // that has already been made.
+  const { allTools } = await import("../dist/server.js");
+  const parse = (tool, field, value) => {
+    const schema = tool.inputSchema[field];
+    return schema.safeParse(value).success;
+  };
+
+  const offer = allTools.find((t) => t.name === "reai_create_offer");
+  const line = (over) => ({ itemName: "x", quantity: 1, unitPrice: 100, vatCode: "3", ...over });
+  const lines = offer.inputSchema.offerLines;
+
+  assert.equal(lines.safeParse([line({ unitPrice: 0 })]).success, false, "unitPrice 0 must be rejected");
+  assert.equal(lines.safeParse([line({ unitPrice: 20_000_000 })]).success, false, "unitPrice bound");
+  assert.equal(lines.safeParse([line({ quantity: 1.234 })]).success, false, "quantity is in steps of 0.01");
+  assert.equal(lines.safeParse([line({ unitPrice: -50 })]).success, true, "a negative price is a discount");
+  assert.equal(lines.safeParse([line({ quantity: 1.5 })]).success, true);
+
+  const customer = allTools.find((t) => t.name === "reai_create_customer");
+  assert.equal(parse(customer, "name", "x".repeat(76)), false, "name is capped at 75 by the API");
+  assert.equal(parse(customer, "name", "x".repeat(75)), true);
+
+  const supplier = allTools.find((t) => t.name === "reai_create_supplier");
+  assert.equal(parse(supplier, "name", "x".repeat(76)), false);
+});
