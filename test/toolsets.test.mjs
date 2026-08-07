@@ -103,6 +103,97 @@ test("every tool that deletes is annotated destructive", () => {
   );
 });
 
+// The gap was in curatedArgsEscalate, the RUNTIME gate: it re-checked a curated tool's
+// arguments for payment routing and invoice delivery but not for the fields that arm a
+// send, so a tool declared `reversible` accepting sendEhf, outputMode or
+// automaticBillingGeneration would have transmitted in the default mode while reai_request
+// refused the identical call.
+//
+// No static test could have caught that, and it is worth being precise about why: the
+// invariant further down this file ("no curated tool is more permissive than the escape
+// hatch would be") compares a declared risk against classifyRequest on the PATH, and a body
+// field is invisible to it. Nothing was reachable — no shipped tool takes one of these
+// fields — and a subscription tool would have been the first.
+test("a curated tool accepting an arms-a-send field escalates like the escape hatch", async () => {
+  const { escalatingBodyFieldNames, curatedArgsEscalate, classifyWithBody, isAllowed } = await import(
+    "../dist/policy.js"
+  );
+  // A value each field actually escalates on, so the probe means something.
+  const arming = {
+    sendehf: true,
+    automaticbillinggeneration: true,
+    outputmode: "create_invoice",
+  };
+  for (const name of escalatingBodyFieldNames) {
+    assert.ok(name in arming, `no probe value for the escalating field ${name} — add one`);
+    assert.equal(
+      classifyWithBody("reversible", { [name]: arming[name] }),
+      "irreversible",
+      `${name} is declared escalating but does not escalate on ${JSON.stringify(arming[name])}`,
+    );
+  }
+
+  const unguarded = [];
+  for (const tool of registeredTools) {
+    if (!tool.apiPaths || tool.risk === "read") continue;
+    for (const input of Object.keys(tool.inputSchema ?? {})) {
+      const key = input.toLowerCase();
+      if (!escalatingBodyFieldNames.includes(key)) continue;
+      const args = { [input]: arming[key] };
+      const escalated = curatedArgsEscalate(tool.apiPaths, args);
+      const effective = escalated?.risk ?? tool.risk;
+      if (isAllowed(effective, "reversible")) {
+        unguarded.push(`${tool.name} accepts ${input} and stays ${effective}`);
+      }
+    }
+  }
+  assert.deepEqual(unguarded, [], "a curated tool can arm a send in the default write mode");
+
+  // No shipped tool accepts one of these fields, so the sweep above passes vacuously today
+  // — neutering the escalation in policy.ts leaves it green. What it is really guarding is
+  // the NEXT tool, so check the mechanism against a tool shaped like that one: a reversible
+  // subscription create, which is exactly what prompted this.
+  // curatedArgsEscalate reads only apiPaths and args, so a fuller tool object here would be
+  // decoration that reads like coverage. This is the path a subscription create would
+  // declare, and the arguments its schema would accept.
+  const subscriptionPaths = [["POST", "/api/subscriptions"]];
+  for (const [field, value] of [
+    ["sendEhf", true],
+    ["outputMode", "create_invoice"],
+    ["automaticBillingGeneration", true],
+  ]) {
+    const escalated = curatedArgsEscalate(subscriptionPaths, { [field]: value });
+    assert.equal(escalated?.risk, "irreversible", `${field} must escalate a curated tool`);
+    assert.match(escalated.consequence, /arms an external send|issue invoices on its own/);
+    assert.equal(isAllowed(escalated.risk, "reversible"), false);
+  }
+  // And the benign values must NOT escalate, or the tool becomes unusable for the ordinary
+  // case: a subscription that produces a draft order and bills nobody automatically.
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { outputMode: "create_order" }), undefined);
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { automaticBillingGeneration: false }), undefined);
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { sendEhf: false }), undefined);
+
+  // Scoped to where these fields exist. bindsToCreateInvoice fails closed on an
+  // unrecognised string, so without the path check a future export tool taking
+  // outputMode: "csv" would be refused in the default mode with a message about Peppol.
+  assert.equal(curatedArgsEscalate([["POST", "/api/vouchers"]], { outputMode: "csv" }), undefined);
+  assert.equal(curatedArgsEscalate([["POST", "/api/vouchers"]], { sendEhf: true }), undefined);
+  assert.ok(curatedArgsEscalate([["POST", "/api/orders"]], { sendEhf: true }), "orders carry sendEhf too");
+
+  // And every reason is reported, not the first one found: the server tells the caller
+  // "the same call without those fields will work", which is false if a second category
+  // is waiting behind the first.
+  const both = curatedArgsEscalate([["PATCH", "/api/subscriptions/7"]], {
+    invoiceEmail: "x@y.no",
+    sendEhf: true,
+  });
+  assert.deepEqual(both.fields, ["invoiceEmail", "sendEhf=true"]);
+  assert.match(both.consequence, /where invoices are delivered/);
+  assert.match(both.consequence, /arms an external send/);
+  assert.match(both.verify, /confirm the address/);
+  assert.match(both.verify, /confirm the recipient/);
+});
+
 test("no curated tool is more permissive than the escape hatch would be", () => {
   // The worst bug class in this codebase is a curated tool that quietly does
   // what reai_request refuses -- it would silently defeat REAI_WRITE_MODE. Each
@@ -428,4 +519,68 @@ test("a getter that takes one record id calls it `id`", () => {
     wrong.push(`${tool.name}: ${ids.join(", ")}`);
   }
   assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
+});
+
+// The annotation clients key on to ask before a destructive call is derived by probing each
+// input through the real gate — "so the annotation cannot drift from the gate that enforces
+// it", as server.ts puts it. It probed with the literal string "probe", and the gate
+// escalates sendEhf and automaticBillingGeneration only on a value that binds to TRUE, so
+// both were invisible to the annotation while fully live in the gate. That is the drift the
+// probe exists to prevent, reproduced one layer up from the hole this PR closed.
+test("the destructiveHint probe sees every field the gate reacts to", async () => {
+  const { curatedArgsEscalate, escalatingBodyFieldNames } = await import("../dist/policy.js");
+  // The REAL probe set, imported rather than copied. A local copy would test the copy:
+  // narrowing ESCALATION_PROBES back to ["probe"] in the build left this green, which is
+  // the same "a guard that reimplements what it guards" mistake this file has hit before.
+  const { ESCALATION_PROBES: probes } = await import("../dist/server.js");
+  const armed = { sendehf: true, automaticbillinggeneration: true, outputmode: "create_invoice" };
+  const paths = [["POST", "/api/subscriptions"]];
+
+  for (const field of escalatingBodyFieldNames) {
+    const live = curatedArgsEscalate(paths, { [field]: armed[field] }) !== undefined;
+    const seen = probes.some((v) => curatedArgsEscalate(paths, { [field]: v }) !== undefined);
+    assert.equal(live, true, `${field} should escalate on ${JSON.stringify(armed[field])}`);
+    assert.equal(seen, true, `${field} escalates the gate but no probe value reaches it`);
+  }
+  // A payment-routing field is a string, and was always visible — kept so the probe set
+  // cannot shrink back to booleans only.
+  assert.ok(
+    probes.some((v) => curatedArgsEscalate([["PATCH", "/api/suppliers/7"]], { iban: v }) !== undefined),
+  );
+});
+
+// REAI_WRITE_MODE answers "can this be undone in the books". REAI_ALLOW_EXTERNAL_SEND
+// answers "does this reach someone else", and `full` deliberately does not lift it.
+// Escalating the write risk alone collapsed the two into one for exactly the fields that
+// arm a send: in full mode with sending off, a curated tool would have transmitted where
+// reai_request refuses the identical call.
+//
+// tool.transmits cannot carry this. Declaring the tool transmits:true would hide it
+// whenever sending is off, including for the ordinary call that sends nothing — only the
+// arguments can tell.
+test("arguments that arm a send are refused when external sending is off", async () => {
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const subscriptionPaths = [["POST", "/api/subscriptions"]];
+
+  for (const [field, value] of [
+    ["sendEhf", true],
+    ["outputMode", "create_invoice"],
+    ["automaticBillingGeneration", true],
+  ]) {
+    const escalated = curatedArgsEscalate(subscriptionPaths, { [field]: value });
+    assert.equal(escalated?.transmits, true, `${field} reaches a counterparty`);
+  }
+
+  // Redirecting a payment or an invoice address is irreversible but sends nothing itself,
+  // so it must NOT be caught by the send gate — that would refuse a bank-detail correction
+  // on a deployment that has sending switched off, which is most of them.
+  const routing = curatedArgsEscalate([["PATCH", "/api/suppliers/7"]], { iban: "NO93" });
+  assert.equal(routing.risk, "irreversible");
+  assert.equal(routing.transmits, false);
+  const delivery = curatedArgsEscalate([["PATCH", "/api/customers/7"]], { invoiceEmail: "x@y.no" });
+  assert.equal(delivery.transmits, false);
+
+  // And the benign values stay benign on both axes.
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { outputMode: "create_order" }), undefined);
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { sendEhf: false }), undefined);
 });

@@ -383,6 +383,22 @@ function bindsToCreateInvoice(v: unknown): boolean {
 
 const KNOWN_OUTPUT_MODES = new Set(["create_order", "create_invoice"]);
 
+/**
+ * Where the arms-a-send fields actually live.
+ *
+ * The other two branches of `curatedArgsEscalate` are path-scoped and its docstring says
+ * why: "the field names are ambiguous out of context". This one was not, and
+ * `bindsToCreateInvoice` fails closed on an unrecognised string — so a future export tool
+ * with `outputMode: "csv"` would have been refused in the default mode with a message
+ * about Peppol transmission. That is the false refusal the README warns teaches operators
+ * to distrust the true ones. In the whole document `outputMode` appears only on
+ * subscriptions and `sendEhf` only on subscriptions and orders, so scoping costs nothing.
+ */
+const ARMS_A_SEND_PATHS: readonly RegExp[] = [
+  /^\/api\/subscriptions(\/|$)/,
+  /^\/api\/orders(\/|$)/,
+];
+
 const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
   // Arms EHF/Peppol transmission of the resulting invoice.
   sendehf: bindsToTrue,
@@ -441,6 +457,9 @@ export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
   }
   return pathRisk;
 }
+
+/** Exported for the invariant that checks curated tools against these same fields. */
+export const escalatingBodyFieldNames: readonly string[] = Object.keys(ESCALATING_BODY_FIELDS);
 
 /** Names of body fields that escalate risk, for use in error messages. */
 export function escalatingBodyFields(body: unknown): string[] {
@@ -869,8 +888,24 @@ export function classifyPaymentRouting(
 export function curatedArgsEscalate(
   apiPaths: ReadonlyArray<readonly [string, string]>,
   args: unknown,
-): { risk: Risk; fields: string[]; consequence: string; verify: string } | undefined {
+): { risk: Risk; fields: string[]; consequence: string; verify: string; transmits: boolean } | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+
+  // ALL the reasons, not the first one found.
+  //
+  // Returning on the first hit made the refusal message wrong rather than merely partial.
+  // The server appends "Every other field on this tool is unaffected, so the same call
+  // without those fields will work" — and for a body carrying both `iban` and `sendEhf`
+  // it named only `iban`, so dropping that field earns a second refusal for a reason
+  // never mentioned, with a contradictory explanation. The arms-a-send half is also the
+  // more permanent consequence of the two, and it was the half omitted.
+  const reasons: Array<{ fields: string[]; consequence: string; verify: string; transmits: boolean }> = [];
+  const add = (fields: string[], consequence: string, verify: string, transmits = false) => {
+    if (fields.length === 0) return;
+    if (reasons.some((r) => r.consequence === consequence)) return;
+    reasons.push({ fields, consequence, verify, transmits });
+  };
+
   for (const [method, path] of apiPaths) {
     // A tool's READ operations cannot redirect anything, and a tool commonly declares both:
     // the supplier-invoice tools list `GET /api/supplier-invoices` alongside their writes.
@@ -881,28 +916,57 @@ export function curatedArgsEscalate(
     // scope. Unreachable today — no curated read takes such an argument — but the next one
     // to do so would be blocked in read-only mode, the mode people point at a live business.
     if (method.toUpperCase() === "GET") continue;
+
     if (classifyPaymentRouting("reversible", path, args, method) === "irreversible") {
-      return {
-        risk: "irreversible",
-        fields: paymentRoutingFields(args),
-        consequence:
-          "this changes where money is sent — whoever pays this counterparty next, quite " +
+      add(
+        paymentRoutingFields(args),
+        "this changes where money is sent — whoever pays this counterparty next, quite " +
           "possibly a person in the ReAI UI long afterwards, sends to whatever account is on file",
-        verify: "confirm the new bank details against something outside this conversation",
-      };
+        "confirm the new bank details against something outside this conversation",
+      );
     }
     if (classifyInvoiceDelivery("reversible", path, args) === "irreversible") {
-      return {
-        risk: "irreversible",
-        fields: invoiceDeliveryFields(args),
-        consequence:
-          "this changes where invoices are delivered — every future invoice goes to that " +
+      add(
+        invoiceDeliveryFields(args),
+        "this changes where invoices are delivered — every future invoice goes to that " +
           "address, and the disclosure happens later, when someone issues one normally",
-        verify: "confirm the address with the customer through a channel you already trust",
-      };
+        "confirm the address with the customer through a channel you already trust",
+      );
+    }
+    // The same body fields the escape hatch escalates on. This helper checked payment
+    // routing and invoice delivery only, so a curated tool declared `reversible` that
+    // accepted sendEhf, outputMode or automaticBillingGeneration would have armed a send
+    // in the default mode while reai_request refused the identical call — the exact bug
+    // class this helper exists for, with the arms-a-send half missing. No shipped tool
+    // took one of those fields; a subscription tool would have been the first.
+    if (
+      pathForms(path).some((n) => ARMS_A_SEND_PATHS.some((re) => re.test(n))) &&
+      classifyWithBody("reversible", args) === "irreversible"
+    ) {
+      add(
+        escalatingBodyFields(args),
+        "this arms an external send or lets ReAI issue invoices on its own — the document " +
+          "leaves for a counterparty later, without another call, and cannot be recalled",
+        "confirm the recipient and the schedule, and check REAI_ALLOW_EXTERNAL_SEND is meant " +
+          "to be on for this deployment",
+        // The second axis. Write mode answers "can this be undone in the books";
+        // REAI_ALLOW_EXTERNAL_SEND answers "does this reach someone else", and `full` does
+        // not lift it. Escalating the risk alone left a curated tool transmitting in full
+        // mode with sending off, where reai_request refuses the identical call — the two
+        // switches collapsed into one for exactly the fields that arm a send.
+        classifyWithBody("reversible", args) === "irreversible",
+      );
     }
   }
-  return undefined;
+
+  if (reasons.length === 0) return undefined;
+  return {
+    risk: "irreversible",
+    fields: [...new Set(reasons.flatMap((r) => r.fields))],
+    consequence: reasons.map((r) => r.consequence).join("; and "),
+    verify: reasons.map((r) => r.verify).join("; and "),
+    transmits: reasons.some((r) => r.transmits),
+  };
 }
 
 /**

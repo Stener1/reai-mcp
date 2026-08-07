@@ -67,6 +67,8 @@ So a call carrying one of those fields is classified **irreversible** and refuse
 
 This was a real gap rather than a hypothetical: `reai_update_supplier` is declared `reversible`, its description promised that the bank fields "require `REAI_WRITE_MODE=full`", and nothing enforced it — while `reai_request` refused the identical `PATCH`. A control that is written down but not implemented is worse than none, because it invites running the default mode believing the fields are protected.
 
+The same re-gating now covers the fields that **arm a send**, not only the ones that redirect money. `sendEhf`, `automaticBillingGeneration` and `outputMode: "create_invoice"` escalate a curated tool exactly as they already did through `reai_request`. No shipped tool accepts one of them, so nothing was ever reachable — the gap was found while designing a subscription tool that would have been the first, which is a better moment to find it than after shipping. A test checks the mechanism against a tool of that shape rather than only sweeping today's tools, because a guard that passes vacuously is not a guard.
+
 ### Sending things to other people is a separate switch
 
 `REAI_WRITE_MODE` answers *what can be undone in the books*. It deliberately does **not** answer *does this reach someone else* — those are different questions, and one setting cannot serve both.
