@@ -446,22 +446,52 @@ async function main() {
       }
       return out;
     };
-    const firstIdOf = (text) => {
-      const body = text.slice(text.indexOf("\n\n") + 2);
-      let parsed;
-      try {
-        parsed = JSON.parse(body);
-      } catch {
-        return null;
+    // A getter must return ONE record whose own id is the one requested. Matching the id
+    // anywhere in the response would pass a getter that called its collection endpoint by
+    // mistake and returned the list — which contains that very row — and would also pass on
+    // a nested object that happens to carry the same id.
+    // ok() emits `note + "\n\n" + body`, but a tool that adds no note emits the body
+    // alone — reai_get_bank_transaction does, and assuming the blank line reported its
+    // perfectly good record as "not a record". Try both, whole text first.
+    const parseBody = (text) => {
+      const attempts = [text];
+      const at = text.indexOf("\n\n");
+      if (at !== -1) attempts.push(text.slice(at + 2));
+      for (const candidate of attempts) {
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          /* try the next framing */
+        }
       }
+      return undefined;
+    };
+    const isRecordWithId = (text, id) => {
+      const body = parseBody(text);
+      return !!body && !Array.isArray(body) && typeof body === "object" && body.id === id;
+    };
+    const describeRecord = (text, id) => {
+      const body = parseBody(text);
+      if (Array.isArray(body)) return `id=${id} but the response is a LIST of ${body.length}`;
+      if (!body || typeof body !== "object") return `id=${id} but the response is not a record`;
+      return body.id === id ? `id=${id}` : `asked for ${id}, got ${JSON.stringify(body.id)}`;
+    };
+    const firstIdOf = (text) => {
+      const parsed = parseBody(text);
+      if (parsed === undefined) return null;
       const rows = Array.isArray(parsed) ? parsed : (parsed?.content ?? parsed?.items ?? []);
       return Array.isArray(rows) && rows.length ? (rows[0]?.id ?? null) : null;
     };
+    // Three of these default their window to the current year (vouchers) or the last year
+    // (orders, invoices), so on a tenant whose records are older the list comes back empty
+    // and the getter is skipped although a record exists to fetch. Reach back explicitly:
+    // this is a discovery call looking for ANY id, not a report.
+    const anyPeriod = { tenantId, startDate: "2000-01-01" };
     for (const [listName, getName, listArgs] of [
-      ["reai_list_vouchers", "reai_get_voucher", { tenantId }],
+      ["reai_list_vouchers", "reai_get_voucher", anyPeriod],
       ["reai_list_customers", "reai_get_customer", { tenantId }],
-      ["reai_list_orders", "reai_get_order", { tenantId }],
-      ["reai_list_invoices", "reai_get_invoice", { tenantId }],
+      ["reai_list_orders", "reai_get_order", anyPeriod],
+      ["reai_list_invoices", "reai_get_invoice", anyPeriod],
       ["reai_list_suppliers", "reai_get_supplier", { tenantId }],
       ["reai_list_supplier_invoices", "reai_get_supplier_invoice", { tenantId }],
       ["reai_list_departments", "reai_get_department", { tenantId }],
@@ -485,13 +515,7 @@ async function main() {
         }
         const res = await client.callTool({ name: getName, arguments: { id, tenantId } });
         const text = textOf(res);
-        // The id we asked for has to be the id we got back. A getter that ignores its
-        // argument and returns something else would otherwise look fine.
-        report(
-          getName,
-          !res.isError && new RegExp(`"id"\\s*:\\s*${id}\\b`).test(text),
-          `id=${id} → ${text.split("\n")[0].slice(0, 60)}`,
-        );
+        report(getName, !res.isError && isRecordWithId(text, id), `id=${id} → ${describeRecord(text, id)}`);
       } catch (err) {
         report(getName, false, String(err));
       }
@@ -508,13 +532,7 @@ async function main() {
       // the synced view does not apply to a manual account, and an archived one is not a
       // working account. Taking banks[0] would have blamed the tenant for a wrong-view call.
       const bankAccountId = (() => {
-        const body = textOf(banks).slice(textOf(banks).indexOf("\n\n") + 2);
-        let rows;
-        try {
-          rows = JSON.parse(body);
-        } catch {
-          return null;
-        }
+        const rows = parseBody(textOf(banks));
         if (!Array.isArray(rows)) return null;
         const synced = rows.find((b) => !b?.archived && (b?.providerType ?? "manual") !== "manual");
         return Number.isInteger(Number(synced?.id)) ? Number(synced.id) : null;
@@ -551,8 +569,8 @@ async function main() {
         const text = textOf(res);
         report(
           "reai_get_bank_transaction",
-          !res.isError && new RegExp(`"id"\\s*:\\s*${transactionId}\\b`).test(text),
-          `id=${transactionId} → ${text.split("\n")[0].slice(0, 56)}`,
+          !res.isError && isRecordWithId(text, transactionId),
+          describeRecord(text, transactionId),
         );
       }
     } catch (err) {
