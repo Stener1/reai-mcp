@@ -9,6 +9,7 @@ import {
   tenantIdArg,
   today,
   type ToolDef,
+  isWholeOre,
 } from "./registry.js";
 
 /**
@@ -296,7 +297,12 @@ const listSupplierInvoices = defineTool({
   title: "List supplier invoices",
   description:
     "List registered supplier invoices (leverandørfakturaer) and credit notes. " +
-    "For what is still unpaid, reai_supplier_ledger with isUnpaid=true is the better question.",
+    "For what is still unpaid, reai_supplier_ledger with isUnpaid=true is the better question.\n\n" +
+    "IMPORTANT: this returns only NON-REVERSED invoices — the spec says so outright. So absence " +
+    "from this list is NOT evidence that an invoice was never registered, and \"did we already " +
+    "book supplier invoice 10009?\" cannot be answered from it alone: a reversed one is invisible " +
+    "here, and re-registering it posts to the ledger a second time. Check the supplier ledger, or " +
+    "fetch the invoice by id, before concluding something is missing.",
   risk: "read",
   apiPaths: [["GET", "/api/supplier-invoices"]],
   inputSchema: {
@@ -434,6 +440,7 @@ const paySupplierInvoice = defineTool({
     invoiceAmount: z
       .number()
       .min(0.01)
+      .refine(isWholeOre, { message: "invoiceAmount must be a whole number of øre." })
       .describe(
         "Amount of the invoice to settle. Must be positive. Ignored in effect when " +
           "paidPrivately=true, which always settles the invoice in full.",
@@ -457,6 +464,7 @@ const paySupplierInvoice = defineTool({
     bankDebitAmount: z
       .number()
       .min(0.01)
+      .refine(isWholeOre, { message: "bankDebitAmount must be a whole number of øre." })
       .optional()
       .describe(
         "What was actually debited from the bank, when it differs from invoiceAmount (fees, " +

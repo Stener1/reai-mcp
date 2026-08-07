@@ -434,6 +434,22 @@ export const QUIRKS: readonly Quirk[] = [
       "an invoice, at most -0.01 on a credit note.",
   },
   {
+    // The consequence half of supplier-invoice-reverses, scoped to the endpoint where
+    // it actually bites. It was recorded only on the DELETE, so an agent asking "is
+    // this invoice already registered?" through the LIST got no warning — and
+    // re-registering posts to the ledger a second time.
+    id: "supplier-invoices-hide-reversed",
+    paths: ["/api/supplier-invoices"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "Returns only NON-REVERSED supplier invoices and credit notes — the spec says so " +
+      "outright. So absence from this list is not evidence of anything: a reversed invoice is " +
+      "invisible here, and \"have we already booked invoice 10009?\" cannot be answered from it. " +
+      "Re-registering one that was reversed posts to the ledger again. Fetch it by id, or check " +
+      "the supplier ledger, before concluding it was never registered.",
+  },
+  {
     id: "supplier-invoice-reverses",
     paths: ["/api/supplier-invoices/{id}"],
     methods: ["DELETE"],

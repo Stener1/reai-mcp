@@ -10,6 +10,7 @@ import {
   today,
   type ToolDef,
   type ToolContext,
+  isWholeOre,
 } from "./registry.js";
 
 /**
@@ -35,19 +36,6 @@ import {
  */
 const OPEN_ITEM_FLOOR = "2000-01-01";
 
-/**
- * Whether a number is a whole number of øre.
- *
- * A fixed 1e-9 tolerance is smaller than floating-point error at the magnitudes this
- * API accepts: 279796.4 is a valid multiple of 0.01, yet 279796.4 * 100 differs from
- * its rounded value by about 3.7e-9, so a fixed epsilon rejected a perfectly valid
- * quantity. Comparing the decimal representation avoids the arithmetic entirely.
- */
-function isWholeOre(value: number): boolean {
-  if (!Number.isFinite(value)) return false;
-  const decimals = String(value).split(".")[1] ?? "";
-  return !decimals.includes("e") && decimals.length <= 2;
-}
 
 const CURRENCY = z
   .string()
@@ -667,7 +655,7 @@ const createOrder = defineTool({
     const { tenantId, ...rest } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const terms = await resolveDaysUntilDue(args.daysUntilDue, args.customerId, resolved, ctx);
-    const res = await ctx.client.request<{ id?: number; orderNumber?: string }>({
+    const res = await ctx.client.request<{ id?: number; number?: string; webUrl?: string }>({
       method: "POST",
       path: "/api/orders",
       body: {
@@ -681,10 +669,17 @@ const createOrder = defineTool({
     const id = res.data?.id;
     return ok(res.data, {
       note:
-        `Order created${res.data?.orderNumber ? ` (${res.data.orderNumber})` : ""}. ` +
+        // The API returns `number`, not `orderNumber`, so this read undefined every
+        // time and the document number — the one thing a user wants back — was dropped.
+        `Order created${res.data?.number ? ` (${res.data.number})` : ""}. ` +
         `Payment terms ${terms.days} days (${describeTermsSource(terms.source)}). ` +
         `Nothing has been sent to the customer yet — invoice it with reai_create_invoice_from_order.`,
-      ...(id ? { link: ctx.client.deepLink(`/orders/${id}`, resolved) } : {}),
+      // Prefer the URL the API itself returns over a guessed one.
+      ...(res.data?.webUrl
+        ? { link: res.data.webUrl }
+        : id
+          ? { link: ctx.client.deepLink(`/orders/${id}`, resolved) }
+          : {}),
     });
   },
 });
@@ -700,26 +695,46 @@ function describeTermsSource(source: "argument" | "customer" | "fallback"): stri
 const listOffers = defineTool({
   name: "reai_list_offers",
   title: "List offers",
-  description: "List offers/quotes (tilbud), optionally filtered by customer, number or date range.",
+  description:
+    "List offers/quotes (tilbud), optionally filtered by customer, number or date range.\n\n" +
+    "The API defaults this to the LAST YEAR (startDate defaults to one year before endDate, " +
+    "endDate to today), and offers routinely sit open longer than that. Unlike /api/orders, no " +
+    "filter here disables those defaults — a customerId or offerNumber search is windowed too — " +
+    "so this tool widens startDate when you do not give one, and says so in the result.",
   risk: "read",
   apiPaths: [["GET", "/api/offers"]],
   inputSchema: {
     customerId: z.number().int().optional().describe("Filter by customer."),
     offerNumber: z.string().optional().describe("Filter by offer number."),
-    startDate: isoDate.optional().describe("Inclusive start date."),
-    endDate: isoDate.optional().describe("Inclusive end date."),
+    startDate: isoDate
+      .optional()
+      .describe(
+        "Inclusive start date. Omit to search from " +
+          OPEN_ITEM_FLOOR +
+          ", rather than the API's default of one year back.",
+      ),
+    endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+    // The API windows this to one year and NO filter here disables that, unlike
+    // /api/orders where externalReference does. So "find the offer we sent Acme" was
+    // silently limited to the last twelve months, and the tool reported the truncated
+    // result as a bare count with no caveat. Offers stay open longer than a year.
+    const widened = args.startDate === undefined;
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/offers",
-      query,
+      query: { ...query, ...(widened ? { startDate: OPEN_ITEM_FLOOR } : {}) },
       tenantId: requireTenantId(tenantId, ctx),
     });
     const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} offer(s).` });
+    return ok(res.data, {
+      note:
+        `${count} offer(s)` +
+        `${widened ? ` from ${OPEN_ITEM_FLOOR} onwards — the API would otherwise have shown only the last year` : ""}.`,
+    });
   },
 });
 
@@ -899,7 +914,12 @@ const createInvoiceFromOrder = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
-    const res = await ctx.client.request<{ id?: number; invoiceNumber?: string; issueDate?: string }>({
+    const res = await ctx.client.request<{
+      id?: number;
+      number?: string;
+      webUrl?: string;
+      issueDate?: string;
+    }>({
       method: "POST",
       path: "/api/invoices",
       body,
@@ -917,7 +937,9 @@ const createInvoiceFromOrder = defineTool({
         : " (the API chose the date; check it if the accounting period matters)";
     return ok(res.data, {
       note:
-        `Invoice issued${res.data?.invoiceNumber ? ` as ${res.data.invoiceNumber}` : ""}` +
+        // `invoiceNumber` exists on InvoiceRes only nested under `order`; the invoice's
+        // own number is `number`.
+        `Invoice issued${res.data?.number ? ` as ${res.data.number}` : ""}` +
         `${dateNote}. ` +
         `Delivery to the customer has been started. This is now a numbered legal document — ` +
         `correct any mistake with a credit note, not by deleting it.`,
@@ -949,7 +971,12 @@ const creditInvoice = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
-    const res = await ctx.client.request<{ id?: number; invoiceNumber?: string }>({
+    const res = await ctx.client.request<{
+      id?: number;
+      number?: string;
+      webUrl?: string;
+      creditedInvoiceNumber?: string;
+    }>({
       method: "POST",
       path: `/api/invoices/${id}/credit`,
       body,
@@ -957,7 +984,9 @@ const creditInvoice = defineTool({
     });
     const creditId = res.data?.id;
     return ok(res.data, {
-      note: `Credit note created${res.data?.invoiceNumber ? ` (${res.data.invoiceNumber})` : ""} for invoice ${id}.`,
+      note:
+        `Credit note created${res.data?.number ? ` (${res.data.number})` : ""} for invoice ` +
+        `${res.data?.creditedInvoiceNumber ?? id}.`,
       ...(creditId ? { link: ctx.client.deepLink(`/invoices/${creditId}`, resolved) } : {}),
     });
   },
@@ -982,6 +1011,8 @@ const registerInvoicePayment = defineTool({
       .number()
       .min(0.01)
       .max(99_999_999.99)
+      // The money field on an irreversible payment tool, and it accepted 1234.567.
+      .refine(isWholeOre, { message: "receivedAmount must be a whole number of øre." })
       .describe(
         "Amount received, in the company's currency. May be less than the invoice total, leaving " +
           "the rest outstanding. Must be positive — this endpoint records money arriving.",
@@ -995,6 +1026,7 @@ const registerInvoicePayment = defineTool({
       .number()
       .min(0.01)
       .max(99_999_999.99)
+      .refine(isWholeOre, { message: "paidInvoiceCurrencyAmount must be a whole number of øre." })
       .optional()
       .describe(
         "Amount the customer paid in the INVOICE's currency, required when that differs from the " +
