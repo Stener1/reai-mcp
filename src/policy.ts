@@ -280,7 +280,13 @@ export function classifyRequest(method: HttpMethod, path: string): Risk {
 
   // Every form this request could be matched as, strictest answer wins.
   let worst: Risk = "read";
-  for (const normalized of pathForms(canonical.pathname)) {
+  // Including the percent-DECODED form. canonicalizeApiPath computes it and says it is
+  // "carried alongside for classification" — and then only the raw form reached the
+  // matchers, so classifyRequest("POST", "/api/agreements/3/sign-reques%74") answered
+  // reversible. No live bypass, because discovery.ts classifies raw and decoded
+  // separately and takes the stricter; but the guarantee belonged here, and any second
+  // caller of classifyRequest would have inherited the weak answer.
+  for (const normalized of pathForms(canonical.pathname, canonical.decodedPathname)) {
     worst = strictestRisk(worst, classifyNormalizedPath(method, normalized));
   }
   return worst;
@@ -495,10 +501,14 @@ function routedForm(path: string): string {
  * Every string form one request may be matched as. A guard that checks all of them and
  * takes the strictest answer cannot be weakened by a shape it did not anticipate.
  */
-function pathForms(path: string): string[] {
-  const plain = normalize(path);
-  const routed = routedForm(path);
-  return routed === plain ? [plain] : [plain, routed];
+function pathForms(...paths: ReadonlyArray<string | undefined>): string[] {
+  const forms = new Set<string>();
+  for (const path of paths) {
+    if (path === undefined) continue;
+    forms.add(normalize(path));
+    forms.add(routedForm(path));
+  }
+  return [...forms];
 }
 
 const RISK_SEVERITY: Record<Risk, number> = { read: 0, reversible: 1, irreversible: 2 };
@@ -807,7 +817,7 @@ export function classifyTransmission(
   const canonical = canonicalizeApiPath(path);
   // Every reading of the path: a transmitting pattern that matches ANY of them counts,
   // so a matrix parameter or a doubled slash cannot hide an EHF send behind a shape.
-  const forms = pathForms(canonical?.pathname ?? path);
+  const forms = pathForms(canonical?.pathname ?? path, canonical?.decodedPathname);
 
   // GET is normally a read, and treating it as such is right for the whole API bar
   // two endpoints that reach a third party despite the verb. `read-only` is the mode

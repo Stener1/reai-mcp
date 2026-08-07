@@ -82,11 +82,42 @@ connector, and has been verified against live ReAI data throughout.
 Found by review — Codex on each pull request, plus independent subagent reviews.
 Recorded because most were reachable in the default configuration:
 
-- **The write policy could be bypassed by path traversal.** Classification ran on
-  the raw string while the URL was built with `new URL()`, which resolves dot
-  segments — so `POST /api/customers/../vouchers` was classified against the
-  reversible `/api/customers` prefix and posted to the general ledger. Paths are
-  now canonicalized once and the same value is both classified and requested.
+- **The write policy could be bypassed four different ways in the path alone.**
+  Classification ran on the raw string while the URL was built with `new URL()`,
+  which resolves dot segments — so `POST /api/customers/../vouchers` was classified
+  against the reversible `/api/customers` prefix and posted to the general ledger.
+  Percent-encoding did the same thing more quietly: `%74` for `t` turned
+  `sign-request` into an unrecognised sub-path of the reversible `/api/agreements`,
+  and the call still landed on the endpoint that emails a counterparty — every guard
+  in the file reduced to a spelling convention. Matrix parameters (`;a=b`), a
+  trailing dot and a doubled slash each lost the escalating-segment match the same
+  way. A request is now read in every form it could route as — literal, percent-
+  decoded, and as a router would normalize it — and the strictest answer wins.
+
+- **A curated tool could repoint a supplier's bank account in the default mode.**
+  The body-level guards ran only in `reai_request`; curated tools were gated on
+  their declared risk alone. `reai_update_supplier` is `reversible` and takes
+  `iban`, `bankAccountNumber` and `swiftCode` as ordinary arguments, so it did what
+  the escape hatch refused for the identical `PATCH`. Nothing transmits and nothing
+  posts, so no other guard fired: the loss lands later, when a person pays that
+  supplier through the ReAI UI. Its own description had promised those fields
+  required `full` mode, which nothing enforced — a documented control that does not
+  exist is worse than none. Arguments are now classified with the same rules as
+  bodies, across `iban`, `bankAccountNumber`, `swiftCode`, `accountNumber`, `bban`
+  and `invoiceEmail`.
+
+- **An array wrapper defeated every body guard.** `PATCH /api/suppliers/5` with
+  `{"iban": …}` was refused; the same call with `[{"iban": …}]` was permitted,
+  because all three inspectors returned early on an array. No operation takes an
+  array body today, so this was latent — but `reai_request` forwards whatever it is
+  given, so it would have become live the day ReAI added a bulk endpoint.
+
+- **Values were judged by their JavaScript type rather than what they bind to.**
+  The backend is Spring with Jackson, not ASP.NET as the comments claimed, and
+  Jackson coerces `"true"` and `1` to `true` and accepts an integer ordinal for an
+  enum. So `{"sendEhf": "true"}` armed an external send that the policy scored as
+  sending nothing, and `{"outputMode": 1}` armed recurring invoice issuance. Two
+  tests asserted the old behaviour outright, which is how the gap survived.
 - **A supplier payment could start a real bank transfer.** `manualPayment` was
   optional and the API defaults it to `false`, selecting the bank-integrated flow
   that can return an approval URL beginning a BankID payment — while the tool
