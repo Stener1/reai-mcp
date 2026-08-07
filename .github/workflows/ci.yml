@@ -22,14 +22,11 @@ jobs:
       - run: npm ci
 
       # --omit=dev, because what ships is what matters: a dev-only advisory cannot
-      # reach a user of this server. Gated at `high` rather than `moderate` only
-      # because one moderate is outstanding upstream — hono's CORS ReDoS, which the
-      # SDK pulls in and this server does not reach (it sets its own CORS headers).
-      # hono@4.12.34 fixes it and clears the 7-day minimum-release-age policy on
-      # 2026-08-10; tighten this to `--audit-level=moderate` once the override lands,
-      # so a new moderate cannot arrive unnoticed.
+      # reach a user of this server. `moderate` now that the production tree is clean —
+      # it was held at `high` only while hono's CORS ReDoS was outstanding, and a
+      # threshold with no expiry quietly becomes permission.
       - name: npm audit (production dependencies)
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev --audit-level=moderate
 
   build:
     name: Build and test (Node ${{ matrix.node }})

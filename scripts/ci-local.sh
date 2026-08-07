@@ -161,8 +161,8 @@ done
 # checks passes" while skipping a blocking step — exactly the gap this script exists
 # to close, since it is used precisely when Actions cannot run.
 echo
-if npm audit --omit=dev --audit-level=high >/tmp/reai-audit.log 2>&1; then
-  echo "  npm audit (production deps): no high or critical advisories"
+if npm audit --omit=dev --audit-level=moderate >/tmp/reai-audit.log 2>&1; then
+  echo "  npm audit (production deps): no moderate, high or critical advisories"
 else
   echo "  npm audit (production deps): FAILED"
   grep -E "Severity|^[a-z@/-]+ +[0-9<>=]" /tmp/reai-audit.log | head -8 | sed 's/^/      /'

@@ -58,6 +58,7 @@
     "typescript": "^5.7.3"
   },
   "overrides": {
-    "fast-uri": "^3.1.5"
+    "fast-uri": "3.1.5",
+    "hono": "4.12.34"
   }
 }

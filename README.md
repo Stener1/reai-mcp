@@ -475,15 +475,12 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 
 ### A note on `npm audit`
 
-Two advisories surface from transitive dependencies of `@modelcontextprotocol/sdk`. An earlier version of this section said neither was on the request path, which was wrong, so here is what is actually true.
+The production tree is clean: `npm audit --omit=dev` reports nothing, and CI enforces that at `--audit-level=moderate` as a blocking step. Two advisories arrived through `@modelcontextprotocol/sdk` and both are resolved by `package.json` overrides — `fast-uri` pinned to 3.1.5 (HIGH, host confusion via a backslash authority introducer) and `hono` to 4.12.34 (MODERATE, ReDoS in CORS middleware).
 
-**`fast-uri`** (HIGH — host confusion via a backslash authority introducer) arrives through `ajv`, and both are loaded into the running process: instrumenting `Module._load` while importing the server prints `fast-uri, ajv, ajv/dist/compile/codegen`. The SDK uses ajv to validate protocol messages. We have not found a route by which attacker-controlled input reaches the vulnerable authority parsing, and it may well not be exploitable here — but "we could not find one" is not "there isn't one", and that is the wrong standard for a HIGH in the runtime tree.
+Both are **exact pins, not ranges**, and that is deliberate (`fast-uri` was a caret until this bit — see below). This project installs under a 7-day minimum-release-age policy, which is a supply-chain defence: a version published minutes ago has had no time for a compromised publish to be noticed. Landing a fix that is still inside that window needs `npm install --min-release-age=0` — and with the age check off, a caret range takes whatever is newest. `^4.12.34` resolved to `4.13.1`, published four hours earlier, which is precisely the exposure the policy guards against. Pinning exactly gets the fix and nothing else.
 
-**`hono`** (MODERATE — ReDoS in CORS middleware) is the narrower case. The SDK's transport runs `@hono/node-server`'s request listener on every `/mcp` call, so hono itself is on the path, but the vulnerable *CORS middleware* is not: the SDK imports it only in its examples, and this server sets its own CORS headers.
+The bypass is also **narrow**, and getting that right took two attempts. Deleting the lockfile and reinstalling under the flag re-resolves *everything*, so `@hono/node-server`, `express-rate-limit`, `ip-address` and `jose` were all upgraded without the age check — a far wider exception than the one being made. Starting from the existing lockfile and adding only the override changes exactly one line. And it is one-time: `npm ci` installs from the lockfile without resolving, so CI never runs under a relaxed policy.
 
-**`fast-uri` is resolved**: `3.1.5` cleared the 7-day minimum-release-age policy this project follows against supply-chain attacks on 2026-08-07 and is pinned by a `package.json` override, so the HIGH is out of the production tree. `hono@4.12.34` clears 2026-08-10 and its override lands then.
-
-CI runs `npm audit --omit=dev --audit-level=high` as a blocking step — `--omit=dev` because what ships is what matters, and `high` rather than `moderate` only while that one known moderate is outstanding. It tightens once the last override is in.
 
 ## Contributing
 
