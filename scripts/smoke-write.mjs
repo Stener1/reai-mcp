@@ -282,11 +282,33 @@ async function main() {
     }
 
     if (created.supplierId) {
+      // Bank details are the one part of this tool that is NOT reversible in effect: the
+      // record can be changed back, but whoever pays this supplier next sends money to
+      // whatever account is on file, quite possibly a person in the ReAI UI weeks later.
+      // So the call escalates to irreversible and `reversible` mode must refuse it —
+      // this assertion used to expect it to succeed, which is what the tool's own
+      // description promised and nothing enforced.
       const supPatch = await client.callTool({
         name: "reai_update_supplier",
         arguments: { id: created.supplierId, bankAccountNumber: "15201353103" },
       });
-      report("reai_update_supplier sets bank details", !supPatch.isError, textOf(supPatch).slice(0, 120));
+      const bankRefused = supPatch.isError && /where money is sent/i.test(textOf(supPatch));
+      report(
+        "reai_update_supplier REFUSES bank details in reversible mode",
+        bankRefused,
+        bankRefused ? "escalated to irreversible, as it should be" : textOf(supPatch).slice(0, 160),
+      );
+
+      // The rest of the tool is ordinary master data and must still work.
+      const supRename = await client.callTool({
+        name: "reai_update_supplier",
+        arguments: { id: created.supplierId, email: "smoke@example.invalid" },
+      });
+      report(
+        "reai_update_supplier still edits ordinary fields",
+        !supRename.isError,
+        textOf(supRename).slice(0, 120),
+      );
 
       const supGet = await client.callTool({
         name: "reai_get_supplier",

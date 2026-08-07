@@ -9,16 +9,31 @@ import { ReaiClient } from "../dist/reai/client.js";
  * numbered, and whether a non-idempotent write is ever repeated.
  */
 
-test("a matched debit and credit share one row, even with different descriptions", () => {
-  // The spec: "A balanced debit+credit entry for the same amount, currency and date
-  // MUST share a single rowNumber... never split the debit and credit of one entry
-  // across two rowNumbers." The old implementation split exactly this pair whenever
-  // their descriptions differed, and a test asserted that as correct.
-  const rows = assignRowNumbers([
+test("a matched pair shares a row only when its descriptions agree", () => {
+  // This test used to assert that a matched debit and credit share a row EVEN WITH
+  // different descriptions, on a reading of the spec prose. The live API says otherwise,
+  // in its own words on a 400 from POST /api/vouchers:
+  //
+  //   "a rowNumber holds at most one debit and one credit side, both with the same
+  //    date, description, currency and absolute amount"
+  //
+  // So pairing them was a guaranteed rejection: the same two postings in rows 0 and 1
+  // are accepted. Description belongs in the eligibility rule alongside the other three.
+  const same = assignRowNumbers([
+    { amount: 1000, description: "Kjøp" },
+    { amount: -1000, description: "Kjøp" },
+  ]);
+  assert.equal(same[0].rowNumber, same[1].rowNumber, "an identical-description pair shares a row");
+
+  const differing = assignRowNumbers([
     { amount: 1000, description: "debit side" },
     { amount: -1000, description: "credit side" },
   ]);
-  assert.equal(rows[0].rowNumber, rows[1].rowNumber, "a matched pair must not be split");
+  assert.notEqual(
+    differing[0].rowNumber,
+    differing[1].rowNumber,
+    "a pair the API will not merge must be given separate rows, not paired and rejected",
+  );
 });
 
 test("a purchase voucher with two debits gets one row each", () => {

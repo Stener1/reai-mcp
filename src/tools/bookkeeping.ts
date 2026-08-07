@@ -312,10 +312,19 @@ export function assignRowNumbers<
   // The schema requires both sides of a row to share amount, currency AND date.
   // Matching on amount alone put a multi-date or multi-currency pair into one row,
   // which ReAI then rejects — worse than giving each posting its own row.
+  //
+  // Description is on that list too, and it was missing. Verified against the live API:
+  // two postings sharing a rowNumber but carrying different descriptions come back
+  //   400 "postings with rowNumber 0 cannot be merged into one voucher row"
+  // whereas the same two postings in rows 0 and 1 clear that check. So pairing them was
+  // a guaranteed rejection, and separating them is a working voucher — the natural
+  // reading of a caller who wrote "…debit" on one line and "…credit" on the other is
+  // two rows, not one malformed one.
   const sameRowEligible = (a: T, b: T): boolean =>
     cents(Math.abs(a.amount)) === cents(Math.abs(b.amount)) &&
     (a.currency ?? "") === (b.currency ?? "") &&
-    (a.postingDate ?? "") === (b.postingDate ?? "");
+    (a.postingDate ?? "") === (b.postingDate ?? "") &&
+    (a.description ?? "") === (b.description ?? "");
 
   for (const debit of debits) {
     const match = credits.find(({ p, i }) => !usedCredits.has(i) && sameRowEligible(p, debit.p));

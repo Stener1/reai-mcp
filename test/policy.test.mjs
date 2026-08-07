@@ -695,7 +695,9 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     },
   };
 
-  // A matched pair stays in one row even though the descriptions differ...
+  // A matched pair sharing a description stays in one row. (An earlier version of this
+  // test claimed the same held with DIFFERING descriptions; the live API rejects that
+  // outright — see the assignRowNumbers test in writes.test.mjs for its exact words.)
   await tool.handler(
     {
       date: "2026-08-06",
@@ -726,10 +728,12 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
   rows = sent[0].body.postings.map((p) => p.rowNumber);
   assert.equal(new Set(rows).size, 3, `expected three rows, got ${rows.join(",")}`);
 
-  // A matched pair that would share a row but disagrees on description is refused
-  // locally, since the row carries one description and the pair cannot be split.
+  // A matched pair whose descriptions differ is given SEPARATE rows and sent. It used
+  // to be refused locally, on the reasoning that a row carries one description and the
+  // pair could not be split — but splitting is exactly what the API accepts, so refusing
+  // turned a workable voucher into a dead end.
   sent.length = 0;
-  const conflict = await tool.handler(
+  const split = await tool.handler(
     {
       date: "2026-08-06",
       postings: [
@@ -739,7 +743,27 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     },
     ctx,
   );
-  assert.equal(sent.length, 0, "nothing should be sent when the row descriptions conflict");
+  assert.equal(split.isError, undefined, "differing descriptions are not an error on their own");
+  assert.equal(sent.length, 1, "it should be sent, in two rows");
+  const splitRows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.notEqual(splitRows[0], splitRows[1], `expected two rows, got ${splitRows.join(",")}`);
+
+  // But when the CALLER pins both to one row, that is a request the API will reject —
+  // "a rowNumber holds at most one debit and one credit side, both with the same date,
+  // description, currency and absolute amount" — so it is still refused locally, with
+  // the reason, rather than sent to fail.
+  sent.length = 0;
+  const conflict = await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 5, description: "aaa", rowNumber: 0 },
+        { accountNumber: "1580", amount: -5, description: "bbb", rowNumber: 0 },
+      ],
+    },
+    ctx,
+  );
+  assert.equal(sent.length, 0, "nothing should be sent when the caller pins a conflicting row");
   const text = conflict.content.map((c) => c.text).join("\n");
   assert.match(text, /must share a description/);
   assert.match(text, /Nothing was sent to ReAI/);
