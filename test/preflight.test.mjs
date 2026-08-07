@@ -636,3 +636,50 @@ test("constraints the descriptions promise are enforced, and no further", () => 
   assert.equal(accepts(supplier.inputSchema.name, ""), true);
 });
 
+
+test("a truncated result never contains a partial value", async () => {
+  // Cutting the serialised body at a byte offset splits tokens: on a ledger-shaped
+  // object the 24000-character cut landed on `"closingBalanc`, and across a range of
+  // cut positions 61% fell mid-token. A partial NUMBER is the dangerous one —
+  // `"closingBalance": 481` where the figure was 4812.60 reads as finished, and a
+  // note above it does not undo that.
+  const { ok } = await import("../dist/tools/registry.js");
+
+  // An array is cut at an item boundary and re-serialised, so it stays valid JSON.
+  const rows = Array.from({ length: 4000 }, (_, i) => ({
+    id: i,
+    accountNumber: "1920",
+    closingBalance: 4812.6,
+    note: "x".repeat(20),
+  }));
+  const arrayText = ok(rows).content[0].text;
+  const jsonPart = arrayText.slice(arrayText.indexOf("["));
+  const parsed = JSON.parse(jsonPart); // throws if truncation broke the structure
+  assert.ok(parsed.length > 0 && parsed.length < rows.length, "should show some but not all");
+  for (const row of parsed) {
+    assert.equal(row.closingBalance, 4812.6, "every value shown must be whole");
+  }
+  assert.match(arrayText, /showing the first \d+ of 4000 items/);
+
+  // A non-array is cut back to a line boundary, so no token is split.
+  const ledger = {
+    accounts: Array.from({ length: 2000 }, (_, i) => ({
+      accountNumber: String(1000 + i),
+      closingBalance: 4812.6,
+    })),
+    totalAmount: 98765.43,
+  };
+  const objectText = ok(ledger).content[0].text;
+  const lastLine = objectText.trimEnd().split("\n").pop() ?? "";
+  // An unterminated string leaves an ODD number of quotes on the line — checking for
+  // a trailing quote instead flags `"accountNumber": "1319",`, which is complete.
+  const quotes = (lastLine.match(/(?<!\\)"/g) ?? []).length;
+  assert.equal(quotes % 2, 0, `line ends mid-string: ${lastLine}`);
+  assert.doesNotMatch(lastLine, /:\s*[\d.]+$/, `line ends on a bare number: ${lastLine}`);
+  assert.match(objectText, /NOT valid JSON/, "the caller must be told it cannot be parsed");
+
+  // Small results are untouched.
+  const small = ok([{ id: 1, closingBalance: 4812.6 }]).content[0].text;
+  assert.doesNotMatch(small, /truncated/);
+  assert.deepEqual(JSON.parse(small), [{ id: 1, closingBalance: 4812.6 }]);
+});

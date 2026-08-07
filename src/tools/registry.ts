@@ -75,15 +75,32 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
 
   let body = stringify(data);
   if (body.length > MAX_RESULT_CHARS) {
-    const total = Array.isArray(data) ? data.length : undefined;
-    const shown = Array.isArray(data) ? countFitting(data) : undefined;
-    body = body.slice(0, MAX_RESULT_CHARS);
-    parts.push(
-      shown !== undefined && total !== undefined
-        ? `NOTE: response truncated — showing roughly the first ${shown} of ${total} items. ` +
-            `Narrow the result with date, status or id filters, or use the limit/page parameters.`
-        : `NOTE: response truncated at ${MAX_RESULT_CHARS} characters. Request a narrower slice of data.`,
-    );
+    // Truncation must never leave a value that LOOKS complete. Cutting the string at
+    // a byte offset splits tokens, so a ledger could end `"closingBalance": 481`
+    // where the figure was 4812.60 — a plausible wrong number, silently, in an
+    // accounting answer. A note above it does not help: the number reads as finished.
+    if (Array.isArray(data)) {
+      // An array can be cut at an ITEM boundary and re-serialised, so what remains is
+      // always valid JSON and every value in it is whole.
+      const shown = countFitting(data);
+      body = stringify(data.slice(0, shown));
+      parts.push(
+        `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
+          `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
+      );
+    } else {
+      // Otherwise drop back to a line boundary and discard the final line, which may
+      // be a partial token. JSON.stringify with indentation puts each scalar on its
+      // own line, so a whole-line cut cannot split a number or a string.
+      const cut = body.slice(0, MAX_RESULT_CHARS);
+      const lastNewline = cut.lastIndexOf("\n");
+      body = lastNewline > 0 ? cut.slice(0, lastNewline) : "";
+      parts.push(
+        `NOTE: response truncated at about ${MAX_RESULT_CHARS} characters and is NOT valid JSON — ` +
+          `it stops at a line boundary, so no value shown is partial, but fields after the cut are ` +
+          `missing entirely. Request a narrower slice rather than reading totals from this.`,
+      );
+    }
   }
 
   const text = parts.length ? `${parts.join("\n")}\n\n${body}` : body;
