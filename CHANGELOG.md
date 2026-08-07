@@ -227,10 +227,16 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
   (published 2026-08-03) was not installable on the 7th. Overriding it needs
   `npm install --min-release-age=0`, and with the age check off a caret range takes
   whatever is newest: `^4.12.34` resolved to `4.13.1`, published four hours earlier.
-  That is exactly the exposure the policy exists to prevent. The override is
-  therefore an EXACT pin rather than a range, and the flag is used once — `npm ci`
-  installs from the lockfile and needs no bypass, so CI never resolves under a
-  relaxed policy.
+  That is exactly the exposure the policy exists to prevent. Both overrides are
+  therefore EXACT pins rather than ranges.
+
+  The bypass also has to be narrow, which took two attempts. Deleting the lockfile
+  and reinstalling under the flag re-resolves everything, so `@hono/node-server`,
+  `express-rate-limit`, `ip-address` and `jose` were all upgraded without the age
+  check — a much wider exception than the one intended. Starting from the existing
+  lockfile and adding only the override changes exactly one line. And the flag is
+  used once: `npm ci` installs from the lockfile and needs no bypass, so CI never
+  resolves under a relaxed policy.
 
 
 - **No sandbox exists** for ReAI. Write paths are therefore verified against a
