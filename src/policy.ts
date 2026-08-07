@@ -888,7 +888,7 @@ export function classifyPaymentRouting(
 export function curatedArgsEscalate(
   apiPaths: ReadonlyArray<readonly [string, string]>,
   args: unknown,
-): { risk: Risk; fields: string[]; consequence: string; verify: string } | undefined {
+): { risk: Risk; fields: string[]; consequence: string; verify: string; transmits: boolean } | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
 
   // ALL the reasons, not the first one found.
@@ -899,11 +899,11 @@ export function curatedArgsEscalate(
   // it named only `iban`, so dropping that field earns a second refusal for a reason
   // never mentioned, with a contradictory explanation. The arms-a-send half is also the
   // more permanent consequence of the two, and it was the half omitted.
-  const reasons: Array<{ fields: string[]; consequence: string; verify: string }> = [];
-  const add = (fields: string[], consequence: string, verify: string) => {
+  const reasons: Array<{ fields: string[]; consequence: string; verify: string; transmits: boolean }> = [];
+  const add = (fields: string[], consequence: string, verify: string, transmits = false) => {
     if (fields.length === 0) return;
     if (reasons.some((r) => r.consequence === consequence)) return;
-    reasons.push({ fields, consequence, verify });
+    reasons.push({ fields, consequence, verify, transmits });
   };
 
   for (const [method, path] of apiPaths) {
@@ -949,6 +949,12 @@ export function curatedArgsEscalate(
           "leaves for a counterparty later, without another call, and cannot be recalled",
         "confirm the recipient and the schedule, and check REAI_ALLOW_EXTERNAL_SEND is meant " +
           "to be on for this deployment",
+        // The second axis. Write mode answers "can this be undone in the books";
+        // REAI_ALLOW_EXTERNAL_SEND answers "does this reach someone else", and `full` does
+        // not lift it. Escalating the risk alone left a curated tool transmitting in full
+        // mode with sending off, where reai_request refuses the identical call — the two
+        // switches collapsed into one for exactly the fields that arm a send.
+        classifyWithBody("reversible", args) === "irreversible",
       );
     }
   }
@@ -959,6 +965,7 @@ export function curatedArgsEscalate(
     fields: [...new Set(reasons.flatMap((r) => r.fields))],
     consequence: reasons.map((r) => r.consequence).join("; and "),
     verify: reasons.map((r) => r.verify).join("; and "),
+    transmits: reasons.some((r) => r.transmits),
   };
 }
 

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ReaiClient } from "./reai/client.js";
 import { ReaiApiError, ReaiConfigError, ReaiTransportError } from "./reai/errors.js";
-import { curatedArgsEscalate, isAllowed, WriteBlockedError } from "./policy.js";
+import { assertTransmitAllowed, curatedArgsEscalate, isAllowed, WriteBlockedError } from "./policy.js";
 import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
@@ -183,6 +183,19 @@ export function buildServer(opts: BuildServerOptions): McpServer {
           // never implemented, which is worse than none, because it invited running
           // the default mode believing bank details were protected.
           const escalated = curatedArgsEscalate(tool.apiPaths ?? [], args ?? {});
+          // The external-send axis, checked BEFORE the write mode. A tool declared
+          // transmits:false is the right declaration when its ordinary call sends nothing —
+          // marking it true would hide the whole tool whenever sending is off, including the
+          // benign case. But then only the ARGUMENTS can tell, and escalating the write risk
+          // alone let `full` mode transmit with REAI_ALLOW_EXTERNAL_SEND unset, which is the
+          // one thing that setting exists to prevent and which reai_request refuses.
+          if (escalated?.transmits) {
+            assertTransmitAllowed(
+              "external",
+              config.allowExternalSend,
+              `${tool.name} with ${escalated.fields.join(", ")}`,
+            );
+          }
           if (escalated && !isAllowed(escalated.risk, config.writeMode)) {
             throw new WriteBlockedError({
               risk: escalated.risk,

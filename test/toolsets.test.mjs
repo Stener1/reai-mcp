@@ -548,3 +548,39 @@ test("the destructiveHint probe sees every field the gate reacts to", async () =
     probes.some((v) => curatedArgsEscalate([["PATCH", "/api/suppliers/7"]], { iban: v }) !== undefined),
   );
 });
+
+// REAI_WRITE_MODE answers "can this be undone in the books". REAI_ALLOW_EXTERNAL_SEND
+// answers "does this reach someone else", and `full` deliberately does not lift it.
+// Escalating the write risk alone collapsed the two into one for exactly the fields that
+// arm a send: in full mode with sending off, a curated tool would have transmitted where
+// reai_request refuses the identical call.
+//
+// tool.transmits cannot carry this. Declaring the tool transmits:true would hide it
+// whenever sending is off, including for the ordinary call that sends nothing — only the
+// arguments can tell.
+test("arguments that arm a send are refused when external sending is off", async () => {
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const subscriptionPaths = [["POST", "/api/subscriptions"]];
+
+  for (const [field, value] of [
+    ["sendEhf", true],
+    ["outputMode", "create_invoice"],
+    ["automaticBillingGeneration", true],
+  ]) {
+    const escalated = curatedArgsEscalate(subscriptionPaths, { [field]: value });
+    assert.equal(escalated?.transmits, true, `${field} reaches a counterparty`);
+  }
+
+  // Redirecting a payment or an invoice address is irreversible but sends nothing itself,
+  // so it must NOT be caught by the send gate — that would refuse a bank-detail correction
+  // on a deployment that has sending switched off, which is most of them.
+  const routing = curatedArgsEscalate([["PATCH", "/api/suppliers/7"]], { iban: "NO93" });
+  assert.equal(routing.risk, "irreversible");
+  assert.equal(routing.transmits, false);
+  const delivery = curatedArgsEscalate([["PATCH", "/api/customers/7"]], { invoiceEmail: "x@y.no" });
+  assert.equal(delivery.transmits, false);
+
+  // And the benign values stay benign on both axes.
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { outputMode: "create_order" }), undefined);
+  assert.equal(curatedArgsEscalate(subscriptionPaths, { sendEhf: false }), undefined);
+});
