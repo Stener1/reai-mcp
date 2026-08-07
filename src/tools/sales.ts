@@ -238,12 +238,22 @@ const updateCustomer = defineTool({
 
 const setCustomerAddress = defineTool({
   name: "reai_set_customer_address",
-  title: "Set a customer's address",
+  title: "Change a customer's address",
   description:
-    "Replace a customer's postal address, or their delivery address. This is a full replacement, " +
-    "not a partial update, so pass every field you want kept.",
+    "Change a customer's postal address, or their delivery address. Pass only the parts you want " +
+    "different; the rest is kept.\n\n" +
+    "The API call underneath is a full REPLACEMENT whose required set is only addressPart1, city " +
+    "and countryCode — so a body carrying those three is accepted and empties everything else. " +
+    "Measured on a live tenant: postalCode \"0150\" became null, province \"Oslo\" became null and " +
+    "the second address line was emptied, on a 200. So this tool reads the current address first " +
+    "and merges your changes into it. Pass null for a part you mean to clear.",
   risk: "reversible",
-  apiPaths: [["PUT", "/api/customers/{id}/address"], ["PUT", "/api/customers/{id}/delivery-address"]],
+  apiPaths: [
+    // The read that makes the merge possible.
+    ["GET", "/api/customers/{id}"],
+    ["PUT", "/api/customers/{id}/address"],
+    ["PUT", "/api/customers/{id}/delivery-address"],
+  ],
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
@@ -251,24 +261,71 @@ const setCustomerAddress = defineTool({
       .enum(["postal", "delivery"])
       .optional()
       .describe('Which address to set. Defaults to "postal".'),
-    addressPart1: z.string().describe("Street address."),
-    city: z.string().describe("City."),
-    countryCode: COUNTRY_CODE.describe('ISO country code, e.g. "NO".'),
-    addressPart2: z.string().optional().describe("Second address line."),
-    postalCode: z.string().optional().describe("Postal code."),
-    province: z.string().optional().describe("Province or region."),
+    // Every part is optional now that the current address is merged in: requiring the three the
+    // API requires would have made "change the street" mean "and retype the city", which is the
+    // shape that lost postcodes in the first place. Null clears a part deliberately.
+    addressPart1: z.string().nullable().optional().describe("Street address."),
+    city: z.string().nullable().optional().describe("City."),
+    countryCode: COUNTRY_CODE.nullable().optional().describe('ISO country code, e.g. "NO".'),
+    addressPart2: z.string().nullable().optional().describe("Second address line."),
+    postalCode: z.string().nullable().optional().describe("Postal code."),
+    province: z.string().nullable().optional().describe("Province or region."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const { tenantId, id, kind, ...body } = args;
+    const { tenantId, id, kind, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
     const segment = kind === "delivery" ? "delivery-address" : "address";
+    const given = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
+    if (Object.keys(given).length === 0) {
+      return fail(
+        "No address parts were given, so nothing was written. Sending an empty body here would " +
+          "replace the address with an empty one.",
+      );
+    }
+
+    // Read first: the PUT replaces, and the parts it does not require are the ones that go
+    // missing. `delivery` and `postal` live on different keys of the customer record.
+    const current = await ctx.client.request<{
+      address?: Record<string, unknown> | null;
+      deliveryAddress?: Record<string, unknown> | null;
+    }>({ method: "GET", path: `/api/customers/${id}`, tenantId: resolved });
+    const existing =
+      (kind === "delivery" ? current.data?.deliveryAddress : current.data?.address) ?? {};
+    // Only the parts this endpoint accepts — the record carries more than the address request
+    // takes, and sending an unknown field is refused ("Unknown field: ...").
+    const ADDRESS_PARTS = ["addressPart1", "addressPart2", "postalCode", "city", "province", "countryCode"];
+    const base = Object.fromEntries(
+      ADDRESS_PARTS.filter((k) => existing[k] !== undefined && existing[k] !== null).map((k) => [k, existing[k]]),
+    );
+    const merged = { ...base, ...given };
+
+    const missing = ["addressPart1", "city", "countryCode"].filter(
+      (k) => merged[k] === undefined || merged[k] === null || merged[k] === "",
+    );
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on an address, and neither your change nor the ` +
+          `customer's current address supplies ${missing.length === 1 ? "it" : "them"}. Nothing ` +
+          `was written — pass ${missing.join(" and ")} explicitly.`,
+      );
+    }
+
     const res = await ctx.client.request({
       method: "PUT",
       path: `/api/customers/${id}/${segment}`,
-      body,
-      tenantId: requireTenantId(tenantId, ctx),
+      body: merged,
+      tenantId: resolved,
     });
-    return ok(res.data ?? `${kind ?? "postal"} address updated.`);
+    const kept = Object.keys(base).filter((k) => !(k in given));
+    return ok(res.data ?? `${kind ?? "postal"} address updated.`, {
+      note:
+        `Changed ${Object.keys(given).join(", ")} on customer ${id}'s ${kind ?? "postal"} address` +
+        (kept.length
+          ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
+            `unchanged, because this endpoint replaces rather than patches.`
+          : `. Nothing else was set on it beforehand.`),
+    });
   },
 });
 

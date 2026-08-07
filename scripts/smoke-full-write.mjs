@@ -329,6 +329,38 @@ async function main() {
       created.bankId ? `id=${created.bankId}` : textOf(bankRes).slice(0, 200),
     );
 
+    // A full-replacement PUT on this record clears the account number when the body omits it —
+    // and the payment-routing guard cannot see an omission, which is why the path is classified
+    // irreversible outright. Demonstrated here on the throwaway bank above rather than asserted,
+    // because the whole claim is that a 200 hides it.
+    if (created.bankId) {
+      const before = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "GET", path: `/api/company-banks/${created.bankId}` },
+      });
+      const bbanBefore = before.isError ? undefined : jsonOf(before)?.bban;
+      const wipe = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/company-banks/${created.bankId}`,
+          // Exactly the required set: an agent renaming the account.
+          body: { name: `${STAMP} renamed`, countryCode: "NO", currency: "NOK" },
+        },
+      });
+      const after = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "GET", path: `/api/company-banks/${created.bankId}` },
+      });
+      const bbanAfter = after.isError ? undefined : jsonOf(after)?.bban;
+      report(
+        "a rename that omits the account number really does clear it",
+        !wipe.isError && bbanBefore && !bbanAfter,
+        `bban ${JSON.stringify(bbanBefore)} → ${JSON.stringify(bbanAfter)} — the reason this PUT ` +
+          `is irreversible, and why the routing guard alone was not enough`,
+      );
+    }
+
     // --- 4z. Agreement terms, on real data -----------------------------------
     //
     // The PUT behind this REPLACES the agreement, which is why the tool reads and merges and

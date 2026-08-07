@@ -473,6 +473,40 @@ export const QUIRKS: readonly Quirk[] = [
       "A Norwegian company is looked up in Brønnøysundregistrene from organizationNumber and its " +
       "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
   },
+  {
+    id: "full-replacement-clears-a-payment-destination",
+    paths: ["/api/company-banks/{id}", "/api/creditors/{id}"],
+    methods: ["PUT"],
+    kind: "irreversible",
+    note:
+      "This REPLACES the record, and the account number is NOT among the required fields — so a " +
+      "body that satisfies the schema and omits it CLEARS it. Measured on a live tenant:\n" +
+      "  PUT /api/company-banks/{id} {name, countryCode, currency} → 200, bban AND iban emptied\n" +
+      "  PUT /api/creditors/{id} {name}                            → 200, bankAccountNumber null\n" +
+      "In both cases the intent was a rename. Nothing in the response says an account number was " +
+      "removed, and the next payment has nowhere to go.\n\n" +
+      "Note what this defeats: the payment-routing guard escalates a body that CONTAINS a " +
+      "destination, so it never sees a body whose danger is the omission. Both PUTs are therefore " +
+      "classified irreversible outright. Read the record first and send back every field you want " +
+      "kept — GET /api/company-banks/{id} or GET /api/creditors/{id} — the way " +
+      "reai_update_agreement does for the same class of trap.",
+  },
+  {
+    id: "address-put-clears-what-it-omits",
+    paths: [
+      "/api/customers/{id}/address",
+      "/api/customers/{id}/delivery-address",
+      "/api/suppliers/{id}/address",
+    ],
+    methods: ["PUT"],
+    kind: "gotcha",
+    note:
+      "A full replacement whose required set is only addressPart1, city and countryCode — so a " +
+      "body carrying those three is accepted and empties the rest. Measured: postalCode " +
+      '"0150" → null, province "Oslo" → null, addressPart2 "Oppgang B" → null, on a 200. An ' +
+      "invoice addressed without a postcode is the visible consequence. reai_set_customer_address " +
+      "reads the current address and merges, so it does not have this problem; a raw call does.",
+  },
   // --- Agreements -----------------------------------------------------------
   {
     id: "agreement-put-replaces-everything",

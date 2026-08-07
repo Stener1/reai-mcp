@@ -327,6 +327,29 @@ function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
     return "irreversible";
   }
 
+  // A full-replacement PUT on a record that CARRIES a payment destination can erase that
+  // destination by leaving it out, and both of these were measured doing exactly that on a live
+  // tenant:
+  //
+  //   PUT /api/company-banks/{id} {name, countryCode, currency}  → 200, bban AND iban cleared
+  //   PUT /api/creditors/{id}     {name}                          → 200, bankAccountNumber cleared
+  //
+  // Neither body mentions an account, so the payment-routing rule — which escalates when a
+  // routing field is PRESENT — cannot see it. That guard is defeated by omission here, which is
+  // why this is a path rule rather than another field. "Rename the bank account" silently
+  // removing the number a customer pays into is not reversible master-data editing.
+  //
+  // PUT only. Creating either record is additive: nothing is diverted, and a company bank is
+  // already exempted from routing escalation on POST for that reason. Both were swept for out of
+  // the whole document — /api/reconciliation-rules/{id} carries a destination too but requires
+  // it, so it cannot be omitted, and the rent agreement is covered by its own rule above.
+  if (
+    method === "PUT" &&
+    /^\/api\/(company-banks|creditors)\/[^/]+$/i.test(normalized)
+  ) {
+    return "irreversible";
+  }
+
   if (matchesPrefix(normalized, IRREVERSIBLE_PREFIXES)) return "irreversible";
 
   if (matchesPrefix(normalized, REVERSIBLE_PREFIXES)) {

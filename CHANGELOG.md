@@ -192,6 +192,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **A full-replacement write can erase a payment destination by omitting it, and
+  the routing guard could not see that.** Found by sweeping the document for the
+  shape that bit on agreements — a PUT with no PATCH sibling — and then asking
+  which of those the payment-routing rule cannot cover. It escalates a body that
+  CONTAINS a destination; a body whose danger is leaving one out is invisible to
+  it. Two paths do exactly that, both measured on a live tenant with a rename as
+  the intent:
+  - `PUT /api/company-banks/{id} {name, countryCode, currency}` → `200`, `bban`
+    **and** `iban` emptied.
+  - `PUT /api/creditors/{id} {name}` → `200`, `bankAccountNumber` null.
+
+  Both are now classified irreversible outright, so the default write mode cannot
+  reach them. Creating either record stays reversible — adding an account diverts
+  nothing, which is the reasoning company banks were already exempted on — and a
+  quirk carries it to `reai_request`, where a `200` is otherwise the only signal.
+  `/api/reconciliation-rules/{id}` carries a destination too and is deliberately
+  NOT swept up: it requires the field, so omission is impossible. The full-write
+  suite now demonstrates the clearing on a throwaway bank rather than asserting it.
+- **`reai_set_customer_address` silently dropped the parts it was not given.** The
+  same shape on a smaller scale: the address PUT requires only `addressPart1`,
+  `city` and `countryCode`, so a body carrying those three is accepted and empties
+  the rest — measured, `postalCode "0150"` → null, `province "Oslo"` → null, second
+  line emptied, on a `200`. An invoice addressed without a postcode is the visible
+  consequence. The tool now reads the current address and merges, takes `null` to
+  clear a part deliberately, sends back only the parts this endpoint accepts (an
+  unknown field is refused outright), reads the DELIVERY address from its own field
+  rather than the postal one, and refuses locally when neither the change nor the
+  stored address supplies a required part.
+
 - **Two operations that reach third parties were not on the send axis.** Found by
   auditing every operation in the spec, after the audit's own guard passed on all
   counts and review went looking for what it could not see. Both were permitted
