@@ -79,6 +79,7 @@ const listAccounts = defineTool({
         query: args.query,
         accountNumberPrefix: args.accountNumberPrefix,
         limit: args.limit,
+        filterRestricted: args.filterRestricted,
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });

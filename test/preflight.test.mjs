@@ -536,3 +536,61 @@ test("the account limit does not exceed the API's silent cap", async () => {
   assert.ok(max, "limit should declare a maximum");
   assert.ok(max.value <= 100, `limit allows ${max.value}, but the API caps at 100`);
 });
+
+test("no read tool accepts an input it never sends", async () => {
+  // Codex found `filterRestricted` declared on reai_list_accounts and silently
+  // dropped, which is worse than not offering it: the tool promised to exclude
+  // system-only accounts and did not. This sweeps for the same class across every
+  // read tool, so the next one fails here instead of shipping.
+  const { allTools } = await import("../dist/server.js");
+
+  // A value the field will actually accept, so the handler behaves normally.
+  const sentinelFor = (name, schema) => {
+    const def = schema?._def?.innerType?._def ?? schema?._def ?? {};
+    if (Array.isArray(def.values) && def.values.length > 0) return def.values[0];
+    if (def.typeName === "ZodBoolean") return true;
+    if (def.typeName === "ZodNumber") return 4242;
+    if (/date/i.test(name)) return "2026-03-04";
+    return `SENTINEL_${name}`;
+  };
+
+  const dropped = [];
+  for (const tool of allTools) {
+    if (tool.risk !== "read") continue;
+    if (tool.name === "reai_request") continue; // its inputs map to method/path/binary, not a query
+    const fields = Object.keys(tool.inputSchema ?? {}).filter((f) => f !== "tenantId");
+    if (fields.length === 0) continue;
+
+    const args = {};
+    for (const f of fields) args[f] = sentinelFor(f, tool.inputSchema[f]);
+
+    const calls = [];
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 1, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: {
+        request: async (opts) => {
+          calls.push(opts);
+          return { status: 200, data: [] };
+        },
+        deepLink: () => "https://app.reai.no/",
+      },
+    };
+
+    try {
+      await tool.handler(args, ctx);
+    } catch {
+      continue; // a tool that refuses this combination locally is not the target here
+    }
+    if (calls.length === 0) continue;
+
+    // A field counts as used if its VALUE or its NAME shows up anywhere in any request
+    // the handler made — query, path or body. Some fields legitimately choose an
+    // endpoint rather than being forwarded.
+    const seen = JSON.stringify(calls);
+    const missing = fields.filter((f) => !seen.includes(String(args[f])) && !seen.includes(f));
+    if (missing.length > 0) dropped.push(`${tool.name}: ${missing.join(", ")}`);
+  }
+
+  assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
+});
