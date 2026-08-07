@@ -156,7 +156,12 @@ const ESCALATING_SEGMENTS: readonly string[] = [
   "/generate",
   "/generate-due",
   "/activate",
-  "/deactivate",
+  // "/deactivate" is deliberately NOT here. It is the exact inverse of activate — the
+  // spec says one "marks the subscription active" and the other "marks it inactive" —
+  // so it is reversible by definition, and it is the action that STOPS recurring
+  // billing. Escalating it meant the default mode could not halt a subscription that
+  // was issuing invoices unattended, which is the wrong way round: activate stays
+  // irreversible because it starts that, and stopping it should not need `full`.
   "/sign-request",
   "/sign-requests",
   "/send",
@@ -560,7 +565,10 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
   /^\/api\/invoices\/[^/]+\/(ehf|email|reminders|credit)(\/|$)/,
   /^\/api\/invoices\/reminders(\/|$)/,
 
-  // Agreement signing requests are emailed to the signer.
+  // Agreement signing requests are emailed to the signer. Deliberately broad: it must
+  // cover POST .../sign-requests AND POST .../sign-requests/{id}/send, which both
+  // deliver. The one exception is the DELETE, handled by method above — narrowing this
+  // pattern instead silently stopped covering /send.
   /^\/api\/agreements\/[^/]+\/sign-requests?(\/|$)/,
 
   // Government filings. These leave for Skatteetaten, which is as external as it
@@ -831,6 +839,19 @@ export function classifyTransmission(
   // or a sync with Altinn.
   if (method === "GET") {
     return forms.some((n) => TRANSMITTING_GETS.some((re) => re.test(n))) ? "external" : "none";
+  }
+
+  // Revoking a pending signer sends nothing: the spec calls it "Deletes a pending
+  // signer and invalidates its signing link". The pattern below is method-blind, so it
+  // caught the revocation along with the send — meaning you could email a signing
+  // request and then be unable to withdraw it without enabling external send, the flag
+  // refusing the action that undoes what it exists to control. Still irreversible: a
+  // deleted signer cannot be restored.
+  if (
+    method === "DELETE" &&
+    forms.some((n) => /^\/api\/agreements\/[^/]+\/sign-requests\/[^/]+$/.test(n))
+  ) {
+    return "none";
   }
 
   if (forms.some((n) => TRANSMITTING_PATTERNS.some((re) => re.test(n)))) return "external";

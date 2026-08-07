@@ -256,10 +256,15 @@ test("subscription billing sub-paths are irreversible", () => {
     "/api/subscriptions/7/generate",
     "/api/subscriptions/generate-due",
     "/api/subscriptions/7/activate",
-    "/api/subscriptions/7/deactivate",
   ]) {
     assert.equal(classifyRequest("POST", path), "irreversible", path);
   }
+  // /deactivate was in that list and should not have been. It is the exact inverse of
+  // activate — the spec says one "marks the subscription active", the other "marks it
+  // inactive" — so it is reversible by definition, and it is the action that STOPS
+  // unattended invoice issuance. Requiring `full` mode to halt a runaway subscription
+  // is the wrong way round.
+  assert.equal(classifyRequest("POST", "/api/subscriptions/7/deactivate"), "reversible");
   // Plain subscription master data is still reversible.
   assert.equal(classifyRequest("PUT", "/api/subscriptions/7"), "reversible");
   assert.equal(classifyRequest("DELETE", "/api/subscriptions/7"), "reversible");
@@ -1075,4 +1080,26 @@ test("normalizing a path never lowers its risk", () => {
     classifyInvoiceDelivery("reversible", "/api/orders;x", { invoiceEmail: "a@evil.example" }),
     "irreversible",
   );
+});
+
+// The policy was refusing the actions that REDUCE risk, alongside the ones that create
+// it. Direction matters: stopping a runaway subscription and revoking a pending
+// signature are the safe moves, and needing `full` mode for them is backwards.
+test("an action that undoes a risk is not gated like the risk itself", () => {
+  // Deactivate is the exact inverse of activate — the spec says one "marks the
+  // subscription active" and the other "marks it inactive". Activate stays irreversible
+  // because it starts unattended invoice issuance; stopping that must not need `full`.
+  assert.equal(classifyRequest("POST", "/api/subscriptions/1/deactivate"), "reversible");
+  assert.equal(classifyRequest("POST", "/api/subscriptions/1/activate"), "irreversible");
+
+  // Deleting a pending signer "invalidates its signing link" — it sends nothing. The
+  // transmitting pattern is matched without regard to method, so it caught the
+  // revocation along with the send, and you could email a signing request and then be
+  // unable to revoke it without enabling external send.
+  assert.equal(classifyTransmission("DELETE", "/api/agreements/1/sign-requests/2"), "none");
+  assert.equal(classifyTransmission("POST", "/api/agreements/1/sign-requests"), "external");
+  assert.equal(classifyTransmission("POST", "/api/agreements/1/sign-request"), "external");
+  // It is still irreversible: a deleted signer cannot be restored, and deleting the
+  // last pending one can complete the agreement.
+  assert.equal(classifyRequest("DELETE", "/api/agreements/1/sign-requests/2"), "irreversible");
 });
