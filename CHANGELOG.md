@@ -216,29 +216,23 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
   every authorization at once — is the remedy.
 - **Serving under a path prefix is unsupported.** A `PUBLIC_URL` containing a
   path, query or fragment is rejected at startup rather than half-working.
-- **Two `npm audit` advisories** come from transitive dependencies of
-  `@modelcontextprotocol/sdk`, and the earlier claim here that neither is on this
-  server's request path was wrong. `fast-uri` (HIGH, host confusion via a
-  backslash authority introducer) reaches us through `ajv`, and **both are loaded
-  into the running process** — the SDK uses ajv to validate protocol messages, so
-  the module is on the path even though we have found no route by which
-  attacker-controlled input reaches the vulnerable authority parsing. "We could
-  not find one" is not "there isn't one", and it is the wrong standard for a HIGH
-  in the runtime tree. `hono` (MODERATE, ReDoS in CORS middleware) is a narrower
-  case: the SDK uses `@hono/node-server`'s request listener on every `/mcp` call,
-  but not hono's CORS middleware — this server sets its own CORS headers — so the
-  vulnerable code is not reached.
+- **The production dependency tree is clean.** Both advisories that came through
+  `@modelcontextprotocol/sdk` are resolved by `package.json` overrides: `fast-uri`
+  pinned to 3.1.5 (HIGH — host confusion via a backslash authority introducer) and
+  `hono` to 4.12.34 (MODERATE — ReDoS in CORS middleware). `npm audit --omit=dev`
+  reports nothing, and CI enforces that at `--audit-level=moderate`.
 
-  **`fast-uri` is resolved.** `3.1.5` cleared the 7-day minimum-release-age policy
-  this project follows against supply-chain attacks on 2026-08-07, and is pinned by
-  a `package.json` override — so the HIGH is out of the production tree.
-  `hono@4.12.34` clears 2026-08-10 and its override lands then; until it does, the
-  remaining advisory is the moderate CORS ReDoS in code this server does not reach.
+  Worth recording how the second one landed, because the mechanism has a sharp edge.
+  This project installs under a 7-day minimum-release-age policy, so `hono@4.12.34`
+  (published 2026-08-03) was not installable on the 7th. Overriding it needs
+  `npm install --min-release-age=0`, and with the age check off a caret range takes
+  whatever is newest: `^4.12.34` resolved to `4.13.1`, published four hours earlier.
+  That is exactly the exposure the policy exists to prevent. The override is
+  therefore an EXACT pin rather than a range, and the flag is used once — `npm ci`
+  installs from the lockfile and needs no bypass, so CI never resolves under a
+  relaxed policy.
 
-  CI now runs `npm audit --omit=dev --audit-level=high` as a blocking step, so a new
-  HIGH cannot arrive unnoticed. It tightens to `moderate` once the hono override is
-  in — gating at `high` today is a statement about one known outstanding item, not a
-  standing tolerance.
+
 - **No sandbox exists** for ReAI. Write paths are therefore verified against a
   real but empty tenant, and two of them remain untested end to end: issuing an
   invoice or credit note (it transmits, and cannot be recalled), and settling a VAT
