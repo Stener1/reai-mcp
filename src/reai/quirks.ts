@@ -474,6 +474,19 @@ export const QUIRKS: readonly Quirk[] = [
       "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
   },
   {
+    id: "swift-code-is-normalised",
+    paths: ["/api/company-banks", "/api/company-banks/{id}"],
+    methods: ["POST", "PUT"],
+    kind: "gotcha",
+    note:
+      'A SWIFT/BIC is stored NORMALISED: the 11-character form ending in the "XXX" ' +
+      'primary-branch suffix comes back as the 8-character form, so sending "DNBANOKKXXX" reads ' +
+      'back as "DNBANOKK". Measured on a live tenant at create time. That is the API doing its ' +
+      "job, not a failed write — but a caller that compares what it sent with what is stored, in " +
+      "order to check the write took effect, will see a difference and should not treat it as one. " +
+      "Echoing the stored value back on a later replacement is unaffected.",
+  },
+  {
     id: "full-replacement-clears-a-payment-destination",
     paths: ["/api/company-banks/{id}", "/api/creditors/{id}"],
     methods: ["PUT"],

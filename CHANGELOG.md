@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**98 tools**: 91 across nine accounting domains, plus 7 always-on.
+**102 tools**: 95 across nine accounting domains, plus 7 always-on.
 
 ### Added
 
@@ -189,6 +189,31 @@ All notable changes to `reai-mcp`. Format loosely follows
   `REAI_ALLOW_EXTERNAL_SEND`; a draft-order subscription that bills on request
   needs neither. `POST /api/subscriptions/generate-due` is deliberately not
   curated: it bills every due subscription at once.
+
+- **Four tools closing the gap the previous change named.** Gating the two
+  destructive PUTs left no safe route to a rename: `reai_request` in `full` mode
+  was the only way, to perform an operation that needs a read-and-merge. The
+  agreements work shipped its gate with a merge tool; that one did not.
+  - `reai_update_company_bank` reads the account, merges, and writes back the six
+    SETTABLE fields — not the eighteen the response carries. The round-trip was
+    verified lossless before relying on it. It also **refuses to clear `bban`**
+    even on request: an account with no number cannot be used for payments or
+    reconciliation, so `reai_delete_company_bank` is the honest way to retire one.
+  - `reai_update_creditor`, with `reai_list_creditors` so the id is findable. What
+    a creditor IS was read off the document rather than guessed: `LoanRes` carries
+    `creditorId` and `debtorId` and the loan write takes a `counterpartyId` with a
+    `perspective`, so a creditor is the counterparty when the company borrows and
+    its `bankAccountNumber` is where repayments go. That is also why creditors
+    carry an account number and debtors do not.
+  - `reai_set_supplier_address`, the supplier half of a fix the customer side
+    already had.
+  - The pure part is now one shared, tested helper (`mergeForReplacement`,
+    `readableRecord`) rather than four copies: filter to settable, overlay the
+    changes, keep a deliberate `null`, drop an absent `undefined`, and report what
+    was carried over, what is missing, and what the record did not already have.
+  - Also recorded: the API NORMALISES a SWIFT code, storing `"DNBANOKKXXX"` as
+    `"DNBANOKK"`. A merge that echoes it back is unaffected, but a caller comparing
+    what it sent to what is stored would otherwise read that as a failed write.
 
 ### Fixed
 

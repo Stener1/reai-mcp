@@ -464,6 +464,40 @@ async function main() {
         !supGet.isError && containsStamp(textOf(supGet)),
         containsStamp(textOf(supGet)) ? "name matches" : textOf(supGet).slice(0, 200),
       );
+
+      // The address merge, on a real supplier: change the street, keep the postcode. The PUT
+      // underneath replaces, and its required set does not include postalCode or province.
+      const fullAddr = await client.callTool({
+        name: "reai_set_supplier_address",
+        arguments: {
+          id: created.supplierId,
+          addressPart1: "Gata 1",
+          addressPart2: "Oppgang B",
+          postalCode: "0150",
+          city: "Oslo",
+          province: "Oslo",
+          countryCode: "NO",
+        },
+      });
+      report("reai_set_supplier_address sets a full address", !fullAddr.isError, firstLineOf(textOf(fullAddr)));
+      const streetOnly = await client.callTool({
+        name: "reai_set_supplier_address",
+        arguments: { id: created.supplierId, addressPart1: "Gata 2" },
+      });
+      const supAfter = await client.callTool({
+        name: "reai_get_supplier",
+        arguments: { id: created.supplierId },
+      });
+      const addr = supAfter.isError ? undefined : jsonOf(supAfter)?.address;
+      report(
+        "changing the street kept the postcode and province",
+        !streetOnly.isError &&
+          addr?.addressPart1 === "Gata 2" &&
+          addr?.postalCode === "0150" &&
+          addr?.province === "Oslo" &&
+          addr?.addressPart2 === "Oppgang B",
+        addr ? JSON.stringify(addr) : firstLineOf(textOf(streetOnly)),
+      );
     }
 
     // 7c. Reconciliation rules moved to irreversible: a rule is standing authority

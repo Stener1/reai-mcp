@@ -563,3 +563,83 @@ export function startOfYear(): string {
   // previous year, so "what have we spent this year" would answer for last year.
   return `${norwegianDate(new Date()).slice(0, 4)}-01-01`;
 }
+
+/**
+ * Merge a caller's changes into a record that must be written back WHOLE.
+ *
+ * Several endpoints here replace rather than patch, so a body carrying one field clears every
+ * other one it omits — measured on agreements (every lease term), company banks and creditors
+ * (the account number), and the address sub-resources (the postcode). The safe shape is always
+ * the same: read the record, overlay the changes, send back everything settable. This is the
+ * pure half of that, so the four tools doing it share one implementation instead of four.
+ *
+ * `settable` matters as much as the merge: a response usually carries more than its request
+ * accepts — CompanyBankRes has 18 properties against CompanyBankReq's six — so echoing a GET
+ * verbatim sends fields the endpoint has no place for.
+ *
+ * A `null` in `changes` is kept, because clearing a field deliberately is a legitimate edit; an
+ * `undefined` is dropped, because that is what "I did not mention this" looks like after Zod
+ * has parsed absent optional arguments.
+ */
+export function mergeForReplacement(opts: {
+  existing: Record<string, unknown>;
+  changes: Record<string, unknown>;
+  settable: readonly string[];
+  required?: readonly string[];
+}): {
+  merged: Record<string, unknown>;
+  /** Fields carried over from the record because the caller did not mention them. */
+  kept: string[];
+  /** Change keys the record does not already have — a new value, or a misspelling. */
+  unknown: string[];
+  /** Required fields that neither the change nor the record supplies. */
+  missing: string[];
+  /** Change keys the caller actually supplied. */
+  given: string[];
+} {
+  const given = Object.entries(opts.changes).filter(([, v]) => v !== undefined);
+  const base: Record<string, unknown> = {};
+  for (const key of opts.settable) {
+    const value = opts.existing[key];
+    if (value !== undefined && value !== null) base[key] = value;
+  }
+  const merged = { ...base, ...Object.fromEntries(given) };
+  const givenKeys = given.map(([k]) => k);
+  return {
+    merged,
+    kept: Object.keys(base).filter((k) => !givenKeys.includes(k)),
+    // Own properties only: `in` walks the prototype chain, so a change named `toString` looked
+    // like an existing field and skipped the warning this exists to give.
+    unknown: givenKeys.filter((k) => !Object.hasOwn(opts.existing, k)),
+    missing: (opts.required ?? []).filter((k) => {
+      const value = merged[k];
+      return value === undefined || value === null || value === "";
+    }),
+    given: givenKeys,
+  };
+}
+
+/**
+ * The record a merge will write into, or a refusal.
+ *
+ * `?? {}` was the first shape of this, and it collapsed "no record yet" into "I could not read
+ * the response" — so a body that came back as text, or with the key renamed, produced an empty
+ * base, and the write then sent the caller's fields alone. That is the destruction the merge
+ * exists to prevent, with the caller believing they made a small edit.
+ */
+export function readableRecord(
+  data: unknown,
+  field?: string,
+): { record?: Record<string, unknown>; problem?: string } {
+  const isObject = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(data)) {
+    return { problem: "the response was not a record object" };
+  }
+  if (field === undefined) return { record: data };
+  const nested = data[field];
+  // Absent or null genuinely means "not set yet", which is a legitimate starting point.
+  if (nested === undefined || nested === null) return { record: {} };
+  if (!isObject(nested)) return { problem: `\`${field}\` was not an object` };
+  return { record: nested };
+}

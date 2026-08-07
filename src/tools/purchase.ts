@@ -15,6 +15,8 @@ import {
   type ToolDef,
   isWholeOre,
   requiredName,
+  mergeForReplacement,
+  readableRecord,
 } from "./registry.js";
 
 /**
@@ -825,6 +827,229 @@ const listExpenses = defineTool({
   },
 });
 
+
+/**
+ * Creditors and debtors: the counterparties on a LOAN.
+ *
+ * What a "creditor" is here was read off the document rather than guessed: `LoanRes` carries
+ * `creditorId` and `debtorId`, and the loan write takes a `counterpartyId` with a `perspective`.
+ * So a creditor is the counterparty when the company borrows — the party it owes — and its
+ * `bankAccountNumber` is where repayments go. That is also why creditors carry an account number
+ * and debtors do not: on a loan the company has made, the money comes back in.
+ *
+ * `creditorId` appears exactly once in the whole document, on LoanRes, so nothing here claims a
+ * creditor is used anywhere else.
+ */
+const CREDITOR_SETTABLE = ["name", "bankAccountNumber"] as const;
+
+const listCreditors = defineTool({
+  name: "reai_list_creditors",
+  title: "List creditors",
+  description:
+    "Loan counterparties the company owes — each with the bank account its repayments go to. " +
+    "The document links these to loans through `LoanRes.creditorId`; a debtor is the mirror " +
+    "image, for a loan the company has made.",
+  risk: "read",
+  apiPaths: [["GET", "/api/creditors"]],
+  inputSchema: { tenantId: tenantIdArg },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/creditors",
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const rows = res.data;
+    const missingAccount = Array.isArray(rows)
+      ? rows.filter((r) => !(r as { bankAccountNumber?: unknown }).bankAccountNumber).length
+      : 0;
+    return okList(rows, {
+      noun: "creditor",
+      suffix: missingAccount > 0 ? `. ${missingAccount} have no bank account number.` : ".",
+      empty:
+        "No creditors. A loan can still exist without one — LoanRes.creditorId is nullable — so " +
+        "this being empty does not mean the company has no debt.",
+    });
+  },
+});
+
+const updateCreditor = defineTool({
+  name: "reai_update_creditor",
+  title: "Change a creditor",
+  description:
+    "Rename a creditor, or change the bank account its loan repayments go to. Pass only what you " +
+    "want different; the rest is kept.\n\n" +
+    "This exists because the underlying call replaces rather than patches, and `bankAccountNumber` " +
+    "is not required — so `PUT {name}`, which is what a rename looks like, is accepted with a 200 " +
+    "and sets the account number to null. Measured on a live tenant. The next repayment has " +
+    "nowhere to go, and nothing in the response says so.\n\n" +
+    "Needs REAI_WRITE_MODE=full, because the raw PUT can destroy a payment destination and a " +
+    "curated tool must not be a softer route to it. Between the read and the write there is a " +
+    "lost-update window: an edit made in the ReAI UI in between is silently reverted.",
+  risk: "irreversible",
+  destructive: true,
+  apiPaths: [
+    ["GET", "/api/creditors/{id}"],
+    ["PUT", "/api/creditors/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Creditor id, from reai_list_creditors."),
+    name: requiredName(255).optional().describe("What the creditor is called."),
+    bankAccountNumber: z
+      .string()
+      .max(50)
+      .nullable()
+      .optional()
+      .describe(
+        "The account loan repayments are paid into. Changing it changes where money goes; null " +
+          "clears it deliberately, which leaves the repayment with no destination.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const current = await ctx.client.request<unknown>({
+      method: "GET",
+      path: `/api/creditors/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data);
+    if (!record) {
+      return fail(
+        `Could not read creditor ${id}: ${problem}. Nothing was written — this endpoint REPLACES ` +
+          `the record, so the bank account number you did not pass would have been erased.`,
+      );
+    }
+    const { merged, kept, unknown, missing, given } = mergeForReplacement({
+      existing: record,
+      changes,
+      settable: CREDITOR_SETTABLE,
+      required: ["name"],
+    });
+    if (given.length === 0) return fail("No changes were given, so nothing was written.");
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on a creditor, and neither your change nor the ` +
+          `stored record supplies it. Nothing was written.`,
+      );
+    }
+    const res = await ctx.client.request<Record<string, unknown>>({
+      method: "PUT",
+      path: `/api/creditors/${id}`,
+      body: merged,
+      tenantId: resolved,
+    });
+    const notes = [
+      `Changed ${given.join(", ")} on creditor ${id}` +
+        (kept.length
+          ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and written ` +
+            `back unchanged, because this endpoint replaces rather than patches.`
+          : `.`),
+    ];
+    if (merged.bankAccountNumber === null || merged.bankAccountNumber === undefined) {
+      notes.push(
+        `This creditor now has NO bank account number, so a loan repayment to it has no ` +
+          `destination. That is what you asked for if you passed null; otherwise it was already empty.`,
+      );
+    }
+    if (unknown.length > 0) {
+      notes.push(
+        `Note: ${unknown.join(", ")} was not already set. Fine for a first-time value; a misspelt ` +
+          `name looks the same, so confirm it took effect.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
+  },
+});
+
+const SUPPLIER_ADDRESS_PARTS = [
+  "addressPart1",
+  "addressPart2",
+  "postalCode",
+  "city",
+  "province",
+  "countryCode",
+] as const;
+
+const setSupplierAddress = defineTool({
+  name: "reai_set_supplier_address",
+  title: "Change a supplier's address",
+  description:
+    "Change a supplier's address. Pass only the parts you want different; the rest is kept.\n\n" +
+    "The call underneath is a full REPLACEMENT whose required set is only addressPart1, city and " +
+    "countryCode — so a body carrying those three is accepted and empties the rest. Measured on " +
+    "the customer version of the same endpoint: postalCode and province became null and the second " +
+    "address line was emptied, on a 200. This reads the supplier first and merges. Pass null for a " +
+    "part you mean to clear.\n\n" +
+    "Between the read and the write an address edited in the ReAI UI is silently reverted; there " +
+    "is no version field to prevent it.",
+  risk: "reversible",
+  apiPaths: [
+    ["GET", "/api/suppliers/{id}"],
+    ["PUT", "/api/suppliers/{id}/address"],
+  ],
+  idempotent: true,
+  inputSchema: {
+    id: z.number().int().positive().describe("Supplier id, from reai_list_suppliers."),
+    addressPart1: z.string().nullable().optional().describe("Street address."),
+    city: z.string().nullable().optional().describe("City."),
+    countryCode: COUNTRY_CODE.nullable().optional().describe('ISO country code, e.g. "NO".'),
+    addressPart2: z.string().nullable().optional().describe("Second address line."),
+    postalCode: z.string().nullable().optional().describe("Postal code."),
+    province: z.string().nullable().optional().describe("Province or region."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const current = await ctx.client.request<unknown>({
+      method: "GET",
+      path: `/api/suppliers/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data, "address");
+    if (!record) {
+      return fail(
+        `Could not read supplier ${id}'s current address: ${problem}. Nothing was written — this ` +
+          `endpoint REPLACES the address, so the parts you did not pass would have been erased.`,
+      );
+    }
+    const { merged, kept, missing, given } = mergeForReplacement({
+      existing: record,
+      changes,
+      settable: SUPPLIER_ADDRESS_PARTS,
+      required: ["addressPart1", "city", "countryCode"],
+    });
+    if (given.length === 0) {
+      return fail(
+        "No address parts were given, so nothing was written. An empty body here would replace " +
+          "the address with an empty one.",
+      );
+    }
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on an address, and neither your change nor the ` +
+          `supplier's current address supplies ${missing.length === 1 ? "it" : "them"}. Nothing ` +
+          `was written.`,
+      );
+    }
+    const res = await ctx.client.request({
+      method: "PUT",
+      path: `/api/suppliers/${id}/address`,
+      body: merged,
+      tenantId: resolved,
+    });
+    return ok(res.data ?? "Supplier address updated.", {
+      note:
+        `Changed ${given.join(", ")} on supplier ${id}'s address` +
+        (kept.length
+          ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
+            `unchanged, because this endpoint replaces rather than patches.`
+          : `. Nothing else was set on it beforehand.`),
+    });
+  },
+});
+
 export const purchaseTools: ToolDef[] = [
   listSuppliers,
   getSupplier,
@@ -839,4 +1064,7 @@ export const purchaseTools: ToolDef[] = [
   listReceptionDocuments,
   parseEhfAttachment,
   listExpenses,
+  listCreditors,
+  updateCreditor,
+  setSupplierAddress,
 ] as ToolDef[];

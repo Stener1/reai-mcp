@@ -3,8 +3,10 @@ import {
   defineTool,
   fail,
   isoDate,
+  mergeForReplacement,
   ok,
   okList,
+  readableRecord,
   requireTenantId,
   tenantIdArg,
   type ToolDef,
@@ -655,6 +657,168 @@ const getTaxReturn = defineTool({
   },
 });
 
+
+/** Everything CompanyBankReq accepts. The response carries twelve more that it does not. */
+const COMPANY_BANK_SETTABLE = [
+  "name",
+  "countryCode",
+  "currency",
+  "bban",
+  "swiftCode",
+  "excludeFromReconciliationTodos",
+] as const;
+
+const updateCompanyBank = defineTool({
+  name: "reai_update_company_bank",
+  title: "Change a company bank account",
+  description:
+    "Change a company bank account — its label, currency, SWIFT code, or the account number " +
+    "itself. Pass only what you want different; the rest is kept.\n\n" +
+    "This exists because the underlying call does the opposite, in the most expensive way this " +
+    "API offers. PUT on a company bank REPLACES the record, and `bban` is not one of its required " +
+    "fields — so a body carrying just {name, countryCode, currency}, which is what renaming looks " +
+    "like, is accepted with a 200 and EMPTIES the account number. Measured on a live tenant. An " +
+    "account with no number cannot be used for payments or reconciliation, and nothing in the " +
+    "response says it happened.\n\n" +
+    "So this reads the account first and merges. The round-trip was verified lossless: the six " +
+    "settable fields, read back and written verbatim, changed nothing. It sends only those six — " +
+    "the response carries eighteen, and the twelve extra (id, iban, providerType, and the rest) " +
+    "have no place in the request.\n\n" +
+    "Needs REAI_WRITE_MODE=full, because the raw PUT can destroy a payment destination and a " +
+    "curated tool must not be a softer route to it. Between the read and the write there is a " +
+    "lost-update window: an edit made in the ReAI UI in between is silently reverted.",
+  risk: "irreversible",
+  destructive: true,
+  apiPaths: [
+    ["GET", "/api/company-banks/{id}"],
+    ["PUT", "/api/company-banks/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Company bank id, from reai_list_company_banks."),
+    name: requiredName(255).optional().describe('A label for the account, e.g. "Drift".'),
+    countryCode: z
+      .string()
+      .regex(/^[A-Z]{2}$/, 'Two-letter uppercase ISO country code, e.g. "NO".')
+      .optional()
+      .describe("ISO country code of the bank."),
+    currency: z
+      .string()
+      .regex(/^[A-Z]{3}$/, 'Three-letter uppercase ISO 4217 code, e.g. "NOK".')
+      .optional()
+      .describe("ISO 4217 currency of the account."),
+    bban: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "The plain account number. Changing this changes where money arrives, so it is a payment " +
+          "destination like any other. An empty value or null is refused with a reason — see below.",
+      ),
+    swiftCode: z
+      .string()
+      .max(11)
+      .nullable()
+      .optional()
+      .describe(
+        "SWIFT/BIC, for foreign accounts. Note the API NORMALISES this: an 11-character code " +
+          'ending in the "XXX" primary-branch suffix is stored as the 8-character form, so ' +
+          '"DNBANOKKXXX" reads back as "DNBANOKK". That is the API, not a failed write.',
+      ),
+    excludeFromReconciliationTodos: z
+      .boolean()
+      .nullable()
+      .optional()
+      .describe("Keep this account out of the reconciliation to-do list."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const current = await ctx.client.request<unknown>({
+      method: "GET",
+      path: `/api/company-banks/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data);
+    if (!record) {
+      return fail(
+        `Could not read company bank ${id}: ${problem}. Nothing was written — this endpoint ` +
+          `REPLACES the record, so without the current values to merge into, the account number ` +
+          `and everything else you did not pass would have been erased.`,
+      );
+    }
+
+    const { merged, kept, unknown, missing, given } = mergeForReplacement({
+      existing: record,
+      changes,
+      settable: COMPANY_BANK_SETTABLE,
+      required: ["name", "countryCode", "currency"],
+    });
+    if (given.length === 0) {
+      return fail("No changes were given, so nothing was written.");
+    }
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on a company bank, and neither your change nor ` +
+          `the stored account supplies ${missing.length === 1 ? "it" : "them"}. Nothing was ` +
+          `written — pass ${missing.join(" and ")} explicitly.`,
+      );
+    }
+    // Clearing the account number is the exact harm this tool exists to prevent, so it cannot
+    // happen by accident — but it can still be ASKED for, and the answer should say why not and
+    // what to do instead.
+    //
+    // Why the argument is `.nullable()` rather than `.min(1)`: with the stricter schema this
+    // branch was unreachable. Zod rejected null and "" first, and the caller got
+    // "Invalid arguments for tool reai_update_company_bank" — no mention of payments, no pointer
+    // at the delete tool. Found by driving the tool live rather than by unit test, because the
+    // unit tests call the handler directly and never see validation.
+    if (Object.hasOwn(changes, "bban") && (changes.bban === null || changes.bban === "")) {
+      return fail(
+        `Refusing to clear bban on company bank ${id}: an account with no number cannot be used ` +
+          `for payments or reconciliation. Nothing was written. If the account is genuinely gone, ` +
+          `delete it with reai_delete_company_bank instead.`,
+      );
+    }
+
+    const res = await ctx.client.request<Record<string, unknown>>({
+      method: "PUT",
+      path: `/api/company-banks/${id}`,
+      body: merged,
+      tenantId: resolved,
+    });
+
+    const notes = [
+      `Changed ${given.join(", ")} on company bank ${id}` +
+        (kept.length
+          ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and written ` +
+            `back unchanged, because this endpoint replaces rather than patches.`
+          : `.`),
+    ];
+    const after = res.data ?? {};
+    if (given.includes("bban") && after.bban !== merged.bban) {
+      notes.push(
+        `WARNING: bban came back as ${JSON.stringify(after.bban)}, not the ${JSON.stringify(
+          merged.bban,
+        )} that was sent. Read the account back before relying on it.`,
+      );
+    }
+    if (typeof after.bban === "string" && after.bban === "") {
+      notes.push(
+        `WARNING: the account number is now EMPTY. This account cannot be used for payments or ` +
+          `reconciliation until it is set again.`,
+      );
+    }
+    if (unknown.length > 0) {
+      notes.push(
+        `Note: ${unknown.join(", ")} was not already set on this account. Fine for a value being ` +
+          `set for the first time; a misspelt name looks the same, so confirm it took effect.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
+  },
+});
+
 export const bankVatTools: ToolDef[] = [
   listCompanyBanks,
   createCompanyBank,
@@ -669,4 +833,5 @@ export const bankVatTools: ToolDef[] = [
   applyReconciliationRules,
   createVatReturn,
   getTaxReturn,
+  updateCompanyBank,
 ] as ToolDef[];

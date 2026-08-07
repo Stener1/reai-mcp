@@ -1048,17 +1048,30 @@ test("payment routing and invoice delivery give different reasons", async () => 
 // is then the only thing left protecting it.
 test("a tool with escalating fields is annotated destructive", async () => {
   const { allTools } = await import("../dist/server.js");
-  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const { hasEscalatingFields } = await import("../dist/server.js");
+  let escalating = 0;
   let mixed = 0;
   for (const tool of allTools) {
-    const escalates = Object.keys(tool.inputSchema ?? {}).some(
-      (f) => curatedArgsEscalate(tool.apiPaths ?? [], { [f]: "probe" }) !== undefined,
-    );
-    if (!escalates) continue;
-    mixed += 1;
-    assert.equal(tool.risk, "reversible", `${tool.name}: expected a mixed-risk tool`);
+    // The REAL probe, which also looks inside object-valued arguments. The local
+    // reimplementation this used to carry could not see a routing field nested in a `changes`
+    // record — the hole that shipped reai_update_agreement with destructiveHint: false.
+    if (!hasEscalatingFields(tool)) continue;
+    escalating += 1;
+    // NOT asserted here: that the tool also carries a static `destructive` flag. The server
+    // computes destructiveHint as `destructive || risk === "irreversible" || hasEscalatingFields`,
+    // so an escalating tool is annotated by construction and demanding the flag as well would be
+    // asking for redundancy — reai_create_customer is correctly annotated without it. Whether the
+    // published annotation really includes this term is pinned in test/toolsets.test.mjs, which
+    // drives hasEscalatingFields itself; the categories below are what this test is for.
+    // "Mixed-risk" — ordinary for most fields, worse for a few — is the case the annotation was
+    // introduced for, and it must keep existing. But it is not the only case: a tool whose PATH
+    // is already irreversible can carry an escalating field too, with nothing left to escalate.
+    // reai_update_creditor is exactly that, and asserting risk === "reversible" for everything
+    // made it a failure rather than a category.
+    if (tool.risk === "reversible") mixed += 1;
   }
-  assert.ok(mixed >= 2, `expected mixed-risk tools, found ${mixed}`);
+  assert.ok(escalating >= 3, `expected tools with escalating fields, found ${escalating}`);
+  assert.ok(mixed >= 2, `expected mixed-risk tools to still exist, found ${mixed}`);
 });
 
 // Reading the path as a router would must never produce a WEAKER answer than reading it
