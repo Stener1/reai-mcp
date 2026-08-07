@@ -207,3 +207,18 @@ function splitHosts(raw: string | undefined): string[] {
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
+
+/**
+ * The rightmost value of a proxy-appended header.
+ *
+ * `firstHeader` is right for ordinary headers, where a comma list is not a hop
+ * chain. For X-Forwarded-* it is exactly wrong: each proxy appends, so the leftmost
+ * entry is client-supplied and the rightmost is the one added by the proxy closest
+ * to us — the only one with any claim to being trustworthy.
+ */
+export function lastForwardedValue(value: string | string[] | undefined): string | undefined {
+  const flat = Array.isArray(value) ? value.join(",") : value;
+  if (!flat) return undefined;
+  const parts = flat.split(",").map((v) => v.trim()).filter(Boolean);
+  return parts[parts.length - 1];
+}

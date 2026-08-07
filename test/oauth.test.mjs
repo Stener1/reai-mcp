@@ -635,3 +635,23 @@ test("an allowed redirect host still reaches the consent page", () => {
   tight.provider.handleAuthorizeGet(url, res);
   assert.match(body, /name="request"/, "an allowed host must still get the consent form");
 });
+
+test("X-Forwarded-* uses the value the nearest proxy added, not the client's", async () => {
+  // Proxies APPEND to these headers, so index 0 is whatever the client sent and the
+  // rightmost entry is the one added closest to us. Taking the first meant a
+  // client-supplied "X-Forwarded-Host: attacker.example, real.host" won outright —
+  // spoofing the OAuth issuer and the resource_metadata pointer in the 401 challenge.
+  // Cloud Run does not strip a client-supplied X-Forwarded-Host, so it is reachable in
+  // the documented deployment; PUBLIC_URL closes it, which is why the deploy script
+  // always sets it and startup now warns when it is missing.
+  const { lastForwardedValue } = await import("../dist/config.js");
+
+  assert.equal(lastForwardedValue("attacker.example, real.host"), "real.host");
+  assert.equal(lastForwardedValue("real.host"), "real.host");
+  assert.equal(lastForwardedValue(["attacker.example", "real.host"]), "real.host");
+  assert.equal(lastForwardedValue(["a, b", "c"]), "c");
+  assert.equal(lastForwardedValue("  spaced.host  "), "spaced.host");
+  assert.equal(lastForwardedValue(undefined), undefined);
+  assert.equal(lastForwardedValue(""), undefined);
+  assert.equal(lastForwardedValue(", ,"), undefined);
+});

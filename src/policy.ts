@@ -495,6 +495,15 @@ export function classifyPaymentRouting(pathRisk: Risk, path: string, body: unkno
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
 }
 
+/**
+ * The only GETs believed to reach outside the tenant. Deliberately an explicit short
+ * list, not a pattern: everything else about GET being safe holds.
+ */
+const TRANSMITTING_GETS: readonly RegExp[] = [
+  /^\/api\/peppol\/messages\/phase4ping$/,
+  /^\/vat-return\/altinn-sync$/,
+];
+
 /** Body fields that arm an external send even on a non-transmitting path. */
 const TRANSMITTING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
   sendehf: (v) => v === true,
@@ -521,10 +530,22 @@ export function classifyTransmission(
   path: string,
   body?: unknown,
 ): Transmission {
-  if (method === "GET") return "none";
-
   const canonical = canonicalizeApiPath(path);
   const normalized = normalize(canonical?.pathname ?? path);
+
+  // GET is normally a read, and treating it as such is right for the whole API bar
+  // two endpoints that reach a third party despite the verb. `read-only` is the mode
+  // people point at a live business, so these are exactly the wrong thing to let
+  // through there.
+  //
+  // Stated honestly: NEITHER carries a description in the spec, so the effect is
+  // inferred from the path and its controller (peppol-sender-ctrl, vat-return-ctrl)
+  // rather than documented. Erring toward "this leaves the tenant" is the safe
+  // direction when the alternative is an unannounced AS4 ping onto the Peppol network
+  // or a sync with Altinn.
+  if (method === "GET") {
+    return TRANSMITTING_GETS.some((re) => re.test(normalized)) ? "external" : "none";
+  }
 
   if (TRANSMITTING_PATTERNS.some((re) => re.test(normalized))) return "external";
 

@@ -490,7 +490,20 @@ test("ordinary writes and all reads are not transmitting", () => {
   }
   // Reading an invoice sends nothing, even on a transmitting prefix.
   assert.equal(classifyTransmission("GET", "/api/invoices"), "none");
-  assert.equal(classifyTransmission("GET", "/api/peppol/messages/phase4ping"), "none");
+  assert.equal(classifyTransmission("GET", "/api/peppol/messages"), "none");
+});
+
+test("the two GETs that reach outside the tenant are treated as transmitting", () => {
+  // GET being a read holds for the whole API bar these two, and this assertion used to
+  // say phase4ping sends nothing. It is an AS4 ping onto the Peppol network; the other
+  // synchronises with Altinn. read-only is the mode people point at a live business,
+  // so it is exactly where they should not slip through.
+  //
+  // Neither carries a description in the spec, so the effect is inferred from the path
+  // and its controller rather than documented — erring toward "this leaves the tenant"
+  // is the safe direction.
+  assert.equal(classifyTransmission("GET", "/api/peppol/messages/phase4ping"), "external");
+  assert.equal(classifyTransmission("GET", "/vat-return/altinn-sync"), "external");
 });
 
 test("sendEhf in the body makes an otherwise local write transmitting", () => {
