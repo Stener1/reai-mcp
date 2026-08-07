@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { defineTool, ok, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import { isAllowed } from "../policy.js";
 import {
   buildReconcileData,
   MAX_ROWS,
   RECONCILE_TEMPLATE_URI,
+  resolveSide,
   type ReconcileData,
   type ReconciliationView,
 } from "../ui/reconciliation.js";
@@ -29,14 +31,22 @@ const MAX_DATA_CHARS = 12_000;
 function fitToBudget(data: ReconcileData): ReconcileData {
   let out = data;
   while (JSON.stringify(out).length > MAX_DATA_CHARS) {
-    const longer = out.transactions.length >= out.postings.length ? "transactions" : "postings";
-    const rows = out[longer];
+    // By COST, not by row count. Counting rows meant one 20,000-character description
+    // emptied the *other* column: the cheap side kept losing rows to pay for a defect in
+    // the expensive one.
+    const dearer =
+      JSON.stringify(out.transactions).length >= JSON.stringify(out.postings).length
+        ? "transactions"
+        : "postings";
+    const rows = out[dearer];
+    // Nothing left to drop means the overage is not in the rows. `buildReconcileData`
+    // bounds every scalar, so that is unreachable through the API — but silently returning
+    // an over-budget payload would be the wrong way to discover otherwise.
     if (rows.length === 0) break;
     // A tenth at a time. Halving converges in fewer passes but overshoots badly — a
-    // 400-row month landed at 60 rows inside a budget that fits well over 100, which
-    // discards rows the user could have matched.
+    // 400-row month landed at 60 rows inside a budget that fits well over 100.
     const keep = Math.max(0, rows.length - Math.max(1, Math.ceil(rows.length / 10)));
-    out = { ...out, [longer]: rows.slice(0, keep) };
+    out = { ...out, [dearer]: rows.slice(0, keep) };
   }
   return out;
 }
@@ -96,40 +106,59 @@ const reconcileUi = defineTool({
     const view = res.data ?? {};
 
     // Absence and zero are different answers, and conflating them is the failure this
-    // view exists to prevent — just moved one layer down. An empty body reported as
-    // "nothing to pair, this month is reconciled" is a positive claim about the books
-    // made from no evidence, and it is the sentence the MODEL reads.
-    const txList = Array.isArray(view.pendingTransactions) ? view.pendingTransactions : undefined;
-    const postList = Array.isArray(view.pendingPostings) ? view.pendingPostings : undefined;
-    const txCount = view.pendingTransactionCount ?? txList?.length;
-    const postCount = view.pendingPostingCount ?? postList?.length;
-    const knowNothing = txCount === undefined && postCount === undefined;
-    const countsWithoutRows =
-      (txCount !== undefined && txCount > 0 && txList === undefined) ||
-      (postCount !== undefined && postCount > 0 && postList === undefined);
+    // view exists to prevent — just moved one layer down. "Nothing to pair, this month is
+    // reconciled" derived from an empty body is a positive claim about the books made from
+    // no evidence, and it is the sentence the MODEL reads.
+    //
+    // Per SIDE, not for the pair. The first attempt required BOTH sides to be absent
+    // before it would admit ignorance, so a response mentioning only transactions was
+    // announced as reconciled on the strength of a ledger side nobody had reported — and a
+    // response with 3 transactions and no posting field printed "3 unmatched transaction(s)
+    // and 0 unmatched posting(s)", which is verbatim the shape that sends an agent to the
+    // booking tool.
+    const tx = resolveSide(view.pendingTransactionCount, view.pendingTransactions);
+    const post = resolveSide(view.pendingPostingCount, view.pendingPostings);
 
-    const data = fitToBudget(buildReconcileData(view, { bankAccountId, month, tenantId: tenant }));
+    const data = fitToBudget(
+      buildReconcileData(view, {
+        bankAccountId,
+        month,
+        tenantId: tenant,
+        canMatch: isAllowed("irreversible", ctx.config.writeMode),
+        writeMode: ctx.config.writeMode,
+      }),
+    );
 
     const where = `${data.bankAccountName} for ${data.month}`;
-    let note: string;
-    if (knowNothing) {
-      note =
-        `The reconciliation endpoint returned no counts and no lists for ${where}, so whether ` +
-        `anything is unmatched is unknown — this is NOT a reconciled month. Check the account ` +
-        `exists and has a bank feed (providerType 'manual' has no reconciliation view), then ` +
-        `read reai_list_bank_transactions directly.`;
-    } else if (countsWithoutRows) {
-      note =
-        `${txCount ?? "?"} unmatched transaction(s) and ${postCount ?? "?"} unmatched posting(s) ` +
-        `on ${where}, but the endpoint returned counts without the corresponding list, so the ` +
-        `view cannot show them. Read reai_get_bank_reconciliation to see the raw response.`;
-    } else if (data.transactionTotal === 0 && data.postingTotal === 0) {
+    const said = (facts: typeof tx, noun: string): string =>
+      facts.total === null ? `an unreported number of unmatched ${noun}(s)` : `${facts.total} unmatched ${noun}(s)`;
+
+    let note = `${said(tx, "transaction")} and ${said(post, "posting")} on ${where}.`;
+    if (tx.total === null || post.total === null) {
+      const which =
+        tx.total === null && post.total === null
+          ? "Neither side was"
+          : tx.total === null
+            ? "The bank side was not"
+            : "The ledger side was not";
+      note +=
+        ` ${which} reported by the endpoint, so this is NOT an established reconciliation — ` +
+        `unreported is not the same as nothing unmatched. Check the account has a bank feed ` +
+        `(providerType 'manual' has no reconciliation view), then read ` +
+        `reai_list_bank_transactions directly.`;
+    } else if (tx.rowsMissing || post.rowsMissing) {
+      note +=
+        ` The endpoint gave counts without the corresponding list, so the view cannot show ` +
+        `those rows. Read reai_get_bank_reconciliation to see the raw response.`;
+    } else if (tx.total === 0 && post.total === 0) {
       note = `Nothing unmatched on ${where} — this month is reconciled.`;
     } else {
-      note =
-        `${data.transactionTotal} unmatched transaction(s) and ${data.postingTotal} unmatched ` +
-        `posting(s) on ${where}. Pick a pairing in the view, then call ` +
-        `reai_match_bank_transactions with the ids.`;
+      note += ` Pick a pairing in the view, then call reai_match_bank_transactions with the ids.`;
+    }
+    if (tx.disagreed || post.disagreed) {
+      note +=
+        ` Note the endpoint's count disagreed with the list it returned; the list was ` +
+        `believed, because rows that exist are the harder fact.`;
     }
     if (data.locked) {
       note += ` The period is closed or locked, so matching will be refused until it is reopened.`;
@@ -137,14 +166,21 @@ const reconcileUi = defineTool({
     if (!data.comparable) {
       note +=
         ` This account is in ${data.bankCurrency} while the books are in ${data.tenantCurrency}, ` +
-        `so the view shows both figures per posting and does not compute a difference.`;
+        `so the view shows each posting's two figures by field name and computes no difference — ` +
+        `the API documents neither field, so which one is the bank's could not be established.`;
+    }
+    if (!data.canMatch) {
+      note +=
+        ` Matching is not available in write mode '${data.writeMode}': it is an irreversible ` +
+        `write, so reai_match_bank_transactions is not registered and the view's button is ` +
+        `disabled. The view still shows the exact call.`;
     }
     const shownTx = data.transactions.length;
     const shownPost = data.postings.length;
-    if (shownTx < data.transactionTotal || shownPost < data.postingTotal) {
+    if (shownTx < (tx.total ?? 0) || shownPost < (post.total ?? 0)) {
       note +=
-        ` The view shows ${shownTx} of ${data.transactionTotal} transaction(s) and ${shownPost} ` +
-        `of ${data.postingTotal} posting(s); match those first, or narrow the month.`;
+        ` The view shows ${shownTx} of ${tx.total} transaction(s) and ${shownPost} ` +
+        `of ${post.total} posting(s); match those first, or narrow the month.`;
     }
 
     // The counts and totals as TEXT, not only inside the view. A host that does not
@@ -158,8 +194,10 @@ const reconcileUi = defineTool({
       tenantCurrency: data.tenantCurrency,
       closed: view.closed ?? false,
       reconciliationLocked: view.reconciliationLocked ?? false,
-      pendingTransactionCount: txCount ?? null,
-      pendingPostingCount: postCount ?? null,
+      writeMode: data.writeMode,
+      matchingAvailable: data.canMatch,
+      pendingTransactionCount: tx.total,
+      pendingPostingCount: post.total,
       rowsShown: { transactions: shownTx, postings: shownPost, cap: MAX_ROWS },
       pendingTransactionsTotal: view.pendingTransactionsTotal,
       pendingPostingsTotal: view.pendingPostingsTotal,

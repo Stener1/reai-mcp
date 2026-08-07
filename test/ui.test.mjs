@@ -79,9 +79,15 @@ function makeElement(tag, doc) {
     },
     set textContent(v) {
       this._text = v === null || v === undefined ? "" : String(v);
+      // Detach, do not merely forget. The first version of this stub left every element
+      // it had ever created in the document's list, so a second delivery reported six
+      // checkboxes and double the selection sum — and would have reported the same if
+      // the view had regressed to appending rows instead of replacing them.
+      for (const child of this.children) child._attached = false;
       this.children = [];
     },
     appendChild(child) {
+      child._attached = true;
       this.children.push(child);
       return child;
     },
@@ -134,7 +140,7 @@ function mount() {
     },
     querySelectorAll(selector) {
       assert.equal(selector, "input[type=checkbox]", `unexpected selector: ${selector}`);
-      return doc._created.filter((n) => n.tagName === "INPUT" && n.type === "checkbox");
+      return doc._created.filter((n) => n.tagName === "INPUT" && n.type === "checkbox" && n._attached);
     },
     write() {
       throw new Error("the view called document.write");
@@ -163,15 +169,34 @@ function mount() {
     posted,
     element: (id) => doc.getElementById(id),
     boxes: () => doc.querySelectorAll("input[type=checkbox]"),
-    /** Deliver a tool result the way an MCP Apps host does. */
-    deliver(structuredContent) {
-      for (const fn of messageHandlers) {
-        fn({ data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent } } });
+    /** Send one raw frame from the host, for testing the handshake itself. */
+    host(msg) {
+      for (const fn of messageHandlers) fn({ data: msg });
+    },
+    /**
+     * Deliver a tool result the way a CONFORMING host does: answer ui/initialize, wait for
+     * ui/notifications/initialized, and only then send the data. A host is forbidden from
+     * sending anything before that notification, so a view that never sends it renders
+     * nothing — which is what this models.
+     */
+    deliver(structuredContent, { skipHandshake = false } = {}) {
+      const post = (msg) => {
+        for (const fn of messageHandlers) fn({ data: msg });
+      };
+      if (!skipHandshake) {
+        const init = posted.find((m) => m.method === "ui/initialize");
+        assert.ok(init, "the view must send ui/initialize");
+        post({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: "2026-01-26", hostContext: {} } });
+        assert.ok(
+          posted.some((m) => m.method === "ui/notifications/initialized"),
+          "the host may not send data until the view says it is initialized",
+        );
       }
+      post({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent } });
     },
     check(kind, id) {
       const box = doc
-        ._created.filter((n) => n.tagName === "INPUT")
+        ._created.filter((n) => n.tagName === "INPUT" && n._attached)
         .find((n) => n.dataset.kind === kind && n.dataset.id === String(id));
       assert.ok(box, `no ${kind} checkbox for id ${id}`);
       box.checked = true;
@@ -182,7 +207,13 @@ function mount() {
 }
 
 const data = (overrides = {}) => ({
-  ...buildReconcileData(sample(), { bankAccountId: 1338, month: "2026-07", tenantId: 2634 }),
+  ...buildReconcileData(sample(), {
+    bankAccountId: 1338,
+    month: "2026-07",
+    tenantId: 2634,
+    canMatch: true,
+    writeMode: "full",
+  }),
   ...overrides,
 });
 
@@ -379,6 +410,8 @@ test("a foreign-currency account shows both figures and computes no difference",
   const view = buildReconcileData(sample({ bankCurrency: "USD", tenantCurrency: "NOK" }), {
     bankAccountId: 1338,
     month: "2026-07",
+    canMatch: true,
+    writeMode: "full",
   });
   assert.equal(view.comparable, false);
 
@@ -435,19 +468,43 @@ test("an empty period says so, and a missing one does not claim to be reconciled
   assert.match(empty.element("tx-rows").textContent, /Nothing unmatched on the bank side/);
   assert.match(empty.element("post-rows").textContent, /Nothing unmatched on the ledger side/);
 
+  const unreported = mount();
+  unreported.deliver(data({ transactions: [], postings: [], transactionTotal: null, postingTotal: null }));
+  assert.match(unreported.element("subtitle").textContent, /an unreported number of unmatched transaction/);
+  assert.match(unreported.element("tx-rows").textContent, /not reported by the API/);
+  assert.doesNotMatch(unreported.element("tx-rows").textContent, /Nothing unmatched/);
+
   const locked = mount();
   locked.deliver(buildReconcileData(sample({ closed: true }), { bankAccountId: 1338, month: "2026-07" }));
   assert.match(locked.element("locked").textContent, /closed or locked/);
   assert.equal(locked.element("locked").hidden, false);
 
-  // Absence is not zero. An empty body reported as "this month is reconciled" is a
-  // positive claim about the books made from no evidence — and it is the sentence the
-  // MODEL reads. Reachable for real: a providerType 'manual' account has no
-  // reconciliation view.
+  // Absence is not zero, and it has to be judged PER SIDE. Requiring both sides to be
+  // absent before admitting ignorance meant a response mentioning only transactions was
+  // announced as reconciled on the strength of a ledger side nobody had reported.
   const nothing = await callTool(undefined);
   assert.doesNotMatch(nothing.text, /is reconciled/);
-  assert.match(nothing.text, /unknown/);
+  assert.match(nothing.text, /Neither side was reported/);
   assert.match(nothing.text, /manual/);
+
+  // Zero transactions, and the ledger side simply not mentioned. The old code called this
+  // a reconciled month.
+  const half = await callTool({ pendingTransactionCount: 0, pendingTransactions: [] });
+  assert.doesNotMatch(half.text, /is reconciled/);
+  assert.match(half.text, /The ledger side was not reported/);
+  assert.match(half.text, /an unreported number of unmatched posting\(s\)/);
+  assert.equal(half.structured.postingTotal, null, "an unreported side must not become 0");
+
+  // And the shape that sends an agent to the booking tool: rows on one side, silence on
+  // the other, printed as "and 0 unmatched posting(s)".
+  const oneSided = await callTool({
+    pendingTransactionCount: 3,
+    pendingTransactions: [
+      { id: 1, amount: 5, currency: "NOK", transactionDate: "2026-07-01", description: "x" },
+    ],
+  });
+  assert.doesNotMatch(oneSided.text, /0 unmatched posting/);
+  assert.match(oneSided.text, /The ledger side was not reported/);
 
   // Counts without the list is the other half: the totals are real, the rows are not.
   const partial = await callTool({
@@ -459,19 +516,32 @@ test("an empty period says so, and a missing one does not claim to be reconciled
   assert.doesNotMatch(partial.text, /is reconciled/);
   assert.match(partial.text, /counts without the corresponding list/);
 
+  // A count that contradicts its own list: believe the rows, and say so.
+  const stale = await callTool({
+    pendingTransactionCount: 0,
+    pendingTransactions: [
+      { id: 1, amount: 5, currency: "NOK", transactionDate: "2026-07-01", description: "x" },
+    ],
+    pendingPostingCount: 0,
+    pendingPostings: [],
+  });
+  assert.doesNotMatch(stale.text, /is reconciled/);
+  assert.match(stale.text, /count disagreed with the list/);
+  assert.equal(stale.structured.transactionTotal, 1);
+
   // And a genuinely reconciled month still says so.
   const done = await callTool({ pendingTransactionCount: 0, pendingPostingCount: 0 });
   assert.match(done.text, /this month is reconciled/);
 });
 
 /** Call the tool with a stubbed client and return its text plus structuredContent. */
-async function callTool(data, args = {}) {
+async function callTool(data, args = {}, writeMode = "full") {
   const [tool] = uiTools;
   const result = await tool.handler(
     { bankAccountId: 1338, month: "2026-07", tenantId: 2634, ...args },
     {
       client: { request: async () => ({ data, status: 200 }), deepLink: () => "link" },
-      config: { writeMode: "read-only", tenantId: 2634 },
+      config: { writeMode, tenantId: 2634 },
       session: {},
     },
   );
@@ -530,4 +600,170 @@ test("the per-call payload stays within a budget", async () => {
 
   // The template itself is a fixed cost, paid once by hosts that fetch it.
   assert.ok(renderTemplate().length < 20_000, `template was ${renderTemplate().length} chars`);
+});
+
+// The handshake is the one thing that decides whether this works at all. The spec is
+// explicit: "The Host MUST NOT send any request or notification to the View before it
+// receives an `initialized` notification." A view that sends `ui/initialize` and then
+// waits — which is what the first version did — sits on its placeholder forever, against
+// a conforming host, with no error anywhere.
+test("the view completes the MCP Apps handshake, in order", () => {
+  const ui = mount();
+  const init = ui.posted.find((m) => m.method === "ui/initialize");
+  assert.ok(init, "ui/initialize must be a request, sent on load");
+  assert.equal(init.jsonrpc, "2.0");
+  assert.ok(init.id !== undefined, "a request needs an id");
+  assert.deepEqual(init.params.appCapabilities.availableDisplayModes, ["inline", "fullscreen"]);
+  assert.equal(init.params.protocolVersion, "2026-01-26");
+
+  // Not before the host has answered.
+  assert.ok(
+    !ui.posted.some((m) => m.method === "ui/notifications/initialized"),
+    "initialized must not be sent before the initialize response",
+  );
+
+  ui.deliver(data());
+  const order = ui.posted.map((m) => m.method);
+  assert.deepEqual(order.slice(0, 2), ["ui/initialize", "ui/notifications/initialized"]);
+  assert.equal(
+    ui.posted.filter((m) => m.method === "ui/notifications/initialized").length,
+    1,
+    "exactly one initialized notification",
+  );
+  // And the data landed.
+  assert.match(ui.element("title").textContent, /drift/);
+});
+
+test("an initialize error still ends initialization rather than hanging", () => {
+  const ui = mount();
+  const init = ui.posted.find((m) => m.method === "ui/initialize");
+  ui.host({ jsonrpc: "2.0", id: init.id, error: { code: -32602, message: "unknown capability" } });
+  assert.ok(
+    ui.posted.some((m) => m.method === "ui/notifications/initialized"),
+    "a host that rejects the request has still spoken; staying silent guarantees no data",
+  );
+});
+
+// Matching is irreversible, so in the default write mode the tool is not registered at
+// all — a button posting tools/call for it fails with "unknown tool", never reaching the
+// write policy's explanation.
+test("the button is disabled when the server cannot match", async () => {
+  const ui = mount();
+  ui.deliver(data({ canMatch: false, writeMode: "reversible" }));
+  ui.check("tx", 43063);
+  ui.check("tx", 43064);
+  ui.check("post", 118681);
+  assert.equal(ui.element("match").disabled, true);
+  assert.match(ui.element("call").textContent, /write mode 'reversible'/);
+  assert.match(ui.element("call").textContent, /REAI_WRITE_MODE=full/);
+  // The exact call is still shown, and the running difference still computed — the view is
+  // useful for deciding even where it cannot act.
+  assert.match(ui.element("call").textContent, /reai_match_bank_transactions/);
+  assert.equal(ui.element("diff").textContent, "balanced");
+  ui.element("match").dispatch("click");
+  assert.equal(ui.posted.filter((m) => m.method === "tools/call").length, 0);
+
+  // And the text answer says so, keyed off the real write mode.
+  const blocked = await callTool(sample(), {}, "reversible");
+  assert.match(blocked.text, /Matching is not available in write mode 'reversible'/);
+  assert.equal(blocked.structured.canMatch, false);
+  const allowed = await callTool(sample(), {}, "full");
+  assert.doesNotMatch(allowed.text, /not available in write mode/);
+  assert.equal(allowed.structured.canMatch, true);
+});
+
+// The first fix for the currency problem labelled BOTH posting figures with the same
+// currency code, so whichever figure was which, one label was false — while the warning
+// above it said the two were shown in different currencies.
+test("cross-currency postings are labelled by field, not by a guessed currency", () => {
+  const view = buildReconcileData(
+    sample({
+      bankCurrency: "USD",
+      tenantCurrency: "NOK",
+      pendingPostings: [
+        {
+          id: 5,
+          amount: 1050,
+          currencyAmount: 100,
+          voucherNumber: "MV1-2026",
+          postingDate: "2026-07-01",
+          description: "levering",
+        },
+      ],
+      pendingPostingCount: 1,
+    }),
+    { bankAccountId: 1338, month: "2026-07", canMatch: true, writeMode: "full" },
+  );
+  const ui = mount();
+  ui.deliver(view);
+  const rows = ui.element("post-rows").textContent;
+  assert.match(rows, /1\u00a0050,00 \(amount\)/);
+  assert.match(rows, /100,00 \(currencyAmount\)/);
+  // Neither figure may carry a currency code, because which one is the bank's is unknown.
+  assert.doesNotMatch(rows, /NOK/);
+  assert.doesNotMatch(rows, /USD/);
+  // The bank column, whose currency IS known, still shows it.
+  assert.match(ui.element("tx-rows").textContent, /USD/);
+});
+
+// The expensive column pays for the budget, not the cheap one. Trimming by row COUNT meant
+// a busy bank side kept taking rows off a short ledger side that would have fitted whole.
+//
+// Note this can no longer be provoked by a single monstrous row: every description is
+// clamped to 120 characters on the way out, so per-row cost is bounded and only the number
+// of rows can overflow the budget. Both guards are deliberate — the clamp bounds the row,
+// the cost rule decides which column loses.
+test("the budget trims the expensive column, not the cheap one", async () => {
+  const { structured, text } = await callTool({
+    ...sample(),
+    pendingTransactionCount: 400,
+    pendingTransactions: Array.from({ length: 400 }, (_, i) => ({
+      id: 1000 + i,
+      amount: 1234.56,
+      currency: "NOK",
+      transactionDate: "2026-07-01",
+      description: `Fakturanr 2026-${i} — leveranse av kontorrekvisita til avdeling Hommelvik, jf. avtale`,
+      paymentReference: `KID${String(i).padStart(12, "0")}`,
+    })),
+    pendingPostingCount: 3,
+    pendingPostings: Array.from({ length: 3 }, (_, i) => ({
+      id: 100 + i,
+      amount: i,
+      currencyAmount: i,
+      voucherNumber: `MV${i}`,
+      postingDate: "2026-07-01",
+      description: "short",
+    })),
+  });
+  assert.equal(structured.postings.length, 3, "the cheap column must survive intact");
+  assert.ok(structured.transactions.length < 120, "the expensive one absorbs the trim");
+  assert.ok(JSON.stringify(structured).length <= 12_000);
+  // And the note agrees with the payload, whatever the trim did.
+  assert.match(text, new RegExp(`shows ${structured.transactions.length} of 400 transaction`));
+  assert.match(text, /3 of 3 posting/);
+});
+
+// A single monstrous row is bounded before the budget ever sees it.
+test("a row description is clamped, so one row cannot dominate", async () => {
+  const { structured } = await callTool({
+    ...sample(),
+    pendingTransactionCount: 1,
+    pendingTransactions: [
+      { id: 1, amount: 5, currency: "NOK", transactionDate: "2026-07-01", description: "x".repeat(20_000) },
+    ],
+  });
+  assert.equal(structured.transactions.length, 1, "the row survives; only its text is cut");
+  assert.ok(structured.transactions[0].description.length <= 120);
+  assert.ok(structured.transactions[0].description.endsWith("…"));
+});
+
+// A scalar the API controls must not be the one unbounded path to the model.
+test("a pathological scalar cannot blow the payload budget", async () => {
+  const { structured } = await callTool({ ...sample(), bankAccountName: "n".repeat(30_000) });
+  assert.ok(
+    JSON.stringify(structured).length <= 12_000,
+    `payload was ${JSON.stringify(structured).length} chars`,
+  );
+  assert.ok(structured.bankAccountName.length <= 120);
+  assert.ok(structured.bankAccountName.endsWith("…"), "and it says it was cut");
 });

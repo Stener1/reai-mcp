@@ -543,7 +543,6 @@ test("no read tool accepts an input it never sends", async () => {
   // dropped, which is worse than not offering it: the tool promised to exclude
   // system-only accounts and did not. This sweeps for the same class across every
   // read tool, so the next one fails here instead of shipping.
-  const { allTools } = await import("../dist/server.js");
 
   // A value the field will actually accept, so the handler behaves normally.
   const sentinelFor = (name, schema) => {

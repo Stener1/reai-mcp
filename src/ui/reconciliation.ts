@@ -95,15 +95,31 @@ export type ReconcileData = {
   /** Carried so the call the view offers to make names the same tenant the read used. */
   tenantId?: number;
   locked: boolean;
-  /** True totals, independent of how many rows travelled. */
-  transactionTotal: number;
-  postingTotal: number;
+  /**
+   * True totals, independent of how many rows travelled — or `null` when the endpoint
+   * said nothing about that side.
+   *
+   * Nullable on purpose. An absent list defaulted to `[]` and then to a total of 0, which
+   * is how "the API did not mention the ledger side" became "there are no unmatched
+   * postings" — the same absence-read-as-zero failure this view exists to prevent, one
+   * layer down.
+   */
+  transactionTotal: number | null;
+  postingTotal: number | null;
   /**
    * Whether the two columns' amounts are in the same currency and may therefore be
    * subtracted. When false the view shows both figures and declines to state a
    * difference — see the note in `buildReconcileData`.
    */
   comparable: boolean;
+  /**
+   * Whether `reai_match_bank_transactions` is registered at all under this server's write
+   * mode. Matching is irreversible, so in the default `reversible` mode the tool does not
+   * exist as far as the host is concerned — a button that posts `tools/call` for it fails
+   * with "unknown tool" rather than with the write policy's explanation.
+   */
+  canMatch: boolean;
+  writeMode: string;
   transactions: Array<{
     id: number;
     date: string;
@@ -122,8 +138,52 @@ export type ReconcileData = {
   }>;
 };
 
-const str = (v: unknown): string => (v === null || v === undefined ? "" : String(v));
+/**
+ * A scalar string, bounded.
+ *
+ * The row arrays are budgeted; these were not, so a pathological `bankAccountName` was the
+ * one path where an API string reached the model unbounded — `fitToBudget` trims rows and
+ * then gives up, because there are no rows left to drop.
+ */
+const str = (v: unknown, max = 120): string => {
+  if (v === null || v === undefined) return "";
+  const text = String(v);
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+/**
+ * What one column's count and list, taken together, actually establish.
+ *
+ * The two can disagree, and every combination has a different honest reading:
+ * absent count with absent list establishes nothing; a count of 0 with rows in the list
+ * means the count is stale, so the rows win; a positive count with no list means the
+ * total is real but the rows cannot be shown.
+ */
+export type SideFacts<T> = {
+  /** `null` when nothing was established. */
+  total: number | null;
+  rows: ReadonlyArray<T>;
+  /** The count was positive but the list absent, so rows exist that cannot be displayed. */
+  rowsMissing: boolean;
+  /** The count and the list contradicted each other; the list was believed. */
+  disagreed: boolean;
+};
+
+export function resolveSide<T>(
+  count: number | undefined,
+  list: ReadonlyArray<T> | undefined,
+): SideFacts<T> {
+  const rows = Array.isArray(list) ? list : undefined;
+  const counted = typeof count === "number" && Number.isFinite(count) ? count : undefined;
+  if (counted === undefined) {
+    return { total: rows === undefined ? null : rows.length, rows: rows ?? [], rowsMissing: false, disagreed: false };
+  }
+  if (rows !== undefined && rows.length > counted) {
+    return { total: rows.length, rows, rowsMissing: false, disagreed: true };
+  }
+  return { total: counted, rows: rows ?? [], rowsMissing: rows === undefined && counted > 0, disagreed: false };
+}
 
 /**
  * Reduce the API's reconciliation to what the view needs, capped and honest about it.
@@ -145,12 +205,21 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
  */
 export function buildReconcileData(
   view: ReconciliationView,
-  fallback: { bankAccountId: number; month: string; tenantId?: number },
+  fallback: {
+    bankAccountId: number;
+    month: string;
+    tenantId?: number;
+    /** Defaults to the safe reading: matching is not available. */
+    canMatch?: boolean;
+    writeMode?: string;
+  },
 ): ReconcileData {
   const bankCurrency = str(view.bankCurrency) || "NOK";
   const tenantCurrency = str(view.tenantCurrency) || bankCurrency;
-  const transactions = (view.pendingTransactions ?? []).slice(0, MAX_ROWS);
-  const postings = (view.pendingPostings ?? []).slice(0, MAX_ROWS);
+  const txSide = resolveSide(view.pendingTransactionCount, view.pendingTransactions);
+  const postSide = resolveSide(view.pendingPostingCount, view.pendingPostings);
+  const transactions = txSide.rows.slice(0, MAX_ROWS);
+  const postings = postSide.rows.slice(0, MAX_ROWS);
 
   return {
     bankAccountId: view.bankAccountId ?? fallback.bankAccountId,
@@ -160,9 +229,11 @@ export function buildReconcileData(
     month: str(view.month) || fallback.month,
     ...(fallback.tenantId === undefined ? {} : { tenantId: fallback.tenantId }),
     locked: view.closed === true || view.reconciliationLocked === true,
-    transactionTotal: view.pendingTransactionCount ?? (view.pendingTransactions ?? []).length,
-    postingTotal: view.pendingPostingCount ?? (view.pendingPostings ?? []).length,
+    transactionTotal: txSide.total,
+    postingTotal: postSide.total,
     comparable: bankCurrency === tenantCurrency,
+    canMatch: fallback.canMatch === true,
+    writeMode: str(fallback.writeMode) || "reversible",
     transactions: transactions.map((t) => ({
       id: num(t.id),
       date: str(t.transactionDate),
@@ -248,6 +319,7 @@ const SCRIPT = String.raw`
 (function () {
   var rpcId = 1;
   var data = null;
+  var initId = null;
 
   function send(method, params) {
     // The host is the MCP client on the other side of this frame; the view speaks
@@ -256,6 +328,7 @@ const SCRIPT = String.raw`
     if (params) msg.params = params;
     if (method.indexOf("notifications/") === -1) msg.id = rpcId++;
     window.parent.postMessage(msg, "*");
+    return msg.id;
   }
 
   function el(tag, className, text) {
@@ -274,7 +347,7 @@ const SCRIPT = String.raw`
     return currency ? formatted + " " + currency : formatted;
   }
 
-  function rowNode(kind, item, currency, altCurrency) {
+  function rowNode(kind, item, currency) {
     var label = el("label", "row");
     var box = document.createElement("input");
     box.type = "checkbox";
@@ -297,26 +370,36 @@ const SCRIPT = String.raw`
       ? (item.reference ? "ref " + item.reference : "")
       : (item.voucherNumber || "")));
 
-    var amt = el("span", "amt", money(item.amount, currency));
-    if (altCurrency && item.currencyAmount !== null && item.currencyAmount !== undefined) {
-      amt.appendChild(el("span", "alt", money(item.currencyAmount, altCurrency)));
+    // When the currencies differ, 'currency' is null: which of the posting's two figures
+    // is the bank's is undocumented, so labelling both with a currency code — as this did,
+    // and with the SAME code for both — asserts something false about at least one of
+    // them. The field names are the only truthful labels available.
+    var amt = el("span", "amt", currency === null
+      ? money(item.amount) + " (amount)"
+      : money(item.amount, currency));
+    if (currency === null && item.currencyAmount !== null && item.currencyAmount !== undefined) {
+      amt.appendChild(el("span", "alt", money(item.currencyAmount) + " (currencyAmount)"));
     }
     label.appendChild(amt);
     return label;
   }
 
-  function fill(hostId, kind, items, total, currency, altCurrency, emptyText) {
+  function fill(hostId, kind, items, total, currency, emptyText) {
     var host = document.getElementById(hostId);
     host.textContent = "";
     if (!items.length) {
-      host.appendChild(el("p", "empty", emptyText));
+      // A null total means the endpoint said nothing about this side. "Nothing unmatched"
+      // would be a claim; "not reported" is what happened.
+      host.appendChild(el("p", "empty", total === null || total === undefined
+        ? "This side was not reported by the API — that is not the same as nothing being unmatched."
+        : emptyText));
     } else {
       for (var i = 0; i < items.length; i++) {
-        host.appendChild(rowNode(kind, items[i], currency, altCurrency));
+        host.appendChild(rowNode(kind, items[i], currency));
       }
     }
     var trimmedEl = document.getElementById(hostId + "-trimmed");
-    trimmedEl.textContent = items.length < total
+    trimmedEl.textContent = (typeof total === "number" && items.length < total)
       ? "Showing " + items.length + " of " + total + ". Match these first, or narrow the month — a partial column is not the whole job."
       : "";
   }
@@ -371,6 +454,22 @@ const SCRIPT = String.raw`
       return;
     }
 
+    if (!data.canMatch) {
+      // The tool this button calls is irreversible, so it is not registered at all unless
+      // the server runs in 'full'. Posting tools/call for it would fail with "unknown
+      // tool" — not with the write policy's explanation, which never gets to run.
+      diffEl.textContent = data.comparable
+        ? (sel.diff === 0 ? "balanced" : "difference " + money(sel.diff, data.bankCurrency))
+        : "difference not computed here";
+      diffEl.className = "diff " + (data.comparable && sel.diff === 0 ? "balanced" : "unbalanced");
+      accountWrap.hidden = true;
+      button.disabled = true;
+      callEl.textContent = "reai_match_bank_transactions " + JSON.stringify(args(sel, null))
+        + "\n\nThis server runs in write mode '" + data.writeMode + "', where matching is not"
+        + " available — it is an irreversible write. Restart with REAI_WRITE_MODE=full to enable it.";
+      return;
+    }
+
     if (!data.comparable) {
       // Cross-currency: the two columns are not in the same unit, so any difference this
       // view printed would be arithmetic on unlike quantities.
@@ -399,9 +498,12 @@ const SCRIPT = String.raw`
   function render() {
     document.getElementById("title").textContent =
       "Bank reconciliation — " + data.bankAccountName + " " + data.month;
+    var count = function (n, noun) {
+      return (n === null || n === undefined ? "an unreported number of" : n) + " unmatched " + noun + "(s)";
+    };
     document.getElementById("subtitle").textContent =
-      data.transactionTotal + " unmatched transaction(s), " + data.postingTotal
-      + " unmatched posting(s). Pick one side and the other; the difference tells you whether they pair.";
+      count(data.transactionTotal, "transaction") + ", " + count(data.postingTotal, "posting")
+      + ". Pick one side and the other; the difference tells you whether they pair.";
 
     var lockedEl = document.getElementById("locked");
     lockedEl.hidden = !data.locked;
@@ -416,11 +518,10 @@ const SCRIPT = String.raw`
         + data.tenantCurrency + ". Postings are shown in both, and no difference is calculated — the two columns are not in the same unit.";
     }
 
-    var alt = data.comparable ? null : data.tenantCurrency;
-    fill("tx-rows", "tx", data.transactions, data.transactionTotal, data.bankCurrency, null,
+    fill("tx-rows", "tx", data.transactions, data.transactionTotal, data.bankCurrency,
       "Nothing unmatched on the bank side.");
     fill("post-rows", "post", data.postings, data.postingTotal,
-      data.comparable ? data.bankCurrency : data.tenantCurrency, alt,
+      data.comparable ? data.bankCurrency : null,
       "Nothing unmatched on the ledger side.");
     update();
   }
@@ -435,6 +536,19 @@ const SCRIPT = String.raw`
   window.addEventListener("message", function (event) {
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
+
+    // The handshake is not optional and not one-sided. The host MUST NOT send anything —
+    // including the tool result this view exists to render — before it receives
+    // 'ui/notifications/initialized' from us. Sending 'ui/initialize' and then waiting
+    // leaves the view on its placeholder forever, which is exactly what it did.
+    if (initId !== null && msg.id === initId) {
+      initId = null;
+      // An 'error' reply still ends initialization: the host has spoken, and staying
+      // silent guarantees no data. Nothing here depends on hostContext.
+      send("ui/notifications/initialized");
+      return;
+    }
+
     if (msg.method === "ui/notifications/tool-result") {
       var p = msg.params || {};
       // Hosts have been observed to nest the result; accept either shape rather than
@@ -444,7 +558,7 @@ const SCRIPT = String.raw`
   });
 
   document.getElementById("match").addEventListener("click", function () {
-    if (!data || !data.comparable) return;
+    if (!data || !data.comparable || !data.canMatch) return;
     var sel = selection();
     if (!sel.tx.length || !sel.post.length) return;
     var accountEl = document.getElementById("account");
@@ -458,7 +572,13 @@ const SCRIPT = String.raw`
 
   document.getElementById("account").addEventListener("input", update);
 
-  send("ui/initialize", { protocolVersion: "2026-01-26" });
+  initId = send("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    clientInfo: { name: "reai-reconciliation-view", version: "1" },
+    // Required of the view by the spec. This one is content that scrolls, so inline is
+    // where it belongs; fullscreen is offered because a 400-row month wants the room.
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  });
 })();
 `;
 

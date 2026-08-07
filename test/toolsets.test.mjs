@@ -172,7 +172,6 @@ function vatCodeFields(schema, depth = 0, path = "") {
 }
 
 test("every ledger-booking tool that takes a vatCode carries the tenant-specific caveat", async () => {
-  const { allTools } = await import("../dist/server.js");
   let checked = 0;
   for (const tool of registeredTools) {
     if (tool.risk !== "irreversible") continue;
@@ -196,7 +195,6 @@ test("every ledger-booking tool that takes a vatCode carries the tenant-specific
 // Issuing an invoice needs BOTH switches, and saying only "requires full" invites an
 // operator to set full and wonder why the tool is still missing.
 test("a transmitting tool names both switches it needs", async () => {
-  const { allTools } = await import("../dist/server.js");
   for (const tool of registeredTools.filter((t) => t.transmits === true)) {
     assert.match(
       tool.description,

@@ -16,13 +16,14 @@ export type ToolContext = {
 };
 
 /**
- * Text is what every tool returns. The embedded-resource block exists for the single UI
- * surface — the bank-reconciliation pairing view — and a result carrying one ALSO carries
- * the text answer, so a client that does not render resources loses nothing.
+ * Text is what every tool returns.
+ *
+ * The UI surface adds `structuredContent` alongside it rather than a second content block:
+ * under MCP Apps the view is a registered resource the host fetches once, so a tool result
+ * never carries markup. An embedded-resource arm existed here for the first version of that
+ * view and is gone with it.
  */
-export type ToolContentBlock =
-  | { type: "text"; text: string }
-  | { type: "resource"; resource: { uri: string; mimeType: string; text: string } };
+export type ToolContentBlock = { type: "text"; text: string };
 
 export type ToolResult = {
   content: ToolContentBlock[];
