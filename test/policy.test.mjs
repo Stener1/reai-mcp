@@ -262,16 +262,38 @@ test("subscription billing sub-paths are irreversible", () => {
   assert.equal(classifyRequest("DELETE", "/api/subscriptions/7"), "reversible");
 });
 
-test("escalation only triggers on an explicit true", () => {
+// This test used to assert that only a literal `true` escalates, and that
+// {"sendEhf":"true"} and {"sendEhf":1} were safe. That was written to the wrong
+// framework: the comments claimed ASP.NET, but the spec is springdoc-generated and
+// the backend is Spring with Jackson, whose default CoercionConfig binds the string
+// "true" and the integer 1 to Java `true`. So both of those armed an external send
+// the policy scored as sending nothing — and the test locked the gap in place.
+test("escalation follows what the value BINDS to, not its JavaScript type", () => {
   for (const body of [
     { sendEhf: false },
-    { sendEhf: "true" },
-    { sendEhf: 1 },
+    { sendEhf: 0 },
+    { sendEhf: "false" },
     { outputMode: "create_order" },
+    { outputMode: 0 },
     { sendEhf: null },
     {},
   ]) {
     assert.equal(classifyWithBody("reversible", body), "reversible", JSON.stringify(body));
+  }
+  for (const body of [
+    { sendEhf: true },
+    { sendEhf: "true" },
+    { sendEhf: "TRUE" },
+    { sendEhf: 1 },
+    { outputMode: "create_invoice" },
+    { outputMode: "CREATE_INVOICE" },
+    // Jackson accepts an integer ordinal for an enum unless FAIL_ON_NUMBERS_FOR_ENUMS
+    // is set, and it is off by default. outputMode is ["create_order","create_invoice"],
+    // so ordinal 1 is create_invoice.
+    { outputMode: 1 },
+    { automaticBillingGeneration: "true" },
+  ]) {
+    assert.equal(classifyWithBody("reversible", body), "irreversible", JSON.stringify(body));
   }
 });
 
@@ -510,7 +532,10 @@ test("sendEhf in the body makes an otherwise local write transmitting", () => {
   assert.equal(classifyTransmission("POST", "/api/orders"), "none");
   assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: true }), "external");
   assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: false }), "none");
-  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: "true" }), "none");
+  // "true" binds to Java true under Jackson, so it transmits — see the binding test.
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: "true" }), "external");
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: 1 }), "external");
+  assert.equal(classifyTransmission("POST", "/api/orders", { sendEhf: "false" }), "none");
   assert.deepEqual(transmittingBodyFields({ sendEhf: true }), ["sendEhf=true"]);
   assert.deepEqual(transmittingBodyFields({ sendEhf: false }), []);
 });

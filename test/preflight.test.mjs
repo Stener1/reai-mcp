@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveOperation, missingRequired, findOperation } from "../dist/reai/spec.js";
+import { resolveOperation, missingRequired, findOperation, getSpecIndex } from "../dist/reai/spec.js";
 import { allTools } from "../dist/server.js";
 import { ok } from "../dist/tools/registry.js";
 
@@ -732,4 +732,29 @@ test("an object whose first field is oversized reports that nothing fits", () =>
 test("a response under the limit is untouched", () => {
   const text = ok({ id: 1, name: "ok" }).content[0].text;
   assert.equal(text, '{\n  "id": 1,\n  "name": "ok"\n}');
+});
+
+// Required query parameters were compared case-INSENSITIVELY, on the stated grounds
+// that "ReAI is a .NET API and binding is case-insensitive by ASP.NET Core default".
+// The backend is Spring, and it is not. Measured against the live API on tenant 2634:
+//
+//   GET /api/vouchers?voucherType=SALARY  ->  0 rows   (filter applied)
+//   GET /api/vouchers?VoucherType=SALARY  -> 38 rows   (silently ignored)
+//
+// So the preflight told an agent its request was complete while the parameter did
+// nothing — the worst shape for a preflight, because the call then returns a
+// confidently wrong ANSWER rather than an error.
+test("a mis-cased required query parameter is reported, and the near-miss is named", () => {
+  const index = getSpecIndex();
+  const op = index.operations.find((o) => o.method === "GET" && o.path === "/api/timesheets");
+  assert.ok(op, "expected /api/timesheets in the index");
+
+  const right = missingRequired(op, { projectId: 7, startDate: "2026-01-01", endDate: "2026-01-31" }, undefined);
+  assert.deepEqual(right.params, [], "correctly cased parameters must satisfy the check");
+
+  const wrong = missingRequired(op, { ProjectId: 7, startDate: "2026-01-01", endDate: "2026-01-31" }, undefined);
+  assert.equal(wrong.params.length, 1);
+  assert.match(wrong.params[0], /^projectId/, "must name the parameter the API wants");
+  assert.match(wrong.params[0], /ProjectId/, "must quote what was actually sent");
+  assert.match(wrong.params[0], /case-sensitive/, "must say why it did not bind");
 });
