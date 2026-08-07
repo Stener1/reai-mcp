@@ -292,6 +292,38 @@ test("the schema lets an empty line array reach the handler that explains it", (
   assert.equal(tool("reai_create_subscription").inputSchema.subscriptionLines.safeParse([]).success, false);
 });
 
+// Omission means "carry over", so null is the only way left to unlink — and adding .optional()
+// alone left no way at all to detach a subscription from its project or agreement.
+test("null unlinks the relations the document says are nullable, and only those", async () => {
+  const schema = tool("reai_update_subscription").inputSchema;
+  for (const field of ["agreementId", "projectId", "invoiceEmail", "invoiceComment", "internalComment"]) {
+    assert.equal(schema[field].safeParse(null).success, true, `${field} must be clearable with null`);
+  }
+  // These four are non-nullable in the document, so null must stay refused: accepting it would
+  // pass local validation only to fail at the API.
+  for (const field of ["daysUntilDue", "periodAlignment", "sendEhf", "serviceRecipients"]) {
+    assert.equal(schema[field].safeParse(null).success, false, `${field} is not nullable upstream`);
+  }
+
+  // And the null actually reaches the body rather than being treated as "unmentioned".
+  const stored = {
+    id: 4,
+    customerId: 12,
+    startDate: "2026-01-01",
+    intervalMonths: 1,
+    billingTiming: "in_advance",
+    currencyCode: "NOK",
+    outputMode: "create_order",
+    automaticBillingGeneration: false,
+    projectId: 77,
+    invoiceEmail: "billing@example.invalid",
+    lines: [{ rowNumber: 1, itemName: "Drift", quantity: 1, unitPrice: 1000 }],
+  };
+  const { calls } = await run("reai_update_subscription", { id: 4, projectId: null }, () => stored);
+  assert.equal(calls[1].body.projectId, null, "the unlink must be sent, not dropped");
+  assert.equal(calls[1].body.invoiceEmail, "billing@example.invalid", "and nothing else changes");
+});
+
 test("an edit that would leave no billing lines is refused", async () => {
   // `missing` only catches undefined/null/"", so an empty array would have replaced a billing
   // subscription with one that bills for nothing.

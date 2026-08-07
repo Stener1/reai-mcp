@@ -286,6 +286,11 @@ async function main() {
       arguments: { name: `${STAMP} sub customer`, privateContact: true, skipRegistryLookup: true },
     });
     const subCustomer = subCustRes.isError ? undefined : jsonOf(subCustRes)?.id;
+    // Recorded BEFORE the next remote call. It used to be assigned after the subscription work,
+    // so a transport failure anywhere in between left the finally with nothing to delete and the
+    // customer alive on the tenant. Note the cleanup-placement guard cannot see this: the key IS
+    // referenced in the finally, and what was wrong was when it got set.
+    if (Number.isInteger(subCustomer)) created.subscriptionCustomerId = subCustomer;
     if (Number.isInteger(subCustomer)) {
       const subRes = await client.callTool({
         name: "reai_create_subscription",
@@ -365,8 +370,6 @@ async function main() {
           firstLineOf(textOf(delivery)),
         );
       }
-      // The customer this subscription belongs to, cleaned up after it below.
-      created.subscriptionCustomerId = subCustomer;
     }
 
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no

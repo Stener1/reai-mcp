@@ -438,6 +438,18 @@ const updateSubscription = defineTool({
     // Every field optional: the stored subscription supplies whatever the caller does not. The
     // create tool keeps the required versions, which is where they belong.
     ...optionalShape(writeFields),
+    // Omission now means "carry the stored value over", so null is the only way left to UNLINK
+    // something — and optionalShape adds only `.optional()`, which left no way at all to detach a
+    // subscription from its project or agreement. A capability this change removed by accident.
+    //
+    // Exactly the five the document types as nullable. daysUntilDue, periodAlignment, sendEhf and
+    // serviceRecipients are NOT nullable, so null stays rejected for them — an empty array is how
+    // service recipients are cleared, and the merge lets an explicit [] win.
+    agreementId: writeFields.agreementId.nullable().optional(),
+    projectId: writeFields.projectId.nullable().optional(),
+    invoiceEmail: writeFields.invoiceEmail.nullable().optional(),
+    invoiceComment: writeFields.invoiceComment.nullable().optional(),
+    internalComment: writeFields.internalComment.nullable().optional(),
     // Overridden to ALLOW an empty array, which the create tool's .min(1) rejects. Not because
     // the API accepts one — it does not — but because "empty the lines to stop the billing" is a
     // plausible wrong idea, and the handler answers it by naming reai_deactivate_subscription.
