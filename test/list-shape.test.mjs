@@ -200,9 +200,14 @@ test("okList separates the three answers", () => {
   assert.match(note(surprise), /NOT a report of "no orders"/);
   // "unchanged" was a promise okList cannot keep: ok() truncates a large payload and says so.
   assert.doesNotMatch(note(surprise), /unchanged/);
-  // A suffix that carries a fact is not swallowed by the empty message.
-  const widened = okList([], { noun: "order", suffix: " Window widened back to 2000-01-01.", empty: "No open orders." });
-  assert.match(note(widened), /No open orders\. Window widened back to 2000-01-01\./);
+  // A fact-carrying suffix survives at zero — because the tools that have one pass no
+  // `empty`, which is how orders, offers and invoices actually call this.
+  const widened = okList([], { noun: "order", suffix: ". Window widened back to 2000-01-01." });
+  assert.equal(note(widened), "0 order(s). Window widened back to 2000-01-01.");
+  // And `empty` replaces the note outright, rather than appending a sentence about what a
+  // collection returns when it returned nothing. This produced a doubled full stop live.
+  const none = okList([], { noun: "employee", suffix: ". The collection returns id and name.", empty: "No employees are registered." });
+  assert.equal(note(none), "No employees are registered.");
   assert.match(surprise.content[0].text, /"id": 7/);
   // null and undefined are not lists either, and must not be counted as zero.
   for (const value of [null, undefined, "text", 42]) {

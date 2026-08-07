@@ -246,14 +246,22 @@ export function okList(
     });
   }
   return ok(data, {
-    // The suffix survives the empty message. Where a suffix carries a FACT rather than
-    // punctuation — the widened-window sentences on orders, offers and invoices — the empty
-    // case is exactly when the caller needs it, since "0 results" and "0 results even after
-    // widening the window back to 2000" are different answers.
-    note:
-      data.length === 0 && empty
-        ? `${empty}${suffix.trim() === "." ? "" : suffix}`
-        : `${data.length} ${noun}(s)${suffix}`,
+    // `empty` REPLACES the whole note, suffix included.
+    //
+    // A previous version appended the suffix to it, to keep a fact-carrying suffix — the
+    // widened-window sentences on orders, offers and invoices — from being lost at zero.
+    // That was solving a case that does not exist: those tools pass no `empty` at all, so
+    // they already read "0 order(s). Window widened back to 2000-01-01." at zero, which is
+    // exactly right. What it did instead was produce
+    //
+    //   "No employees are registered on this tenant.. The collection returns id, name and
+    //    email only"
+    //
+    // against the live API — a doubled full stop, and a sentence about what the collection
+    // returns when it returned nothing. A suffix describing the RESULT SET is noise once
+    // there is no result set; one describing the QUERY belongs in the count branch, where
+    // it already is.
+    note: data.length === 0 && empty ? empty : `${data.length} ${noun}(s)${suffix}`,
   });
 }
 

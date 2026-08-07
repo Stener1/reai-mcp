@@ -81,13 +81,13 @@ const getAsset = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/assets/{id}"]],
   inputSchema: {
-    assetId: z.number().int().positive().describe("Asset id, from reai_list_assets."),
+    id: z.number().int().positive().describe("Asset id, from reai_list_assets."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const res = await ctx.client.request({
       method: "GET",
-      path: `/api/assets/${args.assetId}`,
+      path: `/api/assets/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     return ok(res.data);

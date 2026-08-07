@@ -423,6 +423,106 @@ async function main() {
       report("reai_parse_ehf_attachment", false, String(err));
     }
 
+    // 7c. Single-record getters. Every one of these had never been called against the
+    //     live API — 12 of 43 read tools were unexercised, all but one a GET by id —
+    //     because the suite had no id to pass them. Chained off the list tools instead,
+    //     the way the bank-reconciliation check already chains off company banks.
+    //
+    //     An empty collection is the common case on a fresh tenant and reports SKIP with
+    //     the reason. That is deliberately not a pass: "never ran" and "ran and worked"
+    //     are the distinction this whole server is about, and a silent pass here would be
+    //     the same absence-read-as-success the tools themselves are guarded against.
+    const recentMonths = (count) => {
+      const out = [];
+      const now = new Date();
+      for (let i = 0; i < count; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+      }
+      return out;
+    };
+    const firstIdOf = (text) => {
+      const body = text.slice(text.indexOf("\n\n") + 2);
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return null;
+      }
+      const rows = Array.isArray(parsed) ? parsed : (parsed?.content ?? parsed?.items ?? []);
+      return Array.isArray(rows) && rows.length ? (rows[0]?.id ?? null) : null;
+    };
+    for (const [listName, getName, listArgs] of [
+      ["reai_list_vouchers", "reai_get_voucher", { tenantId }],
+      ["reai_list_customers", "reai_get_customer", { tenantId }],
+      ["reai_list_orders", "reai_get_order", { tenantId }],
+      ["reai_list_invoices", "reai_get_invoice", { tenantId }],
+      ["reai_list_suppliers", "reai_get_supplier", { tenantId }],
+      ["reai_list_supplier_invoices", "reai_get_supplier_invoice", { tenantId }],
+      ["reai_list_departments", "reai_get_department", { tenantId }],
+      ["reai_list_employees", "reai_get_employee", { tenantId }],
+      ["reai_list_assets", "reai_get_asset", { tenantId }],
+    ]) {
+      try {
+        const listed = await client.callTool({ name: listName, arguments: listArgs });
+        const id = firstIdOf(textOf(listed));
+        if (id === null) {
+          console.log(`  [SKIP] ${getName} — ${listName} returned nothing to fetch on this tenant`);
+          continue;
+        }
+        const res = await client.callTool({ name: getName, arguments: { id, tenantId } });
+        const text = textOf(res);
+        // The id we asked for has to be the id we got back. A getter that ignores its
+        // argument and returns something else would otherwise look fine.
+        report(
+          getName,
+          !res.isError && new RegExp(`"id"\\s*:\\s*${id}\\b`).test(text),
+          `id=${id} → ${text.split("\n")[0].slice(0, 60)}`,
+        );
+      } catch (err) {
+        report(getName, false, String(err));
+      }
+    }
+
+    // 7d. The one getter with no list endpoint behind it. Bank transactions are only
+    //     reachable through a reconciliation, so this walks company banks → the current
+    //     month's reconciliation → the first transaction id it can find, in either the
+    //     pending or the matched groups.
+    try {
+      const banks = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
+      const bankAccountId = firstIdOf(textOf(banks));
+      let transactionId = null;
+      if (bankAccountId !== null) {
+        for (const month of recentMonths(4)) {
+          const rec = await client.callTool({
+            name: "reai_get_bank_reconciliation",
+            arguments: { bankAccountId, month, tenantId },
+          });
+          const found = /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec));
+          if (found) {
+            transactionId = Number(found[1]);
+            break;
+          }
+        }
+      }
+      if (transactionId === null) {
+        console.log("  [SKIP] reai_get_bank_transaction — no bank transaction on this tenant to fetch");
+      } else {
+        const res = await client.callTool({
+          name: "reai_get_bank_transaction",
+          arguments: { id: transactionId, tenantId },
+        });
+        const text = textOf(res);
+        report(
+          "reai_get_bank_transaction",
+          !res.isError && new RegExp(`"id"\\s*:\\s*${transactionId}\\b`).test(text),
+          `id=${transactionId} → ${text.split("\n")[0].slice(0, 56)}`,
+        );
+      }
+    } catch (err) {
+      report("reai_get_bank_transaction", false, String(err));
+    }
+
     // 8. Irreversible sales tools must be hidden in this mode, and the escape
     // hatch must refuse a transmitting flag on an otherwise-reversible path.
     // Derive the diagnostic from the same list the assertion uses, so a genuine

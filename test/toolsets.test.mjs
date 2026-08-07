@@ -387,3 +387,25 @@ test("the README's payment-routing table matches the classifier", async () => {
   }
   assert.match(readme, /`invoiceEmail` \| customers, orders, subscriptions/);
 });
+
+// Six getters took `id` and the three most recently added took `<noun>Id`. Two conventions
+// is one too many: an agent that guesses wrong gets "Invalid arguments for tool", which is
+// what happened to me writing a probe against this repo's own tools. Where a tool takes a
+// single record id, it is `id`; where several ids or a period are in play — the bank
+// reconciliation's bankAccountId + month — explicit names are right and this leaves them be.
+test("a getter that takes one record id calls it `id`", () => {
+  const wrong = [];
+  for (const tool of registeredTools) {
+    // Scoped to "fetch one record by its id" — reai_get_*. Deliberately NOT every tool
+    // with an id argument: reai_parse_ehf_attachment does something TO an attachment and
+    // reai_reconcile_ui renders a period for an account, and for those the noun carries
+    // meaning the bare word would lose. reai_get_bank_reconciliation is excluded for the
+    // same reason by the key count — it queries a period, it does not fetch a record.
+    if (tool.risk !== "read" || !tool.name.startsWith("reai_get_")) continue;
+    const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
+    const ids = keys.filter((k) => /^[a-z][A-Za-z]*Id$/.test(k));
+    if (ids.length !== 1 || keys.length > 2) continue;
+    wrong.push(`${tool.name}: ${ids[0]}`);
+  }
+  assert.deepEqual(wrong, [], "single-id read tools should take `id`, like the other six do");
+});
