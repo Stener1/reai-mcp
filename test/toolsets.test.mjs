@@ -331,3 +331,43 @@ test("the README documents the transport limits the code enforces", async () => 
   // And the 405, which looks like a defect to anyone who has not read why.
   assert.match(readme, /GET \/mcp` answers \*\*405\*\*/);
 });
+
+// The README presented these fields as path-specific — `iban` for counterparties,
+// `bban` for company banks — when all five apply to every in-scope path, and it omitted
+// `accountNumber` and the supplier-invoice payment-details path entirely. A table that
+// describes a safety rule has to match the rule.
+test("the README's payment-routing table matches the classifier", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { classifyPaymentRouting, classifyInvoiceDelivery } = await import("../dist/policy.js");
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  const paymentFields = ["iban", "bankAccountNumber", "swiftCode", "accountNumber", "bban"];
+  const paths = [
+    ["PATCH", "/api/suppliers/5"],
+    ["PATCH", "/api/customers/5"],
+    ["PATCH", "/api/creditors/5"],
+    ["PUT", "/api/company-banks/5"],
+    ["PATCH", "/api/supplier-invoices/5/payment-details"],
+  ];
+  // Every field escalates on every one of these paths — that is the claim the table now
+  // makes, so it is the claim the code has to keep true.
+  for (const field of paymentFields) {
+    for (const [method, path] of paths) {
+      assert.equal(
+        classifyPaymentRouting("reversible", path, { [field]: "x" }, method),
+        "irreversible",
+        `${method} ${path} with ${field} should escalate`,
+      );
+    }
+    assert.ok(readme.includes(`\`${field}\``), `the README must list ${field}`);
+  }
+  // Adding a company bank is deliberately not escalated, and the table says so.
+  assert.equal(classifyPaymentRouting("reversible", "/api/company-banks", { bban: "x" }, "POST"), "reversible");
+  assert.match(readme, /Adding\* a company bank stays ordinary work|\*Adding\* a company bank/);
+
+  // Invoice delivery is the second row, and its scope is wider than customers.
+  for (const path of ["/api/customers/5", "/api/orders", "/api/subscriptions/3"]) {
+    assert.equal(classifyInvoiceDelivery("reversible", path, { invoiceEmail: "a@b.c" }), "irreversible", path);
+  }
+  assert.match(readme, /`invoiceEmail` \| customers, orders, subscriptions/);
+});
