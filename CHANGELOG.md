@@ -240,13 +240,22 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
   in — gating at `high` today is a statement about one known outstanding item, not a
   standing tolerance.
 - **No sandbox exists** for ReAI. Write paths are therefore verified against a
-  real but empty tenant, and three of them are still untested end to end:
-  issuing an invoice or credit note (it transmits, and cannot be recalled),
-  registering a payment, and settling a VAT period or filing a tax return (both
-  change a real company's period state). Everything else — ledger postings, the
-  supplier-invoice chain, bank accounts and reconciliation rules — has been
-  posted to live books and cleaned up again, with the tenant verified empty
-  afterwards.
+  real but empty tenant, and two of them remain untested end to end: issuing an
+  invoice or credit note (it transmits, and cannot be recalled), and settling a VAT
+  period or filing a tax return (both change a real company's period state).
+
+  A manual **supplier payment** is now covered, which previously was not. The
+  hazard there was never the record but the flow: `manualPayment: false` selects the
+  bank integration and can return an approval URL that begins a BankID transfer.
+  With `manualPayment: true` the API handles it manually, and the suite asserts the
+  response carries no `approvalUrl` rather than trusting that — an approval URL being
+  exactly the signal that a transfer is waiting on a human. Customer and salary
+  payments stay out: the first needs an issued invoice, which transmits, and the
+  second pays a person.
+
+  Everything else — ledger postings, the supplier-invoice chain, bank accounts and
+  reconciliation rules — has been posted to live books and cleaned up again, with the
+  tenant verified empty afterwards.
 
 ## 0.1.0
 

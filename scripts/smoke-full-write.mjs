@@ -146,6 +146,7 @@ async function main() {
   const created = {
     voucherId: undefined,
     bankId: undefined,
+    supplierPaymentId: undefined,
     ruleId: undefined,
     supplierInvoiceId: undefined,
     supplierId: undefined,
@@ -353,6 +354,48 @@ async function main() {
           noMode.isError === true,
           (textOf(noMode).split("\n")[0] ?? "").slice(0, 100),
         );
+
+        // Actually register one. This was on the untested list because the tool can
+        // start a real bank transfer — but only via manualPayment=false, which selects
+        // the integration flow. With manualPayment=true the spec says the payment is
+        // "handled manually", and that is verified rather than assumed below: the
+        // response must carry no approvalUrl, since an approvalUrl is precisely the
+        // signal that ReAI has asked a human to authorise a transfer.
+        if (created.bankId) {
+          const payRes = await client.callTool({
+            name: "reai_register_supplier_invoice_payment",
+            arguments: {
+              id: created.supplierInvoiceId,
+              paymentDate: today,
+              invoiceAmount: 125,
+              manualPayment: true,
+              companyBankId: created.bankId,
+              bankDebitAmount: 125,
+            },
+          });
+          const payData = payRes.isError ? undefined : jsonOf(payRes);
+          const payText = textOf(payRes);
+          report(
+            "a manual supplier payment is registered",
+            !payRes.isError && Number.isInteger(payData?.paymentId),
+            payData?.paymentId ? `paymentId=${payData.paymentId} status=${payData.status}` : payText.slice(0, 160),
+          );
+          // The whole reason this path was left untested. An approvalUrl here would mean
+          // a transfer is waiting on a human, which is not something a smoke test may do.
+          report(
+            "no bank approval was started (manualPayment=true instructs no bank)",
+            !payRes.isError && !payData?.approvalUrl,
+            payData?.approvalUrl ? `approvalUrl PRESENT: ${payData.approvalUrl}` : "approvalUrl is null",
+          );
+          report(
+            "the tool reports the status the API returned",
+            payText.includes(String(payData?.status ?? "")),
+            (payText.split("\n")[0] ?? "").slice(0, 120),
+          );
+          if (Number.isInteger(payData?.paymentId)) {
+            created.supplierPaymentId = payData.paymentId;
+          }
+        }
       }
     }
 
@@ -392,6 +435,20 @@ async function main() {
       await attempt(
         "reconciliation rule deleted",
         () => client.callTool({ name: "reai_delete_reconciliation_rule", arguments: { id: created.ruleId } }),
+        (r) => textOf(r).slice(0, 90),
+      );
+    }
+    if (created.supplierPaymentId && created.supplierInvoiceId) {
+      await attempt(
+        "supplier payment deleted",
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: {
+              method: "DELETE",
+              path: `/api/supplier-invoices/${created.supplierInvoiceId}/payments/${created.supplierPaymentId}`,
+            },
+          }),
         (r) => textOf(r).slice(0, 90),
       );
     }
@@ -493,8 +550,11 @@ async function main() {
     "\nDeliberately NOT tested:\n" +
       "  - issuing an invoice or credit note — TRANSMITS to the customer and cannot be\n" +
       "    recalled. Not a reversibility question, and no flag in this script enables it.\n" +
-      "  - registering an actual payment (customer, supplier or salary) — moves money or\n" +
-      "    records that it moved; the tool's guards are asserted above without paying.\n" +
+      "  - registering a CUSTOMER or SALARY payment — a customer payment needs an issued\n" +
+      "    invoice, which transmits, and a salary run pays a person. A manual SUPPLIER\n" +
+      "    payment IS registered above: manualPayment=true is handled manually rather than\n" +
+      "    through the bank integration, and the absence of an approvalUrl is asserted\n" +
+      "    rather than assumed, since that is the signal a transfer awaits a human.\n" +
       "  - settling a VAT period — locks the books for it, and reopening is a privileged\n" +
       "    operation, so a test would leave a real company's period in a changed state.\n" +
       "  - tax return submission — files with Skatteetaten, with no idempotency guard.",
