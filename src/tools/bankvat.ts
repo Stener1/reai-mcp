@@ -7,6 +7,7 @@ import {
   requireTenantId,
   tenantIdArg,
   type ToolDef,
+  requiredName,
 } from "./registry.js";
 
 /**
@@ -80,7 +81,11 @@ const createCompanyBank = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/company-banks"]],
   inputSchema: {
-    name: z.string().describe('A label for the account, e.g. "Drift" or "Skattetrekk".'),
+    name: requiredName(255)
+      .describe(
+        'A label for the account, e.g. "Drift" or "Skattetrekk". At most 255 characters — the API ' +
+          'answers "name must be at most 255 characters" beyond that.',
+      ),
     countryCode: z
       .string()
       .regex(/^[A-Z]{2}$/, 'Two-letter uppercase ISO country code, e.g. "NO".')

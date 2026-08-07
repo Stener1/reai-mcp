@@ -630,11 +630,21 @@ test("constraints the descriptions promise are enforced, and no further", () => 
   assert.equal(accepts(offer.inputSchema.offerLines, [line({ unitPrice: 0 })]), true);
   assert.equal(accepts(order.inputSchema.orderLines, [line({ unitPrice: -50 })]), true);
 
-  // CreateCustomerReq declares minLength 0 on purpose: supplying an organizationNumber
-  // and letting the Brønnøysund lookup fill the name is the documented flow, and
-  // requiring a name removes its only valid representation.
-  assert.equal(accepts(customer.inputSchema.name, ""), true);
-  assert.equal(accepts(supplier.inputSchema.name, ""), true);
+  // This used to assert the opposite — that an empty name is VALID — reasoning from
+  // CreateCustomerReq declaring minLength 0, and that supplying an organizationNumber
+  // and letting the Brønnøysund lookup fill the name is the documented flow. The live
+  // API disagrees on both counts:
+  //
+  //   POST /api/customers {"name": ""}                          -> 400 "name is required"
+  //   POST /api/customers {"name": "   "}                       -> 400 "name is required"
+  //   POST /api/customers {"name": "", organizationNumber: ...} -> 400 "name is required"
+  //
+  // The third case is the one that settles it: the lookup does not fill an omitted name.
+  assert.equal(accepts(customer.inputSchema.name, ""), false);
+  assert.equal(accepts(supplier.inputSchema.name, ""), false);
+  assert.equal(accepts(customer.inputSchema.name, "   "), false);
+  // ...while a real name of course still passes, in both directions of this test.
+  assert.equal(accepts(customer.inputSchema.name, "Acme AS"), true);
 });
 
 
@@ -983,4 +993,42 @@ test("a mixed-sign supplier invoice is refused with a way forward", async () => 
   );
   assert.equal(credit.isError, undefined);
   assert.equal(sent, 1);
+});
+
+// Each of these was verified against the live API before being tightened, because the
+// spec is wrong in at least one place and guessing has cost this project twice — once by
+// leaving a field looser than the API (a wasted round trip and a worse message) and once
+// by making one tighter (a legitimate value refused).
+test("validation matches what the API actually enforces", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const field = (tool, name) => allTools.find((t) => t.name === tool)?.inputSchema?.[name];
+  const accepts = (tool, name, value) => field(tool, name).safeParse(value).success;
+
+  // POST /api/customers {"name":""} and {"name":"   "} both answer 400 "name is
+  // required" — including WITH an organizationNumber, which disproves the claim these
+  // tools carried that a Brønnøysund lookup can fill an omitted name.
+  for (const [tool, name] of [
+    ["reai_create_customer", "name"],
+    ["reai_create_supplier", "name"],
+    ["reai_create_product", "title"],
+    ["reai_create_company_bank", "name"],
+  ]) {
+    assert.equal(accepts(tool, name, "Acme AS"), true, `${tool}.${name} must accept a real name`);
+    assert.equal(accepts(tool, name, ""), false, `${tool}.${name} must reject an empty name`);
+    assert.equal(accepts(tool, name, "   "), false, `${tool}.${name} must reject whitespace`);
+  }
+
+  // "name must be at most 255 characters", verbatim from the API.
+  assert.equal(accepts("reai_create_company_bank", "name", "x".repeat(255)), true);
+  assert.equal(accepts("reai_create_company_bank", "name", "x".repeat(256)), false);
+
+  // "must contain only digits" and "must be exactly 11 digits", both from one response.
+  const nid = "nationalIdentityNumber";
+  assert.equal(accepts("reai_create_customer", nid, "12345678901"), true);
+  assert.equal(accepts("reai_create_customer", nid, "abc"), false);
+  assert.equal(accepts("reai_create_customer", nid, "1234567890"), false, "ten digits is not eleven");
+  assert.equal(accepts("reai_create_customer", nid, "123 45678901"), false, "separators are digits-only failures");
+  // Optional, so omitting it stays valid — a refinement next to .optional() is easy to
+  // get wrong in the direction that breaks every caller who does not use the field.
+  assert.equal(field("reai_create_customer", nid).safeParse(undefined).success, true);
 });

@@ -324,6 +324,30 @@ export const oreAmount = z
   .number()
   .refine(isWholeOre, { message: "Amount must be a whole number of øre (at most 2 decimals)." });
 
+/**
+ * A name the API will accept: present, and not just whitespace.
+ *
+ * Verified against the live API rather than read off the schema, because the schema is
+ * wrong here — `CreateCustomerReq.name` declares `minLength: 0`, and an earlier review
+ * concluded from that an empty name was "correctly permitted". It is not:
+ *
+ *   POST /api/customers {"name": ""}                          -> 400 name="name is required"
+ *   POST /api/customers {"name": "   "}                       -> 400 name="name is required"
+ *   POST /api/customers {"name": "", organizationNumber: ...} -> 400 name="name is required"
+ *
+ * That last one also disproves the claim these tools carried, that a name may be
+ * omitted when a Brønnøysund lookup can fill it in.
+ *
+ * A factory rather than a constant because `.refine()` yields a ZodEffects, which has
+ * no `.max()` to chain — the length bound has to be applied to the string first.
+ */
+export function requiredName(maxLength?: number) {
+  const base = maxLength === undefined ? z.string() : z.string().max(maxLength);
+  return base.refine((v) => v.trim().length > 0, {
+    message: "name is required — whitespace alone is rejected",
+  });
+}
+
 export const tenantIdArg = z
   .number()
   .int()

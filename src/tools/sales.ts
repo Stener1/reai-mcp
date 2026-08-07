@@ -11,6 +11,7 @@ import {
   type ToolDef,
   type ToolContext,
   isWholeOre,
+  requiredName,
 } from "./registry.js";
 
 /**
@@ -120,13 +121,13 @@ const createCustomer = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
-    name: z
-      .string()
-      .max(75)
+    name: requiredName(75)
       .describe(
-        "Customer or company name, at most 75 characters. May be EMPTY when organizationNumber is " +
-          "supplied and skipRegistryLookup is not set — the Brønnøysund lookup fills it in, which " +
-          "is the documented way to create a company by its org number alone.",
+        "Customer or company name, at most 75 characters. Required, and whitespace alone will " +
+          "not do — the API answers \"name is required\" for both. This field was previously " +
+          "documented as optional when organizationNumber is supplied, on the reading that the " +
+          "Brønnøysund lookup fills it in; tested against the live API, that is not so, and a " +
+          "blank name is rejected with or without an org number.",
       ),
     organizationNumber: z
       .string()
@@ -137,7 +138,14 @@ const createCustomer = defineTool({
       .optional()
       .describe("True for a private individual rather than a company."),
     email: z.string().optional().describe("General email address."),
-    nationalIdentityNumber: z.string().optional().describe("Fødselsnummer, for private customers."),
+    nationalIdentityNumber: z
+      .string()
+      .regex(/^\d{11}$/, "nationalIdentityNumber must be exactly 11 digits, and digits only")
+      .optional()
+      .describe(
+        "Fødselsnummer, for private customers. Exactly 11 digits, no spaces or separators — the " +
+          'API answers "must contain only digits" and "must be exactly 11 digits".',
+      ),
     countryCode: COUNTRY_CODE.optional().describe('ISO country code. Defaults to "NO".'),
     addressPart1: z.string().optional().describe("Street address."),
     addressPart2: z.string().optional().describe("Second address line."),
@@ -187,7 +195,14 @@ const updateCustomer = defineTool({
       .string()
       .optional()
       .describe('Phone number. A "+47" prefix on a Norwegian number is rejected — write it plain, e.g. "22334455".'),
-    nationalIdentityNumber: z.string().optional().describe("Fødselsnummer, for private customers."),
+    nationalIdentityNumber: z
+      .string()
+      .regex(/^\d{11}$/, "nationalIdentityNumber must be exactly 11 digits, and digits only")
+      .optional()
+      .describe(
+        "Fødselsnummer, for private customers. Exactly 11 digits, no spaces or separators — the " +
+          'API answers "must contain only digits" and "must be exactly 11 digits".',
+      ),
     iban: z.string().optional().describe("IBAN."),
     bankAccountNumber: z.string().optional().describe("Norwegian bank account number."),
     swiftCode: z.string().optional().describe("SWIFT/BIC code."),
@@ -429,7 +444,9 @@ const createProduct = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/products"]],
   inputSchema: {
-    title: z.string().describe("Product name."),
+    title: requiredName().describe(
+      "Product name. Required and non-blank: the schema says minLength 1 and the API enforces it.",
+    ),
     description: z.string().optional().describe("Product description."),
     stockItem: z.boolean().optional().describe("Track this product in inventory."),
     vatCode: z

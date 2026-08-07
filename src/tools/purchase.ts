@@ -10,6 +10,7 @@ import {
   today,
   type ToolDef,
   isWholeOre,
+  requiredName,
 } from "./registry.js";
 
 /**
@@ -108,12 +109,11 @@ const createSupplier = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/suppliers"]],
   inputSchema: {
-    name: z
-      .string()
-      .max(75)
+    name: requiredName(75)
       .describe(
-        "Supplier or company name, at most 75 characters. May be EMPTY when organizationNumber is " +
-          "supplied and the registry lookup is left on — it fills the name in.",
+        "Supplier or company name, at most 75 characters. Required, and whitespace alone will " +
+          "not do — the API answers \"name is required\" for both, with or without an " +
+          "organizationNumber. Verified against the live API, which contradicts the schema.",
       ),
     organizationNumber: z.string().optional().describe("Norwegian organisation number."),
     privateContact: z.boolean().optional().describe("True for a private individual."),
