@@ -7,11 +7,21 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
-## 0.2.0
+## 0.3.0
 
 First version worth using. Covers the bookkeeping core, sales, purchase, and bank
 reconciliation and VAT, runs either locally over stdio or as a self-hosted remote
 connector, and has been verified against live ReAI data throughout.
+
+The jump from 0.2.0 is not new surface — the tool count is unchanged — but a large
+number of safety fixes found by review, several of which were reachable in the
+default configuration, and a handful of behaviour changes a client will notice:
+`GET /mcp` now answers 405, request bodies are capped at 8 MB and JSON-RPC batches
+at 50, an authorization not bound to a company is refused, and several tool schemas
+reject input the API would have rejected anyway. Most of what follows was verified
+by writing to a real test company rather than read off the spec, which is a
+different standard from what the spec alone supports — and in five places the two
+disagreed.
 
 ### Added
 
