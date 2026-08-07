@@ -8,6 +8,21 @@ type MeResponse = {
   tenants?: Array<{ id: number; slug?: string; companyName?: string; currencyCode?: string }>;
 };
 
+/**
+ * The tenant list from /api/me, keeping "reached no companies" apart from "the field was
+ * not there".
+ *
+ * `me.tenants ?? []` collapsed the two, which is the same absence-as-zero mistake the list
+ * tools had — and here the consequence is sharper than a wrong count: reai_use_tenant would
+ * tell a user that a perfectly valid company "is not accessible with this token" and send
+ * them off to ask for access that they already have.
+ */
+function tenantsFrom(me: MeResponse | undefined): { tenants: NonNullable<MeResponse["tenants"]>; reported: boolean } {
+  return Array.isArray(me?.tenants)
+    ? { tenants: me.tenants, reported: true }
+    : { tenants: [], reported: false };
+}
+
 const whoami = defineTool({
   name: "reai_whoami",
   title: "Who am I and which companies can I reach",
@@ -27,9 +42,16 @@ const whoami = defineTool({
     });
     const me = res.data;
     const active = resolveTenantId(undefined, ctx);
-    const tenants = me.tenants ?? [];
+    const { tenants, reported } = tenantsFrom(me);
 
     const notes: string[] = [];
+    if (!reported) {
+      notes.push(
+        "GET /api/me did not return a tenant list. That is NOT the same as the token reaching " +
+          "no companies — the field was absent or not an array, so which companies are " +
+          "reachable is unknown. The raw response is below.",
+      );
+    }
     // A grant bound at authorization time must not enumerate the OTHER companies the
     // underlying ReAI token can reach. /api/me returns all of them, and returning them
     // handed the agent every client company's name, id, currency and deep link — while
@@ -167,7 +189,15 @@ const useTenant = defineTool({
       path: "/api/me",
       omitTenant: true,
     });
-    const tenants = res.data.tenants ?? [];
+    const { tenants, reported } = tenantsFrom(res.data);
+    if (!reported) {
+      return okText(
+        `Cannot verify tenant ${args.tenantId}: GET /api/me did not return a tenant list, so ` +
+          `whether this token reaches that company is unknown. This is deliberately NOT read as ` +
+          `"no access" — that would be a confident wrong answer. Retry, and check the raw ` +
+          `response with reai_request GET /api/me.`,
+      );
+    }
     const match = tenants.find((t) => t.id === args.tenantId);
     if (!match) {
       const list = tenants.map((t) => `  ${t.id} — ${t.companyName ?? t.slug ?? "unnamed"}`).join("\n");

@@ -212,6 +212,39 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
   return { content: [{ type: "text", text }] };
 }
 
+/**
+ * A list result, where "the API did not return a list" and "the list is empty" are
+ * different answers.
+ *
+ * Every list tool wrote `Array.isArray(data) ? data.length : 0` and then stated that
+ * number. So a 200 carrying `{content: [...]}` — a shape this API already uses on
+ * `/api/leads` and `/api/warehouses/inventory` — was reported as "0 customer(s)", with the
+ * rows dropped from the result entirely. Nothing was wrong today, because these endpoints
+ * return bare arrays today; the day one of them starts paginating, eight tools would begin
+ * answering "there are none" about a company's customers, invoices and vouchers at once.
+ *
+ * An HTTP error cannot reach here — the client throws ReaiApiError on any non-2xx — so this
+ * is specifically about a successful response whose shape is not the expected one.
+ */
+export function okList(
+  data: unknown,
+  opts: { noun: string; suffix?: string; empty?: string; link?: string },
+): ToolResult {
+  const { noun, suffix = "", empty, link } = opts;
+  if (!Array.isArray(data)) {
+    return ok(data, {
+      link,
+      note:
+        `The ${noun} endpoint did not return a list, so there is no count to give. The response ` +
+        `is passed through unchanged — do NOT read this as "no ${noun}s".`,
+    });
+  }
+  return ok(data, {
+    link,
+    note: data.length === 0 && empty ? empty : `${data.length} ${noun}(s)${suffix}`,
+  });
+}
+
 /** A plain textual answer, for tools whose output is prose rather than data. */
 export function okText(text: string): ToolResult {
   return { content: [{ type: "text", text }] };

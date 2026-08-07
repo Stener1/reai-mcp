@@ -4,6 +4,7 @@ import {
   fail,
   isoDate,
   ok,
+  okList,
   requireTenantId,
   tenantIdArg,
   type ToolDef,
@@ -67,8 +68,7 @@ const listCompanyBanks = defineTool({
       path: "/api/company-banks",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} bank account(s).` });
+    return okList(res.data, { noun: "bank account", suffix: "." });
   },
 });
 
@@ -240,8 +240,7 @@ const listReconciliationRules = defineTool({
       path: "/api/reconciliation-rules",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} reconciliation rule(s).` });
+    return okList(res.data, { noun: "reconciliation rule", suffix: "." });
   },
 });
 

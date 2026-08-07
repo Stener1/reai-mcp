@@ -4,6 +4,7 @@ import {
   fail,
   isoDate,
   ok,
+  okList,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -160,8 +161,7 @@ const listVouchers = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} voucher(s) between ${startDate} and ${endDate}.` });
+    return okList(res.data, { noun: "voucher", suffix: ` between ${startDate} and ${endDate}.` });
   },
 });
 
@@ -583,8 +583,7 @@ const listPostings = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} posting(s) between ${startDate} and ${endDate}.` });
+    return okList(res.data, { noun: "posting", suffix: ` between ${startDate} and ${endDate}.` });
   },
 });
 

@@ -3,6 +3,7 @@ import {
   defineTool,
   isoDate,
   ok,
+  okList,
   requiredName,
   requireTenantId,
   startOfYear,
@@ -116,19 +117,12 @@ const listDepartments = defineTool({
       path: "/api/departments",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    if (!Array.isArray(res.data)) {
-      return ok(res.data, {
-        note:
-          "The departments endpoint did not return a list. The response is passed through " +
-          "unchanged — do NOT read this as 'no departments'.",
-      });
-    }
-    return ok(res.data, {
-      note:
-        res.data.length === 0
-          ? "No departments. That is not the same as departments being unavailable — an empty " +
-            "list means none are defined, so nothing can be tagged with one yet."
-          : `${res.data.length} department(s).`,
+    return okList(res.data, {
+      noun: "department",
+      suffix: ".",
+      empty:
+        "No departments. That is not the same as departments being unavailable — an empty " +
+        "list means none are defined, so nothing can be tagged with one yet.",
     });
   },
 });
@@ -267,22 +261,13 @@ const listEmployees = defineTool({
     // collection, and it comes back with exactly id, name and email — matching the spec's
     // EmployeeSummaryRes. summarise() therefore removes nothing today and is kept only so a
     // widened projection cannot start leaking a fødselsnummer into a list result.
-    if (!Array.isArray(res.data)) {
-      // Not the documented shape. Returning `[]` here would report zero employees AND throw
-      // the payload away — absence manufactured out of a shape surprise.
-      return ok(res.data, {
-        note:
-          "The employees endpoint did not return a list. The response is passed through " +
-          "unchanged — do NOT read this as 'no employees'.",
-      });
-    }
-    const rows = res.data;
-    return ok(rows.map(summarise), {
-      note:
-        rows.length === 0
-          ? "No employees are registered on this tenant."
-          : `${rows.length} employee(s). The collection returns id, name and email only; ` +
-            `reai_get_employee returns one full record.`,
+    // Summarised BEFORE the count, so a widened projection cannot leak a fødselsnummer into
+    // a list result — but only when it really is a list, since mapping a non-array is how
+    // "absence manufactured out of a shape surprise" happened here in the first place.
+    return okList(Array.isArray(res.data) ? res.data.map(summarise) : res.data, {
+      noun: "employee",
+      suffix: ". The collection returns id, name and email only; reai_get_employee returns one full record.",
+      empty: "No employees are registered on this tenant.",
     });
   },
 });
