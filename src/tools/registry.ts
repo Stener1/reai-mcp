@@ -55,6 +55,14 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
   transmits?: boolean;
   /** True when repeated identical calls have no additional effect. */
   idempotent?: boolean;
+  /**
+   * Passed through as the tool's `_meta`.
+   *
+   * Used for the MCP Apps `ui.resourceUri` pointer, which is how a host finds the view a
+   * tool renders into. Kept as a passthrough rather than a typed field because `_meta` is
+   * an extension point: what belongs in it is decided by the extension, not by us.
+   */
+  meta?: Record<string, unknown>;
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 };
 

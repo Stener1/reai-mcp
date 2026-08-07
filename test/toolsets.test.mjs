@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allTools, alwaysOnTools, selectTools, TOOL_GROUPS } from "../dist/server.js";
+import { allTools, alwaysOnTools, registeredTools, selectTools, TOOL_GROUPS } from "../dist/server.js";
 import { loadConfig, TOOLSETS } from "../dist/config.js";
 import { classifyRequest } from "../dist/policy.js";
 import { findOperation } from "../dist/reai/spec.js";
@@ -92,7 +92,7 @@ test("no curated tool is more permissive than the escape hatch would be", () => 
   // rather than by eye, which is how the previous reviews had to do it.
   const rank = { read: 0, reversible: 1, irreversible: 2 };
 
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     if (!tool.apiPaths) continue;
     for (const [method, path] of tool.apiPaths) {
       // Substitute the template parameters, since classifyRequest sees concrete paths.
@@ -131,7 +131,7 @@ test("every curated tool declares the API paths it calls", () => {
 
 test("declared API paths exist in the OpenAPI spec", () => {
   // Catches a typo'd path, which would make the guard above check nothing.
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     for (const [method, path] of tool.apiPaths ?? []) {
       assert.ok(
         findOperation(method, path),
@@ -174,7 +174,7 @@ function vatCodeFields(schema, depth = 0, path = "") {
 test("every ledger-booking tool that takes a vatCode carries the tenant-specific caveat", async () => {
   const { allTools } = await import("../dist/server.js");
   let checked = 0;
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     if (tool.risk !== "irreversible") continue;
     for (const [name, schema] of Object.entries(tool.inputSchema ?? {})) {
       const fields = /^vatcode$/i.test(name)
@@ -197,7 +197,7 @@ test("every ledger-booking tool that takes a vatCode carries the tenant-specific
 // operator to set full and wonder why the tool is still missing.
 test("a transmitting tool names both switches it needs", async () => {
   const { allTools } = await import("../dist/server.js");
-  for (const tool of allTools.filter((t) => t.transmits === true)) {
+  for (const tool of registeredTools.filter((t) => t.transmits === true)) {
     assert.match(
       tool.description,
       /REAI_ALLOW_EXTERNAL_SEND/,
