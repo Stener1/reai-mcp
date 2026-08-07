@@ -188,19 +188,18 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
 
 ### Known limitations
 
-- **The tenant boundary is enforced by this server, not by the API** — and this is
-  still unverified rather than known false. ReAI ignores `X-Tenant-Id` when a token
-  reaches only one company: every value, including a nonexistent id, returns that
-  company's data. Isolation between *users* is intact, but whether the API enforces
-  a tenant *switch* could not be tested, because every token available during
-  development was tenant-scoped and reached exactly one company.
+- **The tenant boundary is now known to be enforced by the API too**, not only by
+  this server — which corrects a limitation recorded here as unverified for most
+  of this project's life. ReAI ignores `X-Tenant-Id` when a token reaches only one
+  company: every value, including a nonexistent id, returns that company's data,
+  and every token available during development was of that kind, so no probe could
+  distinguish "the header selected" from "there was nothing to select between".
 
-  The spec says a **user-scoped** token behaves differently — `X-Tenant-Id` is
-  "required for tenant-scoped requests when authenticating with a user access
-  token" — so this is testable the moment one exists: list two companies from
-  `GET /api/me`, read a known record from each, and check the header actually
-  selects between them. Until then the guarantee holds for calls made through
-  these tools and says nothing about the same token used directly.
+  A user-scoped token settled it. Reading `GET /api/chart-of-accounts` under two
+  different tenant ids returned different payloads (76,313 vs 89,238 bytes), so
+  the header genuinely selects the company. The single-company caveat still holds
+  exactly as stated for a tenant-scoped token, and `scripts/check-token.sh` reports
+  which case a token is in and re-runs the probe.
 
 - **Individual tokens cannot be revoked** before they expire. Sealed tokens carry
   no server-side record, so rotating `REAI_ENCRYPTION_KEY` — which invalidates

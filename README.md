@@ -201,7 +201,9 @@ The company selected during authorization is a **boundary, not a default**. A gr
 
 An authorization with **no** bound company is refused outright, at every point it could be used — issuing, redeeming and refreshing. Early builds could mint one when `GET /api/me` returned no companies, and such a grant had no tenant boundary at all. If you authorized before this and see `invalid_token` with "not bound to a company", remove and re-add the connector.
 
-**Worth being precise about what this rests on.** The boundary is enforced *here*, in this server — it is not the API refusing the call. ReAI ignores `X-Tenant-Id` for a single-tenant token (see the quirks above), so we could not verify that the API itself enforces a tenant switch, and every tenant we have to test with reaches exactly one company. The guarantee is therefore only as strong as this process: it holds for anything going through these tools, and says nothing about a caller with the same ReAI token talking to ReAI directly. That is the right architecture — the token is the user's own, so they were never prevented from doing that — but do not read it as the API sandboxing them.
+**Worth being precise about what this rests on.** The API does enforce the switch — verified with a user-scoped token by reading `GET /api/chart-of-accounts` under two tenant ids and getting different payloads. For a *tenant-scoped* token the picture is different and unchanged: ReAI ignores `X-Tenant-Id` when the token reaches one company (see the quirks below), so any id returns that company's data and a request that appears to reach elsewhere has not. `scripts/check-token.sh` reports which case a given token is in.
+
+Either way the binding here is a boundary on this *connection*, not a claim about the token: a caller holding the same ReAI token can talk to ReAI directly and reach whatever it reaches. That is the right architecture — the token is the user's own, so they were never prevented from that — but do not read the binding as the API sandboxing them.
 
 ### Request limits
 
