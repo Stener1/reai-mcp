@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**71 tools**: 64 across five accounting domains, plus 7 always-on.
+**77 tools**: 70 across six accounting domains, plus 7 always-on.
 
 ### Added
 
@@ -29,6 +29,18 @@ All notable changes to `reai-mcp`. Format loosely follows
     `{"outcome":"deleted"}`.
   - No project tools. The Project module is disabled on every reachable tenant,
     so `GET /api/projects` answers 403 and the success path is unverifiable.
+
+- **Fixed-asset toolset** (6 tools) — the register, its depreciation schedules,
+  write-off and delete. What each write actually does was measured on the test
+  tenant rather than read off the spec, and the spec implies more than happens:
+  create, set-depreciation and write-off post **no voucher** on an asset with no
+  accounting history (0 vouchers before and after each). They stay irreversible
+  regardless, because a depreciation schedule is standing authority to post
+  later — the reasoning this server already applies to reconciliation rules.
+  - `reai_delete_asset` reports whether the acquisition voucher was deleted or
+    **reversed**. The API's description says the body is always
+    `{"outcome":"deleted"}` while its response schema allows `"reversed"`; only
+    `deleted` has been observed, on an asset with no linked voucher.
 
 ### Fixed
 

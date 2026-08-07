@@ -405,6 +405,32 @@ export const QUIRKS: readonly Quirk[] = [
   },
 
   {
+    id: "asset-register-posts-nothing",
+    paths: ["/api/assets", "/api/assets/{id}/depreciation", "/api/assets/{id}/write-off"],
+    methods: ["POST", "PUT"],
+    kind: "gotcha",
+    note:
+      "Registering an asset, changing its depreciation schedule and writing it off all post NO " +
+      "voucher on an asset with no accounting history behind it — measured on a live tenant, 0 " +
+      "vouchers before and after each call. The register entry and the acquisition booking are " +
+      "separate: capitalising something you have already booked will not create the ledger entry " +
+      "for you, and creating the register entry will not double-book it either. What the schedule " +
+      "does affect is future depreciation, which does post.",
+  },
+  {
+    id: "asset-delete-can-reverse-a-voucher",
+    paths: ["/api/assets/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "Deleting an asset is not only a register edit. Per the API's own description, a linked " +
+      "acquisition voucher is deleted when possible or REVERSED when accounting history must be " +
+      "retained — so this can put a counter-entry in the ledger. The description claims the body " +
+      'is always {"outcome":"deleted"}, but the response schema is the shared ' +
+      "ApiLifecycleOutcomeRes whose enum includes \"reversed\"; only \"deleted\" has been observed, " +
+      "on an asset with no linked voucher. Read the outcome rather than the description.",
+  },
+  {
     id: "employee-list-is-a-projection",
     paths: ["/api/employees"],
     methods: ["GET"],

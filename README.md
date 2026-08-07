@@ -379,23 +379,35 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
 
-Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Fixed assets
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_assets` · `reai_get_asset` | The fixed-asset register (anleggsmidler): what is capitalised, on which balance-sheet account, and how it depreciates | read |
+| `reai_create_asset` | Add an asset and its depreciation schedule. Posts **no voucher** — the register entry and the acquisition booking are separate | **irreversible** |
+| `reai_set_asset_depreciation` | Replace the method and useful life. Changes every future depreciation posting | **irreversible** |
+| `reai_write_off_asset` | Remove the remaining carrying value — the accounting act for something scrapped, lost or sold | **irreversible** |
+| `reai_delete_asset` | Delete the record. A linked acquisition voucher is deleted **or reversed**, so this can put a counter-entry in the ledger | **irreversible** |
 
-If 71 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+What each of these actually does was measured, not read off the spec: on an asset with no accounting history, create, set-depreciation and write-off all post **nothing** — 0 vouchers before and after each call. They stay irreversible anyway, for the same reason a reconciliation rule is: a depreciation schedule is standing authority to post later. The linked case, where deleting an asset reverses its acquisition voucher, is documented by the API and **not** verified here — neither reachable tenant has an asset with accounting history behind it.
+
+Anything not listed — leads, agreements, subscriptions, projects, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 77 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 37 tools
 REAI_TOOLSETS=purchase             # 20 tools
 REAI_TOOLSETS=organisation         # 15 tools
-(unset)                            # all 71
+REAI_TOOLSETS=assets               # 13 tools
+(unset)                            # all 77
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank` and `organisation`; listing all five is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation` and `assets`; listing all six is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **53 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~258 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **55 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~258 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
