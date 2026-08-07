@@ -205,3 +205,101 @@ test("a transmitting tool names both switches it needs", async () => {
     );
   }
 });
+
+// The multi-tenant branch of reai_whoami had no guidance at all, because no token
+// available during development reached more than one company — so the case this server
+// exists to serve well was the one never exercised. The rules genuinely invert between
+// token scopes: the tenant header goes from ignored to load-bearing.
+test("reai_whoami explains the token scope it is actually looking at", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const whoami = allTools.find((t) => t.name === "reai_whoami");
+  const config = {
+    baseUrl: "https://app.reai.no",
+    writeMode: "reversible",
+    timeoutMs: 5000,
+    maxRetries: 0,
+    verbose: false,
+  };
+  const ctxWith = (tenants) => ({
+    client: { request: async () => ({ data: { email: "a@b.no", name: "A", tenants } }), deepLink: (_p, t) => `x/${t}` },
+    config,
+    session: {},
+  });
+
+  const single = (await whoami.handler({}, ctxWith([{ id: 2634, companyName: "One", currencyCode: "NOK" }])))
+    .content[0].text;
+  assert.match(single, /has been observed to\s+IGNORE the tenant header|observed to IGNORE/i);
+  // Must NOT claim the token kind: a user-scoped token for a user with one company also
+  // returns a one-element list, and /api/me has no field that tells them apart.
+  assert.ok(!/TENANT-SCOPED/.test(single), `must not assert a token kind: ${single.slice(0, 200)}`);
+  assert.match(single, /may be scoped to this one/i, "should still explain why one company appears");
+
+  const many = (
+    await whoami.handler(
+      {},
+      ctxWith([
+        { id: 2634, companyName: "One", currencyCode: "NOK" },
+        { id: 2783, companyName: "Two", currencyCode: "NOK" },
+        { id: 9001, companyName: "Three", currencyCode: "EUR" },
+      ]),
+    )
+  ).content[0].text;
+  assert.match(many, /load-bearing/, "the header stops being ignored — say so");
+  assert.ok(!/observed to IGNORE/i.test(many), "must not repeat the single-tenant caveat");
+  assert.match(many, /do not share a currency \(NOK, EUR\)/);
+  // Not every amount is in the company's currency — an invoice total is in the invoice's.
+  assert.match(many, /read the currency on each result/i);
+
+  const sameCurrency = (
+    await whoami.handler(
+      {},
+      ctxWith([
+        { id: 1, companyName: "A", currencyCode: "NOK" },
+        { id: 2, companyName: "B", currencyCode: "NOK" },
+      ]),
+    )
+  ).content[0].text;
+  assert.ok(!/do not share a currency/.test(sameCurrency), "no warning when they agree");
+});
+
+// A grant bound at authorization time is a boundary on what may be ADDRESSED. /api/me
+// returns every company the underlying ReAI token reaches, so reai_whoami handed the
+// agent each client company's name, id, currency and deep link — while the README
+// claimed the binding prevented exactly that. A boundary that leaks the thing it is
+// meant to protect is not a boundary.
+test("a bound connection discloses only the company it is bound to", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const whoami = allTools.find((t) => t.name === "reai_whoami");
+  const tenants = [
+    { id: 2634, companyName: "Torstensen Digital", currencyCode: "NOK" },
+    { id: 2783, companyName: "bedre standard", currencyCode: "NOK" },
+    { id: 9001, companyName: "Client AS", currencyCode: "EUR" },
+  ];
+  const result = await whoami.handler(
+    {},
+    {
+      client: { request: async () => ({ data: { email: "a@b.no", name: "A", tenants } }), deepLink: (_p, t) => `x/${t}` },
+      config: {
+        baseUrl: "https://app.reai.no",
+        writeMode: "reversible",
+        timeoutMs: 5000,
+        maxRetries: 0,
+        verbose: false,
+        boundTenantId: 2783,
+      },
+      session: {},
+    },
+  );
+  const [note, body] = result.content[0].text.split("\n\n");
+  const parsed = JSON.parse(body);
+
+  assert.deepEqual(parsed.tenants.map((t) => t.id), [2783], "only the bound company may be listed");
+  const serialised = JSON.stringify(parsed);
+  for (const leaked of ["Torstensen Digital", "Client AS", "2634", "9001"]) {
+    assert.ok(!serialised.includes(leaked), `leaked ${leaked} on a bound connection`);
+  }
+  assert.match(note, /BOUND to tenant 2783/);
+  // And it must not tell the agent to select a tenant, which is what binding forbids.
+  assert.ok(!/load-bearing/.test(note), "selection guidance contradicts the binding");
+  assert.match(note, /deliberately not listed/i, "say that others exist without naming them");
+});

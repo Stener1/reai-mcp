@@ -30,7 +30,23 @@ const whoami = defineTool({
     const tenants = me.tenants ?? [];
 
     const notes: string[] = [];
-    if (active !== undefined) {
+    // A grant bound at authorization time must not enumerate the OTHER companies the
+    // underlying ReAI token can reach. /api/me returns all of them, and returning them
+    // handed the agent every client company's name, id, currency and deep link — while
+    // the README claimed the binding prevented exactly that. The binding is a boundary
+    // on what can be addressed; it has to be a boundary on what is disclosed too.
+    const bound = ctx.config.boundTenantId;
+    const visible = bound === undefined ? tenants : tenants.filter((t) => t.id === bound);
+
+    if (bound !== undefined) {
+      notes.push(
+        `This connection is BOUND to tenant ${bound}` +
+          `${visible[0]?.companyName ? ` (${visible[0].companyName})` : ""} and cannot address any ` +
+          `other, so there is no tenant to select and no tenantId to pass. The underlying ReAI ` +
+          `token may reach other companies; they are deliberately not listed here. To work in a ` +
+          `different one, re-authorize and pick it.`,
+      );
+    } else if (active !== undefined) {
       const match = tenants.find((t) => t.id === active);
       notes.push(
         match
@@ -46,7 +62,7 @@ const whoami = defineTool({
     } else {
       notes.push(
         `No active tenant set and this token reaches ${tenants.length} companies. ` +
-          `Call reai_use_tenant before using tenant-scoped tools.`,
+          `Call reai_use_tenant before using tenant-scoped tools, or pass tenantId per call.`,
       );
     }
     notes.push(
@@ -54,12 +70,38 @@ const whoami = defineTool({
         `(available modes: ${WRITE_MODES.join(", ")}).`,
     );
     if (tenants.length === 1) {
+      // Deliberately describes the OBSERVED behaviour rather than naming the token kind.
+      // A user-scoped token belonging to a user with access to one company also returns a
+      // one-element list, and /api/me exposes no field that distinguishes the two — so
+      // "this is a tenant-scoped token" would be a guess presented as fact.
       notes.push(
-        `This token reaches exactly one company. Note that ReAI IGNORES the tenant header in that ` +
-          `case — any tenant id returns this company's data, including ids that do not exist — so a ` +
-          `successful response is not evidence you reached the tenant you asked for. This list is ` +
-          `authoritative; a company missing from it is not reachable, even if it exists in the UI.`,
+        `This token reaches exactly one company. In that situation ReAI has been observed to ` +
+          `IGNORE the tenant header — any tenant id returns this company's data, including ids that ` +
+          `do not exist — so a successful response is not evidence you reached the tenant you asked ` +
+          `for. This list is authoritative: a company missing from it is not reachable, even if it ` +
+          `exists in the UI. If you expected more companies, the token may be scoped to this one; a ` +
+          `token covering the whole user account lists every company they can open.`,
       );
+    } else if (tenants.length > 1 && bound === undefined) {
+      // The multi-tenant branch had no guidance at all, because no token available during
+      // development reached more than one company. The rules genuinely invert: the tenant
+      // header goes from ignored to load-bearing. Skipped when bound, where selecting is
+      // exactly what the connection forbids.
+      notes.push(
+        `This token reaches ${tenants.length} companies, so the tenant header is load-bearing ` +
+          `rather than ignored: every tenant-scoped call needs one, and it selects which company ` +
+          `you are writing to. Set it once with reai_use_tenant, or pass tenantId per call — do not ` +
+          `rely on a default.`,
+      );
+      const currencies = [...new Set(tenants.map((t) => t.currencyCode).filter(Boolean))];
+      if (currencies.length > 1) {
+        notes.push(
+          `These companies do not share a currency (${currencies.join(", ")}). The currency below is ` +
+            `the COMPANY's; individual records carry their own — an invoice total, for instance, is ` +
+            `in the invoice's currency, which may differ again. Read the currency on each result ` +
+            `rather than assuming the company's, and do not add figures across companies.`,
+        );
+      }
     }
 
     return ok(
@@ -67,7 +109,7 @@ const whoami = defineTool({
         user: { email: me.email, name: me.name },
         activeTenantId: active ?? null,
         writeMode: ctx.config.writeMode,
-        tenants: tenants.map((t) => ({
+        tenants: visible.map((t) => ({
           ...t,
           url: ctx.client.deepLink("/", t.id),
         })),
