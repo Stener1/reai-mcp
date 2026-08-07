@@ -423,6 +423,160 @@ async function main() {
       report("reai_parse_ehf_attachment", false, String(err));
     }
 
+    // 7e. Single-record getters, chained off the list tools the way the bank-reconciliation
+    //     check already chains off company banks.
+    //
+    //     Of 43 read tools, 13 were not named in this file and 9 were not named in ANY
+    //     smoke script — seven of those nine were GETs by id, unexercised because no suite
+    //     had an id to pass them. (The other two are reai_api_notes, which reads the
+    //     bundled spec, and reai_reconcile_ui.) Several getters WERE already covered, but
+    //     only inside the write suites, which do not run against a real company by default:
+    //     reai_get_voucher and reai_get_customer read back what those scripts create.
+    //
+    //     An empty collection is the common case on a fresh tenant and reports SKIP with
+    //     the reason. That is deliberately not a pass: "never ran" and "ran and worked"
+    //     are the distinction this whole server is about, and a silent pass here would be
+    //     the same absence-read-as-success the tools themselves are guarded against.
+    const recentMonths = (count) => {
+      const out = [];
+      const now = new Date();
+      for (let i = 0; i < count; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+      }
+      return out;
+    };
+    // A getter must return ONE record whose own id is the one requested. Matching the id
+    // anywhere in the response would pass a getter that called its collection endpoint by
+    // mistake and returned the list — which contains that very row — and would also pass on
+    // a nested object that happens to carry the same id.
+    // ok() emits `note + "\n\n" + body`, but a tool that adds no note emits the body
+    // alone — reai_get_bank_transaction does, and assuming the blank line reported its
+    // perfectly good record as "not a record". Try both, whole text first.
+    const parseBody = (text) => {
+      const attempts = [text];
+      const at = text.indexOf("\n\n");
+      if (at !== -1) attempts.push(text.slice(at + 2));
+      for (const candidate of attempts) {
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          /* try the next framing */
+        }
+      }
+      return undefined;
+    };
+    const isRecordWithId = (text, id) => {
+      const body = parseBody(text);
+      return !!body && !Array.isArray(body) && typeof body === "object" && body.id === id;
+    };
+    const describeRecord = (text, id) => {
+      const body = parseBody(text);
+      if (Array.isArray(body)) return `id=${id} but the response is a LIST of ${body.length}`;
+      if (!body || typeof body !== "object") return `id=${id} but the response is not a record`;
+      return body.id === id ? `id=${id}` : `asked for ${id}, got ${JSON.stringify(body.id)}`;
+    };
+    const firstIdOf = (text) => {
+      const parsed = parseBody(text);
+      if (parsed === undefined) return null;
+      const rows = Array.isArray(parsed) ? parsed : (parsed?.content ?? parsed?.items ?? []);
+      return Array.isArray(rows) && rows.length ? (rows[0]?.id ?? null) : null;
+    };
+    // Three of these default their window to the current year (vouchers) or the last year
+    // (orders, invoices), so on a tenant whose records are older the list comes back empty
+    // and the getter is skipped although a record exists to fetch. Reach back explicitly:
+    // this is a discovery call looking for ANY id, not a report.
+    const anyPeriod = { tenantId, startDate: "2000-01-01" };
+    for (const [listName, getName, listArgs] of [
+      ["reai_list_vouchers", "reai_get_voucher", anyPeriod],
+      ["reai_list_customers", "reai_get_customer", { tenantId }],
+      ["reai_list_orders", "reai_get_order", anyPeriod],
+      ["reai_list_invoices", "reai_get_invoice", anyPeriod],
+      ["reai_list_suppliers", "reai_get_supplier", { tenantId }],
+      ["reai_list_supplier_invoices", "reai_get_supplier_invoice", { tenantId }],
+      ["reai_list_departments", "reai_get_department", { tenantId }],
+      ["reai_list_employees", "reai_get_employee", { tenantId }],
+      ["reai_list_assets", "reai_get_asset", { tenantId }],
+    ]) {
+      try {
+        const listed = await client.callTool({ name: listName, arguments: listArgs });
+        // A list tool that FAILED is not a list tool that returned nothing. 403 module
+        // gating is real on this API, and reporting it as "nothing to fetch on this
+        // tenant" would be a false statement plus two silently skipped checks — the
+        // absence-read-as-success this block's own comment claims to avoid.
+        if (listed.isError) {
+          report(getName, false, `${listName} failed: ${textOf(listed).split("\n")[0].slice(0, 60)}`);
+          continue;
+        }
+        const id = firstIdOf(textOf(listed));
+        if (id === null) {
+          console.log(`  [SKIP] ${getName} — ${listName} returned nothing to fetch on this tenant`);
+          continue;
+        }
+        const res = await client.callTool({ name: getName, arguments: { id, tenantId } });
+        const text = textOf(res);
+        report(getName, !res.isError && isRecordWithId(text, id), `id=${id} → ${describeRecord(text, id)}`);
+      } catch (err) {
+        report(getName, false, String(err));
+      }
+    }
+
+    // 7f. The one getter with no list endpoint behind it. Bank transactions are only
+    //     reachable through a reconciliation, so this walks company banks → the current
+    //     month's reconciliation → the first transaction id it can find, in either the
+    //     pending or the matched groups.
+    try {
+      const banks = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
+      if (banks.isError) throw new Error(`reai_list_company_banks failed: ${textOf(banks).split("\n")[0]}`);
+      // The same selection the reconciliation check above makes, and for the same reason:
+      // the synced view does not apply to a manual account, and an archived one is not a
+      // working account. Taking banks[0] would have blamed the tenant for a wrong-view call.
+      const bankAccountId = (() => {
+        const rows = parseBody(textOf(banks));
+        if (!Array.isArray(rows)) return null;
+        const synced = rows.find((b) => !b?.archived && (b?.providerType ?? "manual") !== "manual");
+        return Number.isInteger(Number(synced?.id)) ? Number(synced.id) : null;
+      })();
+      let transactionId = null;
+      if (bankAccountId !== null) {
+        for (const month of recentMonths(4)) {
+          const rec = await client.callTool({
+            name: "reai_get_bank_reconciliation",
+            arguments: { bankAccountId, month, tenantId },
+          });
+          if (rec.isError) continue;
+          // BOTH shapes. The overview carries pendingTransactions and matchedGroups[].
+          // transactions — there is no bare `transactions` at the top level — so matching
+          // only the latter meant a tenant with unmatched transactions and no matched
+          // groups, which is precisely the state the bank workflow exists for, reported
+          // "no bank transaction on this tenant" and skipped the check.
+          const found =
+            /"pendingTransactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec)) ??
+            /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec));
+          if (found) {
+            transactionId = Number(found[1]);
+            break;
+          }
+        }
+      }
+      if (transactionId === null) {
+        console.log("  [SKIP] reai_get_bank_transaction — no bank transaction on this tenant to fetch");
+      } else {
+        const res = await client.callTool({
+          name: "reai_get_bank_transaction",
+          arguments: { id: transactionId, tenantId },
+        });
+        const text = textOf(res);
+        report(
+          "reai_get_bank_transaction",
+          !res.isError && isRecordWithId(text, transactionId),
+          describeRecord(text, transactionId),
+        );
+      }
+    } catch (err) {
+      report("reai_get_bank_transaction", false, String(err));
+    }
+
     // 8. Irreversible sales tools must be hidden in this mode, and the escape
     // hatch must refuse a transmitting flag on an otherwise-reversible path.
     // Derive the diagnostic from the same list the assertion uses, so a genuine

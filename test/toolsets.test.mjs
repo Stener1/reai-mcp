@@ -387,3 +387,45 @@ test("the README's payment-routing table matches the classifier", async () => {
   }
   assert.match(readme, /`invoiceEmail` \| customers, orders, subscriptions/);
 });
+
+/**
+ * `reai_get_*` tools that fetch one record by id but keep an explicit name, with the reason.
+ *
+ * The first version of this test used "at most two non-tenant keys" to exclude them, which
+ * was arbitrary in both directions: a future getter taking `fooId` plus two other params
+ * would slip through, and reai_get_bank_reconciliation was excluded only because `include`
+ * happens to make a third key — drop that optional parameter and the test would demand
+ * renaming `bankAccountId` to `id`, which is the wrong answer.
+ */
+const KEEPS_AN_EXPLICIT_ID = {
+  reai_get_bank_reconciliation:
+    "queries a PERIOD for an account (bankAccountId + month), rather than fetching a record by id",
+};
+
+// Seven getters took `id` and the three added in the last two iterations took `<noun>Id`.
+// Two conventions is one too many: an agent that guesses wrong gets "Invalid arguments for
+// tool", which is what happened writing a probe against this repo's own tools.
+test("every explicit-id exception is a real tool", () => {
+  for (const [name, reason] of Object.entries(KEEPS_AN_EXPLICIT_ID)) {
+    const tool = registeredTools.find((t) => t.name === name);
+    assert.ok(tool, `exception names an unknown tool: ${name}`);
+    assert.ok(reason.length > 20, `${name} needs a reason, not a placeholder`);
+    // And it must actually take an explicit id, or the exception is dead.
+    const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
+    assert.ok(keys.some((k) => /(^|[a-z_])id$/i.test(k) && k !== "id"), `${name} takes no explicit id`);
+  }
+});
+
+test("a getter that takes one record id calls it `id`", () => {
+  const wrong = [];
+  for (const tool of registeredTools) {
+    if (tool.risk !== "read" || !tool.name.startsWith("reai_get_")) continue;
+    if (tool.name in KEEPS_AN_EXPLICIT_ID) continue;
+    const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
+    // Any spelling of an id-shaped name, so fooId and foo_id are both caught.
+    const ids = keys.filter((k) => /(^|[a-z_])id$/i.test(k) && k !== "id");
+    if (ids.length === 0) continue;
+    wrong.push(`${tool.name}: ${ids.join(", ")}`);
+  }
+  assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
+});

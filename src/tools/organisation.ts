@@ -134,13 +134,13 @@ const getDepartment = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/departments/{id}"]],
   inputSchema: {
-    departmentId: z.number().int().positive().describe("Department id, from reai_list_departments."),
+    id: z.number().int().positive().describe("Department id, from reai_list_departments."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const res = await ctx.client.request({
       method: "GET",
-      path: `/api/departments/${args.departmentId}`,
+      path: `/api/departments/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     return ok(res.data);
@@ -285,7 +285,7 @@ const getEmployee = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/employees/{id}"]],
   inputSchema: {
-    employeeId: z.number().int().positive().describe("Employee id, from reai_list_employees."),
+    id: z.number().int().positive().describe("Employee id, from reai_list_employees."),
     includePersonalData: z
       .boolean()
       .optional()
@@ -298,7 +298,7 @@ const getEmployee = defineTool({
   handler: async (args, ctx) => {
     const res = await ctx.client.request<EmployeeRecord>({
       method: "GET",
-      path: `/api/employees/${args.employeeId}`,
+      path: `/api/employees/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     const record = res.data ?? {};

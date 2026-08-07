@@ -48,7 +48,12 @@ const employee = () => ({
 // the API — it shapes the response — so the sweep that catches silently dropped inputs
 // has to be told, and an exemption is only honest if the field demonstrably does something.
 test("an employee's national identity number is redacted unless asked for", async () => {
-  const hidden = await run("reai_get_employee", { employeeId: 12 }, employee());
+  const hidden = await run("reai_get_employee", { id: 12 }, employee());
+  // The path, so a stale argument name cannot sit here unnoticed. These callers kept
+  // passing `employeeId` after the rename and built /api/employees/undefined for a while:
+  // the handler takes args directly in this harness, nothing validates them, and no
+  // assertion looked at the request.
+  assert.equal(hidden.calls[0].path, "/api/employees/12");
   assert.ok(!hidden.text.includes("15057512345"), "the fødselsnummer must not be in the result");
   assert.ok(!hidden.text.includes("12345678903"), "nor the salary account number");
   assert.ok(!hidden.text.includes("NO9386011117947"), "nor the IBAN");
@@ -58,7 +63,7 @@ test("an employee's national identity number is redacted unless asked for", asyn
   assert.match(hidden.text, /Kongens gate 1/);
   assert.match(hidden.text, /650000/);
 
-  const shown = await run("reai_get_employee", { employeeId: 12, includePersonalData: true }, employee());
+  const shown = await run("reai_get_employee", { id: 12, includePersonalData: true }, employee());
   assert.match(shown.text, /15057512345/);
   assert.match(shown.text, /12345678903/);
   assert.doesNotMatch(shown.text, /redacted/);
@@ -68,7 +73,7 @@ test("an employee's national identity number is redacted unless asked for", asyn
 
   // A record without those fields says so rather than claiming a redaction that did not
   // happen — otherwise "redacted" reads as "there is one here and I am hiding it".
-  const bare = await run("reai_get_employee", { employeeId: 12 }, { id: 12, name: "Ola" });
+  const bare = await run("reai_get_employee", { id: 12 }, { id: 12, name: "Ola" });
   assert.match(bare.text, /No national identity number or bank account was found/);
   assert.doesNotMatch(bare.text, /redacted/);
 });
@@ -118,7 +123,7 @@ test("a list endpoint that stops returning a list does not become zero", async (
 
 // The note asserts a NEGATIVE, so it has to be true of the whole record, not of two keys.
 test("redaction reaches nested copies, and the note only claims what was checked", async () => {
-  const nested = await run("reai_get_employee", { employeeId: 12 }, {
+  const nested = await run("reai_get_employee", { id: 12 }, {
     id: 12,
     name: "Kari",
     employmentRelations: [{ id: 1, bankAccount: { iban: "NO9386011117947" } }],
