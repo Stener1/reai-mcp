@@ -338,7 +338,6 @@ function countFittingSerialized(items: unknown[], budget: number): number {
   return low;
 }
 
-/** Shared `tenantId` argument. Every tenant-scoped tool accepts it. */
 /**
  * Whether a number is a whole number of øre.
  *
@@ -387,6 +386,7 @@ export function requiredName(maxLength?: number) {
   });
 }
 
+/** Shared `tenantId` argument. Every tenant-scoped tool accepts it. */
 export const tenantIdArg = z
   .number()
   .int()
