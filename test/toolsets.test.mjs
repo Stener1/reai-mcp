@@ -6,7 +6,7 @@ import { classifyRequest } from "../dist/policy.js";
 import { findOperation } from "../dist/reai/spec.js";
 
 /**
- * The premise of this server is that 313 API operations cannot all be tools. As
+ * The premise of this server is that 323 API operations cannot all be tools. As
  * the curated set grows the same pressure applies to it, so an operator can
  * narrow it — without ever losing reach, since discovery stays on.
  */

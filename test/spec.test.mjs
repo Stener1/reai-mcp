@@ -181,3 +181,33 @@ test("a truncated enum is still recoverable in full from describeOperation", () 
   const full = describeOperation(op).requestBody?.schema?.properties?.directPermissionCodes;
   assert.ok(full.items.enum.length > 24, `expected the full set, got ${full.items.enum?.length}`);
 });
+
+// The `*-ctrl` tag heuristic hides 85 operations, and is right about nearly all of
+// them — UI typeahead, Adyen and Shopify webhooks, point-of-sale auth. But registering
+// a payroll payment is not an undocumented internal, and hiding it made an agent asked
+// to do that report the capability as absent, which is worse than refusing because it
+// is false. None of these has a documented twin; four candidates were dropped because
+// they did.
+test("business operations behind the -ctrl heuristic are discoverable", () => {
+  const index = getSpecIndex();
+  const exposed = index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"));
+  assert.ok(exposed.length > 0, "the allowlist should expose something");
+
+  for (const op of exposed) {
+    // A leaked Spring bean name must never reach the public tag list.
+    assert.ok(!/-ctrl$/.test(op.tag), `${op.path} carries the internal tag ${op.tag}`);
+    assert.ok(index.tags[op.tag] > 0, `${op.path} has tag ${op.tag}, absent from the tag index`);
+
+    // No documented twin: surfacing an unsupported duplicate of a supported endpoint
+    // gives an agent two ways to do one job and no reason to prefer the right one.
+    const leaf = op.path.split("/").pop();
+    const twin = index.operations.find(
+      (o) => !o.internal && o.path.startsWith("/api/") && o.method === op.method && o.path.split("/").pop() === leaf,
+    );
+    assert.equal(twin, undefined, `${op.method} ${op.path} duplicates ${twin?.path}`);
+  }
+
+  const salary = exposed.find((o) => o.path === "/salary/{id}/register-payment");
+  assert.ok(salary, "registering a payroll payment must be reachable");
+  assert.equal(salary.tag, "Salary Payments");
+});

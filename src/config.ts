@@ -35,7 +35,7 @@ export type ServerConfig = {
   /**
    * Which curated tool groups to expose. Empty means all of them.
    *
-   * The whole premise of this server is that 313 API operations cannot all be
+   * The whole premise of this server is that 323 API operations cannot all be
    * tools; as the curated set grows, the same pressure applies to it. An agent
    * doing bookkeeping does not need thirteen purchase-side tools competing for
    * attention, so an operator can narrow the surface without losing coverage —
