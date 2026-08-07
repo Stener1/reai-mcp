@@ -229,11 +229,16 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
   but not hono's CORS middleware — this server sets its own CORS headers — so the
   vulnerable code is not reached.
 
-  Both are fixed upstream, and both are held by the 7-day minimum-release-age
-  policy this project follows against supply-chain attacks: `fast-uri@3.1.5` was
-  published 2026-07-31 and clears 2026-08-07, `hono@4.12.34` was published
-  2026-08-03 and clears 2026-08-10. Adding the overrides before then fails
-  `npm install` outright with ETARGET.
+  **`fast-uri` is resolved.** `3.1.5` cleared the 7-day minimum-release-age policy
+  this project follows against supply-chain attacks on 2026-08-07, and is pinned by
+  a `package.json` override — so the HIGH is out of the production tree.
+  `hono@4.12.34` clears 2026-08-10 and its override lands then; until it does, the
+  remaining advisory is the moderate CORS ReDoS in code this server does not reach.
+
+  CI now runs `npm audit --omit=dev --audit-level=high` as a blocking step, so a new
+  HIGH cannot arrive unnoticed. It tightens to `moderate` once the hono override is
+  in — gating at `high` today is a statement about one known outstanding item, not a
+  standing tolerance.
 - **No sandbox exists** for ReAI. Write paths are therefore verified against a
   real but empty tenant, and three of them are still untested end to end:
   issuing an invoice or credit note (it transmits, and cannot be recalled),

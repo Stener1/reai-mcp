@@ -468,7 +468,9 @@ Two advisories surface from transitive dependencies of `@modelcontextprotocol/sd
 
 **`hono`** (MODERATE — ReDoS in CORS middleware) is the narrower case. The SDK's transport runs `@hono/node-server`'s request listener on every `/mcp` call, so hono itself is on the path, but the vulnerable *CORS middleware* is not: the SDK imports it only in its examples, and this server sets its own CORS headers.
 
-Both are fixed upstream. Both are currently held by the 7-day minimum-release-age policy this project follows against supply-chain attacks — `fast-uri@3.1.5` was published 2026-07-31 and `hono@4.12.34` on 2026-08-03 — so the `overrides` land as each clears. Adding them earlier fails `npm install` with `ETARGET`.
+**`fast-uri` is resolved**: `3.1.5` cleared the 7-day minimum-release-age policy this project follows against supply-chain attacks on 2026-08-07 and is pinned by a `package.json` override, so the HIGH is out of the production tree. `hono@4.12.34` clears 2026-08-10 and its override lands then.
+
+CI runs `npm audit --omit=dev --audit-level=high` as a blocking step — `--omit=dev` because what ships is what matters, and `high` rather than `moderate` only while that one known moderate is outstanding. It tightens once the last override is in.
 
 ## Contributing
 
