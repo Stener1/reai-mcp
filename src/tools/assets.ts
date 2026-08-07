@@ -109,7 +109,7 @@ const createAsset = defineTool({
   risk: "irreversible",
   apiPaths: [["POST", "/api/assets"]],
   inputSchema: {
-    name: requiredName().describe("What the asset is."),
+    name: requiredName(255).describe("What the asset is. The API caps this at 255 characters."),
     accountNumber: balanceSheetAccount.describe(
       "Balance-sheet account to carry it on, from reai_list_accounts. Read from the live chart " +
         "of accounts: 1150 Tomter (land, never depreciated), 1200 Maskiner og anlegg, 1250 " +

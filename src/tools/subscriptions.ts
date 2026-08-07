@@ -91,8 +91,11 @@ const writeFields = {
   intervalMonths: z
     .number()
     .int()
-    .positive()
-    .describe("Months between billings — 1 monthly, 3 quarterly, 12 annually."),
+    .min(1)
+    // The API caps this at 12, so annual is the longest interval a subscription can have —
+    // a biennial arrangement is not expressible and would have failed with a bare 400.
+    .max(12, "The API caps intervalMonths at 12, so annual is the longest interval.")
+    .describe("Months between billings, 1–12 — 1 monthly, 3 quarterly, 12 annually."),
   billingTiming: z
     .enum(["in_advance", "after_period"])
     .describe("Bill at the start of the period or after it has run."),
@@ -116,11 +119,18 @@ const writeFields = {
     .enum(["calendar_boundary", "start_date"])
     .optional()
     .describe("Whether periods snap to calendar boundaries or run from the start date."),
-  daysUntilDue: z.number().int().optional().describe("Payment terms in days."),
+  daysUntilDue: z
+    .number()
+    .int()
+    .min(0, "Payment terms cannot be negative.")
+    .max(3000, "The API caps daysUntilDue at 3000.")
+    .optional()
+    .describe("Payment terms in days, 0–3000."),
   invoiceComment: z.string().optional().describe("Comment on the produced document."),
   internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
   invoiceEmail: z
     .string()
+    .max(100, "The API caps invoiceEmail at 100 characters.")
     .optional()
     .describe(
       "Override the delivery address for what this subscription produces. Changing where " +
