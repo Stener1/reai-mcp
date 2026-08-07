@@ -372,18 +372,35 @@ export function missingRequired(
   query: Record<string, unknown> | undefined,
   body: unknown,
 ): { params: string[]; bodyFields: string[]; bodyMissing: boolean } {
-  // Names are compared case-insensitively. ReAI is a .NET API and both query-string
-  // and System.Text.Json body binding are case-insensitive by ASP.NET Core default,
-  // so `?ProjectId=7` binds fine — reporting it as absent would be telling the agent
-  // something untrue about its own request. Note this is the opposite rule from path
-  // segments, which ARE case-sensitive because routes are.
-  const suppliedQueryKeys = new Map(
-    Object.entries(query ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+  // Names are compared case-SENSITIVELY, and the earlier rule here was the opposite.
+  // It rested on ReAI being an ASP.NET API, where binding is case-insensitive by
+  // default. It is not: the spec is springdoc-generated (2138 Spring `ProblemDetail`
+  // refs, the literal default server description "Generated server url"), and Spring
+  // binds query parameters by exact name. Measured against the live API:
+  //
+  //   ?voucherType=SALARY  ->  0 rows   (filter applied)
+  //   ?VoucherType=SALARY  -> 38 rows   (silently ignored)
+  //
+  // So a mis-cased parameter does not bind — and the old rule reported it as present,
+  // telling the agent its request was complete while the filter did nothing. That is
+  // the worst failure mode for a preflight check: silence on a request that returns a
+  // confidently wrong ANSWER rather than an error. A name that matches only when case
+  // is ignored is reported as missing, with the near-miss named, because "you wrote
+  // ProjectId and it wants projectId" is the whole of what the agent needs.
+  const supplied = query ?? {};
+  const suppliedByLower = new Map(
+    Object.entries(supplied).map(([k, v]) => [k.toLowerCase(), { key: k, value: v }]),
   );
   const params = (op.params ?? [])
     .filter((p) => p.required && p.in === "query")
     .map((p) => p.name)
-    .filter((name) => !isTransmittedQueryValue(suppliedQueryKeys.get(name.toLowerCase())));
+    .filter((name) => !isTransmittedQueryValue(supplied[name]))
+    .map((name) => {
+      const nearMiss = suppliedByLower.get(name.toLowerCase());
+      return nearMiss && nearMiss.key !== name
+        ? `${name} (you sent "${nearMiss.key}" — query parameters are case-sensitive here)`
+        : name;
+    });
 
   const bodyIsObject = typeof body === "object" && body !== null && !Array.isArray(body);
   const suppliedBodyKeys = new Set(
@@ -393,6 +410,10 @@ export function missingRequired(
           .map(([k]) => k.toLowerCase())
       : [],
   );
+  // Body fields stay case-insensitive: this is Jackson, whose default is
+  // case-sensitive too, but a mis-cased body field is REJECTED with a 400 rather than
+  // silently ignored, so the API itself tells the agent. The query-string case is
+  // different precisely because nothing complains.
   const bodyFields = (op.body?.required ?? []).filter(
     (name) => !bodyIsObject || !suppliedBodyKeys.has(name.toLowerCase()),
   );

@@ -212,8 +212,8 @@ export function canonicalizeApiPath(
 
   // The value that gets CLASSIFIED must be the value the upstream server will
   // ROUTE on, and those are not the same string. `new URL()` leaves percent-escapes
-  // other than %2f/%5c untouched, while ReAI is ASP.NET and decodes the path before
-  // routing — so "/api/agreements/3/sign-reques%74" was classified as an unknown
+  // other than %2f/%5c untouched, while ReAI decodes the path before routing (Spring's
+  // UrlPathHelper; verified live — GET /api/custom%65rs returns 200) — so "/api/agreements/3/sign-reques%74" was classified as an unknown
   // sub-path of the reversible /api/agreements prefix and then landed on the real
   // sign-request endpoint, which emails a counterparty. Every guard in this file
   // reduced to a spelling convention: %66 for f, %65 for e, %74 for t defeated both
@@ -315,16 +315,62 @@ export function classifyRequest(method: HttpMethod, path: string): Risk {
  * checked against the OpenAPI document — earlier guesses at plausible-sounding
  * names (`sendEmail`, `sendDirectly`) do not exist as body fields at all.
  */
+/**
+ * Does a value bind to Java `true`?
+ *
+ * The backend is Spring Boot with Jackson — confirmed from the spec itself: 2138
+ * references to Spring 6's `ProblemDetail`, springdoc's literal default server
+ * description "Generated server url", and 172 operationIds carrying springdoc's
+ * `_1`/`_2` disambiguation suffix. An earlier comment here asserted ASP.NET and
+ * System.Text.Json, and the predicates were written to that model.
+ *
+ * It matters because Jackson's default CoercionConfig is looser than a strict
+ * `=== true`: the string "true" and the integer 1 both bind to `true`. So
+ * `{"sendEhf": "true"}` armed an external send that the policy scored as sending
+ * nothing. Anything ambiguous counts as true, because the cost of being wrong is
+ * an irrecoverable transmission in one direction and a refused call in the other.
+ */
+function bindsToTrue(v: unknown): boolean {
+  if (v === true) return true;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    return t === "true" || t === "1" || t === "yes" || t === "on";
+  }
+  return false;
+}
+
+/**
+ * Does a value bind to the `create_invoice` enum member?
+ *
+ * Jackson accepts an integer ORDINAL for an enum unless FAIL_ON_NUMBERS_FOR_ENUMS is
+ * set, which is off by default. `outputMode` is declared ["create_order",
+ * "create_invoice"], so `1` is create_invoice — and a strict string compare read it
+ * as merely reversible. Case-insensitivity is kept for the same reason as before.
+ *
+ * Fails closed on anything that is neither a recognised string nor a known-safe
+ * ordinal: an unrecognised shape means we cannot tell what it binds to, and the safe
+ * reading of "cannot tell" is the dangerous one.
+ */
+function bindsToCreateInvoice(v: unknown): boolean {
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    // Anything that is not plainly create_order is treated as create_invoice.
+    return t !== "create_order" && t !== "" && (t === "create_invoice" || !KNOWN_OUTPUT_MODES.has(t));
+  }
+  if (typeof v === "number") return v !== 0; // ordinal 0 = create_order, anything else is not
+  return v !== undefined && v !== null;
+}
+
+const KNOWN_OUTPUT_MODES = new Set(["create_order", "create_invoice"]);
+
 const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
   // Arms EHF/Peppol transmission of the resulting invoice.
-  sendehf: (v) => v === true,
+  sendehf: bindsToTrue,
   // Lets ReAI issue numbered invoices on a recurring schedule with no further call.
-  automaticbillinggeneration: (v) => v === true,
+  automaticbillinggeneration: bindsToTrue,
   // Decides whether a subscription produces a draft order or a real invoice.
-  // Compared case-insensitively: System.Text.Json falls back to case-insensitive
-  // enum-name matching, so "CREATE_INVOICE" binds just as well and an exact compare
-  // let it through as merely reversible.
-  outputmode: (v) => typeof v === "string" && v.toLowerCase() === "create_invoice",
+  outputmode: bindsToCreateInvoice,
 };
 
 /**
@@ -615,14 +661,14 @@ const TRANSMITTING_GETS: readonly RegExp[] = [
 
 /** Body fields that arm an external send even on a non-transmitting path. */
 const TRANSMITTING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
-  sendehf: (v) => v === true,
+  sendehf: bindsToTrue,
   // A subscription set to produce invoices, or to bill automatically, will issue and
   // DELIVER them with no further call. The write ladder already escalated these to
   // irreversible; transmission said "none", so `full` mode alone armed recurring
   // delivery to a real customer. That is exactly the case the two-axis design exists
   // to catch, and it was slipping between the axes.
-  outputmode: (v) => typeof v === "string" && v.toLowerCase() === "create_invoice",
-  automaticbillinggeneration: (v) => v === true,
+  outputmode: bindsToCreateInvoice,
+  automaticbillinggeneration: bindsToTrue,
 };
 
 /**
