@@ -693,13 +693,21 @@ test("a truncated result never contains a partial value", async () => {
     totalAmount: 98765.43,
   };
   const objectText = ok(ledger).content[0].text;
-  const lastLine = objectText.trimEnd().split("\n").pop() ?? "";
-  // An unterminated string leaves an ODD number of quotes on the line — checking for
-  // a trailing quote instead flags `"accountNumber": "1319",`, which is complete.
-  const quotes = (lastLine.match(/(?<!\\)"/g) ?? []).length;
-  assert.equal(quotes % 2, 0, `line ends mid-string: ${lastLine}`);
-  assert.doesNotMatch(lastLine, /:\s*[\d.]+$/, `line ends on a bare number: ${lastLine}`);
-  assert.match(objectText, /NOT valid JSON/, "the caller must be told it cannot be parsed");
+  // This used to assert the body was NOT valid JSON, and that the caller was told so.
+  // That was the best the line-boundary rule could offer: it kept scalars whole but cut
+  // the array inside the object mid-item. An object whose bulk is in its arrays is now
+  // truncated by SHORTENING those arrays, so the result parses and every item in it is
+  // complete — a strictly stronger guarantee, so the assertion moved up rather than out.
+  const objectBody = objectText.slice(objectText.indexOf("{"));
+  const objectParsed = JSON.parse(objectBody);
+  assert.equal(objectParsed.totalAmount, 98765.43, "scalars after a trimmed list must survive");
+  assert.ok(objectParsed.accounts.length > 0 && objectParsed.accounts.length < 2000);
+  for (const account of objectParsed.accounts) {
+    assert.equal(account.closingBalance, 4812.6, "every value shown must be whole");
+    assert.equal(Object.keys(account).length, 2, "an item was cut short");
+  }
+  assert.match(objectText, /accounts shows \d+ of 2000/);
+  assert.ok(objectText.length <= 24_000 + 500, `object result is ${objectText.length} characters`);
 
   // Small results are untouched.
   const small = ok([{ id: 1, closingBalance: 4812.6 }]).content[0].text;
@@ -757,4 +765,96 @@ test("a mis-cased required query parameter is reported, and the near-miss is nam
   assert.match(wrong.params[0], /^projectId/, "must name the parameter the API wants");
   assert.match(wrong.params[0], /ProjectId/, "must quote what was actually sent");
   assert.match(wrong.params[0], /case-sensitive/, "must say why it did not bind");
+});
+
+// A nested object whose bulk is in its arrays was cut at a line boundary, under a note
+// claiming "no value shown is partial" — while the arrays inside it were cut mid-item
+// and later fields vanished with no field-level signal. Measured on a real bank
+// reconciliation shape: 200 pending transactions became 91 whole ones plus a fragment,
+// with pendingPostings and matchedGroups gone entirely and the result not valid JSON.
+//
+// That is a wrong ANSWER, not just an ugly one: an agent asking "what still needs
+// reconciling" saw unmatched transactions and no unmatched postings, would conclude
+// there was nothing on the ledger side to match against, and would reach for the
+// booking tool — which posts — instead of the matching one.
+test("a nested object is truncated by shortening its lists, not by cutting text", () => {
+  const tx = (i) => ({
+    id: i,
+    date: "2026-07-15",
+    amount: -1234.56 + i,
+    description: `Faktura fra leverandør AS nr ${i}`,
+    reference: `KID${String(i).padStart(12, "0")}`,
+    archived: false,
+    matchedGroupId: null,
+    bankAccountId: 1338,
+  });
+  const posting = (i) => ({
+    id: 9000 + i,
+    voucherId: 500 + i,
+    account: "1920",
+    amount: 1234.56 + i,
+    date: "2026-07-15",
+    description: `Bankpostering ${i}`,
+    vatCode: null,
+  });
+  const payload = {
+    bankAccountId: 1338,
+    month: "2026-07",
+    pendingTransactionCount: 200,
+    pendingPostingCount: 40,
+    matchedGroupCount: 12,
+    openingBalance: 100000,
+    closingBalance: 87654.32,
+    pendingTransactions: Array.from({ length: 200 }, (_, i) => tx(i)),
+    pendingPostings: Array.from({ length: 40 }, (_, i) => posting(i)),
+    matchedGroups: Array.from({ length: 12 }, (_, i) => ({ id: i, transactionIds: [i], postingIds: [9000 + i], amount: 1000 + i })),
+  };
+
+  const text = ok(payload).content[0].text;
+  const [note, ...rest] = text.split("\n\n");
+  const body = rest.join("\n\n");
+
+  // Still parseable, which the old branch was not.
+  const parsed = JSON.parse(body);
+
+  // No field disappears. This is the whole point: an absent pendingPostings reads as
+  // "nothing to match against".
+  for (const field of Object.keys(payload)) {
+    assert.ok(field in parsed, `${field} vanished from the truncated response`);
+  }
+
+  // Every item that IS shown is complete.
+  for (const item of parsed.pendingTransactions) {
+    assert.equal(Object.keys(item).length, Object.keys(tx(0)).length, "an item was cut short");
+  }
+
+  // The smaller lists survive intact rather than being starved by the big one.
+  assert.equal(parsed.pendingPostings.length, 40);
+  assert.equal(parsed.matchedGroups.length, 12);
+  assert.ok(parsed.pendingTransactions.length > 0 && parsed.pendingTransactions.length < 200);
+
+  // The counts are what let an agent detect the shortfall, so they must survive.
+  assert.equal(parsed.pendingTransactionCount, 200);
+  assert.equal(parsed.pendingPostingCount, 40);
+
+  // And the note says which list was shortened and by how much, rather than claiming
+  // nothing is partial.
+  assert.match(note, /pendingTransactions shows \d+ of 200/);
+  assert.match(note, /still valid JSON/);
+  assert.ok(!/no value shown is partial/.test(note));
+  assert.ok(text.length <= 24000 + note.length + 4, "the whole payload must respect the cap");
+});
+
+test("truncation falls back cleanly when shortening lists cannot help", () => {
+  // No arrays to shorten, and one oversized scalar.
+  assert.match(ok({ blob: "A".repeat(40000), id: 7 }).content[0].text, /nothing is shown/);
+  // Arrays exist, but the non-array part alone busts the cap.
+  assert.match(ok({ blob: "A".repeat(30000), rows: [{ a: 1 }] }).content[0].text, /nothing is shown/);
+  // A bare array still uses the item-boundary path.
+  assert.match(
+    ok(Array.from({ length: 4000 }, (_, i) => ({ i, v: "x".repeat(40) }))).content[0].text,
+    /showing the first \d+ of 4000 items/,
+  );
+  // Under the cap, untouched.
+  assert.equal(ok({ id: 1, name: "ok" }).content[0].text, '{\n  "id": 1,\n  "name": "ok"\n}');
 });
