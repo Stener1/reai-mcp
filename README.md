@@ -201,18 +201,15 @@ The company selected during authorization is a **boundary, not a default**. A gr
 
 An authorization with **no** bound company is refused outright, at every point it could be used — issuing, redeeming and refreshing. Early builds could mint one when `GET /api/me` returned no companies, and such a grant had no tenant boundary at all. If you authorized before this and see `invalid_token` with "not bound to a company", remove and re-add the connector.
 
-**Worth being precise about what this rests on.** The boundary is enforced *here*, in this server — it is not the API refusing the call. ReAI ignores `X-Tenant-Id` for a single-tenant token (see the quirks above), so we could not verify that the API itself enforces a tenant switch, and every tenant we have to test with reaches exactly one company. The guarantee is therefore only as strong as this process: it holds for anything going through these tools, and says nothing about a caller with the same ReAI token talking to ReAI directly. That is the right architecture — the token is the user's own, so they were never prevented from doing that — but do not read it as the API sandboxing them.
+**Worth being precise about what this rests on**, because three different claims are easy to run together. Measured with a user-scoped token:
 
-### Request limits
+- **Selection is real.** `GET /api/chart-of-accounts` under two of the token's companies returns different payloads, so `X-Tenant-Id` chooses the company.
+- **Isolation is real.** The same call with an id the token does not reach (`99999999`, `1`) returns `403`, so the API refuses a company the token has no access to.
+- **The binding is not the API's.** A grant narrowed to one company is enforced *here* — ReAI sees the underlying user token, which legitimately reaches all of them, so it cannot know the authorization was scoped. Treating that as API-enforced would be a false assurance.
 
-The MCP endpoint enforces two ceilings, both well above any real tool call:
+For a *tenant-scoped* token none of the first two applies: the header is ignored, any id returns that one company's data, and a request that appears to reach elsewhere has not. `scripts/check-token.sh` reports which case a token is in.
 
-| Limit | Value | Why |
-|---|---|---|
-| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413`, and the connection is closed |
-| JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
-
-`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. Responses stream on the POST itself, so no client capability is lost.
+So the binding is exactly as strong as this process, which is the right architecture — the token is the user's own, and they were never prevented from calling ReAI directly — but do not read it as the API sandboxing them.
 
 ### Verify a deployment
 

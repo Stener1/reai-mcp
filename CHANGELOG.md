@@ -188,19 +188,28 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
 
 ### Known limitations
 
-- **The tenant boundary is enforced by this server, not by the API** — and this is
-  still unverified rather than known false. ReAI ignores `X-Tenant-Id` when a token
-  reaches only one company: every value, including a nonexistent id, returns that
-  company's data. Isolation between *users* is intact, but whether the API enforces
-  a tenant *switch* could not be tested, because every token available during
-  development was tenant-scoped and reached exactly one company.
+- **What the API enforces, and what only this server enforces** — measured with a
+  user-scoped token, and worth separating carefully because an earlier version of
+  this entry ran the three together.
 
-  The spec says a **user-scoped** token behaves differently — `X-Tenant-Id` is
-  "required for tenant-scoped requests when authenticating with a user access
-  token" — so this is testable the moment one exists: list two companies from
-  `GET /api/me`, read a known record from each, and check the header actually
-  selects between them. Until then the guarantee holds for calls made through
-  these tools and says nothing about the same token used directly.
+  *Selection* works: `GET /api/chart-of-accounts` under two of the token's own
+  companies returned different payloads (76,313 vs 89,238 bytes), so `X-Tenant-Id`
+  chooses the company rather than being decorative.
+
+  *Isolation* works: the same call with a tenant id the token does not reach
+  (`99999999`, `1`) returns **403**, so the API refuses a company the token has no
+  access to.
+
+  *The per-authorization binding does not come from the API.* A remote connector
+  grant scoped to one company is enforced **here only** — ReAI sees the underlying
+  user token, which legitimately reaches every company on it, so it cannot tell
+  that a given authorization was narrowed to one. Calling that an API-enforced
+  boundary would be a false assurance.
+
+  And for a **tenant-scoped** token none of this applies: the header is ignored, any
+  id returns that one company's data, and an apparent cross-tenant read has not
+  happened. `scripts/check-token.sh` reports which case a token is in and runs all
+  three probes.
 
 - **Individual tokens cannot be revoked** before they expire. Sealed tokens carry
   no server-side record, so rotating `REAI_ENCRYPTION_KEY` — which invalidates
