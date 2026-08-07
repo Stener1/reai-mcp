@@ -217,10 +217,12 @@ The MCP endpoint enforces two ceilings, both well above any real tool call:
 
 | Limit | Value | Why |
 |---|---|---|
-| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413`, and the connection is closed |
+| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413` and the connection is closed — but see the note below, because a *far* oversized body gets no response at all |
 | JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
 
-`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. Responses stream on the POST itself, so no client capability is lost.
+**A `413` is not guaranteed.** To answer at all, the server has to finish reading the body it is rejecting: closing while data is still arriving makes the OS send `RST`, which discards the response the client has not read yet. So an oversized body is drained first — bounded at 32 MB and 5 seconds — and only then answered. Past either bound the request is destroyed with **no response**, which the client sees as a connection reset. The 400 MB case above is exactly that. Worth knowing before diagnosing a silent reset as a network fault.
+
+`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. No client capability is lost: the server runs with `enableJsonResponse`, so a POST is answered with a single JSON response rather than an event stream, and there is nothing a standalone stream would have carried.
 
 ### Verify a deployment
 
