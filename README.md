@@ -173,7 +173,20 @@ Unknown callback hosts are then refused at registration and never reach the cons
 
 The company selected during authorization is a **boundary, not a default**. A grant bound to tenant 4711 cannot address any other tenant, even though the underlying ReAI token may unlock dozens — relevant for an accountant whose token reaches every client company. Tools that pass a different `tenantId`, and `reai_use_tenant`, are both refused with an explanation. To work in another company, re-authorize and pick it.
 
+An authorization with **no** bound company is refused outright, at every point it could be used — issuing, redeeming and refreshing. Early builds could mint one when `GET /api/me` returned no companies, and such a grant had no tenant boundary at all. If you authorized before this and see `invalid_token` with "not bound to a company", remove and re-add the connector.
+
 **Worth being precise about what this rests on.** The boundary is enforced *here*, in this server — it is not the API refusing the call. ReAI ignores `X-Tenant-Id` for a single-tenant token (see the quirks above), so we could not verify that the API itself enforces a tenant switch, and every tenant we have to test with reaches exactly one company. The guarantee is therefore only as strong as this process: it holds for anything going through these tools, and says nothing about a caller with the same ReAI token talking to ReAI directly. That is the right architecture — the token is the user's own, so they were never prevented from doing that — but do not read it as the API sandboxing them.
+
+### Request limits
+
+The MCP endpoint enforces two ceilings, both well above any real tool call:
+
+| Limit | Value | Why |
+|---|---|---|
+| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413`, and the connection is closed |
+| JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
+
+`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. Responses stream on the POST itself, so no client capability is lost.
 
 ### Verify a deployment
 
@@ -426,7 +439,13 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 
 ### A note on `npm audit`
 
-Two advisories currently surface from transitive dependencies of `@modelcontextprotocol/sdk` (`hono` and `fast-uri`). Neither is on this server's request path — it uses `node:http` directly and never resolves remote JSON-Schema references. They clear when the upstream SDK bumps them.
+Two advisories surface from transitive dependencies of `@modelcontextprotocol/sdk`. An earlier version of this section said neither was on the request path, which was wrong, so here is what is actually true.
+
+**`fast-uri`** (HIGH — host confusion via a backslash authority introducer) arrives through `ajv`, and both are loaded into the running process: instrumenting `Module._load` while importing the server prints `fast-uri, ajv, ajv/dist/compile/codegen`. The SDK uses ajv to validate protocol messages. We have not found a route by which attacker-controlled input reaches the vulnerable authority parsing, and it may well not be exploitable here — but "we could not find one" is not "there isn't one", and that is the wrong standard for a HIGH in the runtime tree.
+
+**`hono`** (MODERATE — ReDoS in CORS middleware) is the narrower case. The SDK's transport runs `@hono/node-server`'s request listener on every `/mcp` call, so hono itself is on the path, but the vulnerable *CORS middleware* is not: the SDK imports it only in its examples, and this server sets its own CORS headers.
+
+Both are fixed upstream. Both are currently held by the 7-day minimum-release-age policy this project follows against supply-chain attacks — `fast-uri@3.1.5` was published 2026-07-31 and `hono@4.12.34` on 2026-08-03 — so the `overrides` land as each clears. Adding them earlier fails `npm install` with `ETARGET`.
 
 ## Contributing
 
