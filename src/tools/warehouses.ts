@@ -229,7 +229,13 @@ const deleteWarehouse = defineTool({
     "So the trigger is current stock on hand, not whether the warehouse was ever used.\n\n" +
     "There is no unarchive endpoint for warehouses — only customers and suppliers have one — so " +
     "the archive branch is one-way. An archived warehouse still holding stock is easy to lose " +
-    "sight of, because the default warehouse list does not show it.",
+    "sight of, because the default warehouse list does not show it.\n\n" +
+    "Worth knowing about the tier this sits in, because it is not obvious: reai_adjust_inventory " +
+    "needs REAI_WRITE_MODE=full precisely because a stock transaction cannot be deleted, while " +
+    "this call is available one tier down and the delete branch removes that whole history at " +
+    "once. It is classified the way every other archive-on-delete tool here is classified, and " +
+    "it is marked destructive so a client can confirm it — but if that asymmetry matters for a " +
+    "deployment, read-only is the setting that closes it.",
   risk: "reversible",
   destructive: true,
   apiPaths: [["DELETE", "/api/warehouses/{id}"]],
