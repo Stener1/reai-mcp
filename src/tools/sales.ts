@@ -246,7 +246,9 @@ const setCustomerAddress = defineTool({
     "and countryCode — so a body carrying those three is accepted and empties everything else. " +
     "Measured on a live tenant: postalCode \"0150\" became null, province \"Oslo\" became null and " +
     "the second address line was emptied, on a 200. So this tool reads the current address first " +
-    "and merges your changes into it. Pass null for a part you mean to clear.",
+    "and merges your changes into it. Pass null for a part you mean to clear.\n\n" +
+    "Between that read and the write there is a lost-update window: an address edited in the " +
+    "ReAI UI in between is silently reverted. There is no ETag or version field to prevent it.",
   risk: "reversible",
   apiPaths: [
     // The read that makes the merge possible.
@@ -290,10 +292,37 @@ const setCustomerAddress = defineTool({
       address?: Record<string, unknown> | null;
       deliveryAddress?: Record<string, unknown> | null;
     }>({ method: "GET", path: `/api/customers/${id}`, tenantId: resolved });
-    const existing =
-      (kind === "delivery" ? current.data?.deliveryAddress : current.data?.address) ?? {};
-    // Only the parts this endpoint accepts — the record carries more than the address request
-    // takes, and sending an unknown field is refused ("Unknown field: ...").
+
+    // Fail closed on a response this cannot read, rather than treating it as "no address yet".
+    // `?? {}` collapsed both cases into one: a body that came back as text, or with the key
+    // renamed, produced an empty base — so the PUT sent the caller's fields alone, which is the
+    // wipe this tool exists to prevent, and the note then said "Nothing else was set on it
+    // beforehand". reai_update_agreement refuses in exactly this situation.
+    const record = current.data;
+    const readable = !!record && typeof record === "object" && !Array.isArray(record);
+    const field = kind === "delivery" ? "deliveryAddress" : "address";
+    const stored = readable ? record[field] : undefined;
+    const storedIsAddress = stored !== null && stored !== undefined
+      ? typeof stored === "object" && !Array.isArray(stored)
+      : true; // null/absent genuinely means "no address set yet"
+    if (!readable || !storedIsAddress) {
+      return fail(
+        `Could not read customer ${id}'s current ${kind ?? "postal"} address: the response was ` +
+          `not a customer record with ${
+            stored === undefined ? `an \`${field}\` field` : `an object at \`${field}\``
+          }. Nothing was written — this endpoint REPLACES the address, so without the current ` +
+          `one to merge into, the parts you did not pass would have been erased.`,
+      );
+    }
+    const existing = (stored as Record<string, unknown> | null) ?? {};
+    // Only the parts this endpoint accepts.
+    //
+    // An earlier comment justified this as "the record carries more, and an unknown field is
+    // refused" — both halves were invented. ContactAddressRes carries exactly the six fields
+    // UpdateCustomerAddressReq takes, and this API has no additionalProperties: false anywhere;
+    // the repo's own measured note for this domain says extra fields are silently DISCARDED. The
+    // whitelist stays because echoing an unrecognised key back is not something to rely on being
+    // ignored, and because it makes the write independent of what the read happens to include.
     const ADDRESS_PARTS = ["addressPart1", "addressPart2", "postalCode", "city", "province", "countryCode"];
     const base = Object.fromEntries(
       ADDRESS_PARTS.filter((k) => existing[k] !== undefined && existing[k] !== null).map((k) => [k, existing[k]]),

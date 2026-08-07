@@ -339,10 +339,21 @@ function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
   // why this is a path rule rather than another field. "Rename the bank account" silently
   // removing the number a customer pays into is not reversible master-data editing.
   //
-  // PUT only. Creating either record is additive: nothing is diverted, and a company bank is
-  // already exempted from routing escalation on POST for that reason. Both were swept for out of
-  // the whole document — /api/reconciliation-rules/{id} carries a destination too but requires
-  // it, so it cannot be omitted, and the rent agreement is covered by its own rule above.
+  // PUT only, because the class is REPLACEMENT. Creating cannot clear what is not there yet, and
+  // PATCH was measured to be a genuine partial update — a name-only PATCH on a supplier left its
+  // account number, IBAN and SWIFT untouched — so those paths keep the routing rule alone.
+  //
+  // What "creating stays reversible" means exactly, since the first version of this comment
+  // overstated it: the PATH classification stays reversible for both. A creditor created WITH an
+  // account number still escalates on the routing axis, because /api/creditors is not in
+  // ADDING_IS_ORDINARY and a company bank is. That asymmetry is not defended here — the
+  // add-diverts-nothing argument would apply equally to a creditor — but loosening a live guard
+  // is not a tidiness change, so it is left as it stands and stated rather than smoothed over.
+  //
+  // Swept out of the whole document, and deliberately narrow:
+  // /api/reconciliation-rules/{id} carries a destination too and REQUIRES it, so omission is
+  // impossible; the rent agreement is covered by its own rule above; /api/debtors/{id} carries
+  // none at all.
   if (
     method === "PUT" &&
     /^\/api\/(company-banks|creditors)\/[^/]+$/i.test(normalized)
@@ -1212,9 +1223,19 @@ export class WriteBlockedError extends Error {
 function explain(risk: Risk, mode: WriteMode): string {
   if (risk === "irreversible") {
     return (
-      "Operations in this class post to the general ledger, issue legal documents, move money, " +
-      "run payroll, file with the tax authority, or administer users — none of which can be " +
-      'cleanly undone. To allow them, restart the server with REAI_WRITE_MODE=full. ' +
+      // The list used to read as a description of THIS call, and for the path-specific rules it
+      // was simply false: renaming a company bank was refused with "posts to the general ledger,
+      // issues legal documents, runs payroll". The harm is directional — an agent told that asks
+      // its operator for REAI_WRITE_MODE=full, which unlocks real ledger writes, when what the
+      // call needed was to send the account number back. So the list is now offered as the class
+      // it is, with a pointer at the endpoint's own note.
+      "Operations in this class cannot be cleanly undone: posting to the general ledger, issuing " +
+      "a legal document, moving money, running payroll, filing with the tax authority, " +
+      "administering users, or REPLACING a record in a way that destroys the fields left out. " +
+      "Which of those applies to this endpoint is on the endpoint — reai_describe_endpoint and " +
+      "reai_api_notes carry its known quirks, and for a replacement the fix is usually to send " +
+      "the missing fields rather than to raise the write mode. If it genuinely needs the higher " +
+      'ceiling, restart the server with REAI_WRITE_MODE=full. ' +
       "Do not enable this against production books you are not prepared to correct by hand."
     );
   }

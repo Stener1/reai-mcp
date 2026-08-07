@@ -504,8 +504,11 @@ export const QUIRKS: readonly Quirk[] = [
       "A full replacement whose required set is only addressPart1, city and countryCode — so a " +
       "body carrying those three is accepted and empties the rest. Measured: postalCode " +
       '"0150" → null, province "Oslo" → null, addressPart2 "Oppgang B" → null, on a 200. An ' +
-      "invoice addressed without a postcode is the visible consequence. reai_set_customer_address " +
-      "reads the current address and merges, so it does not have this problem; a raw call does.",
+      "invoice addressed without a postcode is the visible consequence.\n\n" +
+      "reai_set_customer_address reads the current address and merges, so the two customer paths " +
+      "have a safe route. /api/suppliers/{id}/address has NO curated tool, so a raw call is the " +
+      "only way to change a supplier address — read it back from GET /api/suppliers/{id} and send " +
+      "every part you want kept.",
   },
   // --- Agreements -----------------------------------------------------------
   {

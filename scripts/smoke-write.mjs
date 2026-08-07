@@ -86,15 +86,25 @@ const textOf = (r) =>
 
 /** Pull the first JSON object out of a tool's text response. */
 function jsonOf(result) {
-  const text = textOf(result);
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return undefined;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
+  // The BODY, which ok() puts in the last blank-line-separated block.
+  //
+  // This used to scan from the first `{` to the last `}`. That worked only while every note
+  // above the body was brace-free — and the moment reai_request began appending quirk notes to a
+  // SUCCESSFUL write, notes containing `{ agreementId, templateType, ... }` made the span start
+  // inside the prose and the parse fail. The symptom was a passing API call reported as a failed
+  // check ("a lease exists to edit — HTTP 201"), which is the worst shape of test bug: it blames
+  // the wrong thing.
+  const blocks = textOf(result).split("\n\n");
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i].trim();
+    if (!block.startsWith("{") && !block.startsWith("[")) continue;
+    try {
+      return JSON.parse(block);
+    } catch {
+      // Not the body after all — keep looking rather than giving up on the first candidate.
+    }
   }
+  return undefined;
 }
 
 // A marker that makes anything this script leaves behind obvious in the UI.

@@ -5,11 +5,16 @@ import { getSpecIndex } from "../dist/reai/spec.js";
 import { quirksFor } from "../dist/reai/quirks.js";
 import { allTools } from "../dist/server.js";
 
+const rawRequest = () => allTools.find((x) => x.name === "reai_request");
+
 /**
  * A full-replacement write that CARRIES a payment destination can erase it by omission.
  *
- * Found by sweeping the document for the shape that bit on agreements — a PUT with no PATCH
- * sibling — and then asking which of them the payment-routing guard cannot see. That guard
+ * Found by sweeping the document for full-replacement writes and asking which of them the
+ * payment-routing guard cannot see. Worth stating what actually narrowed it, because the first
+ * account of this claimed more method than there was: "a PUT with no PATCH sibling" selected
+ * every PUT in the API, since no path here has both verbs. The discriminating filter was
+ * carrying a payment-destination field that is not required. That guard
  * escalates a body that CONTAINS a destination, so a body whose danger is leaving one out is
  * invisible to it. Two paths turned out to do exactly that, measured on a live tenant:
  *
@@ -31,12 +36,33 @@ function replacementsCarryingADestination() {
     const fields = op.body?.fields ?? {};
     const destinations = Object.keys(fields).filter((f) => ROUTING.has(f.toLowerCase()));
     if (destinations.length === 0) continue;
-    // The index marks an optional field with a trailing "?"; anything else is required.
-    const clearable = destinations.filter((d) => String(fields[d]).endsWith("?"));
+    // The REQUIRED list, which is the only thing that decides whether a field can be left out.
+    //
+    // The first version read a trailing "?" on the field descriptor as "optional". It is not:
+    // build-spec-index.mjs writes that from whether the type includes null, so it means NULLABLE.
+    // CompanyBankReq.bban is optional and indexed as "string" — so the sweep called it required
+    // and caught company-banks only because `swiftCode` happens to be nullable. It reached the
+    // right answer for the wrong reason, and a schema with an optional non-nullable destination
+    // and nothing else would have been skipped entirely.
+    const required = new Set(op.body?.required ?? []);
+    const clearable = destinations.filter((d) => !required.has(d));
     out.push({ path: op.path, destinations, clearable });
   }
   return out;
 }
+
+test("the sweep reads optionality from the required list, not from nullability", () => {
+  // The two are different and this file conflated them. CompanyBankReq.bban is the witness:
+  // omittable, and NOT nullable, so a nullability test calls it required.
+  const bank = getSpecIndex().operations.find(
+    (o) => o.method === "PUT" && o.path === "/api/company-banks/{id}",
+  );
+  assert.ok(bank, "expected the company-bank PUT in the index");
+  assert.equal(bank.body.fields.bban, "string", "bban is not nullable — that is the whole trap");
+  assert.ok(!(bank.body.required ?? []).includes("bban"), "yet it is not required");
+  const found = replacementsCarryingADestination().find((r) => r.path === "/api/company-banks/{id}");
+  assert.ok(found.clearable.includes("bban"), "so the sweep must call bban clearable");
+});
 
 test("the sweep still finds the shape it is about", () => {
   const found = replacementsCarryingADestination();
@@ -72,16 +98,47 @@ test("a required destination is NOT swept up, because it cannot be omitted", () 
   assert.deepEqual(rules.clearable, [], "accountNumber is required there, so omission is impossible");
 });
 
-test("creating either record stays reversible, because adding diverts nothing", () => {
-  // The whole class is about REPLACING. A company bank is already exempted from routing
-  // escalation on POST for the same reason, and gating creation would make adding an account
-  // need `full` for no gain.
+test("the rule covers replacement only, and does not spread", () => {
+  // The class is REPLACING. Creating cannot clear what is not there yet.
   assert.equal(classifyRequest("POST", "/api/company-banks"), "reversible");
   assert.equal(classifyRequest("POST", "/api/creditors"), "reversible");
   assert.equal(classifyRequest("PUT", "/api/company-banks/7"), "irreversible");
   assert.equal(classifyRequest("PUT", "/api/creditors/7"), "irreversible");
-  // And the rule must not spread to neighbours that carry no destination.
+  // And it must not reach a neighbour carrying no destination.
   assert.equal(classifyRequest("PUT", "/api/debtors/7"), "reversible");
+});
+
+test("what a create is classified as depends on its BODY, which the path test cannot see", () => {
+  // "Creating stays reversible" is true of the PATH and not of the effective classification: a
+  // creditor created with an account number escalates on the routing axis, because
+  // /api/creditors is not in ADDING_IS_ORDINARY and a company bank is. The first version of the
+  // test above asserted the path only and read as a claim about the whole pipeline.
+  const routed = (method, path, body) =>
+    classifyPaymentRouting(classifyRequest(method, path), path, body, method);
+  assert.equal(routed("POST", "/api/creditors", { name: "x" }), "reversible");
+  assert.equal(
+    routed("POST", "/api/creditors", { name: "x", bankAccountNumber: "15201353103" }),
+    "irreversible",
+    "an account number arriving at creation is still a destination the routing axis escalates",
+  );
+  // The company-bank exemption is the deliberate asymmetry, and it is load-bearing for the
+  // live suite, which creates one in the default mode.
+  assert.equal(
+    routed("POST", "/api/company-banks", { name: "x", bban: "15201353103" }),
+    "reversible",
+    "ADDING_IS_ORDINARY exempts this one; if that changes, smoke-write can no longer create a bank",
+  );
+});
+
+test("PATCH is left to the routing rule because it does not replace", () => {
+  // Measured on a live tenant: a name-only PATCH on a supplier left bankAccountNumber, iban and
+  // swiftCode untouched — with the precondition asserted first, since an earlier attempt at this
+  // compared null to null and proved nothing. So the PUT-only scope is evidence, not assumption.
+  const routed = (method, path, body) =>
+    classifyPaymentRouting(classifyRequest(method, path), path, body, method);
+  assert.equal(classifyRequest("PATCH", "/api/suppliers/7"), "reversible");
+  assert.equal(routed("PATCH", "/api/suppliers/7", { name: "x" }), "reversible");
+  assert.equal(routed("PATCH", "/api/suppliers/7", { iban: "NO16" }), "irreversible");
 });
 
 test("the routing guard still escalates when a destination IS present", () => {
@@ -111,6 +168,93 @@ test("a reai_request caller is told, since a 200 says nothing", () => {
   ).note;
   assert.match(note, /bban AND iban emptied/);
   assert.match(note, /defeats/);
+});
+
+/**
+ * The same blindness on the OTHER presence-only axis, recorded rather than fixed.
+ *
+ * INVOICE_DELIVERY_FIELDS escalates a body that contains `invoiceEmail` exactly as the routing
+ * rule escalates a destination — so it is equally blind to omission, and `PUT /api/orders/{id}`
+ * and `PUT /api/subscriptions/{id}` are both full replacements carrying an optional
+ * `invoiceEmail`, both reversible. Omitting it stops delivery rather than sending an invoice to
+ * the wrong party, which is why this is named and not gated: making an ordinary order edit need
+ * `full` is a large cost for a smaller harm, and that is a judgement worth being explicit about
+ * rather than leaving the reader to infer the class was closed.
+ */
+test("the invoice-delivery axis has the same omission blindness, and it is known", async () => {
+  const { invoiceDeliveryFields } = await import("../dist/policy.js");
+  // Presence-only, like the routing rule — that is the shared shape.
+  assert.deepEqual(invoiceDeliveryFields({ invoiceEmail: "a@b.invalid" }), ["invoiceEmail"]);
+  assert.deepEqual(invoiceDeliveryFields({ name: "x" }), []);
+
+  const index = getSpecIndex();
+  const affected = [];
+  for (const path of ["/api/orders/{id}", "/api/subscriptions/{id}"]) {
+    const op = index.operations.find((o) => o.method === "PUT" && o.path === path);
+    assert.ok(op, `${path} should be in the index`);
+    const required = new Set(op.body?.required ?? []);
+    if ("invoiceEmail" in (op.body?.fields ?? {}) && !required.has("invoiceEmail")) affected.push(path);
+  }
+  assert.deepEqual(
+    affected.sort(),
+    ["/api/orders/{id}", "/api/subscriptions/{id}"],
+    "if this set changes, revisit the decision not to gate it",
+  );
+  // Stated as it stands today: reversible, so the default mode can drop a delivery address.
+  for (const path of affected) assert.equal(classifyRequest("PUT", concrete(path)), "reversible");
+});
+
+/** Drives reai_request with a client that makes any HTTP attempt loud. */
+async function raw(method, path, body, writeMode) {
+  let called = false;
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode, allowExternalSend: false },
+    session: {},
+    client: {
+      deepLink: () => "",
+      request: async () => {
+        called = true;
+        return { data: { id: 7, name: "x" }, status: 200 };
+      },
+    },
+  };
+  try {
+    const res = await rawRequest().handler({ method, path, body }, ctx);
+    return { called, text: res.content.map((c) => c.text).join("\n"), refused: res.isError === true };
+  } catch (err) {
+    return { called, text: err?.message ?? String(err), refused: true };
+  }
+}
+
+test("the refusal says why THIS endpoint is irreversible, not what the class usually means", async () => {
+  // "Operations in this class post to the general ledger, issue legal documents, run payroll" is
+  // false of renaming a bank account, and the harm is directional: an agent told that asks its
+  // operator for REAI_WRITE_MODE=full — which unlocks real ledger writes — when what the call
+  // needed was to send the account number back.
+  const r = await raw("PUT", "/api/company-banks/7", { name: "x" }, "reversible");
+  assert.equal(r.refused, true);
+  assert.equal(r.called, false);
+  assert.match(r.text, /REPLACES the record/);
+  assert.match(r.text, /send the missing fields rather than to raise the write mode/);
+
+  // A path that IS in the class for the usual reasons must still read sensibly.
+  const voucher = await raw("POST", "/api/vouchers", {}, "reversible");
+  assert.equal(voucher.refused, true);
+  assert.match(voucher.text, /classified "irreversible"/);
+});
+
+test("a SUCCESSFUL raw write carries the quirk, since a 200 is the only other signal", async () => {
+  // quirksFor was consulted only when the request FAILED. That is right for notes explaining an
+  // error and useless for the ones whose whole point is that the call succeeds and does something
+  // unexpected — which is exactly this endpoint.
+  const ok = await raw("PUT", "/api/company-banks/7", { name: "x" }, "full");
+  assert.equal(ok.called, true, "in full mode the write proceeds");
+  assert.match(ok.text, /Known quirk/);
+  assert.match(ok.text, /CLEARS it/);
+
+  // A read cannot surprise anyone this way, so it stays quiet.
+  const read = await raw("GET", "/api/company-banks/7", undefined, "full");
+  assert.doesNotMatch(read.text, /Known quirk/);
 });
 
 // ---------------------------------------------------------------------------
@@ -188,6 +332,47 @@ test("an empty change set is refused rather than replacing the address with noth
   const { calls, result } = await setAddress({ id: 7 }, STORED);
   assert.equal(result.isError, true);
   assert.equal(calls.length, 0);
+});
+
+// `?? {}` collapsed "no address yet" and "I could not read the response" into one, so a body
+// that came back as text or with the key renamed produced an empty base — the PUT then sent the
+// caller's fields alone, which is the wipe this tool exists to prevent, and the note claimed
+// "Nothing else was set on it beforehand". reai_update_agreement refuses in this situation.
+test("a read it cannot understand is refused, not treated as an empty address", async () => {
+  const unreadable = [
+    ["a text body", "Gata 1, 0150 Oslo"],
+    ["an array", [{ address: { addressPart1: "Gata 1" } }]],
+    ["an address that is not an object", { address: "Gata 1, 0150 Oslo" }],
+  ];
+  for (const [label, body] of unreadable) {
+    // The change SATISFIES the required set on purpose. With an incomplete change the
+    // missing-required check refuses anyway, so the test would pass with the fail-closed branch
+    // removed — which is what a first version of it did.
+    const { calls, result, text } = await setAddress(
+      { id: 7, addressPart1: "Gata 2", city: "Oslo", countryCode: "NO" },
+      body,
+    );
+    assert.equal(result.isError, true, label);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${label}: nothing may be written`);
+    assert.match(text, /Nothing was written/);
+    assert.doesNotMatch(text, /Nothing else was set on it beforehand/, `${label}: must not claim the address was empty`);
+  }
+});
+
+// The limit of the check above, stated rather than papered over: an `address` key that is ABSENT
+// is read as "no address set yet". That is the right reading for the ordinary case — a customer
+// created without one — and it is indistinguishable from the response having been renamed
+// upstream, since both leave the key missing. So a rename would be treated as an empty address
+// and the merge would have nothing to carry over. Nothing in the response can tell the two
+// apart; what can is the tool's own note, which says plainly that nothing was set beforehand.
+test("an absent address key is read as 'none yet', which is a limit and not a check", async () => {
+  const { calls, text } = await setAddress(
+    { id: 7, addressPart1: "Gata 1", city: "Oslo", countryCode: "NO" },
+    { postalAddress: { addressPart1: "Ignored", city: "Bergen", countryCode: "NO" } },
+  );
+  assert.equal(calls[1].method, "PUT");
+  assert.deepEqual(calls[1].body, { addressPart1: "Gata 1", city: "Oslo", countryCode: "NO" });
+  assert.match(text, /Nothing else was set on it beforehand/, "the note is what makes this visible");
 });
 
 test("a customer with no address yet can still have one set", async () => {

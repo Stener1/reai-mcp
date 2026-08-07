@@ -194,8 +194,10 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **A full-replacement write can erase a payment destination by omitting it, and
   the routing guard could not see that.** Found by sweeping the document for the
-  shape that bit on agreements — a PUT with no PATCH sibling — and then asking
-  which of those the payment-routing rule cannot cover. It escalates a body that
+  shape that bit on agreements and asking which full-replacement writes the
+  payment-routing rule cannot cover. (Worth being accurate about the method: "a
+  PUT with no PATCH sibling" selected every PUT, because no path in this document
+  has both verbs. What narrowed it to two was carrying an optional destination.) It escalates a body that
   CONTAINS a destination; a body whose danger is leaving one out is invisible to
   it. Two paths do exactly that, both measured on a live tenant with a rename as
   the intent:
@@ -210,6 +212,23 @@ All notable changes to `reai-mcp`. Format loosely follows
   `/api/reconciliation-rules/{id}` carries a destination too and is deliberately
   NOT swept up: it requires the field, so omission is impossible. The full-write
   suite now demonstrates the clearing on a throwaway bank rather than asserting it.
+- Two gaps this change does NOT close, named rather than left for the reader to
+  infer from the general reasoning:
+  - There is no curated tool for updating a company bank, a creditor or a
+    supplier's address. Having gated the first two PUTs, the only route to a
+    rename is `reai_request` in `full` mode — the mode that also unlocks vouchers,
+    VAT and payroll — to perform an operation this change argues needs a
+    read-and-merge. The agreements work shipped the merge tool alongside the gate;
+    this did not. The quirk therefore names the SETTABLE fields rather than saying
+    "echo the GET back", which does not transfer here: `CompanyBankRes` carries 18
+    properties against `CompanyBankReq`'s six.
+  - The invoice-delivery axis has the identical omission blindness.
+    `INVOICE_DELIVERY_FIELDS` is presence-only, and `PUT /api/orders/{id}` and
+    `PUT /api/subscriptions/{id}` are full replacements carrying an optional
+    `invoiceEmail`, both still reversible. Omitting it stops delivery rather than
+    redirecting it, so the harm is smaller and gating would make an ordinary order
+    edit need `full` — a deliberate decision, with a test that records the set so
+    it surfaces if it grows.
 - **`reai_set_customer_address` silently dropped the parts it was not given.** The
   same shape on a smaller scale: the address PUT requires only `addressPart1`,
   `city` and `countryCode`, so a body carrying those three is accepted and empties
