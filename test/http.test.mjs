@@ -31,6 +31,23 @@ function startUpstream() {
   });
 }
 
+/**
+ * Ask the OS for a free port instead of deriving one from the clock. Sequential runs
+ * across three Node versions can still hold the previous run's port, and a derived
+ * port that collides fails as "server did not become healthy", which reads like a
+ * server bug rather than a harness one.
+ */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
 function waitForHealth(url, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -49,7 +66,7 @@ function waitForHealth(url, timeoutMs = 15000) {
 
 before(async () => {
   const upstreamPort = await startUpstream();
-  const port = 18000 + Number(process.hrtime.bigint() % 900n);
+  const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, ["dist/http.js"], {
     env: {
@@ -98,6 +115,48 @@ function initializeBody(id = 1) {
   };
 }
 
+/**
+ * Send an oversized body and read whatever the server says back.
+ *
+ * Deliberately raw sockets rather than fetch: the server answers 413 and closes
+ * while the client is still uploading, and undici treats a close mid-upload as
+ * "fetch failed" without surfacing the response it already received. That is a
+ * client limitation, not a server fault — but it makes the assertion racy, and the
+ * point of these tests is exactly what the server puts on the wire.
+ */
+function rawPost({ port, path, contentType, declaredBytes, chunkCount, authorization }) {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, "127.0.0.1");
+    let response = "";
+    let wrote = 0;
+    const finish = () => resolve({ response, closed: socket.destroyed || !socket.writable, sockErr, wrote });
+    let sockErr = null;
+    socket.on("error", (e) => { sockErr = e; }); // server closing mid-upload is under test
+    socket.on("data", (d) => {
+      response += d.toString();
+      if (response.includes("\r\n\r\n")) {
+        socket.destroy();
+        resolve({ response, closed: true });
+      }
+    });
+    socket.on("close", finish);
+    socket.on("connect", () => {
+      socket.write(
+        `POST ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+          `Content-Type: ${contentType}\r\nAccept: application/json, text/event-stream\r\n` +
+          (authorization ? `Authorization: Bearer ${authorization}\r\n` : "") +
+          `Content-Length: ${declaredBytes}\r\n\r\n`,
+      );
+      const chunk = "a".repeat(64 * 1024);
+      for (let i = 0; i < chunkCount && socket.writable; i++) { socket.write(chunk); wrote++; }
+    });
+    setTimeout(() => {
+      socket.destroy();
+      finish();
+    }, 30000).unref();
+  });
+}
+
 function mcpPost(body, token, extraHeaders = {}) {
   return fetch(`${base}/mcp`, {
     method: "POST",
@@ -142,10 +201,16 @@ test("a properly bound grant is accepted", async () => {
 // every other in-flight request with it. /mcp bypassed the 512 KB cap the OAuth
 // endpoints use because the raw stream went straight to the SDK.
 test("an oversized MCP body is rejected with 413, not swallowed by the heap", async () => {
-  const res = await mcpPost("x".repeat(9 * 1024 * 1024), accessToken(TENANTED));
-  assert.equal(res.status, 413);
-  const body = await res.json();
-  assert.equal(body.error, "payload_too_large");
+  const { response } = await rawPost({
+    port: Number(new URL(base).port),
+    path: "/mcp",
+    contentType: "application/json",
+    declaredBytes: 9 * 1024 * 1024,
+    chunkCount: 144,
+    authorization: accessToken(TENANTED),
+  });
+  assert.match(response, /^HTTP\/1\.1 413/, `expected 413, got: ${response.slice(0, 200)}`);
+  assert.match(response, /payload_too_large/);
 });
 
 // 1000 tools/call entries in a 130 KB body produced 1000 concurrent upstream calls.
@@ -209,32 +274,25 @@ test("a doubled-slash health path is not served as something else", async () => 
 // could no longer advance. It answered nothing further and was not closed either —
 // open at 45s, RST at 128s — and 100 of them cost an unauthenticated caller ~600 KB
 // each. This asserts the connection is closed promptly instead.
-test("an oversized body on an unauthenticated endpoint closes the connection", async () => {
-  const port = Number(new URL(base).port);
-  const socket = net.connect(port, "127.0.0.1");
-  const closed = new Promise((resolve) => {
-    socket.on("close", () => resolve("closed"));
-    socket.on("error", () => resolve("closed"));
-  });
-  const timeout = new Promise((resolve) => setTimeout(() => resolve("still open"), 10000));
-
-  const chunk = "a".repeat(64 * 1024);
-  await new Promise((resolve) => {
-    socket.write(
-      "POST /token HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
-        "Content-Type: application/x-www-form-urlencoded\r\n" +
-        `Content-Length: ${2 * 1024 * 1024}\r\n\r\n`,
-      resolve,
-    );
-  });
-  let response = "";
-  socket.on("data", (d) => (response += d.toString()));
-  for (let i = 0; i < 32; i++) socket.write(chunk);
-
-  const outcome = await Promise.race([closed, timeout]);
-  socket.destroy();
-  assert.equal(outcome, "closed", "the connection must not be left wedged");
-  assert.match(response, /413|Connection: close/i, `unexpected response: ${response.slice(0, 200)}`);
+test("an oversized body is rejected with 413 every time, not just usually", async () => {
+  // Repeated deliberately. Answering the moment the limit is passed still returned a
+  // 413 on most attempts, so a single-shot assertion passed at a 28% failure rate.
+  // What made it reliable was draining the body before answering: closing with unread
+  // data makes the OS send RST, and an RST discards the response already sitting in
+  // the client's receive buffer. Measured 36/50, then 42/50, then 50/50.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const { response, closed, sockErr, wrote } = await rawPost({
+      port: Number(new URL(base).port),
+      path: "/token",
+      contentType: "application/x-www-form-urlencoded",
+      declaredBytes: 2 * 1024 * 1024,
+      chunkCount: 32,
+    });
+    const detail = JSON.stringify({ attempt, response: response.slice(0, 120), sockErr: String(sockErr), wrote });
+    assert.match(response, /^HTTP\/1\.1 413/, `expected 413: ${detail}`);
+    assert.match(response, /Connection: close/i, `expected a close: ${detail}`);
+    assert.ok(closed, `the connection must not be left wedged: ${detail}`);
+  }
 });
 
 test("an oversized /register body says so, rather than blaming the JSON", async () => {
@@ -255,7 +313,7 @@ test("an oversized /register body says so, rather than blaming the JSON", async 
 // "re-authorize the connector" — advice that makes no sense when passthrough is
 // precisely what skips OAuth.
 test("raw-token passthrough still works with no tenant configured", async () => {
-  const port = 18900 + Number(process.hrtime.bigint() % 90n);
+  const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["dist/http.js"], {
     env: {

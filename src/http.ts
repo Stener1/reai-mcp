@@ -28,6 +28,7 @@ import {
   OAuthProvider,
   readBody,
   BodyTooLargeError,
+  BodyAbandonedError,
   sendPayloadTooLarge,
   sendHtml,
   sendJson,
@@ -85,6 +86,12 @@ async function main(): Promise<void> {
     handle(req, res, config, sealer, replayGuard).catch((err: unknown) => {
       if (err instanceof BodyTooLargeError) {
         sendPayloadTooLarge(res, err.message);
+        return;
+      }
+      // The body blew past the drain ceiling, so readBody destroyed the request and
+      // there is no live connection left to explain it on.
+      if (err instanceof BodyAbandonedError) {
+        log(`abandoned oversized body on ${req.method} ${req.url}`);
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
