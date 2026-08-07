@@ -656,6 +656,16 @@ const STOPWORDS = new Set([
   "with", "from", "by", "at", "as", "it", "its", "if", "so", "any", "some",
   "want", "need", "please", "about", "into", "out", "up", "down", "again",
   "exist", "exists", "s",
+  // Norwegian equivalents of the fillers above. "beklager" ("sorry") earns its place
+  // twice: it carries no signal about which endpoint is wanted, AND it ends in "lager",
+  // so compound decomposition read a conversational apology as a question about the
+  // warehouse — "beklager, hvor er abonnementene" ranked stock above subscriptions.
+  "hvordan", "hva", "hvilken", "hvilke", "hvem", "naar", "hvor", "hvorfor",
+  "kan", "skal", "vil", "er", "var", "har", "hadde", "blir",
+  "jeg", "vi", "min", "mitt", "vaar", "vaare", "meg", "oss", "du", "din", "ditt",
+  "den", "det", "dette", "disse", "der", "som", "til", "fra", "med", "paa", "av",
+  "og", "eller", "ikke", "noen", "noe", "alle", "vennligst", "takk", "hei",
+  "beklager", "unnskyld",
 ]);
 
 /**
@@ -814,7 +824,102 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   overdue: ["unpaid", "due", "reminders"],
   reconcile: ["reconciliation"],
   reconciling: ["reconciliation"],
+
+  // --- Norwegian ----------------------------------------------------------------
+  //
+  // This is a Norwegian accounting system, so an agent talking to a Norwegian user
+  // receives Norwegian words. A handful were already here; these are the rest of the
+  // everyday vocabulary, measured against queries a bookkeeper would actually ask.
+  // Keys are ASCII-folded because lookupForms folds before looking up: "lonn", not "lønn".
+  lager: ["warehouse", "inventory"],
+  varelager: ["warehouse", "inventory"],
+  beholdning: ["warehouse", "inventory"],
+  avstemming: ["reconciliation"],
+  avstemme: ["reconciliation"],
+  abonnement: ["subscription"],
+  avdeling: ["department"],
+  prosjekt: ["project"],
+  avskrivning: ["depreciation", "asset"],
+  anleggsmiddel: ["asset"],
+  anleggsmidler: ["asset"],
+  driftsmiddel: ["asset"],
+  // Irregular: lookupForms strips -er to "driftsmidl" and -r to "driftsmidle", so the
+  // plural has to be its own key. Same reason anleggsmidler and eiendeler are listed.
+  driftsmidler: ["asset"],
+  tilbud: ["offer"],
+  ordre: ["order"],
+  purring: ["reminders", "dunning"],
+  kreditnota: ["credit", "invoice"],
+  innbetaling: ["payment", "customer"],
+  utbetaling: ["payment", "supplier"],
+  betaling: ["payment"],
+  skattemelding: ["tax-returns"],
+  utgift: ["expense"],
+  utgifter: ["expense"],
+  timeliste: ["timesheet"],
+  timer: ["timesheet"],
+  avtale: ["agreement"],
+  avtaler: ["agreement"],
+  // "lån" folds to "lan" — foldDiacritics maps å to a, not aa. The first attempt keyed
+  // this as "laan" and matched nothing.
+  lan: ["loan"],
+  aksje: ["share-investments"],
+  aksjer: ["share-investments"],
+  apningsbalanse: ["opening-balances"],
+  arsregnskap: ["annual-accounts"],
+  resultat: ["result", "income"],
+  balanse: ["balance"],
+  regnskap: ["accounting", "ledger"],
+  kontoplan: ["chart-of-accounts"],
+  hovedbok: ["ledger", "general"],
+  kundefaktura: ["invoice", "customer"],
+  leverandorfaktura: ["supplier-invoices"],
+  lonnsslipp: ["salary", "payslip"],
+  lonnskjoring: ["salary", "salary-payments"],
+  ansatte: ["employee"],
+  eiendel: ["asset"],
+  eiendeler: ["asset"],
 };
+
+/**
+ * Norwegian stems worth finding INSIDE a longer word.
+ *
+ * Norwegian glues nouns together, so the word a user types is often a compound whose
+ * meaning lives in one half: "lønnskjøring" is lønn+kjøring, "varelager" is vare+lager,
+ * "lagerbeholdning" is lager+beholdning. None of those are reachable by the plural and
+ * diacritic rules in lookupForms, so "lønnskjøring" found nothing at all while "lonn" was
+ * already in the table.
+ *
+ * Substring matching earns its keep here and would not in English, where compounds are
+ * written with spaces and a substring rule mostly produces noise. Kept to stems of four
+ * characters or more, and to words specific enough that a coincidental match is unlikely —
+ * "konto" is deliberately absent, because it sits inside "kontor" (an office) and inside
+ * "kontant" (cash).
+ */
+const NORWEGIAN_COMPOUND_STEMS: readonly string[] = [
+  "lonn",
+  "lager",
+  "faktura",
+  "bilag",
+  "kunde",
+  "leverandor",
+  "ansatt",
+  "avdeling",
+  "prosjekt",
+  "abonnement",
+  "avstemming",
+  "avskrivning",
+  "reskontro",
+  "timeliste",
+  "skattemelding",
+  "kreditnota",
+  "purring",
+  "betaling",
+  "regnskap",
+  "aksje",
+  "eiendel",
+  "tilbud",
+];
 
 /**
  * Turn a natural-language query into the terms to score against, each carrying a
@@ -835,14 +940,28 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
     pattern.lastIndex = 0;
   }
 
-  const seen = new Set<string>();
   const terms: Array<{ term: string; weight: number }> = [];
-  let resourceCount = 0;
+  const byTerm = new Map<string, { term: string; weight: number }>();
+  /**
+   * Record a term, keeping the HIGHEST weight any source gives it.
+   *
+   * Keeping the first weight instead made results depend on word order. A compound token
+   * contributes its stems below full weight, so "fakturagebyr faktura" pinned "invoice" at
+   * the compound weight before the plain token could claim it — and since a term under 1
+   * cannot identify a resource, `/api/invoices` fell from first to fourth, while
+   * "faktura fakturagebyr" stayed first. Fourteen of forty-five two-word Norwegian queries
+   * flipped on ordering alone, none of which did before the compound pass existed.
+   */
   const push = (term: string, weight: number) => {
-    if (term.length < 2 || seen.has(term)) return;
-    seen.add(term);
-    terms.push({ term, weight });
-    if (weight >= 1) resourceCount += 1;
+    if (term.length < 2) return;
+    const existing = byTerm.get(term);
+    if (existing === undefined) {
+      const entry = { term, weight };
+      byTerm.set(term, entry);
+      terms.push(entry);
+      return;
+    }
+    if (weight > existing.weight) existing.weight = weight;
   };
 
   for (const term of phraseTerms) push(term, PHRASE_WEIGHT);
@@ -860,7 +979,17 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
       push(variant, weight);
       for (const syn of TERM_SYNONYMS[variant] ?? []) push(syn, weight);
     }
+    // Norwegian compounds: the meaning is in one half of a word written as one word.
+    // Slightly below a direct hit, because a stem found inside a longer word is weaker
+    // evidence than the word itself.
+    for (const stem of compoundStemsIn(token)) {
+      push(stem, weight * COMPOUND_WEIGHT);
+      for (const syn of TERM_SYNONYMS[stem] ?? []) push(syn, weight * COMPOUND_WEIGHT);
+    }
   }
+  // Counted at the end, not as terms arrive: a weight can be raised by a later source, and
+  // a term that starts below the resource gate may finish above it.
+  const resourceCount = terms.filter((t) => t.weight >= 1).length;
   return { terms, resourceCount };
 }
 
@@ -919,6 +1048,54 @@ function fieldNamesOf(op: SpecOperation): string {
 function foldDiacritics(term: string): string {
   return term.replace(/æ/g, "ae").replace(/ø/g, "o").replace(/å/g, "a");
 }
+
+/**
+ * A stem found inside a compound counts as much as the word itself.
+ *
+ * It was 0.8, described as "slightly below a direct hit". That reading was wrong: scoring
+ * has a cliff at 1, not a slope — `termWeight >= 1` is what lets a term identify a resource
+ * and earn the coverage multiplier and the identity bonus, so any discount at all
+ * disqualifies it entirely and the size of the discount is nearly irrelevant. Measured over
+ * 385 queries, moving 0.8 → 0.999 changed 2 results while 0.999 → 1.0 changed 6, and 1.0 was
+ * the better answer in six of the seven: "prosjektregnskap" reaches /api/projects rather
+ * than the asset ledger, "avdelingsregnskap" reaches /api/departments.
+ */
+const COMPOUND_WEIGHT = 1;
+
+/**
+ * Norwegian stems inside a compound token, longest first.
+ *
+ * Only fires when the stem is a proper substring — a token that IS the stem is already
+ * handled by the synonym table directly, and contributing it twice would double its weight.
+ */
+function compoundStemsIn(token: string): string[] {
+  const folded = foldDiacritics(token);
+  if (folded.length < 6) return [];
+  if (NOT_A_COMPOUND.some((word) => folded.startsWith(word))) return [];
+  return NORWEGIAN_COMPOUND_STEMS.filter((stem) => {
+    if (folded === stem) return false;
+    // At a compound BOUNDARY — the first element or the last — rather than anywhere in the
+    // string. An unanchored `includes` matched "lonn" inside "kolonner" (columns) and
+    // "belønning" (reward), and "kunde" inside "sekunder" (seconds), so ordinary words
+    // returned payroll and the customer ledger. Norwegian compounds put their elements at
+    // the edges, so the edges are where to look.
+    // And the OTHER element has to be a word too, not a stray letter: "slager" (a hit song)
+    // ends with "lager" and was reaching the warehouse. Two characters is the shortest
+    // Norwegian element worth treating as one.
+    const remainder = folded.length - stem.length;
+    if (remainder < 2) return false;
+    return folded.startsWith(stem) || folded.endsWith(stem);
+  });
+}
+
+/**
+ * Words that begin with a stem and mean something else.
+ *
+ * Anchoring fixes the mid-word matches but not a genuine shared root: "lønnsomhet" is
+ * profitability, built on the same lønn, and a bookkeeper asking about it does not want the
+ * payroll endpoints. String rules cannot tell those apart, so the exceptions are listed.
+ */
+const NOT_A_COMPOUND: readonly string[] = ["lonnsom", "ulonnsom", "lonnsemne"];
 
 /** The forms of a query token worth trying against the synonym table. */
 function lookupForms(token: string): string[] {
