@@ -113,8 +113,15 @@ const createCustomer = defineTool({
   description:
     "Create a customer. Two kinds exist: set privateContact=true for a private individual, " +
     "otherwise a company is created and a Norwegian company requires a valid organizationNumber. " +
-    "ReAI looks the company up in Brønnøysundregistrene and fills in the name and address, so " +
-    "supplying just the organisation number is usually enough — pass skipRegistryLookup to opt out.\n\n" +
+    "ReAI looks the company up in Brønnøysundregistrene from the organizationNumber and fills in " +
+    "the address — pass skipRegistryLookup to opt out. Two things about that lookup are worth " +
+    "knowing, both measured against the live API rather than inferred:\n" +
+    "  - A name is still REQUIRED. An empty one is refused with \"name is required\" even when a " +
+    "valid organizationNumber is supplied, so \"the org number alone is enough\" — which this " +
+    "description used to claim — does not work.\n" +
+    "  - The name you send is then DISCARDED. Sending name=\"Lookup Probe\" with Skatteetaten's " +
+    "org number stores \"Skatteetaten\". So pass the real name if you know it, and expect the " +
+    "registry to win if you do not.\n\n" +
     "Note that ReAI normalizes the stored name to title case, so it may not come back exactly as sent.\n\n" +
     "Creation accepts only the fields listed here. Invoice email, phone and payment terms are not " +
     "among them — set those with reai_update_customer afterwards.",

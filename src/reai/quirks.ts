@@ -331,6 +331,21 @@ export const QUIRKS: readonly Quirk[] = [
       "discarded rather than rejected. Set them in a follow-up PATCH.",
   },
   {
+    // Measured on a live tenant. The schema declares minLength 0 on the name and the
+    // tools claimed an org number alone sufficed; neither survives contact with the API.
+    id: "brreg-lookup-requires-and-overwrites-name",
+    paths: ["/api/customers", "/api/suppliers"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "The Brønnøysund lookup fills the ADDRESS from organizationNumber but neither accepts nor " +
+      'keeps the name. A blank name is refused with "name is required" even alongside a valid ' +
+      "organizationNumber — so the org number alone is NOT enough, whatever minLength 0 in the " +
+      "schema suggests. And the name you do send is discarded: creating with " +
+      'name="Lookup Probe" and org number 974761076 stores "Skatteetaten". Send the real name ' +
+      "if you know it, and do not treat the echoed value as confirmation of what you sent.",
+  },
+  {
     id: "customer-name-title-cased",
     paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
     methods: ["POST", "PATCH"],
