@@ -303,11 +303,71 @@ test("escalatingBodyFields names the offending field and its value", () => {
   assert.deepEqual(escalatingBodyFields(undefined), []);
 });
 
-test("only booleans that are true, and the one string value, escalate", () => {
-  // Guards the predicate map against regressing to a "field name is present" test.
-  assert.equal(classifyWithBody("reversible", { outputMode: "CREATE_INVOICE" }), "reversible");
+test("the predicate map is not a 'field name is present' test", () => {
+  // Still guards against regressing to name-presence, but no longer asserts that a
+  // case variant is safe. This test used to require outputMode:"CREATE_INVOICE" to
+  // stay reversible, which PINNED A BYPASS: ReAI is .NET, System.Text.Json matches
+  // enum names case-insensitively, so "CREATE_INVOICE" binds exactly as
+  // "create_invoice" does and would have armed recurring invoice issuance while the
+  // policy called it reversible.
   assert.equal(classifyWithBody("reversible", { outputMode: "" }), "reversible");
-  assert.equal(classifyWithBody("reversible", { automaticBillingGeneration: "true" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { outputMode: "create_order" }), "reversible");
+  assert.equal(classifyWithBody("reversible", { sendEhf: false }), "reversible");
+  assert.equal(classifyWithBody("reversible", { unrelatedField: true }), "reversible");
+});
+
+test("a case variant of an escalating value still escalates", () => {
+  for (const value of ["create_invoice", "CREATE_INVOICE", "Create_Invoice", "cReAtE_iNvOiCe"]) {
+    assert.equal(
+      classifyWithBody("reversible", { outputMode: value }),
+      "irreversible",
+      `outputMode=${value} must escalate`,
+    );
+  }
+  // And the field name binds case-insensitively too, which was already handled.
+  assert.equal(classifyWithBody("reversible", { OutputMode: "create_invoice" }), "irreversible");
+  assert.equal(classifyWithBody("reversible", { SENDEHF: true }), "irreversible");
+});
+
+test("subscription billing is transmission, not merely an irreversible write", async () => {
+  // These were classified irreversible but NOT transmitting, so `full` mode alone
+  // sent them: /generate bills one subscription, /generate-due bills every due
+  // subscription in the tenant, and both issue invoices — which starts delivery.
+  const { classifyTransmission } = await import("../dist/policy.js");
+  assert.equal(classifyTransmission("POST", "/api/subscriptions/7/generate"), "external");
+  assert.equal(classifyTransmission("POST", "/api/subscriptions/generate-due"), "external");
+  assert.equal(
+    classifyTransmission("POST", "/api/subscriptions", { outputMode: "create_invoice" }),
+    "external",
+  );
+  assert.equal(
+    classifyTransmission("POST", "/api/subscriptions", { automaticBillingGeneration: true }),
+    "external",
+  );
+});
+
+test("transmitting operations outside /api/ are covered too", async () => {
+  // Every pattern was /api/-anchored while ~100 indexed operations live outside it,
+  // reachable through reai_request, which never checks a path against the spec.
+  // /salary/{id}/complete is literally the A-melding submission the /api/ pattern
+  // guards.
+  const { classifyTransmission } = await import("../dist/policy.js");
+  for (const path of [
+    "/salary/1/complete",
+    "/salary/1/register-payment",
+    "/ztl/banks/1/approval-reminders",
+    "/ztl/banks/1/failed-payment-notifications",
+    "/kassasystem/mobile/payment-request",
+    "/adyen/payout/session",
+    "/cf-worker/email-warning",
+    "/vat-return/altinn-sync",
+  ]) {
+    assert.equal(classifyTransmission("POST", path), "external", `${path} should transmit`);
+  }
+  // Ordinary local writes are unaffected.
+  for (const path of ["/api/customers", "/api/vouchers", "/api/products"]) {
+    assert.equal(classifyTransmission("POST", path), "none", `${path} should not transmit`);
+  }
 });
 
 test("manual reconciliation endpoints are matched by prefix, not by fail-closed accident", () => {
@@ -430,7 +490,20 @@ test("ordinary writes and all reads are not transmitting", () => {
   }
   // Reading an invoice sends nothing, even on a transmitting prefix.
   assert.equal(classifyTransmission("GET", "/api/invoices"), "none");
-  assert.equal(classifyTransmission("GET", "/api/peppol/messages/phase4ping"), "none");
+  assert.equal(classifyTransmission("GET", "/api/peppol/messages"), "none");
+});
+
+test("the two GETs that reach outside the tenant are treated as transmitting", () => {
+  // GET being a read holds for the whole API bar these two, and this assertion used to
+  // say phase4ping sends nothing. It is an AS4 ping onto the Peppol network; the other
+  // synchronises with Altinn. read-only is the mode people point at a live business,
+  // so it is exactly where they should not slip through.
+  //
+  // Neither carries a description in the spec, so the effect is inferred from the path
+  // and its controller rather than documented — erring toward "this leaves the tenant"
+  // is the safe direction.
+  assert.equal(classifyTransmission("GET", "/api/peppol/messages/phase4ping"), "external");
+  assert.equal(classifyTransmission("GET", "/vat-return/altinn-sync"), "external");
 });
 
 test("sendEhf in the body makes an otherwise local write transmitting", () => {
@@ -518,11 +591,12 @@ test("filings with the government count as sending", () => {
   assert.equal(classifyTransmission("POST", "/api/vat-returns/complete-manually"), "none");
 });
 
-test("voucher row numbers are assigned so differing descriptions do not collide", async () => {
-  // Verified against the live API: postings sharing a rowNumber are merged into
-  // one voucher row and must agree on its description. Omitting rowNumber puts
-  // them all in row 0, so differing descriptions fail -- with an error blaming the
-  // sign convention, which sends you looking in the wrong place.
+test("voucher rows follow the API's pairing rule, not description grouping", async () => {
+  // The spec requires a matched debit+credit of equal absolute amount to share ONE
+  // row, and a row to hold at most one debit and one credit. The previous model
+  // grouped by description, which split matched pairs and left multi-debit vouchers
+  // unnumbered. Verified through the real handler, so the body actually sent is what
+  // is asserted.
   const { allTools } = await import("../dist/server.js");
   const tool = allTools.find((t) => t.name === "reai_create_voucher");
   assert.ok(tool, "reai_create_voucher should exist");
@@ -540,23 +614,7 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
     },
   };
 
-  // Differing descriptions must get distinct rows.
-  await tool.handler(
-    {
-      date: "2026-08-06",
-      postings: [
-        { accountNumber: "1576", amount: 1, description: "aaa" },
-        { accountNumber: "1580", amount: -1, description: "bbb" },
-      ],
-    },
-    ctx,
-  );
-  let rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.deepEqual(rows, [0, 1], "differing descriptions need distinct rows");
-
-  // Matching descriptions should be left alone, so ReAI merges them into one
-  // tidy row rather than two.
-  sent.length = 0;
+  // A matched pair stays in one row even though the descriptions differ...
   await tool.handler(
     {
       date: "2026-08-06",
@@ -567,28 +625,43 @@ test("voucher row numbers are assigned so differing descriptions do not collide"
     },
     ctx,
   );
-  rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.deepEqual(rows, [undefined, undefined], "identical descriptions merge fine");
+  let rows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.equal(rows[0], rows[1], "a matched pair must share a row");
 
-  // An explicit rowNumber is respected -- and the *other* posting still has to be
-  // given a row. This assertion previously expected [7, undefined], which pinned a
-  // real bug: leaving the second posting unnumbered defaults it to row 0 at the
-  // API, so a voucher that mixed explicit and implicit rows hit the very merge
-  // failure this logic exists to prevent.
+  // ...and a three-posting purchase voucher gets a row per posting, so no row holds
+  // two debits.
   sent.length = 0;
   await tool.handler(
     {
       date: "2026-08-06",
       postings: [
-        { accountNumber: "1576", amount: 1, description: "aaa", rowNumber: 7 },
-        { accountNumber: "1580", amount: -1, description: "bbb" },
+        { accountNumber: "6700", amount: 800, description: "Kjøp" },
+        { accountNumber: "2710", amount: 200, description: "Kjøp" },
+        { accountNumber: "2400", amount: -1000, description: "Kjøp" },
       ],
     },
     ctx,
   );
   rows = sent[0].body.postings.map((p) => p.rowNumber);
-  assert.equal(rows[0], 7, "an explicit rowNumber must be respected");
-  assert.ok(rows[1] !== undefined && rows[1] !== 7, `the second posting needs its own row, got ${rows[1]}`);
+  assert.equal(new Set(rows).size, 3, `expected three rows, got ${rows.join(",")}`);
+
+  // A matched pair that would share a row but disagrees on description is refused
+  // locally, since the row carries one description and the pair cannot be split.
+  sent.length = 0;
+  const conflict = await tool.handler(
+    {
+      date: "2026-08-06",
+      postings: [
+        { accountNumber: "1576", amount: 5, description: "aaa" },
+        { accountNumber: "1580", amount: -5, description: "bbb" },
+      ],
+    },
+    ctx,
+  );
+  assert.equal(sent.length, 0, "nothing should be sent when the row descriptions conflict");
+  const text = conflict.content.map((c) => c.text).join("\n");
+  assert.match(text, /must share a description/);
+  assert.match(text, /Nothing was sent to ReAI/);
 });
 
 test("anything creatable in reversible mode is also deletable in it", async () => {
@@ -640,4 +713,164 @@ test("every delete tool's endpoint is classified no worse than the tool claims",
       );
     }
   }
+});
+
+test("changing a counterparty's bank details escalates; changing its name does not", async () => {
+  // `reversible` means "master data that can be cleanly deleted", and that criterion
+  // does not describe "redirects a future payment". The record can be put back; the
+  // transfer cannot, and it happens later, through a legitimate action by a person in
+  // the ReAI UI — entirely outside anything this policy observes. So a prompt-injected
+  // agent in the DEFAULT configuration could repoint a supplier's account.
+  const { classifyRequest, classifyPaymentRouting, paymentRoutingFields } = await import("../dist/policy.js");
+  const risk = (method, path, body) => classifyPaymentRouting(classifyRequest(method, path), path, body);
+
+  assert.equal(risk("PATCH", "/api/suppliers/1", { name: "New name" }), "reversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { bankAccountNumber: "15039012345" }), "irreversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { IBAN: "NO9386011117947" }), "irreversible");
+  assert.equal(risk("PUT", "/api/creditors/1", { bankAccountNumber: "x" }), "irreversible");
+  assert.equal(risk("PATCH", "/api/customers/1", { iban: "NO93" }), "irreversible");
+
+  // An empty value is not a repoint.
+  assert.equal(risk("PATCH", "/api/suppliers/1", { iban: "" }), "reversible");
+  assert.equal(risk("PATCH", "/api/suppliers/1", { iban: null }), "reversible");
+
+  // Registering the company's OWN bank account carries a swiftCode and is ordinary
+  // work in the default mode — this must stay path-scoped, not field-only.
+  assert.equal(risk("POST", "/api/company-banks", { swiftCode: "DNBANOKK", bban: "15201353103" }), "reversible");
+
+  assert.deepEqual(paymentRoutingFields({ name: "x", iban: "NO93" }), ["iban"]);
+  assert.deepEqual(paymentRoutingFields({ name: "x" }), []);
+});
+
+test("overwriting an attachment is irreversible; uploading one is not", async () => {
+  // The spec: "Replacing content updates the bytes for every owner that references
+  // this attachment id." So overwriting the file on a posted voucher destroys the
+  // documentation of every voucher pointing at it, and no DELETE exists under
+  // /api/attachments to undo it. It sat in the tier whose criterion is "can be
+  // cleanly deleted".
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(classifyRequest("PATCH", "/api/attachments/1"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/attachments/1"), "irreversible");
+  // Uploading a NEW attachment is additive, so a path prefix would have been too
+  // blunt — it briefly made this irreversible too, which a test caught.
+  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
+  assert.equal(classifyRequest("GET", "/api/attachments/1/content"), "read");
+});
+
+test("an inventory adjustment is irreversible", async () => {
+  // quantityChange and unitCost restate stock quantity and valuation, which is a
+  // balance-sheet input, and the only correction is an offsetting adjustment — the
+  // same reverse-don't-delete property that puts vouchers in this tier.
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(classifyRequest("POST", "/api/warehouses/inventory/adjust"), "irreversible");
+  // Creating a warehouse is ordinary master data.
+  assert.equal(classifyRequest("POST", "/api/warehouses"), "reversible");
+});
+
+test("open-item queries widen the date window; ordinary ones do not", async () => {
+  // Three endpoints return only records "with activity in the period" and default to a
+  // one-year or current-year window, so the open-item question — which orders are
+  // unbilled, what have we not reimbursed, what do we still owe — silently omitted
+  // anything older. Same shape as the customer-ledger bug that was already fixed; the
+  // rest were missed.
+  const { allTools } = await import("../dist/server.js");
+  const sent = [];
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 200, data: [] };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+
+  const cases = [
+    ["reai_list_orders", { status: "open" }, { status: "all" }],
+    ["reai_list_expenses", { paidOut: "false" }, { paidOut: "true" }],
+    ["reai_supplier_ledger", { isUnpaid: true }, {}],
+  ];
+  for (const [name, openArgs, plainArgs] of cases) {
+    const tool = allTools.find((t) => t.name === name);
+    assert.ok(tool, `${name} should exist`);
+
+    sent.length = 0;
+    await tool.handler(openArgs, ctx);
+    assert.equal(sent[0].query.startDate, "2000-01-01", `${name} should widen for open items`);
+
+    sent.length = 0;
+    await tool.handler(plainArgs, ctx);
+    assert.notEqual(sent[0].query.startDate, "2000-01-01", `${name} should not widen otherwise`);
+
+    // An explicit start date always wins.
+    sent.length = 0;
+    await tool.handler({ ...openArgs, startDate: "2026-06-01" }, ctx);
+    assert.equal(sent[0].query.startDate, "2026-06-01", `${name} must respect an explicit date`);
+  }
+});
+
+test("date defaults follow Norway, not UTC", async () => {
+  // toISOString() is UTC, so between midnight and 01:00/02:00 Norwegian time every
+  // default was a day early. At 00:30 on 1 January that stamps an order 31 December of
+  // the year just ended, posting revenue and VAT into a period that may be closed.
+  const { norwegianDate } = await import("../dist/tools/registry.js");
+  assert.equal(norwegianDate(new Date("2025-12-31T23:30:00Z")), "2026-01-01");
+  assert.equal(norwegianDate(new Date("2026-06-15T23:30:00Z")), "2026-06-16");
+  assert.equal(norwegianDate(new Date("2026-06-15T09:00:00Z")), "2026-06-15");
+  assert.match(norwegianDate(new Date()), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("voucher amounts finer than øre are refused, as are all-zero vouchers", async () => {
+  // The balance check rounded the SUM, not the postings, so 100.002 + (-99.998) — a
+  // real 0.004 imbalance — was reported as balanced. Every money field in the API is
+  // multipleOf 0.01, and ReAI rounding each posting silently changes both sides.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_create_voucher");
+  const sent = [];
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: {
+      request: async (opts) => {
+        sent.push(opts);
+        return { status: 201, data: { id: 1 } };
+      },
+      deepLink: () => "https://app.reai.no/",
+    },
+  };
+  const run = async (postings) => {
+    sent.length = 0;
+    const res = await tool.handler({ date: "2026-08-06", postings }, ctx);
+    return { sent: sent.length, text: res.content.map((c) => c.text).join("\n"), isError: res.isError };
+  };
+
+  const subOre = await run([
+    { accountNumber: "1500", amount: 100.002 },
+    { accountNumber: "3000", amount: -99.998 },
+  ]);
+  assert.equal(subOre.sent, 0, "a sub-øre amount must not be sent");
+  assert.match(subOre.text, /whole øre/);
+
+  const zero = await run([
+    { accountNumber: "1500", amount: 0 },
+    { accountNumber: "3000", amount: 0 },
+  ]);
+  assert.equal(zero.sent, 0);
+  assert.match(zero.text, /record nothing/);
+
+  // Genuine øre amounts still work, and a real imbalance is still caught.
+  const valid = await run([
+    { accountNumber: "1500", amount: 0.01 },
+    { accountNumber: "3000", amount: -0.01 },
+  ]);
+  assert.equal(valid.sent, 1);
+
+  const unbalanced = await run([
+    { accountNumber: "1500", amount: 100 },
+    { accountNumber: "3000", amount: -99 },
+  ]);
+  assert.equal(unbalanced.sent, 0);
+  assert.match(unbalanced.text, /not balanced/);
 });

@@ -9,60 +9,68 @@ import { ReaiClient } from "../dist/reai/client.js";
  * numbered, and whether a non-idempotent write is ever repeated.
  */
 
-test("postings with one shared description are left as the caller wrote them", () => {
-  const postings = [
-    { accountNumber: "1576", amount: 1, description: "same" },
-    { accountNumber: "1580", amount: -1, description: "same" },
-  ];
-  // They merge into a single tidy row; adding numbers would only split it.
-  assert.deepEqual(assignRowNumbers(postings), postings);
+test("a matched debit and credit share one row, even with different descriptions", () => {
+  // The spec: "A balanced debit+credit entry for the same amount, currency and date
+  // MUST share a single rowNumber... never split the debit and credit of one entry
+  // across two rowNumbers." The old implementation split exactly this pair whenever
+  // their descriptions differed, and a test asserted that as correct.
+  const rows = assignRowNumbers([
+    { amount: 1000, description: "debit side" },
+    { amount: -1000, description: "credit side" },
+  ]);
+  assert.equal(rows[0].rowNumber, rows[1].rowNumber, "a matched pair must not be split");
 });
 
-test("differing descriptions each get their own row", () => {
+test("a purchase voucher with two debits gets one row each", () => {
+  // Debit cost 800, debit input VAT 200, credit payable -1000, one description
+  // throughout — the ordinary Norwegian purchase voucher. The old code early-returned
+  // because the descriptions matched, assigning nothing, so both debits landed in row
+  // 0 and the API rejected the merge this function exists to prevent.
   const rows = assignRowNumbers([
-    { amount: 1, description: "debit side" },
-    { amount: -1, description: "credit side" },
+    { amount: 800, description: "Kjøp" },
+    { amount: 200, description: "Kjøp" },
+    { amount: -1000, description: "Kjøp" },
   ]);
-  assert.deepEqual(
-    rows.map((r) => r.rowNumber),
-    [0, 1],
-  );
+  const numbers = rows.map((r) => r.rowNumber);
+  assert.equal(new Set(numbers).size, 3, `each posting needs its own row, got ${numbers.join(",")}`);
+  // A row may hold at most one debit and one credit, so no row may hold two debits.
+  for (const n of new Set(numbers)) {
+    const inRow = rows.filter((r) => r.rowNumber === n);
+    assert.ok(inRow.filter((r) => r.amount > 0).length <= 1, `row ${n} has more than one debit`);
+    assert.ok(inRow.filter((r) => r.amount < 0).length <= 1, `row ${n} has more than one credit`);
+  }
 });
 
-test("postings sharing a description share a row", () => {
+test("two independent matched pairs get one row each", () => {
   const rows = assignRowNumbers([
-    { amount: 2, description: "a" },
-    { amount: -1, description: "b" },
-    { amount: -1, description: "a" },
+    { amount: 500, description: "a" },
+    { amount: -500, description: "a" },
+    { amount: 300, description: "b" },
+    { amount: -300, description: "b" },
   ]);
-  assert.deepEqual(
-    rows.map((r) => r.rowNumber),
-    [0, 1, 0],
-  );
+  assert.equal(rows[0].rowNumber, rows[1].rowNumber);
+  assert.equal(rows[2].rowNumber, rows[3].rowNumber);
+  assert.notEqual(rows[0].rowNumber, rows[2].rowNumber, "unrelated entries need separate rows");
 });
 
-test("a partially numbered voucher does not collide on row 0", () => {
-  // The regression Codex caught: bailing out because *one* posting was numbered
-  // left the other defaulted to row 0 as well, so an explicit row 0 describing
-  // A and an unnumbered posting describing B were merged and rejected.
+test("floating-point wobble does not split a matched pair", () => {
+  // Currency arithmetic routinely leaves a pair a fraction apart; comparison is at
+  // øre precision so the pair still shares a row.
   const rows = assignRowNumbers([
-    { amount: 1, rowNumber: 0, description: "A" },
-    { amount: -1, description: "B" },
+    { amount: 100.005, description: "x" },
+    { amount: -100.005, description: "x" },
   ]);
-  assert.equal(rows[0].rowNumber, 0, "an explicit row number must be preserved");
-  assert.notEqual(rows[1].rowNumber, 0, "an unnumbered posting must not land on a taken row");
-  assert.equal(new Set(rows.map((r) => r.rowNumber)).size, 2);
+  assert.equal(rows[0].rowNumber, rows[1].rowNumber);
 });
 
-test("an unnumbered posting joins an explicit row carrying the same description", () => {
+test("an explicit row number is never overwritten", () => {
   const rows = assignRowNumbers([
-    { amount: 2, rowNumber: 3, description: "A" },
-    { amount: -1, description: "A" },
-    { amount: -1, description: "B" },
+    { amount: 1000, rowNumber: 7, description: "A" },
+    { amount: -1000, description: "A" },
   ]);
-  assert.equal(rows[0].rowNumber, 3);
-  assert.equal(rows[1].rowNumber, 3, "same description merges into the existing row");
-  assert.ok(rows[2].rowNumber !== 3, "a different description needs its own row");
+  assert.equal(rows[0].rowNumber, 7);
+  assert.ok(rows[1].rowNumber !== undefined, "the unnumbered side must still get a row");
+  assert.notEqual(rows[1].rowNumber, 7, "a claimed row is not reused for an unpaired posting");
 });
 
 test("a fully numbered voucher is never rewritten", () => {
@@ -120,4 +128,99 @@ test("a DELETE is retried, since repeating it is harmless", async () => {
   const { client, calls } = countingClient(503);
   await assert.rejects(() => client.request({ method: "DELETE", path: "/api/vouchers/1" }));
   assert.equal(calls(), 3);
+});
+
+test("deleting a voucher reports REVERSAL rather than claiming deletion", async () => {
+  // The spec is explicit: DELETE /api/vouchers/{id} "deletes the resource when no
+  // accounting reversal is needed. If financial audit history must be retained,
+  // records a reversal instead" and answers {"outcome":"deleted"|"reversed"}.
+  //
+  // This tool asserted the opposite — that ReAI *rejects* when a reversal would be
+  // needed — and then discarded the body and said "deleted" every time. So an agent
+  // could tell a user a voucher was gone while the ledger held the original plus a
+  // counter-posting, and might re-book the transaction and double-post it. My own
+  // live write test never caught it: on an open period the delete really does remove
+  // the voucher, so the reversal branch was never exercised.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_delete_voucher");
+  assert.ok(tool);
+
+  const run = async (data, status = 200) => {
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 1 },
+      session: {},
+      client: { request: async () => ({ status, data }), deepLink: () => "https://app.reai.no/" },
+    };
+    const res = await tool.handler({ id: 55 }, ctx);
+    return res.content.map((c) => c.text).join("\n");
+  };
+
+  const reversed = await run({ outcome: "reversed" });
+  assert.match(reversed, /REVERSED, not deleted/);
+  assert.match(reversed, /do not re-book/i, "the agent must be told not to re-book");
+  assert.doesNotMatch(reversed, /^Voucher 55 deleted/m);
+
+  const deleted = await run({ outcome: "deleted" });
+  assert.match(deleted, /deleted outright/);
+
+  // An empty body must not be reported as a confident deletion either.
+  const silent = await run(undefined, 204);
+  assert.match(silent, /did not say whether/);
+});
+
+test("a row requires the same currency and date, not just the same amount", async () => {
+  // The schema: both sides of a row share "the same date, description, currency and
+  // absolute amount". Matching on amount alone put a multi-date or multi-currency
+  // pair into one row, which ReAI then rejects — worse than one row each.
+  const { assignRowNumbers } = await import("../dist/tools/bookkeeping.js");
+
+  const differentDate = assignRowNumbers([
+    { amount: 100, postingDate: "2026-01-01" },
+    { amount: -100, postingDate: "2026-02-01" },
+  ]);
+  assert.notEqual(differentDate[0].rowNumber, differentDate[1].rowNumber);
+
+  const differentCurrency = assignRowNumbers([
+    { amount: 100, currency: "NOK" },
+    { amount: -100, currency: "EUR" },
+  ]);
+  assert.notEqual(differentCurrency[0].rowNumber, differentCurrency[1].rowNumber);
+
+  const matching = assignRowNumbers([
+    { amount: 100, currency: "NOK", postingDate: "2026-01-01" },
+    { amount: -100, currency: "NOK", postingDate: "2026-01-01" },
+  ]);
+  assert.equal(matching[0].rowNumber, matching[1].rowNumber);
+});
+
+test("an omitted description is not treated as a conflicting one", async () => {
+  // This check refuses the voucher locally, so it must not fire on a rule the spec
+  // does not state. Only two explicitly different descriptions disagree.
+  const { rowDescriptionConflicts } = await import("../dist/tools/bookkeeping.js");
+  assert.deepEqual(rowDescriptionConflicts([{ rowNumber: 0, description: "Kjøp" }, { rowNumber: 0 }]), []);
+  assert.deepEqual(rowDescriptionConflicts([{ rowNumber: 0 }, { rowNumber: 0 }]), []);
+  assert.equal(
+    rowDescriptionConflicts([
+      { rowNumber: 0, description: "a" },
+      { rowNumber: 0, description: "b" },
+    ]).length,
+    1,
+  );
+});
+
+test("a silent delete response does not report a deleted outcome", async () => {
+  // An earlier version returned a synthesized { outcome: "deleted" } alongside a note
+  // saying the outcome was unknown, so anything reading the structured value would
+  // conclude the voucher was gone when it may have been reversed.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_delete_voucher");
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 1 },
+    session: {},
+    client: { request: async () => ({ status: 204, data: undefined }), deepLink: () => "x" },
+  };
+  const text = (await tool.handler({ id: 9 }, ctx)).content.map((c) => c.text).join("\n");
+  assert.doesNotMatch(text, /"outcome":\s*"deleted"/, "must not synthesize a deleted outcome");
+  assert.match(text, /did not say whether/);
+  assert.match(text, /REVERSED/);
 });

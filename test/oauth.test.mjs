@@ -562,3 +562,96 @@ test("the company-selection step carries the token sealed and the chosen mode", 
 test("escapeHtml handles the dangerous characters", () => {
   assert.equal(escapeHtml('<>&"\''), "&lt;&gt;&amp;&quot;&#39;");
 });
+
+test("the redirect allowlist is enforced at authorize, not only at registration", () => {
+  // Registrations are sealed and live five years, and the allowlist is empty by
+  // default — so a callback registered before an operator set
+  // REAI_ALLOWED_REDIRECT_HOSTS kept working forever after. That is a phishing
+  // primitive on the operator's own domain: the victim sees the genuine consent page
+  // on the real host, pastes their ReAI token, and the code goes to a callback the
+  // operator has since forbidden. Tightening the config has to be retroactive.
+  const open = makeProvider({ allowedRedirectHosts: [] });
+  const registered = open.provider.register({
+    redirect_uris: ["https://attacker.example/cb"],
+    client_name: "registered before the operator locked things down",
+  });
+  assert.equal(registered.status, 201, "registration succeeds while nothing is restricted");
+  const clientId = registered.json.client_id;
+  assert.ok(clientId);
+
+  // A second deployment (or the same one, restarted) sharing the encryption key, now
+  // with the allowlist set. The sealed client_id is still valid and still decrypts.
+  const tight = makeProvider({ allowedRedirectHosts: ["claude.ai"] });
+  const url = new URL("https://reai.example.com/authorize");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", String(clientId));
+  url.searchParams.set("redirect_uri", "https://attacker.example/cb");
+  url.searchParams.set("code_challenge", "a".repeat(43));
+  url.searchParams.set("code_challenge_method", "S256");
+
+  const captured = { status: 0, body: "", headers: {} };
+  const res = {
+    writeHead(status, headers) {
+      captured.status = status;
+      captured.headers = headers ?? {};
+      return this;
+    },
+    setHeader(k, v) {
+      captured.headers[k.toLowerCase()] = v;
+    },
+    end(body) {
+      captured.body = String(body ?? "");
+    },
+  };
+  tight.provider.handleAuthorizeGet(url, res);
+
+  // It must NOT reach the consent page, and must not redirect to the attacker.
+  const location = captured.headers.location ?? captured.headers.Location ?? "";
+  assert.doesNotMatch(captured.body, /name="request"/, "the consent form must not be rendered");
+  assert.ok(
+    !String(location).startsWith("https://attacker.example"),
+    `must not bounce to the forbidden host, got ${location}`,
+  );
+});
+
+test("an allowed redirect host still reaches the consent page", () => {
+  const tight = makeProvider({ allowedRedirectHosts: ["claude.ai"] });
+  const registered = tight.provider.register({ redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] });
+  assert.equal(registered.status, 201);
+
+  const url = new URL("https://reai.example.com/authorize");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", String(registered.json.client_id));
+  url.searchParams.set("redirect_uri", "https://claude.ai/api/mcp/auth_callback");
+  url.searchParams.set("code_challenge", "a".repeat(43));
+  url.searchParams.set("code_challenge_method", "S256");
+
+  let body = "";
+  const res = {
+    writeHead() { return this; },
+    setHeader() {},
+    end(b) { body = String(b ?? ""); },
+  };
+  tight.provider.handleAuthorizeGet(url, res);
+  assert.match(body, /name="request"/, "an allowed host must still get the consent form");
+});
+
+test("X-Forwarded-* uses the value the nearest proxy added, not the client's", async () => {
+  // Proxies APPEND to these headers, so index 0 is whatever the client sent and the
+  // rightmost entry is the one added closest to us. Taking the first meant a
+  // client-supplied "X-Forwarded-Host: attacker.example, real.host" won outright —
+  // spoofing the OAuth issuer and the resource_metadata pointer in the 401 challenge.
+  // Cloud Run does not strip a client-supplied X-Forwarded-Host, so it is reachable in
+  // the documented deployment; PUBLIC_URL closes it, which is why the deploy script
+  // always sets it and startup now warns when it is missing.
+  const { lastForwardedValue } = await import("../dist/config.js");
+
+  assert.equal(lastForwardedValue("attacker.example, real.host"), "real.host");
+  assert.equal(lastForwardedValue("real.host"), "real.host");
+  assert.equal(lastForwardedValue(["attacker.example", "real.host"]), "real.host");
+  assert.equal(lastForwardedValue(["a, b", "c"]), "c");
+  assert.equal(lastForwardedValue("  spaced.host  "), "spaced.host");
+  assert.equal(lastForwardedValue(undefined), undefined);
+  assert.equal(lastForwardedValue(""), undefined);
+  assert.equal(lastForwardedValue(", ,"), undefined);
+});

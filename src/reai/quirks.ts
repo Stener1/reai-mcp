@@ -200,8 +200,11 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["DELETE"],
     kind: "irreversible",
     note:
-      "Only possible while the period is open and no posting is locked. Postings report canDelete " +
-      "and lockReasons — check those first. In a closed period the remedy is a reversing voucher.",
+      "DELETE here means delete OR REVERSE, and ReAI chooses which. It deletes when no audit history " +
+      'need be kept; otherwise it books the counter-posting itself and answers {"outcome":"reversed"} ' +
+      "with the original still in the ledger. A 2xx therefore does NOT mean the transaction is gone — " +
+      "read the outcome, and never re-book on the strength of a successful delete. Postings report " +
+      "canDelete and lockReasons, which is how to know in advance.",
   },
 
   {
@@ -379,12 +382,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Purchase ------------------------------------------------------------
   {
     id: "cost-line-explicit-accounts",
-    paths: [
-      "/api/supplier-invoices",
-      "/api/supplier-invoices/{id}",
-      "/api/invoice-reception-documents/{id}/supplier-invoice",
-      "/api/receipt-reception-documents/{id}/registration",
-    ],
+    paths: ["/api/supplier-invoices", "/api/supplier-invoices/{id}"],
     methods: ["POST", "PATCH"],
     kind: "shape",
     note:
@@ -403,6 +401,21 @@ export const QUIRKS: readonly Quirk[] = [
       "and its postings entirely, leaving nothing behind. Once the period is closed, bokføringsloven " +
       "does not allow that, and the delete becomes a counter-posting that leaves the original in " +
       "the audit trail. Treat it as irreversible unless you know the period is open.",
+  },
+  {
+    id: "reception-cost-line-shape",
+    paths: [
+      "/api/invoice-reception-documents/{id}/supplier-invoice",
+      "/api/receipt-reception-documents/{id}/registration",
+    ],
+    methods: ["POST"],
+    kind: "shape",
+    note:
+      "Cost lines here are NOT shaped like the ones on /api/supplier-invoices. Each line is " +
+      "{ account, amountInclVat, vatCode, description, assetId, projectId } with account and " +
+      "amountInclVat required — there is no debitAccount, no creditAccount, and no `amount`. The " +
+      "figure is VAT-INCLUSIVE, unlike the supplier-invoice `amount`, so reusing that shape here " +
+      "puts the wrong number in the wrong field.",
   },
   {
     id: "reception-inbox-preferred",
@@ -538,9 +551,11 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/vat-codes"],
     kind: "gotcha",
     note:
-      "Which VAT codes are valid depends on the tenant's VAT registration, so look them up rather " +
-      "than assuming. Pass usage=customer-invoice for the subset valid on invoice, order, offer and " +
-      "subscription lines.",
+      "GET /api/vat-codes with no usage returns EVERY code ReAI supports, not the tenant's — the " +
+      "spec is explicit about it. Only usage=customer-invoice narrows to what the tenant can write, " +
+      "and only for order and subscription lines. So the plain list shows 25% codes even on a tenant " +
+      "that is not VAT-registered, and booking one invents VAT that does not exist. Offer lines are " +
+      "not validated against that narrowed set at all (see the line-vat-code quirk).",
   },
   {
     id: "tax-return-filing",

@@ -352,7 +352,30 @@ export class OAuthProvider {
     let writeMode = this.narrowWriteMode(form.get("writeMode"));
     if (carriedWriteMode) writeMode = this.narrowWriteMode(carriedWriteMode, writeMode);
 
+    // Fails CLOSED when the tenant list is missing or empty. It used to fall through
+    // with `?? []`, leaving both defaultTenantId and boundTenantId unset — i.e. no
+    // tenant boundary at all, silently, for every grant minted afterwards. A single
+    // upstream response-shape drift (or any user for whom ReAI omits `tenants`) was
+    // enough to remove the guarantee the consent page makes, with no warning.
     const tenants = me.tenants ?? [];
+    if (tenants.length === 0) {
+      sendHtml(
+        res,
+        400,
+        renderConsentPage({
+          sealedRequest,
+          redirectUri: request.redirectUri,
+          serverWriteMode: this.deps.config.writeMode,
+          baseUrl: this.deps.config.baseUrl,
+          error:
+            "That token authenticated, but GET /api/me returned no companies — so there is no " +
+            "company to bind this connection to. A connection with no bound tenant would have no " +
+            "tenant boundary at all, so it is refused rather than issued. Check that the ReAI user " +
+            "has access to at least one company.",
+        }),
+      );
+      return;
+    }
     const rawTenant = (form.get("tenantId") ?? "").trim();
 
     // With several companies available, make the user choose explicitly rather
@@ -660,6 +683,23 @@ export class OAuthProvider {
       return {
         error: "invalid_request",
         description: "redirect_uri is not registered for this client.",
+      };
+    }
+    // Re-checked against the operator's allowlist HERE, not only at registration.
+    // Registrations are sealed and live five years, and the allowlist is empty by
+    // default — so a callback registered before an operator set
+    // REAI_ALLOWED_REDIRECT_HOSTS kept working forever afterwards. That is a phishing
+    // primitive on the operator's own domain: send a victim to the genuine consent
+    // page, they paste their ReAI token, and the code is delivered to a callback the
+    // operator has since forbidden. Tightening the config now takes effect for
+    // existing registrations too, which is what an operator setting it expects.
+    const allowedRedirectHosts = this.deps.config.allowedRedirectHosts;
+    if (allowedRedirectHosts.length > 0 && !isRedirectHostAllowed(redirectUri, allowedRedirectHosts)) {
+      return {
+        error: "invalid_request",
+        description:
+          "redirect_uri host is not allowed by this deployment. It may have been registered " +
+          "before the operator restricted REAI_ALLOWED_REDIRECT_HOSTS; register again.",
       };
     }
     if (responseType !== "code") {

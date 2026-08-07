@@ -20,7 +20,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
-import { loadConfig, type ServerConfig } from "./config.js";
+import { loadConfig, lastForwardedValue, type ServerConfig } from "./config.js";
 import { WRITE_MODES, type WriteMode } from "./policy.js";
 import { Sealer } from "./auth/crypto.js";
 import {
@@ -73,9 +73,17 @@ async function main(): Promise<void> {
     );
     if (!config.publicUrl) {
       log(
-        "PUBLIC_URL is not set; it will be inferred per-request from the Host header. " +
-          "Set it explicitly in production so OAuth metadata is stable.",
+        "PUBLIC_URL is not set; it will be inferred per-request from the Host and X-Forwarded-Host " +
+          "headers. Set it explicitly in production so OAuth metadata is stable.",
       );
+      if (config.allowedHosts.length === 0) {
+        log(
+          "WARNING: neither PUBLIC_URL nor REAI_ALLOWED_HOSTS is set, so a client-supplied " +
+            "X-Forwarded-Host decides what this server claims to be — including the issuer in its " +
+            "OAuth metadata and the resource_metadata pointer in its 401 challenge. Cloud Run does " +
+            "not strip that header. Set PUBLIC_URL.",
+        );
+      }
     }
     if (config.allowTokenPassthrough) {
       log(
@@ -290,8 +298,15 @@ function narrower(a: WriteMode, b: WriteMode): WriteMode {
 function resolvePublicUrl(req: IncomingMessage, config: ServerConfig): string {
   if (config.publicUrl) return config.publicUrl;
 
-  const forwardedProto = firstHeader(req.headers["x-forwarded-proto"]);
-  const forwardedHost = firstHeader(req.headers["x-forwarded-host"]);
+  // The LAST value, not the first. Proxies APPEND to X-Forwarded-*, so index 0 is
+  // whatever the client sent and the rightmost entry is what the nearest proxy added.
+  // Taking the first meant a client-supplied "X-Forwarded-Host: attacker.example,
+  // real.host" won outright — the opposite of the intent. Cloud Run does not strip a
+  // client-supplied X-Forwarded-Host, so this is reachable in the documented
+  // deployment; setting PUBLIC_URL closes it entirely, which is why the deploy script
+  // always does and why startup now warns when it is absent.
+  const forwardedProto = lastForwardedValue(req.headers["x-forwarded-proto"]);
+  const forwardedHost = lastForwardedValue(req.headers["x-forwarded-host"]);
   let host = forwardedHost ?? req.headers.host ?? `localhost:${config.port}`;
 
   if (config.allowedHosts.length > 0) {
@@ -335,6 +350,7 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   if (Array.isArray(value)) return value[0]?.split(",")[0]?.trim();
   return value?.split(",")[0]?.trim();
 }
+
 
 function isLocalHost(host: string): boolean {
   const name = host.split(":")[0] ?? "";

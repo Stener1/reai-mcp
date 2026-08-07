@@ -527,16 +527,34 @@ const listOrders = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/orders"]],
   inputSchema: {
-    status: z.enum(["all", "open", "closed"]).optional().describe("Filter by order status."),
+    status: z
+      .enum(["all", "open", "closed"])
+      .optional()
+      .describe(
+        'Filter by order status. With "open" the date window is widened automatically — see the ' +
+          "note on startDate.",
+      ),
     customerId: z.number().int().optional().describe("Filter by customer."),
     orderNumber: z.string().optional().describe("Filter by order number."),
     externalReference: z.string().optional().describe("Filter by an external system's reference."),
-    startDate: isoDate.optional().describe("Inclusive start date."),
+    startDate: isoDate
+      .optional()
+      .describe(
+        "Inclusive start date. The API defaults this to ONE YEAR before endDate, so an order left " +
+          'unbilled longer than that is invisible unless you widen it. With status="open" this tool ' +
+          "reaches back to 2000 instead, because that is the question people are really asking.",
+      ),
     endDate: isoDate.optional().describe("Inclusive end date."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+    // The API defaults startDate to one year before endDate, and the endpoint returns
+    // only orders in that window — so "which orders are still unbilled" silently
+    // omitted anything older, exactly as the customer ledger did before it was
+    // widened. An unbilled order from two years ago is precisely the one worth seeing.
+    const widened = args.status === "open" && args.startDate === undefined;
+    if (widened) query.startDate = OPEN_ITEM_FLOOR;
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/orders",
@@ -544,7 +562,14 @@ const listOrders = defineTool({
       tenantId: requireTenantId(tenantId, ctx),
     });
     const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} order(s).` });
+    return ok(res.data, {
+      note:
+        `${count} order(s).` +
+        (widened
+          ? ` Window widened back to ${OPEN_ITEM_FLOOR}: the API would otherwise default to one ` +
+            `year and hide older unbilled orders.`
+          : ""),
+    });
   },
 });
 
@@ -909,13 +934,23 @@ const registerInvoicePayment = defineTool({
   description:
     "Record that a customer paid an invoice. This settles the customer ledger and posts to the bank " +
     "account, so it moves money in the books. A partial amount is allowed and leaves the rest " +
-    "outstanding. Requires REAI_WRITE_MODE=full.",
+    "outstanding. Requires REAI_WRITE_MODE=full.\n\n" +
+    "companyBankId is required unless paidPrivately is true, and registerRestAsBankFee must be " +
+    "false when it is. For a foreign-currency invoice, receivedAmount is what landed in the " +
+    "company account and paidInvoiceCurrencyAmount is what the customer paid.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/invoices/{id}/payments"]],
   inputSchema: {
     id: z.number().int().positive().describe("Invoice id."),
     paymentDate: isoDate.describe("Date the money was received."),
-    receivedAmount: z.number().describe("Amount received. May be less than the invoice total."),
+    receivedAmount: z
+      .number()
+      .min(0.01)
+      .max(99_999_999.99)
+      .describe(
+        "Amount received, in the company's currency. May be less than the invoice total, leaving " +
+          "the rest outstanding. Must be positive — this endpoint records money arriving.",
+      ),
     companyBankId: z
       .number()
       .int()
@@ -923,8 +958,13 @@ const registerInvoicePayment = defineTool({
       .describe("Bank account that received it. List them with reai_request GET /api/company-banks."),
     paidInvoiceCurrencyAmount: z
       .number()
+      .min(0.01)
+      .max(99_999_999.99)
       .optional()
-      .describe("Amount in the invoice's currency, when it differs from the tenant's."),
+      .describe(
+        "Amount the customer paid in the INVOICE's currency, required when that differs from the " +
+          "tenant's currency.",
+      ),
     registerRestAsBankFee: z
       .boolean()
       .optional()
@@ -938,6 +978,28 @@ const registerInvoicePayment = defineTool({
   handler: async (args, ctx) => {
     const { tenantId, id, ...body } = args;
     const resolved = requireTenantId(tenantId, ctx);
+
+    // The same pairings the supplier-side tool enforces, which this one had none of —
+    // and this is a money endpoint. Checked locally so the failure explains itself
+    // instead of arriving as a generic 400 from a call that has already been made.
+    if (args.paidPrivately === true) {
+      const offenders = [
+        args.companyBankId !== undefined ? "companyBankId" : null,
+        args.registerRestAsBankFee === true ? "registerRestAsBankFee=true" : null,
+      ].filter(Boolean);
+      if (offenders.length > 0) {
+        return fail(
+          `paidPrivately=true records the payment against the owner's private account, so ` +
+            `${offenders.join(" and ")} must be omitted. Nothing was sent to ReAI.`,
+        );
+      }
+    } else if (args.companyBankId === undefined) {
+      return fail(
+        "companyBankId is required unless paidPrivately is true — the payment has to land " +
+          "somewhere. List the accounts with reai_list_company_banks. Nothing was sent to ReAI.",
+      );
+    }
+
     const res = await ctx.client.request({
       method: "POST",
       path: `/api/invoices/${id}/payments`,

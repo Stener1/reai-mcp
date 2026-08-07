@@ -16,8 +16,11 @@ import {
   classifyRequest,
   classifyTransmission,
   classifyWithBody,
+  classifyPaymentRouting,
   escalatingBodyFields,
+  paymentRoutingFields,
   transmittingBodyFields,
+  type Risk,
 } from "../policy.js";
 import type { HttpMethod } from "../reai/client.js";
 import { ReaiApiError } from "../reai/errors.js";
@@ -222,6 +225,55 @@ const apiNotes = defineTool({
  * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
  * guessing at required fields there would be noise.
  */
+/**
+ * Tenant ids the caller put in the PATH or QUERY, which the bound-tenant check would
+ * otherwise never see.
+ *
+ * `resolveTenantId` governs exactly one thing: the value that becomes the X-Tenant-Id
+ * header. But twelve operations name a tenant as a path or query parameter, and
+ * `/api/accountant-clients/{clientTenantId}` plus its notes endpoints are PUBLIC —
+ * which is precisely the accountant case the README describes, one token reaching
+ * every client company. So a grant bound to one tenant could still address another by
+ * naming it in the path, making the consent page's promise narrower than it reads.
+ * Found independently by two reviewers, which is usually a sign it is real.
+ */
+function tenantIdsInRequest(
+  method: HttpMethod,
+  path: string,
+  query: Record<string, unknown> | undefined,
+): number[] {
+  const op = resolveOperation(method, path);
+  if (!op) return [];
+
+  const found: number[] = [];
+  const specSegments = op.path.split("/").filter(Boolean);
+  const actualSegments = path.split("/").filter(Boolean);
+
+  for (const param of op.params ?? []) {
+    if (!/tenant/i.test(param.name)) continue;
+    if (param.in === "path") {
+      const index = specSegments.indexOf(`{${param.name}}`);
+      const value = index >= 0 ? actualSegments[index] : undefined;
+      if (value !== undefined && /^\d+$/.test(value)) found.push(Number(value));
+    } else if (param.in === "query") {
+      // Query keys bind case-insensitively on this API.
+      const entry = Object.entries(query ?? {}).find(
+        ([k]) => k.toLowerCase() === param.name.toLowerCase(),
+      );
+      const raw = entry?.[1];
+      if (typeof raw === "number" && Number.isInteger(raw)) found.push(raw);
+      else if (typeof raw === "string" && /^\d+$/.test(raw)) found.push(Number(raw));
+    }
+  }
+  return found;
+}
+
+/** The worse of two classifications, so an ambiguity can only ever tighten. */
+function strictestRisk(a: Risk, b: Risk): Risk {
+  const order: Risk[] = ["read", "reversible", "irreversible"];
+  return order.indexOf(a) >= order.indexOf(b) ? a : b;
+}
+
 /** Statuses where the request's own shape is a plausible explanation. */
 const PAYLOAD_STATUSES = new Set([400, 415, 422]);
 
@@ -380,22 +432,66 @@ const request = defineTool({
       );
     }
 
-    // Path first, then the body: a flag like `sendEhf: true` transmits the
-    // document to a counterparty, which no amount of path inspection reveals.
-    const pathRisk = classifyRequest(method, path);
-    const risk = classifyWithBody(pathRisk, args.body);
-    const escalated = risk !== pathRisk ? escalatingBodyFields(args.body) : [];
+    // A bound tenant is a boundary, so it must cover every way a tenant can be named,
+    // not just the header. Checked before classification, so the refusal is about the
+    // boundary rather than about the write ladder.
+    const boundTenant = ctx.config.boundTenantId;
+    if (boundTenant !== undefined) {
+      const named = tenantIdsInRequest(method, canonical.decodedPathname, args.query).filter(
+        (id) => id !== boundTenant,
+      );
+      if (named.length > 0) {
+        return okText(
+          `This connection is bound to tenant ${boundTenant}, and this request names tenant ` +
+            `${named.join(", ")} in its path or query. Refused.\n` +
+            `The tenant chosen at authorization is a boundary, not a default, so it cannot be ` +
+            `overridden per call — including by an endpoint that takes a tenant id as a parameter.`,
+        );
+      }
+    }
+
+    // Classified on BOTH the raw path and its decoded form, taking whichever is
+    // stricter. The raw form is what gets sent; the decoded form is what the upstream
+    // router will match. Percent-encoding a single character of a segment used to
+    // move a call from one classification to another — "sign-reques%74" was treated
+    // as an unknown sub-path of the reversible /api/agreements prefix and then landed
+    // on the endpoint that emails a signing request to a counterparty. Comparing both
+    // and taking the worse means it no longer matters which one an attacker aims at.
+    const decoded = canonical.decodedPathname;
+    const pathRisk = strictestRisk(
+      classifyRequest(method, path),
+      classifyRequest(method, decoded),
+    );
+    const bodyRisk = classifyWithBody(pathRisk, args.body);
+    // Then payment routing, which needs the path: changing a counterparty's bank
+    // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
+    // happens later when a human pays the invoice in the ReAI UI.
+    const risk = classifyPaymentRouting(bodyRisk, decoded, args.body);
+    const routing = risk !== bodyRisk ? paymentRoutingFields(args.body) : [];
+    const escalated =
+      routing.length > 0
+        ? [`${routing.join(", ")} (this changes where a payment will go)`]
+        : bodyRisk !== pathRisk
+          ? escalatingBodyFields(args.body)
+          : [];
     assertAllowed(
       risk,
       ctx.config.writeMode,
       escalated.length > 0
-        ? `${method} ${path} with ${escalated.join(", ")} (this arms an external send)`
+        ? // The reason is carried in the entry itself now: a body can escalate because it
+          // arms a send, or because it repoints a payment, and calling the second one an
+          // external send would be simply untrue.
+          `${method} ${path} with ${escalated.join(", ")}${
+            routing.length > 0 ? "" : " (this arms an external send)"
+          }`
         : `${method} ${path}`,
     );
 
     // Separately from reversibility: does this leave the tenant? Checked after
     // the write policy so the more fundamental refusal is reported first.
-    const transmits = classifyTransmission(method, path, args.body);
+    const rawTransmits = classifyTransmission(method, path, args.body);
+    const decodedTransmits = classifyTransmission(method, decoded, args.body);
+    const transmits = rawTransmits !== "none" ? rawTransmits : decodedTransmits;
     const sendFields = transmittingBodyFields(args.body);
     assertTransmitAllowed(
       transmits,

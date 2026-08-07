@@ -12,6 +12,13 @@ import {
 } from "./registry.js";
 
 /**
+ * Floor for open-item queries. Mirrors the customer-side constant: the ledger only
+ * returns parties with activity in the window, so an unpaid invoice from an earlier
+ * year is simply absent unless the window reaches back.
+ */
+const OPEN_ITEM_FLOOR = "2000-01-01";
+
+/**
  * The purchase side: suppliers, supplier invoices, the document inbox, expenses.
  *
  * Two things shape this domain and are not obvious from the endpoint names.
@@ -128,7 +135,7 @@ const updateSupplier = defineTool({
   name: "reai_update_supplier",
   title: "Update a supplier",
   description:
-    "Update supplier details, including the bank account used to pay them. " +
+    "Update supplier details. Editing name, address or contact data is ordinary master-data work.\n\nCHANGING THE BANK DETAILS (bankAccountNumber, iban, swiftCode) is different in kind: the record is reversible, but the payment is not. Whoever pays this supplier next — quite possibly a person clicking through the ReAI UI, long after this call — sends money to whatever account is on file. So those fields require REAI_WRITE_MODE=full, and they are worth confirming with the user against something outside the conversation before changing. " +
     "Only the fields you pass are changed.",
   risk: "reversible",
   apiPaths: [["PATCH", "/api/suppliers/{id}"]],
@@ -204,7 +211,14 @@ const supplierLedger = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const startDate = args.startDate ?? startOfYear();
+    // Widened for open-item questions, exactly as the customer ledger already is.
+    // The endpoint returns only suppliers "with activity in the period", so a
+    // current-year default silently hides an invoice that went unpaid in an earlier
+    // year — and "what do we still owe" is precisely the question people ask of this
+    // tool. Understating accounts payable is the failure mode, and it looks like a
+    // clean answer. Both open-item flags need it, not just one.
+    const openItems = args.isUnpaid === true || args.isOpenPosting === true;
+    const startDate = args.startDate ?? (openItems ? OPEN_ITEM_FLOOR : startOfYear());
     const endDate = args.endDate ?? today();
     const path = args.supplierId ? `/api/ledger/supplier/${args.supplierId}` : "/api/ledger/supplier";
     const res = await ctx.client.request({
@@ -219,7 +233,15 @@ const supplierLedger = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data, { note: `Supplier ledger ${startDate} to ${endDate}.` });
+    return ok(res.data, {
+      note:
+        `Supplier ledger ${startDate} to ${endDate}` +
+        (openItems && args.startDate === undefined
+          ? " (open items only — the window was widened back to 2000, because this endpoint returns " +
+            "only suppliers with activity in the period and an older unpaid invoice would otherwise " +
+            "be invisible)."
+          : "."),
+    });
   },
 });
 
@@ -635,14 +657,28 @@ const listExpenses = defineTool({
     paidOut: z
       .enum(["true", "false"])
       .optional()
-      .describe('Whether the claim has been reimbursed. The API takes this as a string, not a boolean.'),
+      .describe(
+        'Whether the claim has been reimbursed. The API takes this as a string, not a boolean. ' +
+          'With "false" the date window is widened automatically — see startDate.',
+      ),
     employeeIds: z.string().optional().describe("Comma-separated employee ids."),
-    startDate: isoDate.optional().describe("Inclusive start date."),
+    startDate: isoDate
+      .optional()
+      .describe(
+        "Inclusive start date. The API defaults this to 1 January of the current year, so an " +
+          'unreimbursed claim from last December is invisible. With paidOut="false" this tool ' +
+          "reaches back to 2000 instead.",
+      ),
     endDate: isoDate.optional().describe("Inclusive end date."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, ...query } = args;
+    // The endpoint returns only claims in the window and defaults to the current year,
+    // so "what have we not reimbursed" hid a December claim from last year — the same
+    // shape of bug as the customer and supplier ledgers.
+    const widened = args.paidOut === "false" && args.startDate === undefined;
+    if (widened) query.startDate = OPEN_ITEM_FLOOR;
     const res = await ctx.client.request<unknown[]>({
       method: "GET",
       path: "/api/expenses",
