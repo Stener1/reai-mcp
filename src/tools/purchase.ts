@@ -4,6 +4,7 @@ import {
   fail,
   isoDate,
   ok,
+  okList,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -70,8 +71,7 @@ const listSuppliers = defineTool({
       query,
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} supplier(s).` });
+    return okList(res.data, { noun: "supplier", suffix: "." });
   },
 });
 
@@ -329,8 +329,7 @@ const listSupplierInvoices = defineTool({
       query: { documentType: args.documentType },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} supplier invoice(s).` });
+    return okList(res.data, { noun: "supplier invoice", suffix: "." });
   },
 });
 
@@ -675,9 +674,16 @@ const listReceptionDocuments = defineTool({
       const which = wanted[i] as "invoice" | "receipt";
       const key = which === "invoice" ? "invoiceInbox" : "receiptInbox";
       if (settled.status === "fulfilled") {
-        const count = Array.isArray(settled.value.res.data) ? settled.value.res.data.length : 0;
-        out[key] = settled.value.res.data;
-        notes.push(`${count} ${which} document(s) awaiting processing`);
+        const rows = settled.value.res.data;
+        out[key] = rows;
+        // Two inboxes are read in parallel and reported in one sentence, so this cannot use
+        // okList — but it must make the same distinction. A non-array counted as 0 would say
+        // "0 invoice document(s) awaiting processing" about an inbox that returned rows.
+        notes.push(
+          Array.isArray(rows)
+            ? `${rows.length} ${which} document(s) awaiting processing`
+            : `the ${which} inbox did not return a list, so it is NOT known to be empty`,
+        );
       } else {
         failures++;
         const message =
@@ -783,8 +789,7 @@ const listExpenses = defineTool({
       query,
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} expense claim(s).` });
+    return okList(res.data, { noun: "expense claim", suffix: "." });
   },
 });
 

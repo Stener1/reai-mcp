@@ -591,9 +591,60 @@ const request = defineTool({
     if (res.location) notes.push(`Location: ${res.location}`);
     if (risk !== "read") notes.push(`Write classified as "${risk}" and permitted by policy.`);
 
-    return ok(res.data ?? "(empty response)", { note: notes.join("\n") });
+    // A bound connection must not disclose the OTHER companies the underlying ReAI token
+    // reaches — reai_whoami filters its tenant list for exactly that reason, and the README
+    // describes the binding as a disclosure boundary. But the boundary was tool-dependent:
+    // GET /api/me through this escape hatch returned every company verbatim. Verified with a
+    // three-tenant response on a connection bound to one — whoami showed one, this showed
+    // all three. The binding has to hold whichever door the agent walks through.
+    const body = redactUnboundTenants(res.data, ctx.config.boundTenantId, isMeta, notes);
+
+    return ok(body ?? "(empty response)", { note: notes.join("\n") });
   },
 });
+
+/**
+ * Strip companies a bound connection may not address from a /api/me or /api/tenants body.
+ *
+ * Shape-tolerant on purpose: the point is a disclosure boundary, so an unrecognised shape
+ * is withheld rather than passed through on the assumption it holds nothing sensitive.
+ */
+function redactUnboundTenants(
+  data: unknown,
+  bound: number | undefined,
+  isMeta: boolean,
+  notes: string[],
+): unknown {
+  if (!isMeta || bound === undefined || data === undefined || data === null) return data;
+
+  const keep = (list: unknown): unknown[] | undefined =>
+    Array.isArray(list) ? list.filter((t) => (t as { id?: number })?.id === bound) : undefined;
+
+  if (Array.isArray(data)) {
+    const kept = keep(data);
+    if (kept && kept.length !== data.length) {
+      notes.push(
+        `Filtered to tenant ${bound}: this connection is bound to one company and does not ` +
+          `disclose the others the underlying token reaches. reai_whoami shows the same view.`,
+      );
+    }
+    return kept ?? data;
+  }
+  if (typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    if (!("tenants" in record)) return data;
+    const kept = keep(record.tenants);
+    notes.push(
+      kept
+        ? `Filtered to tenant ${bound}: this connection is bound to one company and does not ` +
+          `disclose the others the underlying token reaches. reai_whoami shows the same view.`
+        : `The tenants field was withheld: this connection is bound to tenant ${bound}, and the ` +
+          `field was not a list, so it could not be filtered to that company.`,
+    );
+    return { ...record, tenants: kept ?? null };
+  }
+  return data;
+}
 
 export const discoveryTools: ToolDef[] = [
   searchEndpoints,

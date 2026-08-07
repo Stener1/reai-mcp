@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineTool, ok, requiredName, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import { defineTool, ok, okList, requiredName, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
 
 /**
  * The fixed-asset register (anleggsmidler).
@@ -64,19 +64,12 @@ const listAssets = defineTool({
       path: "/api/assets",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    if (!Array.isArray(res.data)) {
-      return ok(res.data, {
-        note:
-          "The assets endpoint did not return a list. The response is passed through unchanged " +
-          "— do NOT read this as 'no assets'.",
-      });
-    }
-    return ok(res.data, {
-      note:
-        res.data.length === 0
-          ? "The fixed-asset register is empty. That means no assets are registered, not that " +
-            "the company owns nothing — anything expensed rather than capitalised never appears here."
-          : `${res.data.length} fixed asset(s).`,
+    return okList(res.data, {
+      noun: "fixed asset",
+      suffix: ".",
+      empty:
+        "The fixed-asset register is empty. That means no assets are registered, not that " +
+        "the company owns nothing — anything expensed rather than capitalised never appears here.",
     });
   },
 });

@@ -4,6 +4,7 @@ import {
   fail,
   isoDate,
   ok,
+  okList,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -81,8 +82,7 @@ const listCustomers = defineTool({
       query,
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} customer(s).` });
+    return okList(res.data, { noun: "customer", suffix: "." });
   },
 });
 
@@ -439,8 +439,7 @@ const listProducts = defineTool({
       path: "/api/products",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, { note: `${count} product(s).` });
+    return okList(res.data, { noun: "product", suffix: "." });
   },
 });
 
@@ -632,10 +631,10 @@ const listOrders = defineTool({
       query,
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, {
-      note:
-        `${count} order(s).` +
+    return okList(res.data, {
+      noun: "order",
+      suffix:
+        "." +
         (widened
           ? ` Window widened back to ${OPEN_ITEM_FLOOR}: the API would otherwise default to one ` +
             `year and hide older unbilled orders.`
@@ -777,11 +776,9 @@ const listOffers = defineTool({
       query: { ...query, ...(widened ? { startDate: OPEN_ITEM_FLOOR } : {}) },
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, {
-      note:
-        `${count} offer(s)` +
-        `${widened ? ` from ${OPEN_ITEM_FLOOR} onwards — the API would otherwise have shown only the last year` : ""}.`,
+    return okList(res.data, {
+      noun: "offer",
+      suffix: `${widened ? ` from ${OPEN_ITEM_FLOOR} onwards — the API would otherwise have shown only the last year` : ""}.`,
     });
   },
 });
@@ -894,10 +891,10 @@ const listInvoices = defineTool({
       query,
       tenantId: requireTenantId(tenantId, ctx),
     });
-    const count = Array.isArray(res.data) ? res.data.length : 0;
-    return ok(res.data, {
-      note:
-        `${count} invoice(s).` +
+    return okList(res.data, {
+      noun: "invoice",
+      suffix:
+        "." +
         (widened
           ? ` Searched from ${OPEN_ITEM_FLOOR}: the API would otherwise default to the last year ` +
             `only, hiding invoices overdue for longer than that.`
