@@ -130,7 +130,8 @@ const deleteCompanyBank = defineTool({
   description:
     "Remove a company bank account. ReAI archives the account instead of deleting it once " +
     "postings or reconciliations refer to it, which keeps those references intact — the response " +
-    "says which happened. Removing the record does not touch anything at the bank.",
+    "says which happened. Removing the record does not touch anything at the bank.\n\n" +
+    "There is NO unarchive endpoint for company banks, so through the API this is one-way.",
   risk: "reversible",
   apiPaths: [["DELETE", "/api/company-banks/{id}"]],
   destructive: true,
@@ -176,8 +177,10 @@ const getBankReconciliation = defineTool({
       .array(z.enum(["summary", "pending_transactions", "pending_postings", "matched_groups"]))
       .optional()
       .describe(
-        "Which sections to return. Omit for the API's default. Narrow this on a busy account — a " +
-          "full month of transactions and postings can be large.",
+        "Which sections to return. Omit to include ALL of them, which on a busy account is large " +
+          "enough to be shortened before you see it — the tool trims the longest lists to fit and " +
+          "says so, but a trimmed list is not an answer to \"what is left to reconcile\". Narrowing " +
+          "this to the section you actually need is the reliable way to get a complete one.",
       ),
     tenantId: tenantIdArg,
   },
@@ -265,7 +268,15 @@ const createReconciliationRule = defineTool({
       .string()
       .describe("Account to book matching transactions to. From reai_list_accounts."),
     description: z.string().min(1).describe("Description to put on the resulting posting."),
-    vatCode: z.string().optional().describe("VAT code for the posting, from reai_list_vat_codes."),
+    vatCode: z
+      .string()
+      .optional()
+      .describe(
+        "VAT code for the posting. Take it from reai_list_vat_codes — but note that the unfiltered " +
+          "list returns EVERY code ReAI supports, not the ones THIS tenant may use, so it shows 25% " +
+          "codes even for a company that is not VAT-registered. Booking one the tenant cannot use " +
+          "invents VAT that does not exist. Omit it if you are not sure.",
+      ),
     subAccountId: z.number().int().optional().describe("Optional general sub-account id."),
     tenantId: tenantIdArg,
   },
@@ -451,7 +462,15 @@ const bookBankTransactions = defineTool({
           '"2400/123" books against supplier 123, which is what keeps the supplier ledger ' +
           "reconciled rather than leaving a bare balance on 2400.",
       ),
-    vatCode: z.string().optional().describe("VAT code for the posting, from reai_list_vat_codes."),
+    vatCode: z
+      .string()
+      .optional()
+      .describe(
+        "VAT code for the posting. Take it from reai_list_vat_codes — but note that the unfiltered " +
+          "list returns EVERY code ReAI supports, not the ones THIS tenant may use, so it shows 25% " +
+          "codes even for a company that is not VAT-registered. Booking one the tenant cannot use " +
+          "invents VAT that does not exist. Omit it if you are not sure.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

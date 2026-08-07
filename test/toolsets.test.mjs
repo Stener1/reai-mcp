@@ -140,3 +140,32 @@ test("declared API paths exist in the OpenAPI spec", () => {
     }
   }
 });
+
+// Quirk vat-codes-tenant-specific warns that the unfiltered VAT-code list returns every
+// code ReAI supports rather than the tenant's, so "booking one invents VAT that does not
+// exist". Two tools take a vatCode and BOOK to the ledger with it — and a reconciliation
+// rule does so repeatedly and unattended — while pointing at reai_list_vat_codes with no
+// caveat at all. Documented, not surfaced where it bites.
+test("tools that book with a vatCode warn that the code list is not tenant-specific", async () => {
+  const { allTools } = await import("../dist/server.js");
+  for (const name of ["reai_create_reconciliation_rule", "reai_book_bank_transactions"]) {
+    const tool = allTools.find((t) => t.name === name);
+    assert.ok(tool, `${name} not found`);
+    const described = JSON.stringify(tool.inputSchema.vatCode?._def ?? {});
+    const text = `${tool.description} ${described}`;
+    assert.match(text, /not VAT-registered|THIS tenant|invents VAT/i, `${name} gives no caveat`);
+  }
+});
+
+// Issuing an invoice needs BOTH switches, and saying only "requires full" invites an
+// operator to set full and wonder why the tool is still missing.
+test("a transmitting tool names both switches it needs", async () => {
+  const { allTools } = await import("../dist/server.js");
+  for (const tool of allTools.filter((t) => t.transmits === true)) {
+    assert.match(
+      tool.description,
+      /REAI_ALLOW_EXTERNAL_SEND/,
+      `${tool.name} transmits but never mentions REAI_ALLOW_EXTERNAL_SEND`,
+    );
+  }
+});
