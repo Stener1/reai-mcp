@@ -145,9 +145,26 @@ async function main() {
   if (postRes.status === 200) {
     const html = await postRes.text();
     const verified = /name="verified" value="([^"]+)"/.exec(html)?.[1];
-    const firstTenant = /<option value="(\d+)"/.exec(html)?.[1];
-    report("multi-tenant token prompts for a company", Boolean(verified && firstTenant));
-    if (!verified || !firstTenant) throw new Error("unexpected consent response");
+    // Pick a company that has been DECLARED, not simply the first on the page. With a
+    // user-scoped token the first option is whatever sorts first, which may be someone
+    // else's business, and the whole flow below then reads from it.
+    const offered = [...html.matchAll(/<option value="(\d+)"/g)].map((m) => m[1]);
+    const declared = (process.env.REAI_READ_TENANTS ?? "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const chosen = tenantArg ?? offered.find((id) => declared.includes(id));
+    report("multi-tenant token prompts for a company", Boolean(verified && offered.length > 0));
+    if (!verified || offered.length === 0) throw new Error("unexpected consent response");
+    if (!chosen) {
+      throw new Error(
+        `The consent page offers ${offered.length} companies (${offered.join(", ")}) and none is\n` +
+          `declared. Name the one to bind, so this script does not choose for you:\n\n` +
+          `  --tenant 2634\n` +
+          `  REAI_READ_TENANTS=2634 node scripts/smoke-http.mjs\n`,
+      );
+    }
+    const firstTenant = chosen;
     postRes = await fetch(asMeta.authorization_endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
