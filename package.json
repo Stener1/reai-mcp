@@ -1,6 +1,6 @@
 {
   "name": "reai-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for ReAI (app.reai.no) — Norwegian accounting. Curated bookkeeping tools plus full-API escape hatch. Runs as local stdio or self-hosted remote connector.",
   "license": "MIT",
   "author": "Stener Torstensen",
