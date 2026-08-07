@@ -590,6 +590,20 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
   // pattern instead silently stopped covering /send.
   /^\/api\/agreements\/[^/]+\/sign-requests?(\/|$)/,
 
+  // Granting access to an email address INVITES that address. UserAccessRes.status is
+  // "active" | "pending_invitation" and carries an invitationId, CreateUserReq takes
+  // { email, roleCode, expiresInDays }, and GET /api/users/invitations lists the pending
+  // ones — an expiring invitation the invitee has to accept can only reach them by mail.
+  //
+  // Stated honestly: the endpoint has NO description, so the email itself is inferred from
+  // that shape rather than documented. Failing closed is the easy call here, because what
+  // this one sends is not data but PRIVILEGE — roleCode accepts ROLE_TENANT_ADMIN, to an
+  // address the caller chooses. /api/users was already irreversible on the write axis
+  // ("changes who can reach the books at all"), so `full` mode permitted it while the send
+  // axis had never looked at it: a server trusted with the ledger could mail an admin
+  // invitation to anyone. Exact, because the sub-operations read roles and permissions.
+  /^\/api\/users$/,
+
   // Government filings. These leave for Skatteetaten, which is as external as it
   // gets — and the tax return has no idempotency guard, so a repeated call
   // re-files.
@@ -1036,6 +1050,36 @@ export function classifyTransmission(
     return "none";
   }
 
+  // Paying a supplier invoice can start a REAL outgoing bank transfer. The endpoint's own
+  // description: "For a bank-integrated payment that requires customer approval, approvalUrl
+  // provides the authenticated ReAI handoff that starts the BankID approval flow", and the
+  // cancel path answers 409 with an scaRedirectUrl when the provider requires SCA. That is
+  // money leaving for a third party, which is what already puts /adyen/payout and
+  // /kassasystem/mobile/payment-request on this axis.
+  //
+  // Conditional rather than blanket, because the endpoint is two operations wearing one path:
+  // manualPayment=true RECORDS a payment that has already left the bank, which is bookkeeping
+  // and sends nothing. Anything else — including OMITTING the field — selects the integration
+  // flow. That the default is the dangerous one is measured, not assumed: omitting it once
+  // during live verification started the bank-integrated flow, which is why the curated tool
+  // makes manualPayment required. reai_request has no such schema, so the gate belongs here
+  // too, or the escape hatch is the one way to start a transfer with sending switched off.
+  //
+  // paidPrivately alone does NOT exempt it, deliberately. A private settlement returns a
+  // voucherId rather than a payment id and takes no companyBankId, which reads like
+  // bookkeeping — but nothing says a sole proprietor's private account cannot also be paid
+  // through bank approval, and that is not a guess worth making in this direction. Pass
+  // manualPayment: true alongside it to say plainly that the money has already moved.
+  if (
+    method === "POST" &&
+    forms.some((n) => /^\/api\/supplier-invoices\/[^/]+\/payments$/.test(n)) &&
+    !inspectableObjects(body).some((o) =>
+      Object.entries(o).some(([k, v]) => k.toLowerCase() === "manualpayment" && bindsToTrue(v)),
+    )
+  ) {
+    return "external";
+  }
+
   if (forms.some((n) => TRANSMITTING_PATTERNS.some((re) => re.test(n)))) return "external";
 
   for (const candidate of inspectableObjects(body)) {
@@ -1062,7 +1106,11 @@ export function transmittingBodyFields(body: unknown): string[] {
 export class ExternalSendBlockedError extends Error {
   constructor(what: string) {
     super(
-      `${what} sends a document, email or signing request outside this tenant, and ` +
+      // "document, email or signing request" was the whole list until money movement and an
+      // access invitation joined this axis. A refusal that names the wrong kind of thing reads
+      // like a misfire, and an agent that thinks the gate misfired looks for a way around it.
+      `${what} reaches someone outside this tenant — a document, an email, a signing request, a ` +
+        `filing, an access invitation, or money leaving on a bank integration — and ` +
         `REAI_ALLOW_EXTERNAL_SEND is not enabled on this server.\n\n` +
         `This is a separate switch from REAI_WRITE_MODE by design. A write mode governs what can be ` +
         `undone in the books; this governs whether anything reaches a third party, which cannot be ` +

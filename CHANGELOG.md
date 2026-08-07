@@ -45,6 +45,16 @@ All notable changes to `reai-mcp`. Format loosely follows
     returns only archived warehouses, and nothing returns both sets. Combined
     with the archive-on-delete behaviour, stock can sit in a warehouse the
     default list does not show.
+- **Whole-spec guard for the external-send gate** (`test/transmit-coverage.test.mjs`),
+  in three halves because none of them covers all three failures: enforcement
+  derived from the policy (every transmitting operation refused by the real
+  handler in every write mode, asserting the API was never reached and that in
+  `full` mode the SEND gate is what refuses); coverage from an independent keyword
+  sweep of the spec with reasoned exceptions; and named pins for the transmitting
+  operations no other test mentions — seven Peppol paths and two that place a
+  phone call. The derived half alone would have been the mistake this repo keeps
+  making: it takes its own subject from the policy, so deleting a transmitting
+  pattern shrinks the set and stays green.
 - **Six quirks** for the same measurements, so a `reai_request` caller gets the
   warnings the curated tools give — including `stock-product-needs-a-variant`,
   which is a `POST /api/products` rejection whose `fieldErrors` name a synthetic
@@ -90,6 +100,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Two operations that reach third parties were not on the send axis.** Found by
+  auditing every operation in the spec, after the audit's own guard passed on all
+  counts and review went looking for what it could not see. Both were permitted
+  by `REAI_WRITE_MODE=full` with `REAI_ALLOW_EXTERNAL_SEND` unset — a documented,
+  intended configuration.
+  - `POST /api/users` **emails an access invitation**. `UserAccessRes.status` is
+    `active | pending_invitation` with an `invitationId`, the request takes
+    `{ email, roleCode, expiresInDays }`, and `GET /api/users/invitations` lists
+    the pending ones: an expiring invitation the invitee must accept can only
+    reach them by mail. The endpoint has no description, so the email itself is
+    inferred from that shape — an easy call to fail closed on, because what it
+    sends is privilege rather than data, and `roleCode` accepts
+    `ROLE_TENANT_ADMIN` to an address the caller chooses. The write axis had
+    already reviewed `/api/users` ("changes who can reach the books at all"); the
+    send axis never had.
+  - `POST /api/supplier-invoices/{id}/payments` can **start a real bank
+    transfer**: its own description says `approvalUrl` "starts the BankID approval
+    flow". Gated conditionally rather than outright, because the path is two
+    operations in one — `manualPayment: true` records a payment that has already
+    left the bank and sends nothing. Anything else, **including omitting the
+    field**, selects the integration flow; that the default is the dangerous one
+    is measured, not assumed, which is why the curated tool already required the
+    field. `paidPrivately` alone does not exempt it: nothing says a sole
+    proprietor's private account cannot also be paid through bank approval.
+  - Gated in the curated tool as well as in the policy. `curatedArgsEscalate`
+    does not consult `classifyTransmission`, so the policy rule alone left
+    `reai_request` **stricter** than
+    `reai_register_supplier_invoice_payment` — backwards, since the curated tool
+    is what an agent reaches for. Routing it through that helper was tried and
+    reverted: it reads a tool's arguments as an API body, so a report tool's
+    `outputMode` read as arming a send. The tool now calls
+    `assertTransmitAllowed` itself, as `reai_activate_subscription` already did.
+- The refusal message listed "a document, email or signing request" while the axis
+  had grown to cover money movement and an access invitation. A refusal that names
+  the wrong kind of thing reads like a misfire, and an agent that thinks a gate
+  misfired looks for a way past it.
 - The README's `reai_delete_asset` row repeated the spec's claim that a linked
   acquisition voucher is "deleted **or reversed**", which the paragraph directly
   below it already contradicted and the tool's own description refutes: the call

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertTransmitAllowed } from "../policy.js";
 import {
   CURRENCY_CODE,
   COUNTRY_CODE,
@@ -549,6 +550,26 @@ const paySupplierInvoice = defineTool({
       return fail(
         "bankDebitAmount applies only to manual payments. For a bank-integrated payment " +
           "(manualPayment=false) it must not be sent. Nothing was sent to ReAI.",
+      );
+    }
+
+    // The bank-integrated branch can start a real transfer: the endpoint returns an
+    // approvalUrl that "starts the BankID approval flow". That is money leaving for a third
+    // party, so it belongs behind REAI_ALLOW_EXTERNAL_SEND and not behind the write mode
+    // alone — `full` says "you may touch the ledger", not "you may move money out".
+    //
+    // Gated here as well as in the policy, deliberately. classifyTransmission covers the same
+    // path for reai_request, and without this the escape hatch would be STRICTER than the
+    // curated tool, which is backwards: the curated tool is what an agent reaches for. Done in
+    // the handler rather than through curatedArgsEscalate because that helper reads the
+    // arguments as an API body, and a tool argument named like a transmitting field — a report
+    // tool's outputMode, say — would then arm a send that no request carries.
+    if (args.manualPayment !== true) {
+      assertTransmitAllowed(
+        "external",
+        ctx.config.allowExternalSend,
+        `paying supplier invoice ${id} with manualPayment=false, the bank-integrated flow, ` +
+          `which can return an approvalUrl that starts a real BankID transfer`,
       );
     }
 

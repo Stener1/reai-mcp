@@ -424,15 +424,24 @@ test("an absent response field is reported as unknown, not as zero", async () =>
 
   const pay = tool("reai_register_supplier_invoice_payment");
   const payArgs = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", manualPayment: false, companyBankId: 1, tenantId: 2634 };
+  // The statuses below (awaiting_approval, an approvalUrl at all) only ARISE on the
+  // bank-integrated flow, so this deliberately uses manualPayment: false — which the tool now
+  // treats as an external send, since it can start a real BankID transfer. A deployment
+  // exercising that flow is one with sending enabled, so that is the posture simulated here.
+  // The refusal itself is covered in test/transmit-coverage.test.mjs.
+  const bankFlowCtx = (data, status = 201) => ({
+    ...fakeCtx(data, status),
+    config: { writeMode: "full", tenantId: 2634, allowExternalSend: true },
+  });
 
   // awaiting_approval with a null URL — the schema permits it, and the status is the
   // authority. Branching on the URL alone let this read as "recorded".
-  const awaiting = await pay.handler(payArgs, fakeCtx({ status: "awaiting_approval", approvalUrl: null }));
+  const awaiting = await pay.handler(payArgs, bankFlowCtx({ status: "awaiting_approval", approvalUrl: null }));
   assert.match(text(awaiting), /NOT YET PAID/);
   assert.match(text(awaiting), /completed from within ReAI/);
 
   // A replayed payment that FAILED must not be reported as already paid.
-  const replayFailed = await pay.handler(payArgs, fakeCtx({ status: "failed", paymentId: 77 }, 200));
+  const replayFailed = await pay.handler(payArgs, bankFlowCtx({ status: "failed", paymentId: 77 }, 200));
   assert.match(text(replayFailed), /NOT PAID/);
   assert.match(text(replayFailed), /created NOTHING/);
   assert.ok(!/already paid/.test(text(replayFailed)), `must not contradict itself: ${text(replayFailed)}`);

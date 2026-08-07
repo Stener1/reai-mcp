@@ -28,7 +28,7 @@ import { allTools } from "../dist/server.js";
  *  3. NAMED PINS for the transmitting operations no other test mentions. Half is not enough on
  *     its own: (1) derives its own subject from the policy, so removing a path shrinks the set
  *     and stays green — the "guard that tests a copy of the thing it guards" shape this repo
- *     has shipped twice. (2) only sees the ones with a telling name, which is 21 of 33.
+ *     has shipped twice. (2) only sees the ones with a telling name, which is 23 of 35.
  */
 
 const OPERATIONS = getSpecIndex().operations;
@@ -46,7 +46,7 @@ test("the spec still contains transmitting operations at all", () => {
   // against, so it is checked first and by an absolute number.
   assert.ok(
     externalOps.length >= 30,
-    `only ${externalOps.length} operations classify as external; 33 were present when this ` +
+    `only ${externalOps.length} operations classify as external; 35 were present when this ` +
       `was written, so a large drop means the classification broke, not that the API changed`,
   );
 });
@@ -55,9 +55,25 @@ test("the spec still contains transmitting operations at all", () => {
 // 1. Enforcement
 // ---------------------------------------------------------------------------
 
-/** Drives the real handler with a client that makes any HTTP attempt loud. */
-async function attempt(method, path, writeMode) {
+/**
+ * Drives the real handler and reports whether the API was reached, and WHICH gate refused.
+ *
+ * Two things here were wrong in the first version and are worth keeping visible:
+ *
+ * `called` is now recorded inside the stub rather than inferred from the error message. The
+ * old version treated any throw not carrying its sentinel — and any isError result — as a
+ * refusal, so a refactor that normalised client failures into an isError result while moving
+ * the transmit check AFTER the request would have invoked the client and still been scored
+ * "refused".
+ *
+ * `by` names the gate. The write ladder runs BEFORE the send gate, so outside `full` mode most
+ * transmitting operations are refused by the write policy and the send gate never runs. A test
+ * that only asked "was it refused" therefore proved nothing about sending in those modes —
+ * demonstrated: gating on `writeMode === "full"` only left the whole file green.
+ */
+async function attempt(method, path, writeMode, body = {}) {
   const tool = allTools.find((t) => t.name === "reai_request");
+  let called = false;
   const ctx = {
     config: {
       boundTenantId: undefined,
@@ -69,32 +85,69 @@ async function attempt(method, path, writeMode) {
     client: {
       deepLink: () => "",
       request: async () => {
+        called = true;
         throw new Error("__REACHED_THE_API__");
       },
     },
   };
+  const classify = (err) => {
+    const name = err?.name ?? "";
+    if (name === "ExternalSendBlockedError") return "send-gate";
+    if (name === "WriteBlockedError") return "write-ladder";
+    return /__REACHED_THE_API__/.test(err?.message ?? "") ? "none" : "other";
+  };
   try {
-    const res = await tool.handler({ method, path, body: {} }, ctx);
-    return res.isError ? { refused: true } : { refused: false, how: "returned success" };
+    const res = await tool.handler({ method, path, body }, ctx);
+    return { called, refused: res.isError === true, by: res.isError ? "tool-error" : "none" };
   } catch (err) {
-    return /__REACHED_THE_API__/.test(err.message)
-      ? { refused: false, how: "an HTTP request was made" }
-      : { refused: true };
+    return { called, refused: classify(err) !== "none", by: classify(err) };
   }
 }
 
-test("every transmitting operation is refused in every write mode", async () => {
+test("no transmitting operation reaches the API, in any write mode", async () => {
   const escaped = [];
   for (const op of externalOps) {
-    // `full` is the one that matters most: it lifts the write ceiling, and the whole point of
-    // the second axis is that it does NOT lift external send. `read-only` matters for the two
-    // transmitting GETs, which are the ones a "surely a read is safe" assumption would miss.
     for (const writeMode of ["read-only", "reversible", "full"]) {
-      const result = await attempt(op.method, concrete(op.path), writeMode);
-      if (!result.refused) escaped.push(`${writeMode}: ${keyOf(op)} — ${result.how}`);
+      const r = await attempt(op.method, concrete(op.path), writeMode);
+      // `called` is the property that matters: an HTTP request to a transmitting path IS the
+      // send. Whether the handler then threw or returned an error is a detail.
+      if (r.called) escaped.push(`${writeMode}: ${keyOf(op)} — the client was invoked`);
+      else if (!r.refused) escaped.push(`${writeMode}: ${keyOf(op)} — returned success`);
     }
   }
   assert.deepEqual(escaped, [], "these would have transmitted with REAI_ALLOW_EXTERNAL_SEND unset");
+});
+
+test("in full mode the SEND gate is what refuses, not the write ladder", async () => {
+  // The distinction this file previously missed. `full` lifts the write ceiling, so it is the
+  // only mode where the send gate is the sole thing standing in the way — and therefore the
+  // only mode where "refused" is evidence about sending at all. Asserting the error's identity
+  // also turns a future silent change into a visible one: if any of these stops being
+  // irreversible, or the gates swap order, the refuser changes and this fails.
+  const wrong = [];
+  for (const op of externalOps) {
+    const r = await attempt(op.method, concrete(op.path), "full");
+    if (r.by !== "send-gate") wrong.push(`${keyOf(op)} — refused by ${r.by}`);
+  }
+  assert.deepEqual(wrong, [], "in full mode every one of these must hit ExternalSendBlockedError");
+});
+
+test("outside full mode the write ladder refuses first, which is why the check above exists", async () => {
+  // Not an aspiration — a measurement, recorded so the previous mistake cannot come back
+  // quietly. In read-only and reversible, the write policy refuses every transmitting WRITE
+  // before the send gate is consulted; only the transmitting GETs reach it, since a GET is
+  // permitted by every write mode.
+  const gets = externalOps.filter((op) => op.method === "GET");
+  assert.ok(gets.length >= 2, `expected transmitting GETs to exist; found ${gets.length}`);
+  for (const op of gets) {
+    const r = await attempt(op.method, concrete(op.path), "read-only");
+    assert.equal(r.by, "send-gate", `${keyOf(op)} in read-only`);
+    assert.equal(r.called, false);
+  }
+  for (const op of externalOps.filter((op) => op.method !== "GET")) {
+    const r = await attempt(op.method, concrete(op.path), "reversible");
+    assert.equal(r.by, "write-ladder", `${keyOf(op)} in reversible`);
+  }
 });
 
 test("the refusal names the switch, so the reason is actionable", async () => {
@@ -115,9 +168,11 @@ test("the refusal names the switch, so the reason is actionable", async () => {
     }
   })();
   assert.match(text, /REAI_ALLOW_EXTERNAL_SEND/);
-  // And it must not suggest raising the write mode, which would not help and is the more
-  // dangerous of the two knobs to reach for.
-  assert.doesNotMatch(text, /REAI_WRITE_MODE=full/);
+  // It must not tell the caller to raise the write mode, which would not help and is the more
+  // dangerous of the two knobs to reach for. Asserted as the RECOMMENDATION rather than as the
+  // substring "REAI_WRITE_MODE=full": a better message could legitimately mention that flag in
+  // order to say it will not help, and forbidding the characters would fail that improvement.
+  assert.doesNotMatch(text, /(set|use|enable|raise|try)\s+REAI_WRITE_MODE/i);
 });
 
 // ---------------------------------------------------------------------------
@@ -148,7 +203,8 @@ const REVIEWED_NOT_SENDERS = {
   "GET /api/attachments/{id}/ehf":
     "reads the EHF payload of a document already received; incoming, not outgoing",
   "GET /api/attachments/{id}/embedded-files":
-    "lists files inside an attachment — matched only on the word 'files'",
+    "reads files out of an attachment already received; it is caught by 'EHF' in its summary " +
+    "(\"Download embedded files from an EHF attachment\"), not by the word 'files'",
   "PUT /api/customers/{id}/delivery-address":
     "sets a postal address and matched on 'deliver'; changing where goods go is not a send. It " +
     "is not unguarded either — checked, it is inside inPaymentRoutingScope, so a body carrying " +
@@ -164,10 +220,6 @@ const REVIEWED_NOT_SENDERS = {
     "lists reminders already issued; POST on the same path is the one that sends",
   "GET /api/invoices/{id}/reminders/{reminderId}/pdf":
     "downloads a reminder to the CALLER, not to the debtor",
-  "GET /api/leads/person-profiles": "matched on 'file' inside 'profiles'",
-  "POST /api/supplier-invoices/{id}/attachments/existing":
-    "attaches an already-stored file to an INCOMING invoice; matched on 'file'",
-  "GET /attachments/{id}/view/{filename}": "matched on 'file' inside 'filename'",
 };
 
 test("anything that looks like a send is classified, or excused with a reason", () => {
@@ -188,11 +240,22 @@ test("anything that looks like a send is classified, or excused with a reason", 
   );
 });
 
-test("every excused operation still exists and still does not send", () => {
-  const specKeys = new Set(OPERATIONS.map(keyOf));
+test("every excused operation still exists, still matches the sweep, and still does not send", () => {
+  const byKey = new Map(OPERATIONS.map((op) => [keyOf(op), op]));
   for (const [key, reason] of Object.entries(REVIEWED_NOT_SENDERS)) {
-    assert.ok(specKeys.has(key), `excuses an operation the spec no longer has: ${key}`);
+    const op = byKey.get(key);
+    assert.ok(op, `excuses an operation the spec no longer has: ${key}`);
     assert.ok(reason.length > 25, `${key} needs a reason, not a placeholder`);
+    // An excuse for something the sweep never selects is dead weight that LOOKS like a
+    // reviewed decision. Three entries were exactly that: they were written against an
+    // earlier regex containing bare `file`, which later became `filing`, so they excused
+    // nothing while reading as considered judgements. Worse, the same drift in reverse — a
+    // keyword quietly removed — would shrink the sweep and leave its excuses green.
+    assert.ok(
+      LOOKS_LIKE_A_SEND.test([op.path, op.summary ?? "", op.id ?? ""].join(" ")),
+      `${key} no longer matches the sweep, so this excuse is dead — remove it, or restore the ` +
+        `keyword that used to select it`,
+    );
     // If one of these becomes a sender, the excuse is now a lie sitting next to the gate.
     const [method, path] = key.split(" ");
     assert.notEqual(
@@ -201,6 +264,75 @@ test("every excused operation still exists and still does not send", () => {
       `${key} is now classified external — remove its excuse rather than leaving both`,
     );
   }
+});
+
+/**
+ * Transmission that depends on the BODY, driven through the handler.
+ *
+ * The path sweep cannot see these: `POST /api/orders` is "none" by path and external only when
+ * the body carries sendEhf, so it is absent from externalOps and every assertion above. A
+ * regression where reai_request stopped passing args.body to classifyTransmission would have
+ * left this whole-spec file green while `full` mode issued EHF invoices with sending off.
+ *
+ * The armed values come from the policy's own field list rather than a copy of it, so a new
+ * transmitting field cannot be added without appearing here.
+ */
+const ARMED_BODIES = [
+  ["POST", "/api/orders", { sendEhf: true }],
+  ["POST", "/api/orders", { sendEhf: "true" }],
+  ["POST", "/api/subscriptions", { outputMode: "create_invoice" }],
+  ["POST", "/api/subscriptions", { automaticBillingGeneration: true }],
+  // A top-level ARRAY, which the inspection handles deliberately — a batch body would
+  // otherwise hide an armed field behind its outer shape.
+  ["POST", "/api/orders", [{ sendEhf: true }]],
+];
+
+/**
+ * Not tested: an armed field NESTED inside an object or a line array, e.g.
+ * `{ lines: [{ sendEhf: true }] }`. The inspection is deliberately shallow here and does not
+ * catch that — checked against the spec rather than assumed: sweeping every `*Req` schema to
+ * depth 4, sendEhf, outputMode and automaticBillingGeneration occur ONLY as top-level
+ * properties (CreateOrderReq, UpdateOrderReq, SubscriptionWriteReq), so there is no request
+ * shape in this API that nests them.
+ *
+ * Worth stating because the payment-routing axis DOES walk nested objects (MAX_BODY_DEPTH 4).
+ * That asymmetry is justified by the spec — bank-routing fields genuinely nest, these do not —
+ * not by one axis having been thought about less.
+ */
+
+test("a body that arms a send is refused by the handler, path notwithstanding", async () => {
+  for (const [method, path, body] of ARMED_BODIES) {
+    // Precondition: these must be "none" by path, or the test proves nothing about the body.
+    assert.equal(
+      classifyTransmission(method, path),
+      "none",
+      `${method} ${path} is external by PATH, so it cannot demonstrate body-triggered gating`,
+    );
+    assert.equal(classifyTransmission(method, path, body), "external", JSON.stringify(body));
+
+    const r = await attempt(method, path, "full", body);
+    assert.equal(r.called, false, `${method} ${path} ${JSON.stringify(body)} reached the API`);
+    assert.equal(r.by, "send-gate", `${method} ${path} ${JSON.stringify(body)}`);
+  }
+});
+
+test("every field the policy treats as arming a send is exercised above", async () => {
+  const { transmittingBodyFields } = await import("../dist/policy.js");
+  // The real list, derived: a field added to TRANSMITTING_BODY_FIELDS and not covered here
+  // would otherwise be gated in the classifier and untested through the handler.
+  const armed = { sendEhf: true, outputMode: "create_invoice", automaticBillingGeneration: true };
+  const known = transmittingBodyFields(armed).map((entry) => entry.split("=")[0].toLowerCase());
+  assert.ok(known.length >= 3, `expected the policy to report its armed fields; got ${known}`);
+  const exercised = new Set(
+    ARMED_BODIES.flatMap(([, , body]) =>
+      JSON.stringify(body)
+        .toLowerCase()
+        .match(/"([a-z]+)":/g)
+        ?.map((m) => m.slice(1, -2)) ?? [],
+    ),
+  );
+  const missing = known.filter((f) => !exercised.has(f));
+  assert.deepEqual(missing, [], "these arm a send in the policy but are not driven through the handler");
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +349,11 @@ test("every excused operation still exists and still does not send", () => {
  * "leads" suggests the send axis.
  */
 const MUST_TRANSMIT = [
+  // Neither of these is visible to the sweep: /api/users has no summary at all and no send
+  // token in its path, and "payments" is not a word the regex knows. Both were found by
+  // review, and both are exactly the shape the sweep is blind to — which is why they are
+  // pinned here rather than left to it.
+  "POST /api/users",
   "POST /api/peppol/messages/sendas4-facturx/{senderId}/{receiverId}/{countryC1}",
   "POST /api/peppol/messages/sendas4/{senderId}/{receiverId}/{docTypeId}/{processId}/{countryC1}",
   "POST /api/peppol/reports/create-eusr/{year}/{month}",
@@ -238,6 +375,143 @@ test("the transmitting operations nothing else names are pinned here", () => {
       "external",
       `${key} must be classified external`,
     );
+  }
+});
+
+/**
+ * The two operations this PR added to the send axis, pinned with their reasoning.
+ *
+ * Both were found by review after the first version of this file passed on all counts, and
+ * both are invisible to the keyword sweep — which is the honest limit of that half: it is only
+ * as strong as the spec's naming, and 284 of 430 operations here carry no summary at all.
+ */
+test("granting user access is on the send axis, because an invitation is an email", async () => {
+  // UserAccessRes.status is "active" | "pending_invitation" with an invitationId, CreateUserReq
+  // is { email, roleCode, expiresInDays }, and GET /api/users/invitations lists the pending
+  // ones. An expiring invitation the invitee must accept can only reach them by mail. The
+  // endpoint has no description, so the email is inferred from that shape — and failing closed
+  // is easy here, because roleCode accepts ROLE_TENANT_ADMIN and what is sent is privilege.
+  assert.equal(classifyTransmission("POST", "/api/users"), "external");
+  const r = await attempt("POST", "/api/users", "full", {
+    email: "someone@example.invalid",
+    roleCode: "ROLE_TENANT_ADMIN",
+  });
+  assert.equal(r.called, false, "an admin invitation must not reach the API with sending off");
+  assert.equal(r.by, "send-gate");
+
+  // Reading and revoking access are not sends, and must stay usable.
+  for (const [method, path] of [
+    ["GET", "/api/users"],
+    ["GET", "/api/users/invitations"],
+    ["GET", "/api/users/roles"],
+    ["DELETE", "/api/users/7"],
+    ["PUT", "/api/users/7"],
+  ]) {
+    assert.equal(classifyTransmission(method, path), "none", `${method} ${path}`);
+  }
+});
+
+test("paying a supplier invoice is on the send axis unless it is books-only", async () => {
+  const path = "/api/supplier-invoices/7/payments";
+  // Its own description: for a bank-integrated payment, approvalUrl "starts the BankID approval
+  // flow". manualPayment: true records a payment that has already left the bank and sends
+  // nothing; anything else selects the integration flow.
+  assert.equal(classifyTransmission("POST", path, { manualPayment: true }), "none");
+  assert.equal(classifyTransmission("POST", path, { manualPayment: "true" }), "none");
+  assert.equal(classifyTransmission("POST", path, { manualPayment: 1 }), "none");
+
+  // Absent is the dangerous one, and it is dangerous by MEASUREMENT rather than by caution:
+  // omitting manualPayment once during live verification selected the bank-integrated flow,
+  // which is why the curated tool makes the field required. reai_request has no such schema.
+  for (const body of [{}, undefined, { manualPayment: false }, { paidPrivately: true }]) {
+    assert.equal(
+      classifyTransmission("POST", path, body),
+      "external",
+      `body ${JSON.stringify(body ?? null)} must not be able to start a transfer`,
+    );
+  }
+
+  const armed = await attempt("POST", path, "full", { paymentDate: "2026-08-01", invoiceAmount: 125 });
+  assert.equal(armed.called, false, "a bank-integrated payment must not reach the API");
+  assert.equal(armed.by, "send-gate");
+
+  // And the books-only form must still work at full mode with sending off, or this gate would
+  // have made recording a paid invoice impossible — which is not what it is for.
+  const booksOnly = await attempt("POST", path, "full", {
+    paymentDate: "2026-08-01",
+    invoiceAmount: 125,
+    manualPayment: true,
+    companyBankId: 1,
+  });
+  assert.equal(booksOnly.by, "none", "manualPayment: true must reach the API in full mode");
+  assert.equal(booksOnly.called, true);
+
+  // Listing and deleting payments are unaffected.
+  assert.equal(classifyTransmission("GET", path), "none");
+  assert.equal(classifyTransmission("DELETE", `${path}/3`), "none");
+});
+
+test("the CURATED payment tool is gated too, not only the escape hatch", async () => {
+  // A policy rule alone was not enough here. classifyTransmission covers reai_request, but
+  // curatedArgsEscalate reads a tool's arguments as an API body and does not consult it — so
+  // the escape hatch became STRICTER than reai_register_supplier_invoice_payment, which is
+  // backwards: the curated tool is the one an agent reaches for. The tool now calls
+  // assertTransmitAllowed itself, the way reai_activate_subscription already did.
+  //
+  // Not routed through curatedArgsEscalate deliberately: that helper would read any argument
+  // named like a transmitting field as arming a send, and a report tool's `outputMode` is
+  // exactly such an argument. Attempted, and it made two existing tests fail for that reason.
+  const { registeredTools } = await import("../dist/server.js");
+  const tool = registeredTools.find((x) => x.name === "reai_register_supplier_invoice_payment");
+  assert.ok(tool, "the curated payment tool must exist for this to mean anything");
+
+  const call = async (args, allowExternalSend) => {
+    let called = false;
+    const ctx = {
+      client: {
+        deepLink: () => "",
+        request: async () => {
+          called = true;
+          return { data: { paymentId: 1, status: "settled" }, status: 201 };
+        },
+      },
+      config: { writeMode: "full", tenantId: 2783, allowExternalSend },
+      session: {},
+    };
+    try {
+      await tool.handler(args, ctx);
+      return { called, error: undefined };
+    } catch (err) {
+      return { called, error: err?.name };
+    }
+  };
+
+  const base = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", companyBankId: 1, tenantId: 2783 };
+
+  // The bank-integrated branch: refused, and nothing reaches the API.
+  const bankFlow = await call({ ...base, manualPayment: false }, false);
+  assert.equal(bankFlow.error, "ExternalSendBlockedError");
+  assert.equal(bankFlow.called, false, "a BankID transfer must not be started with sending off");
+
+  // Books-only must stay usable, or the gate has broken recording a paid invoice.
+  const booksOnly = await call({ ...base, manualPayment: true }, false);
+  assert.equal(booksOnly.error, undefined);
+  assert.equal(booksOnly.called, true);
+
+  // And with sending enabled the bank-integrated branch works, since that is the point.
+  const enabled = await call({ ...base, manualPayment: false }, true);
+  assert.equal(enabled.error, undefined);
+  assert.equal(enabled.called, true);
+});
+
+test("the refusal says what kind of thing is leaving", async () => {
+  // The message listed "a document, email or signing request" while the axis had grown to
+  // cover money movement and an access invitation. A refusal that names the wrong kind of
+  // thing reads like a misfire, and an agent that thinks a gate misfired looks for a way past it.
+  const { ExternalSendBlockedError } = await import("../dist/policy.js");
+  const text = new ExternalSendBlockedError("paying supplier invoice 42").message;
+  for (const kind of [/document/, /email/, /signing request/, /filing/, /invitation/, /money leaving/]) {
+    assert.match(text, kind);
   }
 });
 
