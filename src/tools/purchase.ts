@@ -396,6 +396,19 @@ const createSupplierInvoice = defineTool({
     // Zero is rejected as well as the wrong sign: the spec asks for at least 0.01
     // on an invoice and at most -0.01 on a credit note, but declares no `minimum`,
     // so a zero-amount line may well be accepted and posted.
+    //
+    // A review questioned whether this is over-tight, since a discount or an
+    // øre-rounding line on a Norwegian supplier invoice is ordinarily negative. It is
+    // not over-tight — the API enforces it PER LINE, verified against a live tenant:
+    //
+    //   [1000, 250]   -> 201
+    //   [1000, -200]  -> 400 "costLines amount must be at least 0.01 for invoice
+    //                        and at most -0.01 for credit_note"
+    //   [1000, -0.4]  -> 400 (same)
+    //
+    // So the check mirrors the API and, unlike the API, says so before posting
+    // anything. What it cannot do is leave the caller stuck, which is why the message
+    // now says how to express a discount instead.
     const isCredit = args.documentType === "credit_note";
     const wrongSign = args.costLines.filter((l) =>
       isCredit ? l.amount > -0.01 : l.amount < 0.01,
@@ -405,7 +418,14 @@ const createSupplierInvoice = defineTool({
         `Cost-line amounts do not match documentType=${args.documentType ?? "invoice"}.\n` +
           `An invoice needs amounts of at least 0.01; a credit note needs at most -0.01. ` +
           `Zero is not valid either way.\n` +
-          `Offending amounts: ${wrongSign.map((l) => l.amount).join(", ")}.\n` +
+          `Offending amounts: ${wrongSign.map((l) => l.amount).join(", ")}.\n\n` +
+          `This is the API's own rule, not a stricter one imposed here — it rejects a ` +
+          `mixed-sign document with "costLines amount must be at least 0.01 for invoice and ` +
+          `at most -0.01 for credit_note". So a discount or an øre-rounding line cannot be ` +
+          `sent as a negative line on an invoice. Express it either by netting it into the ` +
+          `line it discounts (send 800 rather than 1000 and -200), or, if the credit arrived ` +
+          `separately from the supplier, as its own document with documentType="credit_note" ` +
+          `and all amounts negative.\n` +
           `Nothing was sent to ReAI.`,
       );
     }
