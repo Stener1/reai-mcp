@@ -116,8 +116,14 @@ if [[ "$STATUS" -eq 1 ]]; then
   exit 1
 fi
 
-if [[ "$STATUS" -eq 0 ]]; then
-  echo "==> Checking that the tenant header actually selects between companies"
+# Runs for a one-company token as well as a multi-company one. Skipping it there was
+# backwards: with one company the probe is the ONLY thing that can distinguish a
+# tenant-scoped token (header ignored, an outside id returns this company data) from a
+# user-scoped one whose user happens to have a single company (header honoured, an
+# outside id is refused). The README says this script reports which case applies, and
+# without the probe that was not true.
+if [[ "$STATUS" -eq 0 || "$STATUS" -eq 3 ]]; then
+  echo "==> Checking what the tenant header actually does"
   # The probe this project has wanted from the start: read the same endpoint under two
   # different tenant ids and see whether the answers differ. With a tenant-scoped token
   # they are identical, which is what made every earlier attempt inconclusive.
@@ -135,11 +141,16 @@ const skipped = all.filter((id) => !touchable.has(String(id)));
 if (skipped.length) {
   console.log(`    not touching ${skipped.join(", ")} — outside the allowlist for this repo, not even to read`);
 }
-if (ids.length < 2) {
-  console.log(`    need two allowed companies to compare and have ${ids.length} (${ids.join(", ") || "none"}).`);
-  console.log("    Cross-tenant isolation stays unverified. Widen REAI_MCP_TOUCHABLE_TENANTS only for");
-  console.log("    companies you are willing to read from.");
-  process.exit(0);
+// SELECTION needs two companies to compare. ISOLATION does not need any of them — it
+// asks about ids nobody holds — so a shortage here skips only the first check. Bailing
+// out of both was why a one-company token learned nothing: isolation is precisely the
+// probe that separates "header ignored" from "header honoured" for that token.
+const canCompare = ids.length >= 2;
+if (!canCompare) {
+  console.log(`    only ${ids.length} allowed company (${ids.join(", ") || "none"}), so SELECTION cannot`);
+  console.log("    be compared — that needs two. The isolation check below still applies, and for a");
+  console.log("    one-company token it is the one that resolves the ambiguity: a refusal means the");
+  console.log("    header is honoured, and this company data coming back means it is ignored.");
 }
 // A read-only endpoint that differs between companies if anything does.
 const read = async (tenantId) => {
@@ -149,14 +160,17 @@ const read = async (tenantId) => {
   const text = await res.text();
   return { status: res.status, length: text.length, body: text };
 };
-const [a, b] = await Promise.all([read(ids[0]), read(ids[1])]);
+const [a, b] = canCompare
+  ? await Promise.all([read(ids[0]), read(ids[1])])
+  : [undefined, undefined];
+if (canCompare) {
 console.log(`    tenant ${ids[0]}: HTTP ${a.status}, ${a.length} bytes`);
 console.log(`    tenant ${ids[1]}: HTTP ${b.status}, ${b.length} bytes`);
 if (a.status >= 400 || b.status >= 400) {
   console.log("    At least one read failed, so this proves nothing either way. An earlier version of");
   console.log("    this probe called /api/accounts, which does not exist: it compared two identical");
   console.log("    404s and reported them as evidence.");
-  process.exit(0);
+  // Fall through: the isolation probe below does not depend on this comparison.
 }
 if (a.body === b.body) {
   console.log("    IDENTICAL responses. Either the header did not select, or both companies genuinely");
@@ -164,12 +178,18 @@ if (a.body === b.body) {
 } else {
   console.log("    SELECTION works: different payloads, so X-Tenant-Id chooses the company.");
 }
+}
 
 // Selection is not isolation. Comparing two companies the token is ALLOWED to reach
 // proves only that the header affects routing; it says nothing about whether the API
-// refuses one the token may not reach. That needs an id outside the token list — an
-// implausible one, so the probe never touches anybody real.
-const outside = [99999999, 1];
+// refuses one the token may not reach.
+//
+// The candidate ids are DERIVED from the token list rather than hardcoded. The first
+// version used [99999999, 1] — and 1 is a perfectly ordinary tenant id that some token
+// somewhere does reach, so on such a token this probe would have read a real company
+// after promising an allowlist. An id nobody holds is the only safe one to ask about.
+const highest = Math.max(...all.map(Number).filter(Number.isFinite), 0);
+const outside = [highest + 991, highest + 7919].filter((id) => !all.map(Number).includes(id));
 const denied = [];
 for (const id of outside) {
   const res = await fetch(`${base}/api/chart-of-accounts`, {
@@ -177,12 +197,26 @@ for (const id of outside) {
   });
   denied.push({ id, status: res.status });
 }
-for (const d of denied) console.log(`    tenant ${d.id} (not on this token): HTTP ${d.status}`);
-if (denied.every((d) => d.status === 403 || d.status === 404)) {
-  console.log("    ISOLATION works: the API refuses a tenant this token may not reach.");
+for (const d of denied) console.log(`    tenant ${d.id} (derived, not on this token): HTTP ${d.status}`);
+// 403 is a refusal. 404 is not: it says the id does not exist, which proves nothing
+// about whether authorization would stop you reaching a company that does. Treating
+// them alike would have reported "ISOLATION works" for two ids that simply are not
+// there.
+if (denied.length > 0 && denied.every((d) => d.status === 403)) {
+  console.log("    ISOLATION works: the API REFUSES a tenant this token may not reach (403).");
+} else if (denied.every((d) => d.status === 404)) {
+  console.log("    INCONCLUSIVE: 404 for every derived id, which only says they do not exist. It");
+  console.log("    does not show that authorization would refuse a company that does.");
+} else if (denied.some((d) => d.status < 400)) {
+  // A success for an id nobody holds is the signature of the header being ignored, which
+  // for a one-company token is exactly the answer that was missing: it is TENANT-SCOPED.
+  console.log("    The header is IGNORED: an id nobody holds still returned data, so every tenant id");
+  console.log("    reaches the same company. This token is scoped to that one company.");
+  console.log("    Consequence: a successful response is never evidence of which company answered,");
+  console.log("    and cross-company isolation cannot be assessed with this token at all.");
 } else {
-  console.log("    WARNING: a tenant outside this token list did not come back 403/404. Isolation");
-  console.log("    between companies cannot be assumed from here.");
+  console.log(`    INCONCLUSIVE: statuses ${denied.map((d) => d.status).join(", ")} — neither a clear`);
+  console.log("    refusal nor a clear success.");
 }
 console.log("");
 console.log("    Note what this does NOT show. The per-authorization binding in the remote connector");
@@ -190,6 +224,15 @@ console.log("    is enforced by THIS SERVER only: ReAI sees the underlying user 
 console.log("    legitimately reaches every company above, so it cannot tell that a given");
 console.log("    authorization was scoped to one of them.");
 '
+  PROBE_STATUS=$?
+  # errexit is off, so without capturing this a network error or a JSON parse failure
+  # inside the probe would leave the earlier STATUS in place and automation would read
+  # the verification as having succeeded.
+  if [[ "$PROBE_STATUS" -ne 0 ]]; then
+    echo "    The probe itself failed (exit ${PROBE_STATUS}). Treat the header behaviour as" >&2
+    echo "    unverified rather than confirmed." >&2
+    [[ "$STATUS" -eq 0 ]] && STATUS=5
+  fi
 fi
 
 if [[ "$SAVE" -eq 1 ]]; then
