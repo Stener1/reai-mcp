@@ -7,6 +7,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+## Unreleased
+
+**71 tools**: 64 across five accounting domains, plus 7 always-on.
+
+### Added
+
+- **Organisation toolset** (8 tools) — departments, employees and the employee
+  ledger. `reai_list_postings`, `reai_general_ledger` and `reai_list_expenses`
+  already took an `employeeId`, and nothing here could turn a name into one.
+  - `reai_get_employee` **redacts** `nationalIdentityNumber` and `bankAccount`
+    unless `includePersonalData` is set, and `reai_list_employees` omits them
+    entirely. A default rather than a control — `reai_request` returns the raw
+    record — but a question about who works here should not put a fødselsnummer
+    into a model's context.
+  - `reai_delete_department` reports whether the record was deleted or
+    **archived**, which is the difference between a 200 that removed it and a 200
+    that hid it. Departments have no unarchive endpoint.
+  - Verified against the live API: the department create/read/rename/delete
+    round-trip was run end to end on the test tenant, and `DELETE` answered
+    `{"outcome":"deleted"}`.
+  - No project tools. The Project module is disabled on every reachable tenant,
+    so `GET /api/projects` answers 403 and the success path is unverifiable.
+
+### Fixed
+
+- The `delete-may-archive` quirk was missing `/api/projects/{id}` and
+  `/api/warehouses/{id}`, and said only customers could be unarchived — suppliers
+  can too, and the other six cannot, which makes an archive there one-way.
+
 ## 0.3.0
 
 First version worth using. Covers the bookkeeping core, sales, purchase, and bank

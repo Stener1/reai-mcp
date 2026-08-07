@@ -538,6 +538,13 @@ test("the account limit does not exceed the API's silent cap", async () => {
   assert.ok(max.value <= 100, `limit allows ${max.value}, but the API caps at 100`);
 });
 
+/** Read-tool inputs that legitimately never reach the API. See the filter below. */
+const SHAPES_THE_RESPONSE = {
+  "reai_get_employee: includePersonalData":
+    "returns the national identity number and bank account instead of redacting them; proven by " +
+    "the redaction test in test/organisation.test.mjs",
+};
+
 test("no read tool accepts an input it never sends", async () => {
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude
@@ -588,7 +595,13 @@ test("no read tool accepts an input it never sends", async () => {
     // the handler made — query, path or body. Some fields legitimately choose an
     // endpoint rather than being forwarded.
     const seen = JSON.stringify(calls);
-    const missing = fields.filter((f) => !seen.includes(String(args[f])) && !seen.includes(f));
+    const missing = fields
+      .filter((f) => !seen.includes(String(args[f])) && !seen.includes(f))
+      // ...or if it shapes the RESPONSE instead of the request, which is a real thing a
+      // read tool can do and not the failure this sweeps for. Listed one by one with the
+      // reason, and each entry owes a test proving the field actually changes the output —
+      // an exemption without one is the same silent drop wearing a comment.
+      .filter((f) => SHAPES_THE_RESPONSE[`${tool.name}: ${f}`] === undefined);
     if (missing.length > 0) dropped.push(`${tool.name}: ${missing.join(", ")}`);
   }
 

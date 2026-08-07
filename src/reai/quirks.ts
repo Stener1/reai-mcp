@@ -389,13 +389,19 @@ export const QUIRKS: readonly Quirk[] = [
       // reai_request caller got no warning, even though the curated tools say it.
       "/api/products/{id}",
       "/api/company-banks/{id}",
+      // The last two sharing the identical spec wording, found by matching on the
+      // sentence rather than by listing them from memory.
+      "/api/projects/{id}",
+      "/api/warehouses/{id}",
     ],
     methods: ["DELETE"],
     kind: "gotcha",
     note:
       "DELETE archives instead of deleting when the record already has transactions, preserving the " +
-      'audit trail. The response says which happened (outcome: "deleted" | "archived"). Customers ' +
-      "can be unarchived with POST /api/customers/{id}/unarchive.",
+      'audit trail. The response says which happened (outcome: "deleted" | "archived") — read it ' +
+      "rather than treating 200 as deletion. ONLY customers and suppliers can be unarchived " +
+      "(POST /api/{customers,suppliers}/{id}/unarchive); for the other six an archive is one-way, " +
+      "and the record stays hidden from the active list.",
   },
 
   // --- Subscriptions -------------------------------------------------------

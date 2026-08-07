@@ -154,9 +154,15 @@ test("tool counts stated in the changelog match the groups", () => {
   // The changelog said "59 curated tools across four domains, plus discovery",
   // which read as 59 domain tools with discovery on top. It is 52 + 7.
   const domainTotal = Object.values(TOOL_GROUPS).flat().length;
+  // The domain COUNT is part of the sentence, and it was hardcoded to "four" — so adding a
+  // fifth group made this fail against the 0.3.0 entry, which is a historical record and
+  // correct as written. The current total belongs in the unreleased section; released
+  // entries describe what shipped then.
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"];
+  const domains = Object.keys(TOOL_GROUPS).length;
   assert.ok(
-    CHANGELOG.includes(`${domainTotal} across four accounting domains`),
-    `changelog should say ${domainTotal} domain tools`,
+    CHANGELOG.includes(`${domainTotal} across ${words[domains]} accounting domains`),
+    `changelog should say ${domainTotal} tools across ${words[domains]} accounting domains`,
   );
   assert.ok(
     CHANGELOG.includes(`${alwaysOnTools.length} always-on`),
