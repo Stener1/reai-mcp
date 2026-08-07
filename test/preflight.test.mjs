@@ -595,31 +595,44 @@ test("no read tool accepts an input it never sends", async () => {
   assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
 });
 
-test("constraints the descriptions promise are actually enforced", async () => {
-  // Each of these was stated in prose and unchecked by the schema, so the tool
-  // described a guardrail it did not have. The API rejects them anyway — the point is
-  // that the failure arrives as a clear local message rather than a 400 from a call
-  // that has already been made.
-  const { allTools } = await import("../dist/server.js");
-  const parse = (tool, field, value) => {
-    const schema = tool.inputSchema[field];
-    return schema.safeParse(value).success;
-  };
-
+test("constraints the descriptions promise are enforced, and no further", () => {
+  // Each was stated in prose and unchecked, so the tool described a guardrail it did
+  // not have. Tightening them then over-shot in three places and rejected calls the
+  // API accepts — which is the worse failure, so both directions are asserted here.
   const offer = allTools.find((t) => t.name === "reai_create_offer");
-  const line = (over) => ({ itemName: "x", quantity: 1, unitPrice: 100, vatCode: "3", ...over });
-  const lines = offer.inputSchema.offerLines;
-
-  assert.equal(lines.safeParse([line({ unitPrice: 0 })]).success, false, "unitPrice 0 must be rejected");
-  assert.equal(lines.safeParse([line({ unitPrice: 20_000_000 })]).success, false, "unitPrice bound");
-  assert.equal(lines.safeParse([line({ quantity: 1.234 })]).success, false, "quantity is in steps of 0.01");
-  assert.equal(lines.safeParse([line({ unitPrice: -50 })]).success, true, "a negative price is a discount");
-  assert.equal(lines.safeParse([line({ quantity: 1.5 })]).success, true);
-
+  const order = allTools.find((t) => t.name === "reai_create_order");
   const customer = allTools.find((t) => t.name === "reai_create_customer");
-  assert.equal(parse(customer, "name", "x".repeat(76)), false, "name is capped at 75 by the API");
-  assert.equal(parse(customer, "name", "x".repeat(75)), true);
-
   const supplier = allTools.find((t) => t.name === "reai_create_supplier");
-  assert.equal(parse(supplier, "name", "x".repeat(76)), false);
+  const line = (over) => ({ itemName: "x", quantity: 1, unitPrice: 100, vatCode: "3", ...over });
+  const accepts = (schema, value) => schema.safeParse(value).success;
+
+  // Rejected, as the API rejects them.
+  assert.equal(accepts(offer.inputSchema.offerLines, [line({ quantity: 1.234 })]), false);
+  assert.equal(accepts(offer.inputSchema.offerLines, [line({ unitPrice: 20_000_000 })]), false);
+  assert.equal(accepts(customer.inputSchema.name, "x".repeat(76)), false);
+  assert.equal(accepts(supplier.inputSchema.name, "x".repeat(76)), false);
+
+  // A fixed 1e-9 epsilon rejected 279796.4, a valid multiple of 0.01, because
+  // 279796.4 * 100 drifts about 3.7e-9 from its rounded value.
+  for (const quantity of [279_796.4, 1.5, 0.01, 99_999_999.99]) {
+    assert.equal(
+      accepts(offer.inputSchema.offerLines, [line({ quantity })]),
+      true,
+      `quantity ${quantity} is a valid multiple of 0.01`,
+    );
+  }
+
+  // Zero unit price is forbidden on an ORDER line and permitted on an OFFER line —
+  // only CreateOrderLineReq documents the restriction. Putting it in the shared base
+  // blocked valid free-item and informational quote lines.
+  assert.equal(accepts(order.inputSchema.orderLines, [line({ unitPrice: 0 })]), false);
+  assert.equal(accepts(offer.inputSchema.offerLines, [line({ unitPrice: 0 })]), true);
+  assert.equal(accepts(order.inputSchema.orderLines, [line({ unitPrice: -50 })]), true);
+
+  // CreateCustomerReq declares minLength 0 on purpose: supplying an organizationNumber
+  // and letting the Brønnøysund lookup fill the name is the documented flow, and
+  // requiring a name removes its only valid representation.
+  assert.equal(accepts(customer.inputSchema.name, ""), true);
+  assert.equal(accepts(supplier.inputSchema.name, ""), true);
 });
+

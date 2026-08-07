@@ -223,6 +223,18 @@ export const QUIRKS: readonly Quirk[] = [
       "three share a shape.",
   },
   {
+    id: "person-role-matches-shape",
+    paths: ["/api/leads/person-role-matches"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "Returns { matched, companyMatched, items } — an object, but NOT the page object the other " +
+      "lead endpoints use: no page, hasNext, hasMore, nextStartOrgNo or limit. So it needs reading " +
+      "differently from /api/leads and /api/leads/person-profiles, and there is nothing to paginate " +
+      "through. Requires the linkedinSlug query parameter, and omitting it returns a bare " +
+      '400 "Validation failed" that names nothing.',
+  },
+  {
     id: "leads-unsaved-rows-have-no-id",
     paths: ["/api/leads"],
     methods: ["GET"],

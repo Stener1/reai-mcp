@@ -98,7 +98,13 @@ const createSupplier = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/suppliers"]],
   inputSchema: {
-    name: z.string().min(1).max(75).describe("Supplier or company name. At most 75 characters."),
+    name: z
+      .string()
+      .max(75)
+      .describe(
+        "Supplier or company name, at most 75 characters. May be EMPTY when organizationNumber is " +
+          "supplied and the registry lookup is left on — it fills the name in.",
+      ),
     organizationNumber: z.string().optional().describe("Norwegian organisation number."),
     privateContact: z.boolean().optional().describe("True for a private individual."),
     email: z.string().optional().describe("Email address."),
@@ -142,7 +148,7 @@ const updateSupplier = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
-    name: z.string().min(1).max(75).optional().describe("New name. At most 75 characters."),
+    name: z.string().max(75).optional().describe("New name. At most 75 characters."),
     email: z.string().optional().describe("Email address."),
     phone: z
       .string()
