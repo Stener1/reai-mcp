@@ -480,6 +480,17 @@ export const QUIRKS: readonly Quirk[] = [
 
   // --- Subscriptions -------------------------------------------------------
   {
+    id: "subscription-created-active",
+    paths: ["/api/subscriptions"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "A created subscription comes back active: true — there is no inert draft stage, and " +
+      "POST /api/subscriptions/{id}/activate is for restarting a deactivated one. Verified on a " +
+      "live create. What makes a new subscription harmless is automaticBillingGeneration: false, " +
+      "which leaves it waiting for an explicit generate call; being newly created does not.",
+  },
+  {
     id: "subscription-self-invoicing",
     paths: ["/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],

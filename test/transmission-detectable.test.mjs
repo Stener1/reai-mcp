@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { classifyRequest, classifyWithBody, classifyTransmission, isAllowed, WRITE_MODES } from "../dist/policy.js";
 import { allTools } from "../dist/server.js";
 
@@ -22,7 +23,22 @@ import { allTools } from "../dist/server.js";
  */
 
 /** Mirrors the list in scripts/smoke-http.mjs. */
-const TRANSMITTING_TOOLS = ["reai_create_invoice_from_order", "reai_credit_invoice"];
+/**
+ * The watch list, READ FROM THE SCRIPT rather than copied.
+ *
+ * This was a hand-maintained duplicate, which is the shape of guard this repo has been
+ * caught by twice: a test that mirrors the thing it guards tests the mirror. Adding a
+ * transmitting tool to the script and not to the copy, or the reverse, would leave both
+ * directions of the assertion below green while they disagreed.
+ */
+const SMOKE_HTTP = readFileSync(new URL("../scripts/smoke-http.mjs", import.meta.url), "utf8");
+const TRANSMITTING_TOOLS = (() => {
+  const block = /const TRANSMITTING_TOOLS = \[([\s\S]*?)\];/.exec(SMOKE_HTTP);
+  assert.ok(block, "could not find TRANSMITTING_TOOLS in scripts/smoke-http.mjs");
+  const names = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(names.length > 0, "parsed an empty watch list — the regex has drifted");
+  return names;
+})();
 
 /** Mirrors the paths that script probes. */
 const PROBED = [

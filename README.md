@@ -394,9 +394,24 @@ What each of these does was measured rather than read off the spec, and the spec
 
 Create, set-depreciation and write-off post **nothing** on an asset with no accounting history. They stay irreversible because `/api/assets` has always been classified that way and because write-off on an asset carrying real value could not be produced — this classifier fails closed on what it has not seen, and *not* because of any depreciation-posting mechanism, since no operation in this API posts depreciation at all.
 
-Anything not listed — leads, agreements, subscriptions, projects, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Subscriptions
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_subscriptions` · `reai_get_subscription` | What bills whom, how often, and whether it goes out on its own. The list calls out how many bill **automatically** | read |
+| `reai_subscription_billing_history` | What a subscription has already produced. Nothing stops you billing the same period twice — this is how you check | read |
+| `reai_create_subscription` · `reai_update_subscription` | Set one up, or replace it. Created **inactive**; the update is a full replacement, so read it first | reversible |
+| `reai_activate_subscription` | Start the schedule running — for an automatic subscription this is the moment the machine starts | **irreversible** |
+| `reai_deactivate_subscription` | Stop it producing anything further. Undoing a standing risk, so available in the default mode | reversible |
+| `reai_generate_subscription_billing` | Bill it now, producing a draft order or a numbered invoice | **irreversible** + external send |
+| `reai_delete_subscription` | Remove the arrangement. Documents it already produced are unaffected | reversible |
 
-If 77 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+Three fields decide whether a subscription reaches a customer on its own: `outputMode: "create_invoice"`, `automaticBillingGeneration`, and `sendEhf`. Together they are a machine that invoices real people while nobody is looking, so a body carrying any of them is treated as irreversible **and** as an external send — needing `REAI_WRITE_MODE=full` *and* `REAI_ALLOW_EXTERNAL_SEND`, because `full` alone does not lift the second. A subscription that produces a draft order and bills on request needs neither, and stays usable in the default mode.
+
+`POST /api/subscriptions/generate-due` is deliberately **not** curated. It bills every due subscription in one call — the operation an agent would reach for to "catch up billing", and the one where a mistake is widest. It stays available through `reai_request`, where the refusal names what it is.
+
+Anything not listed — leads, agreements, projects, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 86 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
@@ -404,14 +419,15 @@ REAI_TOOLSETS=bookkeeping,sales    # 37 tools
 REAI_TOOLSETS=purchase             # 20 tools
 REAI_TOOLSETS=organisation         # 15 tools
 REAI_TOOLSETS=assets               # 13 tools
-(unset)                            # all 77
+REAI_TOOLSETS=subscriptions        # 16 tools
+(unset)                            # all 86
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation` and `assets`; listing all six is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets` and `subscriptions`; listing all seven is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **56 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **57 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
