@@ -516,21 +516,28 @@ const paySupplierInvoice = defineTool({
       tenantId: resolved,
     });
 
-    // An approvalUrl means ReAI is waiting for a human to approve a real payment.
-    // Saying "payment registered" there would be a lie -- but so was the fallback:
-    // branching on approvalUrl ALONE caught only `awaiting_approval`, and the API also
-    // returns in_process, customer_action_required, failed and reversed. A
-    // bank-integrated payment the bank REJECTED was reported as recorded.
+    // A payment awaiting approval is NOT paid -- but branching on approvalUrl alone
+    // was wrong twice over. It caught only awaiting_approval among the API's several
+    // non-terminal states, and it missed awaiting_approval itself whenever the URL was
+    // null, which the response schema permits. The STATUS is the authority; the URL is
+    // just how a human finishes the job.
     const notes: string[] = [];
     const status = res.data?.status;
-    // HTTP 200 rather than 201 means "existing idempotent payment returned" -- the
-    // call created nothing, and reporting it as a fresh payment invites a second one.
+    // HTTP 200 rather than 201 means "existing idempotent payment returned": this call
+    // created nothing. That says nothing about whether the invoice is SETTLED -- the
+    // existing payment can itself be failed, in flight, or a partial amount -- so it is
+    // reported as "already existed" and the settlement question is left to the status
+    // above. Claiming "already paid, do not retry" would have contradicted a preceding
+    // "NOT PAID" line, and could leave a genuinely unpaid invoice looking closed.
     const replayed = res.status === 200;
+    const settled = status === undefined || status === "completed";
 
-    if (res.data?.approvalUrl) {
+    if (status === "awaiting_approval" || res.data?.approvalUrl) {
       notes.push(
-        `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval. ` +
-          `Someone must complete it (BankID) here: ${res.data.approvalUrl}`,
+        `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval.` +
+          (res.data?.approvalUrl
+            ? ` Someone must complete it (BankID) here: ${res.data.approvalUrl}`
+            : ` No approval URL was returned, so it has to be completed from within ReAI.`),
       );
     } else if (status === "failed" || status === "reversed") {
       notes.push(
@@ -559,8 +566,12 @@ const paySupplierInvoice = defineTool({
     if (replayed) {
       notes.push(
         `This call created NOTHING: the API returned an existing payment` +
-          `${res.data?.paymentId ? ` (id ${res.data.paymentId})` : ""} rather than a new one, so the ` +
-          `invoice was already paid. Do not retry.`,
+          `${res.data?.paymentId ? ` (id ${res.data.paymentId})` : ""} rather than a new one, so a ` +
+          `payment for this invoice was already registered. Do not send it again.` +
+          (settled
+            ? ""
+            : ` Note the state above — an existing payment is not necessarily a settled invoice.`) +
+          ` If the amount was a partial payment, re-read the invoice to see what remains.`,
       );
     }
     return ok(res.data, {

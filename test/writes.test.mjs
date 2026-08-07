@@ -360,9 +360,66 @@ test("a tool never claims an outcome the API did not report", async () => {
   // HTTP 200 is "existing idempotent payment returned" — the call created nothing.
   const replay = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 77 }, 200));
   assert.match(replay.content[0].text, /created NOTHING/);
-  assert.match(replay.content[0].text, /Do not retry/);
+  assert.match(replay.content[0].text, /Do not send it again/);
   // And a genuine 201 still reads as done.
   const fresh = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 78 }, 201));
   assert.match(firstLine(fresh), /^Payment of 300 recorded/);
   assert.ok(!/created NOTHING/.test(fresh.content[0].text));
+});
+
+// The first version of the fix above traded one confident assumption for another: it
+// read counts from the response but turned an ABSENT array into a definite zero, and
+// treated HTTP 200 as proof the invoice was paid. Absent means unknown. Saying
+// "Matched 0" under a status of "matched", or "already paid" over a preceding
+// "NOT PAID", is the same defect as trusting the request — pointed the other way.
+test("an absent response field is reported as unknown, not as zero", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const fakeCtx = (data, status = 201) => ({
+    client: { request: async () => ({ data, status }), deepLink: () => "link" },
+    config: { writeMode: "full", tenantId: 2634 },
+    session: {},
+  });
+  const text = (r) => r.content[0].text;
+  const tool = (n) => allTools.find((x) => x.name === n);
+
+  // A deployment returning `status` but not the newer id arrays must not read as zero.
+  const matched = await tool("reai_match_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1, 2, 3], postingIds: [9], tenantId: 2634 },
+    fakeCtx({ status: "matched" }, 200),
+  );
+  assert.match(text(matched), /did not say how many/);
+  assert.ok(!/Matched 0/.test(text(matched)), `must not invent a zero: ${text(matched)}`);
+
+  // A discrepancy account supplied but nothing to book: do not claim a posting exists.
+  const balanced = await tool("reai_match_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1], postingIds: [9], discrepancyAccount: "7770", tenantId: 2634 },
+    fakeCtx({ status: "matched", reconciledTransactionIds: [1], reconciledPostingIds: [9], discrepancy: 0 }, 200),
+  );
+  assert.match(balanced.content[0].text, /balanced exactly, so nothing was booked/);
+  assert.ok(!/difference of/.test(text(balanced)));
+
+  // 201 with vouchers but no id list: the booking clearly happened.
+  const booked = await tool("reai_book_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1, 2], account: "7770", description: "x", tenantId: 2634 },
+    fakeCtx({ voucherIds: [900] }),
+  );
+  assert.ok(!/Booked 0/.test(text(booked)), `must not say zero: ${text(booked)}`);
+  assert.match(text(booked), /voucher\(s\) 900/);
+  assert.match(text(booked), /did not report how many/);
+
+  const pay = tool("reai_register_supplier_invoice_payment");
+  const payArgs = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", manualPayment: false, companyBankId: 1, tenantId: 2634 };
+
+  // awaiting_approval with a null URL — the schema permits it, and the status is the
+  // authority. Branching on the URL alone let this read as "recorded".
+  const awaiting = await pay.handler(payArgs, fakeCtx({ status: "awaiting_approval", approvalUrl: null }));
+  assert.match(text(awaiting), /NOT YET PAID/);
+  assert.match(text(awaiting), /completed from within ReAI/);
+
+  // A replayed payment that FAILED must not be reported as already paid.
+  const replayFailed = await pay.handler(payArgs, fakeCtx({ status: "failed", paymentId: 77 }, 200));
+  assert.match(text(replayFailed), /NOT PAID/);
+  assert.match(text(replayFailed), /created NOTHING/);
+  assert.ok(!/already paid/.test(text(replayFailed)), `must not contradict itself: ${text(replayFailed)}`);
+  assert.match(text(replayFailed), /not necessarily a settled invoice/);
 });

@@ -354,8 +354,12 @@ const matchBankTransactions = defineTool({
     // Reporting the REQUESTED counts as though they were the result meant
     // "Matched 3 transaction(s)" for a response of {status:"not_matched"} — an agent
     // then reports the month reconciled, or re-attempts the same work another way.
-    // This is the same defect already guarded for reai_delete_voucher, which reports
-    // a reversal rather than claiming a deletion.
+    //
+    // The counts come from the response, and an ABSENT array is reported as unknown
+    // rather than as zero. Substituting a confident 0 for "the field was not there"
+    // is the same error as trusting the request: an older deployment that returns
+    // `status` without the newer id arrays would read as "Matched 0" under a status
+    // that confirms a match, which invites redoing the reconciliation.
     const data = res.data as
       | {
           status?: string;
@@ -369,8 +373,6 @@ const matchBankTransactions = defineTool({
         }
       | undefined;
     const status = data?.status ?? (data?.success === false ? "not_matched" : undefined);
-    const matchedTx = data?.reconciledTransactionIds?.length ?? 0;
-    const matchedPost = data?.reconciledPostingIds?.length ?? 0;
     const errors = (data?.errors ?? []).map(String).filter(Boolean);
 
     if (status === "not_matched" || data?.success === false) {
@@ -393,13 +395,32 @@ const matchBankTransactions = defineTool({
           "it ran, so do not read this as having just done the work.",
       });
     }
+
+    const txCount = data?.reconciledTransactionIds?.length;
+    const postCount = data?.reconciledPostingIds?.length;
+    const parts = [
+      txCount === undefined
+        ? `Matched — the API did not say how many of the ${args.transactionIds.length} transaction(s) it reconciled`
+        : `Matched ${txCount} transaction(s)`,
+      postCount === undefined ? undefined : `to ${postCount} posting(s)`,
+    ].filter(Boolean);
+    // Only claim a difference was BOOKED if the response says there was one. Saying so
+    // because the argument was present is exactly the request-versus-result confusion
+    // this change exists to remove, and it would have a caller account for a posting
+    // that does not exist.
+    const discrepancy = data?.discrepancy;
+    const bookedDifference =
+      args.discrepancyAccount && typeof discrepancy === "number" && discrepancy !== 0
+        ? `, difference of ${discrepancy} booked to ${args.discrepancyAccount}`
+        : args.discrepancyAccount && discrepancy === 0
+          ? ", and the totals balanced exactly, so nothing was booked to the discrepancy account"
+          : "";
     return ok(res.data, {
       note:
-        `Matched ${matchedTx} transaction(s) to ${matchedPost} posting(s)` +
+        `${parts.join(" ")}` +
         `${data?.voucherIds?.length ? `, voucher(s) ${data.voucherIds.join(", ")}` : ""}` +
-        `${args.discrepancyAccount ? `, difference booked to ${args.discrepancyAccount}` : ""}. ` +
-        `Reported by the API, not assumed from the request` +
-        `${matchedTx !== args.transactionIds.length ? ` — note you asked for ${args.transactionIds.length}` : ""}.`,
+        `${bookedDifference}. As reported by the API, not assumed from the request` +
+        `${txCount !== undefined && txCount !== args.transactionIds.length ? ` — note you asked for ${args.transactionIds.length}` : ""}.`,
     });
   },
 });
@@ -442,19 +463,27 @@ const bookBankTransactions = defineTool({
       tenantId: requireTenantId(tenantId, ctx),
     });
     // Same rule as the matcher: report what the API says it did, not what was asked
-    // for. The response names the vouchers it created and the transactions it
-    // actually reconciled, and one voucher is created per calendar month spanned.
+    // for — and treat an absent count as unknown rather than as zero. A 201 with
+    // voucherIds but no reconciledTransactionIds would otherwise read as "Booked 0",
+    // contradicting the vouchers it just named and inviting a duplicate ledger write.
     const data = res.data as
       | { voucherIds?: unknown[]; reconciledTransactionIds?: unknown[] }
       | undefined;
-    const booked = data?.reconciledTransactionIds?.length ?? 0;
+    const booked = data?.reconciledTransactionIds?.length;
     const vouchers = data?.voucherIds ?? [];
     return ok(res.data, {
       note:
-        `Booked ${booked} transaction(s) to account ${args.account}` +
+        (booked === undefined
+          ? `Booked to account ${args.account}`
+          : `Booked ${booked} transaction(s) to account ${args.account}`) +
         `${vouchers.length ? `, creating voucher(s) ${vouchers.join(", ")}` : ""}. ` +
-        `ReAI creates one voucher per calendar month spanned` +
-        `${booked !== args.transactionIds.length ? `. You asked for ${args.transactionIds.length}` : ""}.`,
+        `ReAI creates one voucher per calendar month spanned.` +
+        (booked === undefined
+          ? ` The API did not report how many of the ${args.transactionIds.length} transaction(s) ` +
+            `it reconciled, so read the voucher to confirm.`
+          : booked !== args.transactionIds.length
+            ? ` You asked for ${args.transactionIds.length}.`
+            : ""),
     });
   },
 });
