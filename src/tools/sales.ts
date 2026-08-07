@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  COUNTRY_CODE,
   defineTool,
   fail,
   isoDate,
@@ -43,10 +44,6 @@ const CURRENCY = z
   .string()
   .regex(/^[A-Z]{3}$/, 'Must be an uppercase ISO 4217 code, e.g. "NOK".')
   .describe('ISO 4217 currency code, e.g. "NOK". Use reai_request GET /api/currencies for the full list.');
-
-const COUNTRY_CODE = z
-  .string()
-  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
 
 // --- Customers -------------------------------------------------------------
 

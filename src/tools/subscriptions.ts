@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { assertTransmitAllowed } from "../policy.js";
 import {
+  CURRENCY_CODE,
+  COUNTRY_CODE,
   defineTool,
   isoDate,
   ok,
@@ -99,7 +101,7 @@ const writeFields = {
   billingTiming: z
     .enum(["in_advance", "after_period"])
     .describe("Bill at the start of the period or after it has run."),
-  currencyCode: z.string().describe("Currency, e.g. NOK."),
+  currencyCode: CURRENCY_CODE.describe('Currency, e.g. "NOK".'),
   outputMode: z
     .enum(["create_order", "create_invoice"])
     .describe(
@@ -153,9 +155,20 @@ const writeFields = {
   serviceRecipients: z
     .array(
       z.object({
-        organizationNumber: z.string().min(1).describe("The recipient organisation's number."),
-        name: z.string().optional().describe("Recipient name."),
-        countryCode: z.string().optional().describe("Two-letter country code."),
+        organizationNumber: z
+          .string()
+          .min(1)
+          .max(36, "The API caps organizationNumber at 36 characters.")
+          .describe("The recipient organisation's number."),
+        name: z
+          .string()
+          .max(255, "The API caps a recipient name at 255 characters.")
+          .optional()
+          .describe("Recipient name."),
+        // A bare z.string() here accepted "no" and "norway"; the spec's CountryCode is
+        // ^[A-Z]{2}$. Inside an array, which is exactly where the first version of the
+        // bounds sweep could not look.
+        countryCode: COUNTRY_CODE.optional().describe('Two-letter country code, e.g. "NO".'),
       }),
     )
     .optional()

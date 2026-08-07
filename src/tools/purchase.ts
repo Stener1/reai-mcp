@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  CURRENCY_CODE,
+  COUNTRY_CODE,
   defineTool,
   fail,
   isoDate,
@@ -37,10 +39,6 @@ const OPEN_ITEM_FLOOR = "2000-01-01";
  * attachment, which is what bokføringsloven actually requires, so it is the one
  * worth reaching for.
  */
-
-const COUNTRY_CODE = z
-  .string()
-  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
 
 // --- Suppliers -------------------------------------------------------------
 
@@ -392,7 +390,7 @@ const createSupplierInvoice = defineTool({
       .enum(["invoice", "credit_note"])
       .optional()
       .describe('Defaults to "invoice". A credit note needs negative cost-line amounts.'),
-    currency: z.string().optional().describe('ISO 4217 code. Defaults to the tenant currency.'),
+    currency: CURRENCY_CODE.optional().describe('ISO 4217 code. Defaults to the tenant currency.'),
     kidNumber: z.string().optional().describe("Norwegian KID payment reference."),
     paymentReference: z.string().optional().describe("Free-text payment reference."),
     tenantId: tenantIdArg,

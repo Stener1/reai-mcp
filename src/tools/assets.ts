@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { defineTool, ok, okList, requiredName, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import {
+  CURRENCY_CODE,
+  defineTool,
+  ok,
+  okList,
+  requiredName,
+  requireTenantId,
+  tenantIdArg,
+  type ToolDef,
+} from "./registry.js";
 
 /**
  * The fixed-asset register (anleggsmidler).
@@ -139,7 +148,7 @@ const createAsset = defineTool({
           "whose method is 'manual' — the API refuses with 409 otherwise.",
       ),
     description: z.string().optional().describe("Free text."),
-    currencyCode: z.string().optional().describe("Defaults to the company's currency."),
+    currencyCode: CURRENCY_CODE.optional().describe("Defaults to the company's currency."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

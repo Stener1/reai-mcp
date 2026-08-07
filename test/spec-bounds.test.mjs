@@ -25,32 +25,116 @@ const SCHEMAS = SPEC.components.schemas;
  * checks voucher balance locally for exactly that reason.
  */
 
-/** Constraints per field name, from a request body schema, following refs and unions. */
-function constraintsOf(node, out = {}, seen = new Set(), depth = 0) {
-  if (depth > 6 || !node || typeof node !== "object") return out;
+/**
+ * Constraints per dotted LOCATION, from a request body schema.
+ *
+ * The first version flattened every depth into one field-name map, which made it blind to
+ * anything inside an array — `subscriptionLines[].quantity`, `postings[].rowNumber`,
+ * `serviceRecipients[].countryCode`. That is not a corner: it is where the bug that
+ * prompted this whole sweep lived. Thirty probes existed for array-nested fields and the
+ * sweep ran none of them, so deleting `quantity`'s bounds left it green.
+ *
+ * Locations also remove a latent false positive: two constrained fields sharing a name at
+ * different depths used to collide, last writer winning, which could apply a nested field's
+ * tighter bound to a top-level argument.
+ */
+function constraintsOf(node, prefix = "", out = {}, seen = new Set(), depth = 0) {
+  if (depth > 8 || !node || typeof node !== "object") return out;
   if (node.$ref) {
     const name = node.$ref.split("/").pop();
     if (seen.has(name)) return out;
-    return constraintsOf(SCHEMAS[name] ?? {}, out, new Set([...seen, name]), depth + 1);
+    return constraintsOf(SCHEMAS[name] ?? {}, prefix, out, new Set([...seen, name]), depth + 1);
   }
   for (const key of ["allOf", "anyOf", "oneOf"]) {
-    for (const sub of node[key] ?? []) constraintsOf(sub, out, seen, depth + 1);
+    for (const sub of node[key] ?? []) constraintsOf(sub, prefix, out, seen, depth + 1);
   }
-  if (node.items) constraintsOf(node.items, out, seen, depth + 1);
+  if (node.items) constraintsOf(node.items, `${prefix}[]`, out, seen, depth + 1);
   for (const [name, schema] of Object.entries(node.properties ?? {})) {
-    const c = {};
-    for (const key of ["maximum", "minimum", "maxLength", "pattern", "enum"]) {
-      if (schema[key] !== undefined) c[key] = schema[key];
-    }
-    // An enum often hides behind a $ref (VatCode, CountryCode).
-    if (schema.$ref) {
-      const ref = SCHEMAS[schema.$ref.split("/").pop()];
-      if (ref?.enum) c.enum = ref.enum;
-    }
-    if (Object.keys(c).length > 0) out[name] = { ...(out[name] ?? {}), ...c };
-    constraintsOf(schema, out, seen, depth + 1);
+    const location = prefix ? `${prefix}.${name}` : name;
+    const c = scalarConstraints(schema, seen);
+    if (Object.keys(c).length > 0) out[location] = { ...(out[location] ?? {}), ...c };
+    constraintsOf(schema, location, out, seen, depth + 1);
   }
   return out;
+}
+
+/**
+ * The constraints on one property, including any reached through a `$ref` or a `oneOf`.
+ *
+ * Only `enum` used to be pulled through a `$ref`, so the patterns on `CountryCode`
+ * (`^[A-Z]{2}$`) and `CurrencyCode` (`^[A-Z]{3}$`) were dropped — which is how a service
+ * recipient's `countryCode` came to accept "no".
+ */
+function scalarConstraints(schema, seen = new Set(), depth = 0) {
+  if (depth > 4 || !schema || typeof schema !== "object") return {};
+  const c = {};
+  for (const key of ["maximum", "minimum", "maxLength", "minLength", "pattern", "enum"]) {
+    if (schema[key] !== undefined) c[key] = schema[key];
+  }
+  const refs = [schema.$ref, ...(schema.oneOf ?? []).map((o) => o.$ref)].filter(Boolean);
+  for (const ref of refs) {
+    const name = ref.split("/").pop();
+    if (seen.has(name)) continue;
+    Object.assign(c, scalarConstraints(SCHEMAS[name] ?? {}, new Set([...seen, name]), depth + 1), c);
+  }
+  return c;
+}
+
+/**
+ * Unwrap toward the schema underneath — used for DESCENT, where an object or array shape is
+ * needed. Strips refinements, so it must never be used for the probe itself.
+ */
+function unwrapForDescent(schema) {
+  let node = schema;
+  for (let i = 0; i < 10 && node?._def; i++) {
+    const kind = node._def.typeName;
+    if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") node = node._def.innerType;
+    else if (kind === "ZodEffects") node = node._def.schema;
+    else break;
+  }
+  return node;
+}
+
+/**
+ * Unwrap only the modifiers that do not carry validation, for PROBING.
+ *
+ * Keeping ZodEffects matters: a `.refine()` is where several of these bounds live, and
+ * unwrapping it threw the refinement away — so the sweep kept reporting the two `name`
+ * fields as unbounded after they had been fixed, because it was probing the bare
+ * ZodString inside the refinement rather than the schema the server actually uses.
+ */
+function unwrapForProbe(schema) {
+  let node = schema;
+  for (let i = 0; i < 10 && node?._def; i++) {
+    const kind = node._def.typeName;
+    if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") node = node._def.innerType;
+    else break;
+  }
+  return node;
+}
+
+/** Follow a dotted location into a tool's input schema, descending arrays and objects. */
+function resolveInput(inputSchema, location) {
+  const parts = location.split(".");
+  const first = parts[0].replace(/\[\]$/, "");
+  let node = inputSchema[first];
+  if (!node) return undefined;
+  // Descend with the stripping unwrap, but return the LAST hop probe-ready, refinements
+  // intact.
+  const isLeaf = parts.length === 1 && !parts[0].endsWith("[]");
+  if (isLeaf) return unwrapForProbe(node);
+  node = unwrapForDescent(node);
+  if (parts[0].endsWith("[]")) node = unwrapForDescent(node?._def?.type);
+  for (const [i, raw] of parts.slice(1).entries()) {
+    const key = raw.replace(/\[\]$/, "");
+    const shape = typeof node?._def?.shape === "function" ? node._def.shape() : node?.shape;
+    if (!shape?.[key]) return undefined;
+    const last = i === parts.length - 2 && !raw.endsWith("[]");
+    if (last) return unwrapForProbe(shape[key]);
+    node = unwrapForDescent(shape[key]);
+    if (raw.endsWith("[]")) node = unwrapForDescent(node?._def?.type);
+  }
+  return node;
 }
 
 /**
@@ -106,29 +190,44 @@ function writeOperations() {
   return out;
 }
 
-test("the sweep finds the operations it is meant to check", () => {
+test("the sweep reaches inside arrays, which is where the motivating bug lived", () => {
   const ops = writeOperations();
   assert.ok(ops.length >= 20, `only ${ops.length} tool write operations resolved to a request schema`);
-  // Named anchors, so a traversal that silently stops following $ref fails here rather than
-  // passing an empty assertion below.
   const find = (name) => ops.find((o) => o.tool.name === name);
-  assert.ok(find("reai_create_subscription"), "subscription create should resolve");
-  assert.equal(find("reai_create_subscription").constraints.intervalMonths?.maximum, 12);
-  assert.equal(find("reai_create_customer").constraints.organizationNumber?.maxLength, 36);
-  // And a constraint reached through a nested array of objects.
-  assert.equal(find("reai_create_subscription").constraints.quantity?.minimum, 1);
+
+  // Spec side: the nested locations resolve at all.
+  const sub = find("reai_create_subscription");
+  assert.equal(sub.constraints["subscriptionLines[].quantity"]?.minimum, 1);
+  assert.equal(sub.constraints["serviceRecipients[].name"]?.maxLength, 255);
+  assert.equal(sub.constraints.intervalMonths?.maximum, 12);
+  // A pattern reached through a $ref — only `enum` used to be followed.
+  assert.equal(sub.constraints["serviceRecipients[].countryCode"]?.pattern, "^[A-Z]{2}$");
+
+  // Tool side: the same locations resolve into the zod schema, so a probe can reach them.
+  const reach = (name, location) => resolveInput(find(name).tool.inputSchema, location);
+  assert.ok(reach("reai_create_subscription", "subscriptionLines[].quantity"));
+  assert.ok(reach("reai_create_subscription", "serviceRecipients[].countryCode"));
+  assert.ok(reach("reai_create_voucher", "postings[].rowNumber"));
+  // And at least a dozen nested locations are genuinely probed, or the sweep is theatre.
+  let nested = 0;
+  for (const { tool, constraints } of ops) {
+    for (const location of Object.keys(constraints)) {
+      if (location.includes("[]") && resolveInput(tool.inputSchema, location)) nested++;
+    }
+  }
+  assert.ok(nested >= 12, `only ${nested} nested locations are reachable — the descent has drifted`);
 });
 
 test("no tool accepts an argument the API's schema rejects", () => {
   const accepted = [];
   for (const { tool, constraints } of writeOperations()) {
-    for (const [field, schema] of Object.entries(tool.inputSchema ?? {})) {
-      const key = `${tool.name}.${field}`;
+    for (const [location, c] of Object.entries(constraints)) {
+      const key = `${tool.name}.${location}`;
       if (key in DELIBERATELY_LOOSER) continue;
-      for (const [why, value] of violationsOf(constraints[field] ?? {})) {
-        if (schema.safeParse?.(value)?.success === true) {
-          accepted.push(`${key}: accepts a value ${why}`);
-        }
+      const schema = resolveInput(tool.inputSchema, location);
+      if (!schema) continue; // the tool does not expose this field
+      for (const [why, value] of violationsOf(c)) {
+        if (schema.safeParse?.(value)?.success === true) accepted.push(`${key}: accepts a value ${why}`);
       }
     }
   }
@@ -140,39 +239,100 @@ test("no tool accepts an argument the API's schema rejects", () => {
   );
 });
 
-// The bounds that came out of the sweep, pinned individually so a regression names itself
-// rather than appearing as one line in a list.
-test("the bounds found by the sweep are enforced", () => {
-  const input = (toolName, field) => {
+// The map is a filter, so a stale entry silently suppresses a live gap: with `.max(12)`
+// removed from intervalMonths AND a stale exemption present, the sweep went green. The two
+// comparable maps in this repo both check their own entries; this one did not.
+test("every DELIBERATELY_LOOSER entry is real, needed, and explained", () => {
+  for (const [key, reason] of Object.entries(DELIBERATELY_LOOSER)) {
+    const [toolName, ...rest] = key.split(".");
+    const location = rest.join(".");
     const tool = registeredTools.find((t) => t.name === toolName);
-    assert.ok(tool?.inputSchema?.[field], `${toolName}.${field} should exist`);
-    return tool.inputSchema[field];
-  };
-  const rejects = (schema, value, pattern) => {
-    const parsed = schema.safeParse(value);
-    assert.equal(parsed.success, false, `should reject ${JSON.stringify(value)}`);
-    if (pattern) assert.match(parsed.error.issues.at(-1).message, pattern);
-  };
+    assert.ok(tool, `exemption names an unknown tool: ${toolName}`);
+    const schema = resolveInput(tool.inputSchema, location);
+    assert.ok(schema, `${toolName} has no input at ${location}`);
+    assert.ok(String(reason).length > 25, `${key} needs a reason, not a placeholder`);
 
-  // The one that mattered: annual is the longest interval the API allows, so a biennial
-  // subscription was expressible and could only fail.
-  rejects(input("reai_create_subscription", "intervalMonths"), 24, /caps intervalMonths at 12/);
-  rejects(input("reai_update_subscription", "intervalMonths"), 13);
-  assert.equal(input("reai_create_subscription", "intervalMonths").safeParse(12).success, true);
+    // And it must still be NEEDED: if the field now rejects everything the spec rejects,
+    // the exemption is stale and hiding whatever comes next.
+    const constraints = writeOperations()
+      .filter((o) => o.tool.name === toolName)
+      .reduce((acc, o) => ({ ...acc, ...(o.constraints[location] ?? {}) }), {});
+    const stillLoose = violationsOf(constraints).some(([, v]) => schema.safeParse?.(v)?.success === true);
+    assert.equal(stillLoose, true, `${key} is no longer loose — drop the exemption`);
+  }
+});
 
-  rejects(input("reai_create_subscription", "daysUntilDue"), -1, /cannot be negative/);
-  rejects(input("reai_create_subscription", "daysUntilDue"), 3001, /caps daysUntilDue at 3000/);
-  rejects(input("reai_create_subscription", "invoiceEmail"), "x".repeat(101), /100 characters/);
-  rejects(input("reai_create_customer", "organizationNumber"), "x".repeat(37), /36 characters/);
-  rejects(input("reai_create_supplier", "organizationNumber"), "x".repeat(37), /36 characters/);
-  rejects(input("reai_create_order", "buyerReference"), "x".repeat(256), /255 characters/);
-  rejects(input("reai_create_order", "externalReference"), "x".repeat(101), /100 characters/);
-  rejects(input("reai_create_asset", "name"), "x".repeat(256));
-  rejects(input("reai_register_supplier_invoice_payment", "invoiceAmount"), 10_000_000_000_000);
-  rejects(input("reai_register_supplier_invoice_payment", "bankDebitAmount"), 10_000_000_000_000);
+
+/** A probe-ready schema at a dotted location, asserted to exist. */
+function at(toolName, location) {
+  const tool = registeredTools.find((t) => t.name === toolName);
+  assert.ok(tool, `no such tool: ${toolName}`);
+  const schema = resolveInput(tool.inputSchema, location);
+  assert.ok(schema, `${toolName} has no input at ${location}`);
+  return schema;
+}
+function rejects(schema, value, pattern) {
+  const parsed = schema.safeParse(value);
+  assert.equal(parsed.success, false, `should reject ${JSON.stringify(value).slice(0, 30)}`);
+  if (pattern) assert.match(parsed.error.issues.at(-1).message, pattern);
+}
+
+// The top-level bounds, pinned individually so a regression names itself rather than
+// appearing as one line in a list.
+test("the top-level bounds are enforced", () => {
+  // The one that mattered: annual is the longest interval the API allows, confirmed against
+  // the live API — 24 and 13 both answer 400, 12 is accepted.
+  rejects(at("reai_create_subscription", "intervalMonths"), 24, /caps intervalMonths at 12/);
+  rejects(at("reai_update_subscription", "intervalMonths"), 13);
+  assert.equal(at("reai_create_subscription", "intervalMonths").safeParse(12).success, true);
+
+  rejects(at("reai_create_subscription", "daysUntilDue"), -1, /cannot be negative/);
+  rejects(at("reai_create_subscription", "daysUntilDue"), 3001, /caps daysUntilDue at 3000/);
+  rejects(at("reai_create_subscription", "invoiceEmail"), "x".repeat(101), /100 characters/);
+  rejects(at("reai_create_customer", "organizationNumber"), "x".repeat(37), /36 characters/);
+  rejects(at("reai_create_supplier", "organizationNumber"), "x".repeat(37), /36 characters/);
+  rejects(at("reai_create_order", "buyerReference"), "x".repeat(256), /255 characters/);
+  rejects(at("reai_create_order", "externalReference"), "x".repeat(101), /100 characters/);
+  rejects(at("reai_create_asset", "name"), "x".repeat(256));
+  rejects(at("reai_register_supplier_invoice_payment", "invoiceAmount"), 10_000_000_000_000);
+  rejects(at("reai_register_supplier_invoice_payment", "bankDebitAmount"), 10_000_000_000_000);
 
   // A blank name is rejected by the API's own pattern, on both update tools.
-  rejects(input("reai_update_customer", "name"), "   ", /cannot be blank/);
-  rejects(input("reai_update_supplier", "name"), "", /cannot be blank/);
-  assert.equal(input("reai_update_customer", "name").safeParse("Kunde AS").success, true);
+  rejects(at("reai_update_customer", "name"), "   ", /cannot be blank/);
+  rejects(at("reai_update_supplier", "name"), "", /cannot be blank/);
+  assert.equal(at("reai_update_customer", "name").safeParse("Kunde AS").success, true);
+});
+
+// Found only once the sweep could see inside arrays, and once it followed a $ref to a
+// pattern. Every one of these would have failed the whole enclosing write with a bare 400.
+test("the bounds inside arrays and behind refs are enforced", () => {
+  rejects(at("reai_create_voucher", "postings[].rowNumber"), -1, /0 or more/);
+  rejects(at("reai_create_voucher", "postings[].accountNumber"), "", /non-empty/);
+  rejects(at("reai_create_subscription", "serviceRecipients[].countryCode"), "no", /two-letter uppercase/);
+  rejects(at("reai_create_subscription", "serviceRecipients[].name"), "x".repeat(256), /255/);
+  rejects(at("reai_create_subscription", "serviceRecipients[].organizationNumber"), "x".repeat(37), /36/);
+  // The line bound Codex found, now reachable by the sweep rather than only by a hand pin.
+  rejects(at("reai_create_subscription", "subscriptionLines[].quantity"), 0, /at least 1/);
+
+  // Currency codes: the pattern lives behind a $ref, which the first sweep did not follow.
+  for (const [tool, location] of [
+    ["reai_create_subscription", "currencyCode"],
+    ["reai_create_asset", "currencyCode"],
+    // On the posting line, not the voucher root.
+    ["reai_create_voucher", "postings[].currency"],
+    ["reai_create_supplier_invoice", "currency"],
+  ]) {
+    rejects(at(tool, location), "nok", /three-letter uppercase/);
+    assert.equal(at(tool, location).safeParse("NOK").success, true, `${tool}.${location} must accept NOK`);
+  }
+});
+
+// The sweep's own unwrapping hid two findings after they were fixed: stripping ZodEffects
+// discards a .refine(), so it probed the bare string inside the refinement rather than the
+// schema the server uses. Descent needs the stripping unwrap; the probe must not have it.
+test("the probe sees refinements, not the schema underneath them", () => {
+  assert.equal(at("reai_update_customer", "name").safeParse("   ").success, false);
+  // And descent still works through a refined object — subscriptionLines is
+  // z.array(z.object({...}).refine(...)).
+  assert.ok(at("reai_create_subscription", "subscriptionLines[].quantity"));
 });
