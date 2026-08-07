@@ -92,18 +92,45 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
           : `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
               `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
       );
+    } else if (typeof data === "string") {
+      // Plain text is not serialised with indentation, so the line-boundary rule below
+      // has nothing to cut back to and discarded the entire response — 40,000 characters
+      // came back as the note alone, which read as "the call returned nothing". Text has
+      // no JSON token to split, so a prefix is safe; it is simply partial, and the note
+      // has to say that rather than the opposite.
+      const total = body.length;
+      body = body.slice(0, MAX_RESULT_CHARS);
+      parts.push(
+        `NOTE: text truncated — showing the first ${MAX_RESULT_CHARS} of ${total} characters. ` +
+          `It ends mid-text, so do not read the tail as the end of the document.`,
+      );
     } else {
       // Otherwise drop back to a line boundary and discard the final line, which may
       // be a partial token. JSON.stringify with indentation puts each scalar on its
       // own line, so a whole-line cut cannot split a number or a string.
       const cut = body.slice(0, MAX_RESULT_CHARS);
       const lastNewline = cut.lastIndexOf("\n");
-      body = lastNewline > 0 ? cut.slice(0, lastNewline) : "";
-      parts.push(
-        `NOTE: response truncated at about ${MAX_RESULT_CHARS} characters and is NOT valid JSON — ` +
-          `it stops at a line boundary, so no value shown is partial, but fields after the cut are ` +
-          `missing entirely. Request a narrower slice rather than reading totals from this.`,
-      );
+      const kept = lastNewline > 0 ? cut.slice(0, lastNewline) : "";
+      // One early oversized field — a base64 attachment, a long description — pushes the
+      // first line boundary past the cut, leaving nothing but the opening brace. Saying
+      // "truncated, fields after the cut are missing" over a lone `{` invites the reader
+      // to treat it as a partial record; there is no record.
+      if (kept.replace(/[\s{[]/g, "").length === 0) {
+        body = "";
+        parts.push(
+          `NOTE: nothing is shown — the first field of this response alone exceeds the ` +
+            `${MAX_RESULT_CHARS}-character limit, so no whole value fits. This usually means an ` +
+            `embedded file or a long text field. Fetch the record with a tool that omits it, or ` +
+            `request the attachment separately.`,
+        );
+      } else {
+        body = kept;
+        parts.push(
+          `NOTE: response truncated at about ${MAX_RESULT_CHARS} characters and is NOT valid JSON — ` +
+            `it stops at a line boundary, so no value shown is partial, but fields after the cut are ` +
+            `missing entirely. Request a narrower slice rather than reading totals from this.`,
+        );
+      }
     }
   }
 

@@ -818,6 +818,21 @@ export function sendJson(res: ServerResponse, status: number, json: unknown): vo
   res.end(body);
 }
 
+/**
+ * Distinguishable so callers can answer 413 rather than 500, and so a caller that
+ * wraps the read in a JSON.parse try/catch does not report an oversized body as
+ * "Body must be JSON." — which is what /register did, telling an operator exactly
+ * the wrong thing.
+ */
+export class BodyTooLargeError extends Error {
+  readonly limitBytes: number;
+  constructor(limitBytes: number) {
+    super(`Request body exceeds the ${limitBytes}-byte limit.`);
+    this.name = "BodyTooLargeError";
+    this.limitBytes = limitBytes;
+  }
+}
+
 /** Read and size-limit a request body. */
 export async function readBody(req: IncomingMessage, limitBytes = 1024 * 512): Promise<string> {
   const chunks: Buffer[] = [];
@@ -825,8 +840,27 @@ export async function readBody(req: IncomingMessage, limitBytes = 1024 * 512): P
   for await (const chunk of req) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     total += buf.length;
-    if (total > limitBytes) throw new Error("Request body too large.");
+    if (total > limitBytes) throw new BodyTooLargeError(limitBytes);
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Answer an oversized body and end the connection.
+ *
+ * Throwing out of `for await (const chunk of req)` destroys the request stream
+ * mid-body, which leaves the HTTP parser unable to advance past the bytes still
+ * arriving. Writing a response and leaving keep-alive on therefore produced a
+ * connection that answered nothing further and was not closed either — it sat open
+ * until the 128-second socket timeout, and a caller could hold many of them for the
+ * cost of a partial upload and no credentials. Announcing `Connection: close` and
+ * ending the socket makes the outcome immediate and unambiguous.
+ */
+export function sendPayloadTooLarge(res: ServerResponse, description: string): void {
+  if (!res.headersSent) {
+    res.setHeader("Connection", "close");
+    sendJson(res, 413, { error: "payload_too_large", error_description: description });
+  }
+  res.socket?.end();
 }

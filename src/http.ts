@@ -27,6 +27,8 @@ import {
   CodeReplayGuard,
   OAuthProvider,
   readBody,
+  BodyTooLargeError,
+  sendPayloadTooLarge,
   sendHtml,
   sendJson,
   ACCESS_TOKEN_TTL,
@@ -36,6 +38,28 @@ import { escapeHtml, renderErrorPage } from "./auth/pages.js";
 import { ReaiConfigError } from "./reai/errors.js";
 
 const MCP_PATH = "/mcp";
+
+/**
+ * The OAuth endpoints cap bodies at 512 KB, but /mcp handed the raw stream to the
+ * SDK, which parses it with no limit at all. A single authenticated POST with a
+ * 400 MB body OOM-killed a container started with --max-old-space-size=192, taking
+ * every other in-flight request with it; the deploy script provisions 512 Mi across
+ * three instances, so one caller could cycle all of them.
+ *
+ * 8 MB is far above any real tool call — the largest are voucher batches and
+ * base64 attachments — and far below what threatens the heap.
+ */
+const MAX_MCP_BODY_BYTES = 8 * 1024 * 1024;
+
+/**
+ * JSON-RPC allows an array of messages, and the SDK dispatches them all at once with
+ * no concurrency limit: 1000 tools/call entries in a 130 KB body produced 1000
+ * simultaneous upstream ReAI calls in one second, and 20,000 saturated the event
+ * loop for 49 seconds. The write policy is enforced per call, so it never sees the
+ * aggregate — in `full` mode a single HTTP request could push thousands of postings
+ * into real books. Agents batch a handful of calls at most.
+ */
+const MAX_MCP_BATCH = 50;
 
 function log(message: string): void {
   process.stderr.write(`[${SERVER_NAME}] ${message}\n`);
@@ -59,6 +83,10 @@ async function main(): Promise<void> {
 
   const server = createServer((req, res) => {
     handle(req, res, config, sealer, replayGuard).catch((err: unknown) => {
+      if (err instanceof BodyTooLargeError) {
+        sendPayloadTooLarge(res, err.message);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       log(`unhandled error on ${req.method} ${req.url}: ${message}`);
       if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
@@ -111,7 +139,15 @@ async function handle(
   replayGuard: CodeReplayGuard,
 ): Promise<void> {
   const publicUrl = resolvePublicUrl(req, config);
-  const url = new URL(req.url ?? "/", publicUrl);
+  // A request target beginning with "//" is a protocol-relative reference, so
+  // `new URL` reads the authority from the target rather than from the base: the
+  // pathname of "//evil.example/mcp" is "/mcp", and "//mcp" has no path at all and
+  // resolved to "/", which served the HTML status page in answer to a POST that a
+  // client believed was going to the MCP endpoint. Collapsing leading slashes keeps
+  // routing keyed on the path the client actually asked for. Origin-form targets are
+  // what HTTP/1.1 requires here anyway.
+  const target = (req.url ?? "/").replace(/^\/+/, "/");
+  const url = new URL(target, publicUrl);
   const oauth = new OAuthProvider({ config, sealer, publicUrl, replayGuard });
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -152,9 +188,13 @@ async function handle(
         sendJson(res, 405, { error: "method_not_allowed" });
         return;
       }
+      // Read first, parse second: folding both into one try reported an oversized
+      // body as "Body must be JSON.", which sends whoever is debugging it looking
+      // at their payload's syntax instead of its size.
+      const raw = await readBody(req);
       let parsed: unknown;
       try {
-        parsed = JSON.parse((await readBody(req)) || "{}");
+        parsed = JSON.parse(raw || "{}");
       } catch {
         sendJson(res, 400, { error: "invalid_request", error_description: "Body must be JSON." });
         return;
@@ -217,6 +257,25 @@ async function handle(
     }
 
     case MCP_PATH:
+      // A standalone SSE stream carries server-initiated messages, which requires a
+      // session to deliver them to. This server is stateless by design — a fresh
+      // MCP server per request — so nothing can ever be sent on one. The SDK opened
+      // it anyway, with a keep-alive ping and no server-side lifetime, ending only
+      // when the client left: 400 concurrent held GETs cost the server nothing in
+      // memory but consume Cloud Run's per-instance concurrency, and the 300-second
+      // request timeout was the only thing that ever closed them. The spec's other
+      // permitted answer is 405, which is the honest one here.
+      if (req.method === "GET") {
+        res.setHeader("Allow", "POST, DELETE");
+        sendJson(res, 405, {
+          error: "method_not_allowed",
+          error_description:
+            "This server runs in stateless mode, so it has no session on which to deliver " +
+            "server-initiated messages and does not offer a standalone SSE stream. Send " +
+            "requests as POST; responses stream on the POST itself.",
+        });
+        return;
+      }
       await handleMcp(req, res, config, oauth);
       return;
 
@@ -240,6 +299,34 @@ async function handleMcp(
 
   const grant: GrantPayload = auth.grant;
 
+  // The write mode is re-clamped against current config below, for reasons that
+  // apply just as much here: a sealed grant is unforgeable but it is not fresh.
+  // The tenant binding was never re-checked, and `boundTenantId` was set ONLY when
+  // the grant carried a tenant — so a grant without one had no tenant boundary at
+  // all and could reach every company its ReAI token could see. Grants like that
+  // are not hypothetical: they are what this server minted before the consent flow
+  // began failing closed on an empty company list, and they stay valid for the full
+  // 90-day absolute TTL, re-minted on every refresh. Refuse them at redemption too,
+  // so the promise the consent page makes ("pick the company this connection should
+  // use") holds for every token in circulation rather than only for new ones.
+  if (grant.tenantId === undefined) {
+    res.setHeader(
+      "WWW-Authenticate",
+      oauth.challengeHeader(
+        "invalid_token",
+        "This authorization is not bound to a company. Re-authorize the connector.",
+      ),
+    );
+    sendJson(res, 401, {
+      error: "invalid_token",
+      error_description:
+        "This authorization carries no bound company, so it has no tenant boundary. It was " +
+        "issued before that became mandatory. Remove and re-add the connector to authorize " +
+        "again; the new grant will be bound to the company you pick.",
+    });
+    return;
+  }
+
   // Re-clamp the grant against the operator's *current* ceiling. Grants are
   // sealed and unforgeable, but they are minted at authorization time and live
   // for hours (refreshable for weeks). Without this, an operator who redeploys
@@ -256,9 +343,8 @@ async function handleMcp(
       // Stateless mode: a fresh server per request means session-local state does
       // not survive, and reai_use_tenant must not claim otherwise.
       statelessSession: true,
-      ...(grant.tenantId !== undefined
-        ? { defaultTenantId: grant.tenantId, boundTenantId: grant.tenantId }
-        : {}),
+      defaultTenantId: grant.tenantId,
+      boundTenantId: grant.tenantId,
     },
     token: grant.reaiToken,
   });
@@ -277,7 +363,43 @@ async function handleMcp(
   });
 
   await server.connect(transport);
-  await transport.handleRequest(req, res);
+
+  if (req.method !== "POST") {
+    await transport.handleRequest(req, res);
+    return;
+  }
+
+  // Read and validate before the SDK sees it. `parsedBody` short-circuits the
+  // transport's own unbounded `req.json()`.
+  const raw = await readBody(req, MAX_MCP_BODY_BYTES);
+  let parsedBody: unknown;
+  try {
+    parsedBody = JSON.parse(raw || "null");
+  } catch {
+    sendJson(res, 400, {
+      jsonrpc: "2.0",
+      error: { code: -32700, message: "Parse error: Invalid JSON" },
+      id: null,
+    });
+    return;
+  }
+
+  if (Array.isArray(parsedBody) && parsedBody.length > MAX_MCP_BATCH) {
+    sendJson(res, 400, {
+      jsonrpc: "2.0",
+      error: {
+        code: -32600,
+        message:
+          `Batch of ${parsedBody.length} exceeds the limit of ${MAX_MCP_BATCH}. Every entry is ` +
+          `dispatched concurrently, so a large batch is a burst of simultaneous ReAI calls — ` +
+          `and the write policy is applied per call, not to the batch. Split it up.`,
+      },
+      id: null,
+    });
+    return;
+  }
+
+  await transport.handleRequest(req, res, parsedBody);
 }
 
 /** The more restrictive of two write modes. */
