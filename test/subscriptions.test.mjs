@@ -120,8 +120,8 @@ test("the list answers the question worth asking first", async () => {
     subscription({ id: 6, active: true, automaticBillingGeneration: true, outputMode: "create_order", due: true }),
   ]);
   assert.match(armed.text, /3 subscription\(s\)/);
-  assert.match(armed.text, /2 bill\(s\) automatically, of which 1 issue a numbered invoice/);
-  assert.match(armed.text, /1 due now/);
+  assert.match(armed.text, /2 bill\(s\) automatically right now, of which 1 issue a numbered invoice/);
+  assert.match(armed.text, /1 active and due now/);
 
   const quiet = await run("reai_list_subscriptions", {}, [subscription()]);
   assert.match(quiet.text, /None bill automatically/);
@@ -132,6 +132,32 @@ test("the list answers the question worth asking first", async () => {
   // A shape surprise is not emptiness — the same rule every list tool follows.
   const odd = await run("reai_list_subscriptions", {}, { content: [subscription()] });
   assert.match(odd.text, /did not return a list/);
+});
+
+// Three states where the first version of the summary was false, each in the reassuring
+// direction. The worst is the first: an agent asks "does anything auto-invoice?", is told
+// "None", then activates a stopped subscription — which every description frames as the
+// ordinary thing to do — and numbered invoices start.
+test("a stopped automatic subscription is not reported as manual", async () => {
+  const dormant = await run("reai_list_subscriptions", {}, [
+    subscription({ active: false, automaticBillingGeneration: true, outputMode: "create_invoice" }),
+  ]);
+  assert.doesNotMatch(dormant.text, /None bill automatically/);
+  assert.match(dormant.text, /would bill automatically if activated — they are stopped, not manual/);
+
+  // `due` on something that produces nothing pushes toward a generate call that does nothing.
+  const dueButOff = await run("reai_list_subscriptions", {}, [
+    subscription({ active: false, due: true }),
+  ]);
+  assert.doesNotMatch(dueButOff.text, /due now/);
+
+  // An absent field is unknown, not false.
+  const unknown = await run("reai_list_subscriptions", {}, [
+    { id: 7, active: true, outputMode: "create_invoice" },
+  ]);
+  assert.match(unknown.text, /did not report automaticBillingGeneration/);
+  assert.match(unknown.text, /UNKNOWN — not assumed to be no/);
+  assert.doesNotMatch(unknown.text, /None bill automatically/);
 });
 
 test("reading one says whether it acts on its own", async () => {
@@ -225,4 +251,105 @@ test("the create tool does not claim an inert draft stage", async () => {
     subscriptionLines: [{ itemName: "x", quantity: 1, unitPrice: 1 }],
   }, { id: 9, active: true });
   assert.match(active.text, /Created subscription 9 — ACTIVE/);
+});
+
+// The arming state lives on the RECORD, and activate carries no body — so the argument gate
+// has nothing to inspect. Without reading the subscription first, one call in `full` mode
+// with sending OFF resumes automatic numbered invoicing over Peppol: the exact thing that
+// switch exists to prevent, and reai_generate_subscription_billing — a strictly smaller
+// action, one billing — is already gated on it.
+test("activating an armed subscription is refused when sending is off", async () => {
+  const armedRecord = subscription({
+    active: false,
+    automaticBillingGeneration: true,
+    outputMode: "create_invoice",
+    sendEhf: true,
+  });
+  const attempt = async (allowExternalSend, record) => {
+    const calls = [];
+    const ctx = {
+      client: {
+        request: async (req) => {
+          calls.push(req);
+          return { data: record, status: 200 };
+        },
+        deepLink: () => "link",
+      },
+      config: { writeMode: "full", tenantId: 2783, allowExternalSend },
+      session: {},
+    };
+    try {
+      const r = await tool("reai_activate_subscription").handler({ id: 4, tenantId: 2783 }, ctx);
+      return { calls, text: r.content[0].text };
+    } catch (err) {
+      return { calls, error: String(err.message ?? err) };
+    }
+  };
+
+  const blocked = await attempt(false, armedRecord);
+  assert.ok(blocked.error, "an armed subscription must not be re-armed with sending off");
+  assert.match(blocked.error, /automaticBillingGeneration/);
+  assert.match(blocked.error, /sendEhf/);
+  // And it must be refused BEFORE the activate call is made, not after.
+  assert.deepEqual(
+    blocked.calls.map((c) => c.method),
+    ["GET"],
+    "the refusal has to happen before the POST, or the subscription is already running",
+  );
+
+  const allowed = await attempt(true, armedRecord);
+  assert.ok(!allowed.error, "with sending on it is the operator's call");
+  assert.match(allowed.text, /it now bills on its own/);
+
+  // A subscription that bills only on request is not arming anything, so it stays usable
+  // with sending off — otherwise restarting an ordinary one would need the dangerous mode.
+  const manual = await attempt(false, subscription({ active: false }));
+  assert.ok(!manual.error, "an unarmed subscription must still be activatable");
+  assert.match(manual.text, /bills only when reai_generate_subscription_billing is called/);
+});
+
+// The API answers with counts. The first version ignored all four and said "Billed
+// subscription N" whatever came back, so a run that generated nothing read as success.
+test("generate reports what the API said it produced", async () => {
+  const nothing = await run("reai_generate_subscription_billing", { id: 4 }, {
+    generatedBillings: 0, generatedOrders: 0, generatedInvoices: 0, safetyCapHits: 0,
+  });
+  assert.match(nothing.text, /Nothing was generated/);
+  assert.match(nothing.text, /nothing reached the customer/);
+  assert.doesNotMatch(nothing.text, /^Billed subscription/);
+
+  const many = await run("reai_generate_subscription_billing", { id: 4 }, {
+    generatedBillings: 8, generatedOrders: 8, generatedInvoices: 0, safetyCapHits: 0,
+  });
+  assert.match(many.text, /Generated 8 billing\(s\)/);
+  assert.match(many.text, /8 order\(s\) and 0 invoice\(s\)/);
+
+  const invoiced = await run("reai_generate_subscription_billing", { id: 4 }, {
+    generatedBillings: 2, generatedOrders: 0, generatedInvoices: 2, safetyCapHits: 0,
+  });
+  assert.match(invoiced.text, /numbered documents and have left for the customer/);
+
+  const capped = await run("reai_generate_subscription_billing", { id: 4 }, {
+    generatedBillings: 3, generatedOrders: 3, generatedInvoices: 0, safetyCapHits: 2,
+  });
+  assert.match(capped.text, /safety cap 2 time\(s\); some periods were NOT generated/);
+
+  // An absent count is unknown, never zero and never success.
+  const silent = await run("reai_generate_subscription_billing", { id: 4 }, {});
+  assert.match(silent.text, /did not report how much it produced/);
+  assert.doesNotMatch(silent.text, /Nothing was generated/);
+});
+
+// serviceRecipients is on the write schema and returned by the read, and the update is a
+// full replacement — so leaving it out of the tool meant "read it first and send back what
+// you do not intend to change" was impossible to follow.
+test("the write schema can express everything the read returns", () => {
+  for (const name of ["reai_create_subscription", "reai_update_subscription"]) {
+    const schema = tool(name).inputSchema;
+    assert.ok(schema.serviceRecipients, `${name} must be able to send serviceRecipients`);
+    assert.equal(
+      schema.serviceRecipients.safeParse([{ organizationNumber: "123456789", name: "Mottaker AS" }]).success,
+      true,
+    );
+  }
 });

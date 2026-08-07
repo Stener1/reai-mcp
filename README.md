@@ -399,11 +399,11 @@ Create, set-depreciation and write-off post **nothing** on an asset with no acco
 |---|---|---|
 | `reai_list_subscriptions` · `reai_get_subscription` | What bills whom, how often, and whether it goes out on its own. The list calls out how many bill **automatically** | read |
 | `reai_subscription_billing_history` | What a subscription has already produced. Nothing stops you billing the same period twice — this is how you check | read |
-| `reai_create_subscription` · `reai_update_subscription` | Set one up, or replace it. Created **inactive**; the update is a full replacement, so read it first | reversible |
-| `reai_activate_subscription` | Start the schedule running — for an automatic subscription this is the moment the machine starts | **irreversible** |
+| `reai_create_subscription` · `reai_update_subscription` | Set one up, or replace it. Created **active** — what keeps a new one harmless is `automaticBillingGeneration: false`, not its newness. The update is a full replacement, so read it first | reversible |
+| `reai_activate_subscription` | Restart a stopped subscription. Reads it first and refuses, when external sending is off, to re-arm one that invoices on its own | **irreversible** |
 | `reai_deactivate_subscription` | Stop it producing anything further. Undoing a standing risk, so available in the default mode | reversible |
-| `reai_generate_subscription_billing` | Bill it now, producing a draft order or a numbered invoice | **irreversible** + external send |
-| `reai_delete_subscription` | Remove the arrangement. Documents it already produced are unaffected | reversible |
+| `reai_generate_subscription_billing` | Bill every DUE period now — a backdated subscription produced eight orders from one call. Reports the counts the API returns | **irreversible** + external send |
+| `reai_delete_subscription` | Remove one that has never billed. One that has is refused with 409 — deactivate it instead | reversible |
 
 Three fields decide whether a subscription reaches a customer on its own: `outputMode: "create_invoice"`, `automaticBillingGeneration`, and `sendEhf`. Together they are a machine that invoices real people while nobody is looking, so a body carrying any of them is treated as irreversible **and** as an external send — needing `REAI_WRITE_MODE=full` *and* `REAI_ALLOW_EXTERNAL_SEND`, because `full` alone does not lift the second. A subscription that produces a draft order and bills on request needs neither, and stays usable in the default mode.
 
@@ -427,7 +427,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `as
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **57 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **60 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

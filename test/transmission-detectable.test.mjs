@@ -40,14 +40,21 @@ const TRANSMITTING_TOOLS = (() => {
   return names;
 })();
 
-/** Mirrors the paths that script probes. */
-const PROBED = [
-  { method: "POST", path: "/api/invoices/1/ehf", body: {} },
-  { method: "POST", path: "/api/invoices/1/email", body: { email: "x@example.invalid" } },
-  { method: "POST", path: "/api/peppol/messages/sendsbdh", body: {} },
-  { method: "POST", path: "/api/tax-returns/2026/submit", body: {} },
-  { method: "POST", path: "/api/orders", body: { customerId: 1, sendEhf: true, orderLines: [] } },
-];
+/**
+ * The paths the script probes, READ FROM THE SCRIPT.
+ *
+ * This was a hand-maintained mirror, and the commit that fixed the same problem for
+ * TRANSMITTING_TOOLS left it stale by exactly the two entries it added — so a regression
+ * making POST /api/subscriptions permitted in every mode would leave this file green while
+ * the script created a live auto-invoicing subscription on real books.
+ */
+const PROBED = (() => {
+  const block = /const sendingPaths = \[([\s\S]*?)\n  \];/.exec(SMOKE_HTTP);
+  assert.ok(block, "could not find sendingPaths in scripts/smoke-http.mjs");
+  const rows = [...block[1].matchAll(/\[\s*\n?\s*"[^"]*",\s*\n?\s*"([A-Z]+)",\s*\n?\s*"([^"]+)",\s*\n?\s*(\{[\s\S]*?\})\s*,?\s*\n?\s*\]/g)];
+  assert.ok(rows.length >= 5, `parsed ${rows.length} probed paths — the regex has drifted`);
+  return rows.map(([, method, path, body]) => ({ method, path, body: JSON.parse(body.replace(/(\w+):/g, '"$1":').replace(/'/g, '"')) }));
+})();
 
 const riskOf = (p) => classifyWithBody(classifyRequest(p.method, p.path), p.body);
 

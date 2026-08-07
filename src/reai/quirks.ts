@@ -480,6 +480,41 @@ export const QUIRKS: readonly Quirk[] = [
 
   // --- Subscriptions -------------------------------------------------------
   {
+    id: "subscription-generate-catches-up",
+    paths: ["/api/subscriptions/{id}/generate", "/api/subscriptions/generate-due"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "Generates every DUE period, not the next one. A subscription backdated to January and " +
+      "generated in August produced EIGHT orders from a single call — measured live. Re-running " +
+      "is safe: the next two calls returned generatedBillings 0, so the API bills only what is " +
+      "due rather than repeating a period. The response is counts " +
+      "(generatedBillings, generatedOrders, generatedInvoices, safetyCapHits), never the " +
+      "documents themselves, and a non-zero safetyCapHits means some periods were skipped.",
+  },
+  {
+    id: "subscription-with-history-cannot-be-deleted",
+    paths: ["/api/subscriptions/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "A subscription that has generated billing history cannot be deleted: 409 \"Kan ikke " +
+      "slette et abonnement som har generert faktureringshistorikk\". This is NOT the " +
+      "delete-or-archive behaviour other records have — nothing is archived and there is no " +
+      "outcome field, the call simply fails. Deactivate it instead. Verified live.",
+  },
+  {
+    id: "order-delete-needs-its-customer",
+    paths: ["/api/orders/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "Deleting an order whose customer has already been deleted answers 500 \"Referenced " +
+      "record is not accessible\", and unarchiving the customer does not undo it. So clean up " +
+      "in dependency order — orders first, then the customer — or the orders become " +
+      "undeletable through the API. Learned by getting it wrong on a test tenant.",
+  },
+  {
     id: "subscription-created-active",
     paths: ["/api/subscriptions"],
     methods: ["POST"],
