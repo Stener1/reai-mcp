@@ -130,6 +130,7 @@ async function main() {
     offerId: undefined,
     supplierId: undefined,
     warehouseId: undefined,
+    agreementId: undefined,
   };
 
   try {
@@ -201,6 +202,66 @@ async function main() {
       exposed.has("reai_get_warehouse_inventory") && exposed.has("reai_list_warehouses"),
       `${[...exposed].filter((n) => n.includes("warehouse")).length} warehouse tools visible`,
     );
+
+    // 0b. Agreements. Changing terms is IRREVERSIBLE — the underlying PUT replaces the record
+    //     — so the round-trip lives in smoke-full-write.mjs. What this suite proves is the
+    //     ceiling: the tool is not exposed here, while its read-only siblings are.
+    {
+      const exposed = new Set((await client.listTools()).tools.map((tool) => tool.name));
+      report(
+        "reai_update_agreement is not exposed in reversible mode",
+        !exposed.has("reai_update_agreement"),
+        exposed.has("reai_update_agreement") ? "EXPOSED — it wraps a destructive PUT" : "hidden",
+      );
+      report(
+        "the read-only agreement tools are exposed",
+        exposed.has("reai_list_agreements") && exposed.has("reai_get_agreement"),
+        `${[...exposed].filter((n) => n.includes("agreement")).length} agreement tools visible`,
+      );
+      // Creating one stays reversible: additive, and DELETE answers 204.
+      const agRes = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "POST",
+          path: "/api/agreements/rent-agreement",
+          body: {
+            landlordName: `${STAMP} utleier`,
+            tenantName: `${STAMP} leietaker`,
+            monthlyRent: 12000,
+            leaseDurationType: "indefinite",
+          },
+        },
+      });
+      const agreement = agRes.isError ? undefined : jsonOf(agRes);
+      // The id field is `agreementId`, not `id`.
+      if (Number.isInteger(agreement?.agreementId)) created.agreementId = agreement.agreementId;
+      report(
+        "a rent agreement can still be created in the default mode",
+        !agRes.isError && Number.isInteger(created.agreementId),
+        created.agreementId ? `agreementId=${created.agreementId}` : textOf(agRes).slice(0, 180),
+      );
+      if (created.agreementId) {
+        const readRes = await client.callTool({
+          name: "reai_get_agreement",
+          arguments: { id: created.agreementId },
+        });
+        const wrapper = readRes.isError ? undefined : jsonOf(readRes);
+        report(
+          "reai_get_agreement finds the terms in the template sub-object",
+          wrapper?.rentAgreement?.monthlyRent === 12000 && /under `rentAgreement`/.test(textOf(readRes)),
+          readRes.isError ? textOf(readRes).slice(0, 160) : `rent=${wrapper?.rentAgreement?.monthlyRent}`,
+        );
+        const signersRes = await client.callTool({
+          name: "reai_list_agreement_signers",
+          arguments: { id: created.agreementId },
+        });
+        report(
+          "reai_list_agreement_signers reads the object shape",
+          !signersRes.isError && /Nobody has been asked to sign/.test(textOf(signersRes)),
+          firstLineOf(textOf(signersRes)),
+        );
+      }
+    }
 
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
     //    real company gets attached to the test record.
@@ -471,6 +532,25 @@ async function main() {
         );
       } catch (err) {
         report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
+      }
+    }
+    if (created.agreementId) {
+      try {
+        const delRes = await client.callTool({
+          name: "reai_delete_agreement",
+          arguments: { id: created.agreementId },
+        });
+        report("reai_delete_agreement cleans up", !delRes.isError, firstLineOf(textOf(delRes)));
+        // 204 with no body, so the list is the only confirmation available.
+        const after = await client.callTool({ name: "reai_list_agreements", arguments: {} });
+        const gone = after.isError !== true && !textOf(after).includes(String(created.agreementId));
+        report(
+          "the test agreement is gone afterwards",
+          gone,
+          gone ? "verified" : `STILL PRESENT — delete agreement ${created.agreementId} by hand`,
+        );
+      } catch (err) {
+        report("agreement cleanup", false, `remove agreement ${created.agreementId} by hand: ${err}`);
       }
     }
     if (created.warehouseId) {

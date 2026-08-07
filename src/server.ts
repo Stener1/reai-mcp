@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ReaiClient } from "./reai/client.js";
 import { ReaiApiError, ReaiConfigError, ReaiTransportError } from "./reai/errors.js";
-import { assertTransmitAllowed, curatedArgsEscalate, isAllowed, WriteBlockedError } from "./policy.js";
+import { assertTransmitAllowed, curatedArgsEscalate, escalatingFieldNames, isAllowed, WriteBlockedError } from "./policy.js";
 import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
@@ -21,6 +21,7 @@ import { organisationTools } from "./tools/organisation.js";
 import { assetTools } from "./tools/assets.js";
 import { subscriptionTools } from "./tools/subscriptions.js";
 import { warehouseTools } from "./tools/warehouses.js";
+import { agreementTools } from "./tools/agreements.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.3.0";
@@ -39,6 +40,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   assets: assetTools,
   subscriptions: subscriptionTools,
   warehouses: warehouseTools,
+  agreements: agreementTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];
@@ -91,11 +93,27 @@ export const ESCALATION_PROBES: readonly unknown[] = ["probe", true, "create_inv
  * drift from the gate that enforces it — which only works if the probe values are ones
  * the gate actually reacts to.
  */
-function hasEscalatingFields(tool: ToolDef): boolean {
+/**
+ * Exported so the invariant test can assert the REAL probe rather than a copy of it. A test
+ * that reimplements this passes on its own reimplementation — the mistake the comment inside
+ * the function is about, one level up.
+ */
+export function hasEscalatingFields(tool: ToolDef): boolean {
   return Object.keys(tool.inputSchema ?? {}).some((field) =>
-    ESCALATION_PROBES.some(
-      (value) => curatedArgsEscalate(tool.apiPaths ?? [], { [field]: value }) !== undefined,
-    ),
+    ESCALATION_PROBES.some((value) => {
+      if (curatedArgsEscalate(tool.apiPaths ?? [], { [field]: value }) !== undefined) return true;
+      // A field that takes an OBJECT hides everything inside it from a scalar probe. The gate
+      // itself walks nested bodies, so it catches those at runtime — but the annotation did
+      // not, and the annotation is what a client keys on to ask before a destructive call.
+      // reai_update_agreement was exactly this: `changes` carries the whole agreement, so
+      // rentAccountNumber and depositAccountNumber were live in the gate and invisible here,
+      // and a lease's payment destination could be redirected in `full` mode with the client
+      // told it was an ordinary edit.
+      return escalatingFieldNames.some(
+        (nested) =>
+          curatedArgsEscalate(tool.apiPaths ?? [], { [field]: { [nested]: value } }) !== undefined,
+      );
+    }),
   );
 }
 
@@ -281,6 +299,9 @@ const GROUP_BLURBS: Record<string, string> = {
   organisation: "departments and employees, and the employee ledger — the ids that postings and expenses are tagged with",
   assets: "the fixed-asset register (anleggsmidler): what the company capitalises, and how it depreciates",
   subscriptions: "recurring billing (abonnement): what bills whom, how often, and whether it goes out on its own",
+  warehouses: "warehouses and stock on hand (lager), and the adjustments that move it",
+  agreements:
+    "contracts (avtaler): leases, employment contracts, purchase and service agreements, and their signing status",
 };
 
 function describeEnabledGroups(toolsets: readonly string[]): string {

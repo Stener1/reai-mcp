@@ -242,6 +242,46 @@ test("no tool accepts an argument the API's schema rejects", () => {
 // The map is a filter, so a stale entry silently suppresses a live gap: with `.max(12)`
 // removed from intervalMonths AND a stale exemption present, the sweep went green. The two
 // comparable maps in this repo both check their own entries; this one did not.
+/**
+ * Operations this sweep cannot see, named so the gap is recorded rather than silent.
+ *
+ * DELIBERATELY_LOOSER is for a tool argument that maps to a body field of the same name; it
+ * cannot express this case, and its own "is it still loose?" check rejects the entry — the
+ * agreement tool takes a passthrough `changes` record, so there is no per-field schema for the
+ * sweep to compare and all five template PUTs are skipped entirely.
+ *
+ * That is a deliberate trade: the five templates carry 78 / 31 / 23 / 20 / 17 fields, and
+ * restating them as Zod would be a copy of the document that rots. The part that bites — 14
+ * documented enums whose members are lowercase snake_case — is checked at call time from the
+ * spec index instead, which test/agreements.test.mjs exercises for every one of the lease's.
+ *
+ * If this list grows, the reason should be as good.
+ */
+test("the operations this sweep skips are the ones we know about", () => {
+  const seen = new Set();
+  for (const { tool, method, path, constraints } of writeOperations()) {
+    // "Skipped" here means: the operation has documented constraints and the tool exposes no
+    // field of that name to compare them against.
+    const exposes = Object.keys(constraints).some((field) => resolveInput(tool.inputSchema, field));
+    if (!exposes && Object.keys(constraints).length > 0) seen.add(`${tool.name}: ${method} ${path}`);
+  }
+  // Four, not five: the purchase template declares no constraints at all, so there is nothing
+  // for this sweep to skip on it. Measured rather than assumed — the first version of this list
+  // had five and the test said so.
+  const expected = [
+    "reai_update_agreement: PUT /api/agreements/accounting-services/{id}",
+    "reai_update_agreement: PUT /api/agreements/employee-contract/{id}",
+    "reai_update_agreement: PUT /api/agreements/rent-agreement/{id}",
+    "reai_update_agreement: PUT /api/agreements/service-agreement/{id}",
+  ];
+  assert.deepEqual(
+    [...seen].sort(),
+    expected,
+    "a write operation whose constraints this sweep cannot check — either expose the fields, or " +
+      "add it here with the reason it is safe to skip",
+  );
+});
+
 test("every DELIBERATELY_LOOSER entry is real, needed, and explained", () => {
   for (const [key, reason] of Object.entries(DELIBERATELY_LOOSER)) {
     const [toolName, ...rest] = key.split(".");

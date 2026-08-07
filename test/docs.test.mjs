@@ -178,8 +178,12 @@ test("tool counts stated in the changelog match the groups", () => {
   // fifth group made this fail against the 0.3.0 entry, which is a historical record and
   // correct as written. The current total belongs in the unreleased section; released
   // entries describe what shipped then.
-  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"];
+  // The list ran out at "eight" the moment a ninth toolset shipped, and `words[9]` being
+  // undefined made the failure read as a changelog problem rather than a test one.
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve"];
   const domains = Object.keys(TOOL_GROUPS).length;
+  assert.ok(words[domains], `no word for ${domains} domains — extend the list above`);
   assert.ok(
     CHANGELOG.includes(`${domainTotal} across ${words[domains]} accounting domains`),
     `changelog should say ${domainTotal} tools across ${words[domains]} accounting domains`,
