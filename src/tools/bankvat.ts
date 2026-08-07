@@ -97,7 +97,8 @@ const createCompanyBank = defineTool({
           "account created without one cannot be used for payments or reconciliation, so it is " +
           "required here.",
       ),
-    swiftCode: z.string().optional().describe("SWIFT/BIC code, for foreign accounts."),
+    swiftCode: z.string()
+      .max(11).optional().describe("SWIFT/BIC code, for foreign accounts."),
     excludeFromReconciliationTodos: z
       .boolean()
       .optional()

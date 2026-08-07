@@ -35,6 +35,20 @@ import {
  */
 const OPEN_ITEM_FLOOR = "2000-01-01";
 
+/**
+ * Whether a number is a whole number of øre.
+ *
+ * A fixed 1e-9 tolerance is smaller than floating-point error at the magnitudes this
+ * API accepts: 279796.4 is a valid multiple of 0.01, yet 279796.4 * 100 differs from
+ * its rounded value by about 3.7e-9, so a fixed epsilon rejected a perfectly valid
+ * quantity. Comparing the decimal representation avoids the arithmetic entirely.
+ */
+function isWholeOre(value: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  const decimals = String(value).split(".")[1] ?? "";
+  return !decimals.includes("e") && decimals.length <= 2;
+}
+
 const CURRENCY = z
   .string()
   .regex(/^[A-Z]{3}$/, 'Must be an uppercase ISO 4217 code, e.g. "NOK".')
@@ -109,7 +123,14 @@ const createCustomer = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
-    name: z.string().describe("Customer or company name."),
+    name: z
+      .string()
+      .max(75)
+      .describe(
+        "Customer or company name, at most 75 characters. May be EMPTY when organizationNumber is " +
+          "supplied and skipRegistryLookup is not set — the Brønnøysund lookup fills it in, which " +
+          "is the documented way to create a company by its org number alone.",
+      ),
     organizationNumber: z
       .string()
       .optional()
@@ -160,7 +181,7 @@ const updateCustomer = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
-    name: z.string().optional().describe("New name."),
+    name: z.string().max(75).optional().describe("New name. At most 75 characters."),
     email: z.string().optional().describe("New email address."),
     invoiceEmail: z.string().optional().describe("Where invoices should be sent."),
     invoiceInEnglish: z.boolean().optional().describe("Issue this customer's invoices in English."),
@@ -460,8 +481,16 @@ const lineBase = {
     .number()
     .min(0)
     .max(99_999_999.99)
-    .describe("Quantity. Zero or positive, at most 99999999.99."),
-  unitPrice: z.number().describe("Unit price. Must not be exactly zero; negative is allowed."),
+    .refine(isWholeOre, { message: "quantity must be in steps of 0.01" })
+    .describe("Quantity. Zero or positive, at most 99999999.99, in steps of 0.01."),
+  // Bounds are shared; the nonzero rule is NOT. Only CreateOrderLineReq documents
+  // "must not be exactly zero" — OfferLineReq permits it, and a zero-priced quote line
+  // (a free item, or something informational) is a real thing to send.
+  unitPrice: z
+    .number()
+    .min(-10_000_000)
+    .max(10_000_000)
+    .describe("Unit price, between -10000000 and 10000000. Negative is allowed for a discount line."),
   comment: z.string().optional().describe("Extra line comment."),
   discount: z
     .number()
@@ -475,6 +504,12 @@ const lineBase = {
 
 const orderLine = z.object({
   ...lineBase,
+  unitPrice: lineBase.unitPrice
+    .refine((v) => v !== 0, { message: "unitPrice must not be exactly zero on an order line" })
+    .describe(
+      "Unit price. Must NOT be exactly zero on an order line, which the API states explicitly; " +
+        "negative is allowed for a credit line. Offer lines do permit zero.",
+    ),
   itemName: z.string().optional().describe("Line text. Falls back to the product name when variantId is set."),
   vatCode: ORDER_VAT_CODE.optional(),
 });
