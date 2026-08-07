@@ -80,7 +80,12 @@ test("an update reads first and writes back every field it was not asked to chan
   assert.equal(body.depositAccountNumber, "15031234567", "a payment destination must not be dropped");
   assert.equal(body.otherTerms, "ZZ original terms");
   assert.equal(body.petsAllowed, true);
-  assert.equal(Object.keys(body).length, 10, "the whole sub-object is written back, not a patch");
+  // Self-updating against the fixture, rather than a hardcoded count.
+  assert.deepEqual(
+    Object.keys(body).sort(),
+    Object.keys(lease().rentAgreement).sort(),
+    "the whole sub-object is written back, not a patch",
+  );
   assert.match(text, /written back unchanged/);
 });
 
@@ -144,15 +149,152 @@ test("an empty change set is refused, not turned into a pointless rewrite", asyn
 });
 
 test("a value the API silently did not store is reported, not assumed", async () => {
-  // Measured behaviour elsewhere in this API: an unrecognised enum is refused, but a stored
-  // value that differs from the one sent would otherwise read as success.
+  // A non-enum field, since an unrecognised enum member is now refused locally before the write.
   const { text } = await run(
     "reai_update_agreement",
-    { id: 290, changes: { depositType: "escrow" } },
-    (req, n) => (n === 1 ? lease() : lease({ depositType: "deposit" })),
+    { id: 290, changes: { monthlyRent: 13500 } },
+    (req, n) => (n === 1 ? lease() : lease({ monthlyRent: 12000 })),
   );
   assert.match(text, /WARNING/);
-  assert.match(text, /sent "escrow", stored "deposit"/);
+  assert.match(text, /monthlyRent: sent 13500, stored 12000/);
+});
+
+// The enums ARE in the spec — an earlier version of this toolset claimed they were not, which
+// was simply wrong. Since they are documented, they can be checked locally, and the members are
+// lowercase snake_case, which is not what anyone guesses from a Norwegian contract form.
+test("a value outside a documented enum is refused before the write, naming the members", async () => {
+  const { calls, result, text } = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { depositType: "escrow" } },
+    () => lease(),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+  assert.match(text, /depositType/);
+  assert.match(text, /deposit \| guarantee/);
+  assert.match(text, /lowercase snake_case/);
+});
+
+test("the enum check reads the spec rather than a copy of it", async () => {
+  // If it were a hand-written list, a field the document constrains and the list forgot would
+  // pass through to a bare 400 — which is the failure the check exists to remove.
+  const { findOperation } = await import("../dist/reai/spec.js");
+  const fields = findOperation("PUT", "/api/agreements/rent-agreement/{id}")?.body?.fields ?? {};
+  const enums = Object.entries(fields).filter(([, v]) => typeof v === "string" && v.startsWith("enum("));
+  assert.ok(enums.length >= 6, `expected the lease's documented enums; found ${enums.length}`);
+  // Every one of them must be enforced, not just the two that were measured by hand.
+  for (const [name, declared] of enums) {
+    const { result } = await run(
+      "reai_update_agreement",
+      { id: 290, changes: { [name]: "ZZ-not-a-member" } },
+      () => lease(),
+    );
+    assert.equal(result.isError, true, `${name} (${declared}) must be checked`);
+  }
+  // ...and a legitimate member passes.
+  const good = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { leaseDurationType: "fixed_standard" } },
+    (req, n) => (n === 1 ? lease() : lease({ leaseDurationType: "fixed_standard" })),
+  );
+  assert.notEqual(good.result.isError, true);
+});
+
+test("an empty template sub-object is not accepted as a base to merge into", async () => {
+  // `{}` is truthy, so the first version let it through: the merge then wrote only the caller's
+  // changes — the destructive replacement this tool exists to prevent — and the note reported
+  // "the other -1 field(s) written back unchanged".
+  const { calls, result, text } = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { monthlyRent: 13500 } },
+    () => ({ agreementId: 290, templateType: "rent_agreement", rentAgreement: {} }),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+  assert.match(text, /would have erased everything/);
+});
+
+test("the untouched-field count is right when a term is set for the first time", async () => {
+  const { text } = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { landlordEmail: "zz@example.invalid" } },
+    (req, n) => (n === 1 ? lease() : lease({ landlordEmail: "zz@example.invalid" })),
+  );
+  // The fixture carries 10 fields and landlordEmail is not one of them, so all 10 are carried
+  // over. Subtracting the change count would have said 9.
+  assert.match(text, /the other 10 field\(s\)/);
+});
+
+test("the terms are located by templateType, not by whichever sub-object comes first", async () => {
+  // Scanning in declaration order reported a lease's fields as living under accountingServices,
+  // and on a PUT response produced "stored undefined" for a value that was stored correctly.
+  const twoPopulated = {
+    agreementId: 290,
+    templateType: "rent_agreement",
+    accountingServices: { clientCompanyName: "ZZ Decoy" },
+    rentAgreement: lease().rentAgreement,
+  };
+  const read = await run("reai_get_agreement", { id: 290 }, twoPopulated);
+  // The NOTE only — the body below it echoes the record, decoy key included.
+  const note = read.text.split("\n\n")[0];
+  assert.match(note, /under `rentAgreement`/);
+  assert.doesNotMatch(note, /accountingServices/);
+
+  const { calls, text } = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { monthlyRent: 13500 } },
+    (req, n) => (n === 1 ? twoPopulated : { ...twoPopulated, rentAgreement: lease({ monthlyRent: 13500 }).rentAgreement }),
+  );
+  assert.equal(calls[1].body.tenantName, "ZZ Leietaker", "it merged the lease, not the decoy");
+  assert.doesNotMatch(text, /WARNING/, "the response diff must read the same sub-object it wrote");
+
+  // The response is where re-scanning actually bites: with templateType absent from IT, a
+  // rescan lands on the decoy and reports every change as "stored undefined" — which an agent
+  // reads as "the edit did not take" for a value that was stored correctly.
+  const noTypeOnResponse = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { monthlyRent: 13500 } },
+    (req, n) =>
+      n === 1
+        ? twoPopulated
+        // A response carrying only the DECOY and no templateType. Re-scanning finds
+        // accountingServices confidently, sees no monthlyRent in it, and reports
+        // "sent 13500, stored undefined" for a value that was stored correctly. Keying off the
+        // sub-object the request wrote to instead yields nothing to compare, and the diff is
+        // skipped rather than inverted.
+        : { agreementId: 290, accountingServices: { clientCompanyName: "ZZ Decoy" } },
+  );
+  assert.doesNotMatch(
+    noTypeOnResponse.text,
+    /WARNING/,
+    "the diff must use the key the REQUEST wrote to, not re-scan a response that cannot say",
+  );
+});
+
+test("an agreement with no templateType is refused by the update, before any guessing", async () => {
+  // The templateType guard fires first, which is the right order: without it there is no path to
+  // write to, and picking one would edit through the wrong template.
+  const { calls, result, text } = await run(
+    "reai_update_agreement",
+    { id: 290, changes: { monthlyRent: 13500 } },
+    () => ({ agreementId: 290, accountingServices: { a: 1 }, rentAgreement: { b: 2 } }),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+  assert.match(text, /does not know how to edit/);
+});
+
+test("reading an agreement with two populated templates and no templateType reports ambiguity", async () => {
+  // The read tool has no path to choose, so it can still say what it found — and must not pick
+  // the first sub-object and present it as the terms.
+  const { text } = await run("reai_get_agreement", { id: 290 }, {
+    agreementId: 290,
+    accountingServices: { clientCompanyName: "ZZ" },
+    rentAgreement: { monthlyRent: 12000 },
+  });
+  const note = text.split("\n\n")[0];
+  assert.match(note, /more than one/i);
+  assert.doesNotMatch(note, /the terms are under/);
 });
 
 test("a field the agreement does not already carry is flagged as possibly misspelt", async () => {
@@ -250,12 +392,39 @@ test("the signers response is read as an object, not a list", async () => {
 });
 
 test("delete reports the status, since the endpoint returns no body at all", async () => {
-  const { calls, text } = await run("reai_delete_agreement", { id: 290 }, undefined);
-  assert.equal(calls[0].method, "DELETE");
-  assert.equal(calls[0].path, "/api/agreements/290");
+  const { calls, text } = await run("reai_delete_agreement", { id: 290 }, (req, n) =>
+    n === 1 ? { agreementId: 290, signStatus: "draft" } : undefined,
+  );
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "DELETE"], "it reads the signing status first");
+  assert.equal(calls[1].path, "/api/agreements/290");
   assert.match(text, /deleted \(HTTP 204\)/);
   assert.match(text, /returns no body/);
   assert.match(text, /reai_list_agreements is how to check/);
+});
+
+// The description said "prefer keeping the record" and then deleted unconditionally, in the
+// DEFAULT write mode, with a 204 and no body to check afterwards.
+test("a signed agreement is not deleted, because that behaviour was never established", async () => {
+  for (const signStatus of ["sent", "signed", "partially_signed"]) {
+    const { calls, result, text } = await run("reai_delete_agreement", { id: 290 }, () => ({
+      agreementId: 290,
+      signStatus,
+    }));
+    assert.equal(result.isError, true, signStatus);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${signStatus}: nothing may be deleted`);
+    assert.match(text, /Nothing was deleted/);
+    // And it says how to proceed deliberately, rather than just refusing.
+    assert.match(text, /reai_request DELETE/);
+  }
+  // A draft, and a record whose status the response omits, still delete: refusing on an absent
+  // field would block the ordinary case on a shape surprise.
+  for (const record of [{ signStatus: "draft" }, {}]) {
+    const { calls, result } = await run("reai_delete_agreement", { id: 290 }, (req, n) =>
+      n === 1 ? { agreementId: 290, ...record } : undefined,
+    );
+    assert.notEqual(result.isError, true, JSON.stringify(record));
+    assert.equal(calls.length, 2);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -293,25 +462,41 @@ test("changing terms is irreversible, in step with the raw PUT it wraps", async 
   assert.equal(classifyRequest("PUT", "/api/agreements/290"), "reversible");
 });
 
-test("no signing endpoint is curated, because every one of them sends", () => {
-  // Reading who was asked is fine; asking is not. If a future tool declares one of these
-  // paths, it must also declare transmits, and that is what this pins.
-  const sending = [/sign-request$/, /sign-requests$/, /sign-requests\/[^/]+\/send$/];
+// The first version of this matched sign-request paths and asserted transmits — and no tool
+// declares one, so it pinned nothing at all. Derived from the policy instead, it constrains four
+// real declarations today.
+test("any curated tool that declares a transmitting write says so", async () => {
+  const { classifyTransmission } = await import("../dist/policy.js");
+  // reai_register_supplier_invoice_payment is external only for the bank-integrated branch, and
+  // it gates that in its handler — declaring transmits would hide the books-only use entirely.
+  const GATES_IN_ITS_HANDLER = new Set(["reai_register_supplier_invoice_payment"]);
+  const checked = [];
   for (const t of registeredTools) {
     for (const [method, path] of t.apiPaths ?? []) {
       if (method === "GET") continue;
-      if (sending.some((re) => re.test(path))) {
-        assert.ok(t.transmits, `${t.name} declares ${method} ${path} but not transmits: true`);
-      }
+      if (classifyTransmission(method, path.replace(/\{[^}]+\}/g, "7")) !== "external") continue;
+      checked.push(`${t.name}: ${method} ${path}`);
+      if (GATES_IN_ITS_HANDLER.has(t.name)) continue;
+      assert.ok(t.transmits, `${t.name} declares ${method} ${path} but not transmits: true`);
     }
   }
+  assert.ok(checked.length >= 3, `expected real transmitting declarations; found ${checked.length}`);
 });
 
-test("a lease's payment destinations still escalate through the update tool", () => {
-  // rentAccountNumber and depositAccountNumber name where a tenant's money goes. The tool is
-  // declared reversible, so the routing layer is the only thing that stops a body carrying one
-  // in the default mode — assert the path it writes to is actually in that scope.
+test("a lease's payment destinations escalate from INSIDE the changes object", async () => {
+  // The load-bearing fact is nested reachability: `changes` carries the whole lease, and only
+  // paymentRoutingFields recurses (the sibling inspectors are top-level only). Asserting
+  // inPaymentRoutingScope alone was a restatement of policy.test.mjs — swapping the recursive
+  // walk for a shallow one would have left it green while the gate went silent.
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const paths = tool("reai_update_agreement").apiPaths;
+  for (const field of ["depositAccountNumber", "rentAccountNumber"]) {
+    const escalated = curatedArgsEscalate(paths, { id: 7, changes: { [field]: "15031234567" } });
+    assert.ok(escalated, `${field} nested inside changes must escalate`);
+    assert.equal(escalated.risk, "irreversible");
+    assert.ok(escalated.fields.includes(field), `the refusal must name ${field}`);
+  }
+  // An ordinary term nested the same way must NOT escalate, or the gate is just noise.
+  assert.equal(curatedArgsEscalate(paths, { id: 7, changes: { monthlyRent: 12000 } }), undefined);
   assert.equal(inPaymentRoutingScope("/api/agreements/rent-agreement/7", "PUT"), true);
-  const declared = tool("reai_update_agreement").apiPaths.map(([, p]) => p);
-  assert.ok(declared.includes("/api/agreements/rent-agreement/{id}"));
 });

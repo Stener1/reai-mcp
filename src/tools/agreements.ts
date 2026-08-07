@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { findOperation } from "../reai/spec.js";
 import { defineTool, fail, ok, okList, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
 
 /**
@@ -24,7 +25,13 @@ import { defineTool, fail, ok, okList, requireTenantId, tenantIdArg, type ToolDe
  * `reai_update_agreement` reads the agreement, merges the requested changes over what is
  * already there, and writes the whole thing back. That the round-trip is lossless was verified
  * rather than assumed: the 78-key sub-object a GET returns can be PUT back verbatim with no
- * field changing value.
+ * field changing value. Measured on `rent_agreement`; for the other four the SPEC supports it —
+ * each `…Res` and `…Req` pair carries an identical property set, so there is no read-only field
+ * to send back — but only the lease was exercised live.
+ *
+ * The window this leaves is a lost update: between the read and the write, an edit made in the
+ * ReAI UI is silently reverted. There is no ETag, If-Match or version field to prevent it, so
+ * the tool states it rather than pretending the merge is atomic.
  *
  * ## Nothing is required, so an empty body creates a contract
  *
@@ -37,18 +44,43 @@ import { defineTool, fail, ok, okList, requireTenantId, tenantIdArg, type ToolDe
  * The identifier is `agreementId`, NOT `id` — reading `.id` yields undefined, which is how the
  * first cleanup in this toolset's own measurement deleted nothing. `GET /api/agreements/{id}`
  * returns a WRAPPER with five nullable sub-objects (`accountingServices`, `employeeContract`,
- * `rentAgreement`, `serviceAgreement`, `purchaseAgreement`), exactly one of which is populated,
- * so a lease's terms are under `rentAgreement` rather than at the top level. DELETE answers
- * 204 with no body — there is no `{"outcome": ...}` here, unlike the records that archive.
+ * `rentAgreement`, `serviceAgreement`, `purchaseAgreement`); the one named by `templateType`
+ * carries the terms, so a lease's rent is at `rentAgreement.monthlyRent` rather than at the top
+ * level. Only one was ever seen populated, on one template on one tenant, which is why the code
+ * prefers `templateType` over scanning and says so when more than one is non-null instead of
+ * taking the first.
+ *
+ * DELETE answers 204 with an empty body, so there is no `{"outcome": ...}` to read. That is
+ * evidence for "no outcome field" and NOT for "no archive branch": the record leaving the list
+ * is exactly what an archived warehouse also does, and `GET /api/agreements` takes no
+ * `archived` parameter, so an archive here would be invisible either way. Unestablished.
+ *
+ * ## The enums ARE documented — an earlier version of this comment said otherwise
+ *
+ * A 400 naming allowed values ("leaseDurationType has invalid value 'OPEN_ENDED'. Allowed
+ * values: indefinite, fixed_standard, fixed_special_reason") was read here as the spec being
+ * silent about them. It is not: `leaseDurationType` and `depositType` are declared enums in the
+ * document with exactly those members, and there are 14 such fields across the five templates.
+ * The rejected values were simply wrong guesses.
+ *
+ * What is worth knowing is narrower: the members are lowercase snake_case, which is not what an
+ * agent guesses from a Norwegian contract form. So `reai_update_agreement` checks values against
+ * the documented enum before writing and names the allowed set locally, rather than letting the
+ * API answer with one.
  *
  * ## What the API does NOT check
  *
- * Norwegian tenancy law caps a deposit at six months' rent (husleieloven § 3-5) and requires a
- * statutory reason for a fixed term under three years (§ 9-3). Measured: a deposit of 9 999 999
- * against a monthly rent of 10 000 is accepted, and a four-month `fixed_standard` lease with no
- * reason given is accepted. The API is a document generator, not a compliance check — so
- * neither is enforced here either, because refusing them would be this server inventing law.
- * They are stated in the tool text instead.
+ * Norwegian tenancy law caps a deposit at six months' rent (husleieloven § 3-5), and § 9-3 sets
+ * a three-year minimum for a fixed-term residential lease — its effect on a shorter one is that
+ * the term counts as INDEFINITE unless a statutory ground applies, which is a different thing
+ * from being rejected. Both are residential rules, while the template also covers
+ * `storage_or_other`.
+ *
+ * Measured: a deposit of 9 999 999 against a monthly rent of 10 000 is accepted, and a
+ * four-month `fixed_standard` lease with no reason given is accepted. The API is a document
+ * generator, not a compliance check — and neither is enforced here either, because refusing them
+ * would be this server inventing law on a template that is not always residential. Stated in the
+ * tool text instead.
  */
 
 /** The five templates, and the path segment each one is edited through. */
@@ -77,20 +109,51 @@ type AgreementRes = {
   documentId?: number | null;
 } & Record<string, unknown>;
 
-/** The populated template sub-object, with the key it was found under. */
-function unwrapTemplate(res: AgreementRes | undefined): { key?: string; fields?: Record<string, unknown> } {
+/**
+ * The template sub-object carrying the terms, with the key it was found under.
+ *
+ * `templateType` decides it. Scanning was the first version, and it picks whichever sub-object
+ * happens to come first in declaration order — which, on a body where two are non-null, reported
+ * a lease's 78 fields as living under `accountingServices`, and on a PUT response produced
+ * "sent 13500, stored undefined" for a value that had been stored correctly. AgreementRes has no
+ * `required` list, so an absent templateType is permitted by the document; `ambiguous` is
+ * returned rather than a guess when more than one is populated.
+ */
+function unwrapTemplate(res: AgreementRes | undefined): {
+  key?: string;
+  fields?: Record<string, unknown>;
+  ambiguous?: string[];
+} {
   if (!res) return {};
-  const expected = res.templateType ? TEMPLATE_SUBOBJECTS[res.templateType] : undefined;
-  const candidates = expected ? [expected] : Object.values(TEMPLATE_SUBOBJECTS);
-  for (const key of candidates) {
-    const value = res[key];
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      return { key, fields: value as Record<string, unknown> };
-    }
+  const isFields = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+
+  const expected =
+    res.templateType !== undefined && Object.hasOwn(TEMPLATE_SUBOBJECTS, res.templateType)
+      ? TEMPLATE_SUBOBJECTS[res.templateType]
+      : undefined;
+  if (expected !== undefined) {
+    const value = res[expected];
+    return isFields(value) ? { key: expected, fields: value } : {};
   }
-  return {};
+
+  const populated = Object.values(TEMPLATE_SUBOBJECTS).filter((key) => isFields(res[key]));
+  if (populated.length === 1) {
+    const key = populated[0] as string;
+    return { key, fields: res[key] as Record<string, unknown> };
+  }
+  return populated.length > 1 ? { ambiguous: populated } : {};
 }
 
+/**
+ * How many fields carry something.
+ *
+ * `false` counts as unset deliberately: the API returns booleans as false rather than null for a
+ * template's unanswered yes/no questions — the wiped lease came back with petsAllowed: false —
+ * so counting them would make an empty draft look populated. The cost is that a lease genuinely
+ * saying "no pets, no smoking, no cable TV" undercounts, which is why the low-field warning is
+ * worded as a prompt to look rather than as a verdict.
+ */
 const populatedCount = (fields: Record<string, unknown>): number =>
   Object.values(fields).filter((v) => v !== null && v !== undefined && v !== false && v !== "").length;
 
@@ -152,9 +215,18 @@ const getAgreement = defineTool({
       path: `/api/agreements/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const { key, fields } = unwrapTemplate(res.data);
+    const { key, fields, ambiguous } = unwrapTemplate(res.data);
     const notes: string[] = [];
-    if (key && fields) {
+    if (ambiguous) {
+      // Picking the first would present one template's fields as the agreement's terms. Only
+      // one sub-object was ever seen populated, so this is a shape surprise worth naming rather
+      // than papering over.
+      notes.push(
+        `This agreement has more than one template sub-object populated ` +
+          `(${ambiguous.join(", ")}) and carries no templateType to choose between them, so ` +
+          `which one holds the terms cannot be determined from the response. Read the body below.`,
+      );
+    } else if (key && fields) {
       const filled = populatedCount(fields);
       notes.push(
         `Template ${res.data?.templateType ?? "?"}; the terms are under \`${key}\`, where ` +
@@ -246,7 +318,12 @@ const updateAgreement = defineTool({
     const templateType = current.data?.templateType;
     // Narrowed together so the sub-object lookup below is typed too: a templateType this tool
     // does not know is exactly the case where guessing a path would edit the wrong template.
-    const segment = templateType === undefined ? undefined : TEMPLATE_PATHS[templateType];
+    // Object.hasOwn, because a plain-object lookup on "constructor" returns the Object function
+    // and would pass an `undefined` check.
+    const segment =
+      templateType !== undefined && Object.hasOwn(TEMPLATE_PATHS, templateType)
+        ? TEMPLATE_PATHS[templateType]
+        : undefined;
     if (templateType === undefined || segment === undefined) {
       return fail(
         `Agreement ${args.id} reports templateType ${JSON.stringify(templateType)}, which this ` +
@@ -257,8 +334,19 @@ const updateAgreement = defineTool({
       );
     }
 
-    const { key, fields } = unwrapTemplate(current.data);
-    if (!fields) {
+    const { key, fields, ambiguous } = unwrapTemplate(current.data);
+    if (ambiguous) {
+      return fail(
+        `Agreement ${args.id} has more than one template sub-object populated ` +
+          `(${ambiguous.join(", ")}) and no templateType to choose between them, so which terms ` +
+          `to merge into is ambiguous. Nothing was written — guessing here would write one ` +
+          `template's fields over another's.`,
+      );
+    }
+    // `{}` is truthy, so `!fields` let an empty sub-object through as a valid base. The merge
+    // then wrote only the caller's changes, which is the destructive replacement this tool
+    // exists to prevent — and the note reported "the other -1 field(s) written back unchanged".
+    if (!fields || Object.keys(fields).length === 0) {
       // Writing the merge without a base would be the destructive replacement this tool exists
       // to prevent — with the caller believing they had made a small edit.
       return fail(
@@ -270,7 +358,35 @@ const updateAgreement = defineTool({
       );
     }
 
-    const unknown = changeKeys.filter((k) => !(k in fields));
+    // Own properties only: `k in fields` walks the prototype chain, so a change named
+    // `toString` or `constructor` looked like an existing field and skipped the warning below.
+    const unknown = changeKeys.filter((k) => !Object.hasOwn(fields, k));
+
+    // The documented enums, checked locally. The members are lowercase snake_case, which is not
+    // what an agent guesses from a Norwegian contract form — and the alternative is a 400 that
+    // arrives after the read, having written nothing but wasted the round-trip. Read from the
+    // spec index rather than restated here: 14 fields across the five templates carry an enum,
+    // and a copy would rot the moment one changes.
+    const operation = findOperation("PUT", `/api/agreements/${segment}/{id}`);
+    const rejected: string[] = [];
+    for (const [name, value] of Object.entries(args.changes as Record<string, unknown>)) {
+      const declared = operation?.body?.fields?.[name];
+      const members = typeof declared === "string" ? /^enum\(([^)]*)\)/.exec(declared)?.[1] : undefined;
+      if (members === undefined || value === null || value === undefined) continue;
+      const allowed = members.split("|");
+      if (!allowed.includes(String(value))) {
+        rejected.push(`${name}: ${JSON.stringify(value)} is not one of ${allowed.join(" | ")}`);
+      }
+    }
+    if (rejected.length > 0) {
+      return fail(
+        `Nothing was written — ${rejected.length === 1 ? "a value is" : "values are"} not among ` +
+          `the ones this field accepts:\n  ${rejected.join("\n  ")}\n\n` +
+          `The members are lowercase snake_case. The API would reject these too, so this is the ` +
+          `same answer sooner.`,
+      );
+    }
+
     const merged = { ...fields, ...args.changes };
     const res = await ctx.client.request<AgreementRes>({
       method: "PUT",
@@ -279,11 +395,21 @@ const updateAgreement = defineTool({
       tenantId,
     });
 
-    const after = unwrapTemplate(res.data).fields ?? {};
+    // Read the response through the key the REQUEST used, not by unwrapping again: re-scanning a
+    // response whose templateType is absent can land on a different sub-object and then report
+    // every change as "stored undefined", which reads as "the edit did not take".
+    const after =
+      key !== undefined && res.data?.[key] && typeof res.data[key] === "object"
+        ? (res.data[key] as Record<string, unknown>)
+        : {};
+    // Count the fields actually carried over, rather than subtracting the change count: a change
+    // that sets a term for the FIRST time is not one of the existing fields, so subtracting
+    // undercounted — and on an empty base it printed a negative number.
+    const untouched = Object.keys(fields).filter((k) => !changeKeys.includes(k)).length;
     const notes = [
       `Changed ${changeKeys.join(", ")} on agreement ${args.id} (${templateType}); the other ` +
-        `${Object.keys(fields).length - changeKeys.length} field(s) under \`${key}\` were read ` +
-        `first and written back unchanged, because this API replaces rather than patches.`,
+        `${untouched} field(s) under \`${key}\` were read first and written back unchanged, ` +
+        `because this API replaces rather than patches.`,
     ];
     // Report what the API actually stored, not what was asked for.
     const notApplied = changeKeys.filter(
@@ -357,25 +483,54 @@ const deleteAgreement = defineTool({
   title: "Delete an agreement",
   description:
     "Remove an agreement and its generated document.\n\n" +
-    "Answers 204 with an empty body — there is no {\"outcome\": ...} here and no archive " +
-    "branch, unlike customers, suppliers or warehouses. Measured on a live tenant: the record " +
-    "is gone from the list afterwards.\n\n" +
+    "Answers 204 with an empty body, so unlike customers, suppliers or warehouses there is no " +
+    "{\"outcome\": ...} to read. Measured on a live tenant, the record is gone from the list " +
+    "afterwards — which is evidence that it left the ACTIVE list and NOT that no archive exists: " +
+    "an archived warehouse does exactly the same, and GET /api/agreements takes no `archived` " +
+    "parameter, so an archive here would be invisible either way. Unestablished.\n\n" +
     "What this does to an agreement already SIGNED was not established — no signature could be " +
     "produced without sending a request to a real person, which this server will not do with " +
-    "external sending off. Treat deleting a signed contract as unverified, and prefer keeping " +
-    "the record.",
+    "external sending off. So this tool reads the signing status first and REFUSES anything that " +
+    "is not a draft, rather than deleting a signed contract on unverified behaviour. Use " +
+    "reai_request if you have decided to do it anyway.",
   risk: "reversible",
   destructive: true,
-  apiPaths: [["DELETE", "/api/agreements/{id}"]],
+  apiPaths: [
+    ["GET", "/api/agreements/{id}"],
+    ["DELETE", "/api/agreements/{id}"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Agreement id — the `agreementId` field."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
+
+    // The description said "prefer keeping the record" and then deleted unconditionally, in the
+    // DEFAULT write mode, with a 204 and no body to confirm anything afterwards. Reading first
+    // costs one GET and is the same pattern reai_update_agreement already uses.
+    const current = await ctx.client.request<AgreementRes>({
+      method: "GET",
+      path: `/api/agreements/${args.id}`,
+      tenantId,
+    });
+    const signStatus = current.data?.signStatus;
+    if (signStatus !== undefined && signStatus !== "draft") {
+      return fail(
+        `Agreement ${args.id} has signing status "${signStatus}", so it is not a draft. Nothing ` +
+          `was deleted.\n\n` +
+          `What deleting a signed agreement does was never established — producing a signature ` +
+          `requires sending a request to a real person, which this server will not do with ` +
+          `external sending off — and the endpoint answers 204 with no body, so there would be ` +
+          `nothing to check afterwards. If you have decided to do it regardless, reai_request ` +
+          `DELETE /api/agreements/${args.id} will.`,
+      );
+    }
+
     const res = await ctx.client.request<unknown>({
       method: "DELETE",
       path: `/api/agreements/${args.id}`,
-      tenantId: requireTenantId(args.tenantId, ctx),
+      tenantId,
     });
     return ok(res.data ?? { deleted: args.id }, {
       note:

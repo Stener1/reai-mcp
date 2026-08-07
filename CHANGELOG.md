@@ -24,7 +24,9 @@ All notable changes to `reai-mcp`. Format loosely follows
     agreement, merges the requested changes over the existing terms and writes the
     whole thing back. That the round-trip is lossless was verified rather than
     assumed: the 78-key sub-object a GET returns was written back verbatim with no
-    field changing value. It refuses outright if it cannot read the current terms,
+    field changing value. Measured on the lease; for the other four the spec
+    supports it — each Res/Req pair carries an identical property set, so there is
+    no read-only field to send back — but only the lease was exercised live. It refuses outright if it cannot read the current terms,
     since a merge with no base is the destructive replacement it exists to prevent.
   - **Nothing is required**: `POST /api/agreements/rent-agreement {}` answers `201`
     with a draft in which every term is null, and the PDF renders for that too.
@@ -36,7 +38,8 @@ All notable changes to `reai-mcp`. Format loosely follows
     `204` with no body — no outcome field and no archive branch.
   - Some fields the schema types as plain strings are validated as enums the spec
     never lists; the API names the allowed set in its `400`.
-  - Deliberately **not** curated: the five create endpoints (78-field bodies the
+  - Deliberately **not** curated: the five create endpoints (78 fields for a
+    lease, 17-31 for the others, all documented by the
     spec documents, with every trap above now carried as a quirk), the three
     signing endpoints (they email a counterparty, so `reai_request` is the right
     route — the refusal there names what would have gone out), and the PDF
@@ -111,6 +114,37 @@ All notable changes to `reai-mcp`. Format loosely follows
   exported from the policy rather than a copy, so a new escalating field cannot be
   added without becoming probeable. The invariant test calls the real probe rather
   than reimplementing it.
+- Corrected in review, and worth recording because the claim was simply wrong: an
+  earlier version of this entry said some agreement fields are "validated as enums
+  the spec does not list". They ARE listed — `leaseDurationType` and `depositType`
+  are declared enums with exactly the members quoted, and there are **14 such
+  fields** across the five templates. The rejected values in the original probe
+  were just wrong guesses. Since they are documented, they can be checked:
+  `reai_update_agreement` now reads the enum members out of the spec index at call
+  time and refuses a non-member locally, naming the allowed set, instead of letting
+  the API answer with a 400 after the read. The members are lowercase snake_case,
+  which is the part actually worth knowing.
+- Five more review findings on the same tool, all fixed: the untouched-field count
+  subtracted the change count, so a term set for the FIRST time was undercounted
+  and an empty base printed "the other -1 field(s)"; `{}` is truthy, so an empty
+  template sub-object passed the merge-base guard and produced exactly the
+  destructive replacement the tool exists to prevent; the sub-object lookup fell
+  back to declaration order when `templateType` was absent, which could report a
+  lease's terms as living under `accountingServices` and, on a PUT response, emit
+  "sent 13500, stored undefined" for a value that was stored correctly; the
+  response diff now reads the key the REQUEST wrote to rather than re-scanning; and
+  `reai_delete_agreement` deleted unconditionally while its own description said to
+  prefer keeping a signed contract — it now reads the signing status first and
+  refuses anything that is not a draft.
+- Two over-claims softened rather than restated: "no archive branch" was inferred
+  from the record leaving the list, which is exactly what an archived warehouse
+  also does — and `GET /api/agreements` takes no `archived` parameter, so an
+  archive would be invisible either way. And "exactly one sub-object is populated"
+  became "the one named by templateType", with ambiguity reported instead of
+  guessed. The husleieloven citations were made precise: § 9-3's effect on a short
+  fixed term is that it counts as indefinite unless a statutory ground applies, not
+  that it is rejected, and both rules are residential while the template also
+  covers storage.
 - **Four agreement quirks** carrying the traps above to a reai_request caller,
   since the five create endpoints and the signing flow are reached that way.
 - **Six quirks** for the same measurements, so a `reai_request` caller gets the

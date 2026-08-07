@@ -299,6 +299,9 @@ const GROUP_BLURBS: Record<string, string> = {
   organisation: "departments and employees, and the employee ledger — the ids that postings and expenses are tagged with",
   assets: "the fixed-asset register (anleggsmidler): what the company capitalises, and how it depreciates",
   subscriptions: "recurring billing (abonnement): what bills whom, how often, and whether it goes out on its own",
+  warehouses: "warehouses and stock on hand (lager), and the adjustments that move it",
+  agreements:
+    "contracts (avtaler): leases, employment contracts, purchase and service agreements, and their signing status",
 };
 
 function describeEnabledGroups(toolsets: readonly string[]): string {
