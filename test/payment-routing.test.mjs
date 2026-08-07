@@ -24,7 +24,19 @@ const SCHEMAS = SPEC.components.schemas;
  * like it routes money cannot be added to the API without someone deciding whether it
  * does. A narrow pattern would only re-assert what the set already contains.
  */
-const ROUTING_SHAPED = /iban|swift|^bic$|bban|routing|accountnumber|bankaccount|clearing/i;
+const ROUTING_SHAPED =
+  /iban|swift|^bic$|bic(code|number)|bban|routing|accountnumber|account_?no\b|bankaccount|bankgiro|clearing|sort_?code|aba(number|routing)|beneficiar|payee|payout|recipient|destination|escrow|konto/i;
+
+/**
+ * Names the pattern above is known NOT to catch, so the claim it supports stays honest.
+ *
+ * It cannot be widened to bare `account`: the document already uses `account`,
+ * `creditAccount`, `debitAccount` and `discrepancyAccount` for chart-of-accounts codes,
+ * and flagging those would bury the real signal. So a field called simply `account` that
+ * turned out to hold an IBAN would still slip through, and the README says so rather than
+ * promising a guarantee this cannot give.
+ */
+const KNOWN_BLIND_SPOTS = ["account", "creditAccount", "debitAccount", "toAccount"];
 
 /**
  * Routing-shaped names that do NOT name a destination, each with the evidence.
@@ -38,20 +50,32 @@ const ROUTING_SHAPED = /iban|swift|^bic$|bban|routing|accountnumber|bankaccount|
 const NOT_A_DESTINATION = {
   accrualaccountnumber: "chart-of-accounts code: $ref AccountNumber on supplier-invoice cost lines",
   accruedinterestaccountnumber: "chart-of-accounts code: $ref AccountNumber on LoanReq",
-  assetaccountnumber: "chart-of-accounts code: $ref AccountNumber on ShareInvestmentReq",
+  // The Req is a bare string with maxLength 10; only ShareInvestmentRes $refs
+  // AccountNumber. The conclusion holds — it is the balance-sheet account a holding is
+  // carried on — but the first version of this line cited the Res as if it were the Req,
+  // which is the same Req/Res confusion that nearly got the rent-agreement fields
+  // dismissed. Corrected rather than quietly reworded.
+  assetaccountnumber: "chart-of-accounts code: ShareInvestmentRes $refs AccountNumber; the Req is the same field",
   interestexpenseaccountnumber: "chart-of-accounts code: $ref AccountNumber on LoanReq",
   interestincomeaccountnumber: "chart-of-accounts code: $ref AccountNumber on LoanReq",
   principalaccountnumber: "chart-of-accounts code: $ref AccountNumber on LoanReq",
-  bankaccountcategory: "classifies the account; does not name one (spec: 'The bank account category')",
-  localclearingsystem: "selects the rails, not the destination account",
+  // These three select the rails a payment travels on and never name an account. Note the
+  // weaker claim than the first version of this block made: it argued a destination is
+  // "always written alongside them, so the call is caught anyway", which is false for a
+  // PATCH — a partial update can legally carry localClearingSystem on its own. They are
+  // exempt because they do not identify an account, full stop, not because something else
+  // catches them.
+  bankaccountcategory: "classifies an account; does not identify one (spec: 'The bank account category')",
+  localclearingsystem: "names a clearing scheme, not an account",
   routingtype: "qualifies routingNumber, which is itself in the set",
-  // Genuinely unresolved rather than dismissed. Norwegian rental deposits go to a
-  // dedicated escrow account, so `depositAccountNumber` may well be a bank account — but
-  // both fields are bare strings with no AccountNumber ref and no pattern, and
-  // /api/agreements/rent-agreement is not curated, so there is nothing to check it
-  // against. Recorded so the question is visible rather than silently answered.
-  depositaccountnumber: "UNRESOLVED: bare string on RentAgreementReq, could be escrow or ledger",
-  rentaccountnumber: "UNRESOLVED: bare string on RentAgreementReq, sits beside depositAccountNumber",
+  // Caught only once the pattern was widened, and each has to be decided rather than
+  // waved through — which is the point of widening it.
+  beneficiaryname:
+    "names the payee, not the account. Where money lands is decided by accountNumber/iban; " +
+    "a mismatched name fails or is ignored depending on whether the rail does Confirmation of Payee",
+  beneficiaryaddress: "a postal address on the payment details, not an account",
+  servicerecipients: "who receives the subscribed service; no bank details in the object",
+  recipientemail: "an email address on an internal warning endpoint",
 };
 
 /** Every property name reachable in a request body, following $ref, arrays and unions. */
@@ -94,6 +118,44 @@ function writeOperations() {
 /** A concrete path, so the policy's regexes have something to match. */
 const concrete = (path) => path.replace(/\{[^}]+\}/g, "7");
 
+// Both invariants below are "assert this list is empty", which is exactly the shape that
+// passes when the list cannot be populated. Hoisting every requestBody into
+// components/requestBodies — an ordinary springdoc regeneration — empties `fieldsOf` and
+// both tests go green having checked nothing. So pin the scan itself first.
+test("the spec scan finds what it is looking for", () => {
+  const ops = writeOperations();
+  assert.ok(ops.length > 150, `only ${ops.length} write operations found — did the spec shape change?`);
+
+  const withRouting = ops.filter(({ fields }) =>
+    [...fields].some((f) => paymentRoutingFieldNames.has(f.toLowerCase())),
+  );
+  assert.ok(withRouting.length >= 10, `only ${withRouting.length} ops carry a routing field`);
+
+  // Named operations, so a traversal that silently stops following $ref or oneOf fails
+  // here rather than passing two empty assertions further down.
+  const find = (method, path) => ops.find((o) => o.method === method && o.path === path);
+  assert.ok(find("PATCH", "/api/suppliers/{id}")?.fields.has("iban"), "top-level field lost");
+  assert.ok(
+    find("PATCH", "/api/employees/{id}")?.fields.has("accountNumber"),
+    "the field this whole PR is about is not being found",
+  );
+  assert.ok(
+    find("POST", "/api/supplier-invoices")?.fields.has("iban"),
+    "nested oneOf traversal lost paymentDetails.iban",
+  );
+  assert.ok(
+    find("PUT", "/api/agreements/rent-agreement/{id}")?.fields.has("depositAccountNumber"),
+    "rent-agreement fields lost",
+  );
+  // And the regex has to match the names it exists to match.
+  for (const field of paymentRoutingFieldNames) {
+    assert.ok(ROUTING_SHAPED.test(field), `${field} is in the set but the scan pattern misses it`);
+  }
+  for (const blind of KNOWN_BLIND_SPOTS) {
+    assert.ok(!ROUTING_SHAPED.test(blind), `${blind} is documented as a blind spot but now matches`);
+  }
+});
+
 // This is the test that would have caught the gap. It was found by hand, which is exactly
 // the failure mode: the field set was written against the supplier and company-bank
 // schemas, and nothing compared it with the rest of the document.
@@ -128,6 +190,8 @@ const NOT_A_DESTINATION_PATH = {
     "accountNumber is the sub-account's own chart-of-accounts code ($ref AccountNumber)",
   "POST /api/company-banks":
     "registering the company's OWN account is ordinary work; only repointing one escalates",
+  "POST /api/agreements/rent-agreement":
+    "a new lease establishes an arrangement rather than diverting one, and a human signs it before anyone pays; PUT escalates",
 };
 
 // The other half: knowing a field routes money is useless if the path carrying it is out
@@ -258,4 +322,76 @@ test("the payment-details sub-resource the policy guards does not exist in the s
       `${path} should also be in payment-routing scope, so the protection does not rely on the path risk`,
     );
   }
+});
+
+// A curated tool commonly declares its reads and its writes together, and this helper has
+// to force pathRisk to "reversible" in order to ask the question at all — so without a
+// method check a GET carrying a routing-shaped argument came back irreversible. That is
+// the same false positive the escape-hatch side documents fixing, and it became reachable
+// the moment supplier-invoices entered routing scope.
+test("a curated tool's READ operations are never escalated by their arguments", async () => {
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  assert.equal(curatedArgsEscalate([["GET", "/api/supplier-invoices"]], { iban: "NO93" }), undefined);
+  assert.equal(curatedArgsEscalate([["GET", "/api/employees"]], { accountNumber: "123" }), undefined);
+  assert.equal(curatedArgsEscalate([["GET", "/api/suppliers/{id}"]], { iban: "NO93" }), undefined);
+
+  // And the writes still escalate, including from a tool that declares both.
+  const both = curatedArgsEscalate(
+    [
+      ["GET", "/api/employees"],
+      ["PATCH", "/api/employees/{id}"],
+    ],
+    { accountNumber: "12345678903" },
+  );
+  assert.equal(both?.risk, "irreversible");
+  assert.deepEqual(both?.fields, ["accountNumber"]);
+  assert.match(both?.consequence, /where money is sent/);
+});
+
+// The nested walk is what makes the supplier-invoice paths mean anything. Before it, the
+// scope regex matched and the body inspector looked only at the top level, so the guard
+// did not apply to the one payload most obviously about where a payment goes.
+test("a destination nested under paymentDetails is found", async () => {
+  const { classifyPaymentRouting, paymentRoutingFields } = await import("../dist/policy.js");
+  const body = { supplierId: 1, paymentDetails: { iban: "NO9386011117947" } };
+  assert.deepEqual(paymentRoutingFields(body), ["iban"]);
+  assert.equal(
+    classifyPaymentRouting("reversible", "/api/supplier-invoices", body, "POST"),
+    "irreversible",
+    "nested beneficiary details must escalate on their own, not only via the path risk",
+  );
+  // Depth-bounded, and an array on the way down does not stop the walk.
+  assert.deepEqual(paymentRoutingFields({ a: { b: [{ c: { iban: "X" } }] } }), ["iban"]);
+  assert.deepEqual(paymentRoutingFields({ a: { b: { c: { d: { e: { iban: "X" } } } } } }), []);
+  // A cost line's chart-of-accounts field is still not a destination.
+  assert.deepEqual(paymentRoutingFields({ costLines: [{ accrualAccountNumber: "1460" }] }), []);
+});
+
+// Repointing an existing lease redirects rent and the deposit; creating one does not.
+test("a lease's rent and deposit accounts are payment destinations", async () => {
+  const { classifyPaymentRouting, classifyRequest, isAllowed } = await import("../dist/policy.js");
+  const routed = (method, path, body) =>
+    classifyPaymentRouting(classifyRequest(method, path), path, body, method);
+
+  for (const field of ["rentAccountNumber", "depositAccountNumber"]) {
+    assert.equal(
+      routed("PUT", "/api/agreements/rent-agreement/7", { [field]: "12345678903" }),
+      "irreversible",
+      `${field} redirects money the tenant pays in`,
+    );
+  }
+  // Editing the terms is ordinary work.
+  assert.equal(routed("PUT", "/api/agreements/rent-agreement/7", { monthlyRent: 12000 }), "reversible");
+  assert.equal(routed("PUT", "/api/agreements/rent-agreement/7", { petsAllowed: true }), "reversible");
+  // And creating a lease is, on the same reasoning as adding a company bank: nothing is
+  // diverted, and a human signs it before anyone pays.
+  assert.ok(
+    isAllowed(routed("POST", "/api/agreements/rent-agreement", { depositAccountNumber: "1" }), "reversible"),
+  );
+  assert.equal(
+    routed("POST", "/api/company-banks", { bban: "12345678903" }),
+    "reversible",
+    "the company-bank exemption must survive being folded into the shared rule",
+  );
+  assert.equal(routed("PUT", "/api/company-banks/7", { bban: "12345678903" }), "irreversible");
 });
