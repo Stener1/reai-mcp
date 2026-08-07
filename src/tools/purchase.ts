@@ -464,6 +464,7 @@ const paySupplierInvoice = defineTool({
     bankDebitAmount: z
       .number()
       .min(0.01)
+      .refine(isWholeOre, { message: "bankDebitAmount must be a whole number of øre." })
       .optional()
       .describe(
         "What was actually debited from the bank, when it differs from invoiceAmount (fees, " +

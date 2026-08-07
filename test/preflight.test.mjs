@@ -897,9 +897,14 @@ test("money amounts must be whole øre", async () => {
   const { isWholeOre } = await import("../dist/tools/registry.js");
 
   const field = (tool, name) => allTools.find((t) => t.name === tool).inputSchema[name];
+  // Every field the spec marks multipleOf 0.01 on these two request schemas, including
+  // the optional companion amounts — a foreign-currency payment and a bank debit that
+  // differs from the invoice are exactly where odd fractions turn up.
   for (const [tool, name] of [
     ["reai_register_invoice_payment", "receivedAmount"],
+    ["reai_register_invoice_payment", "paidInvoiceCurrencyAmount"],
     ["reai_register_supplier_invoice_payment", "invoiceAmount"],
+    ["reai_register_supplier_invoice_payment", "bankDebitAmount"],
   ]) {
     const schema = field(tool, name);
     assert.equal(schema.safeParse(100).success, true, `${tool}.${name} must accept 100`);

@@ -1026,6 +1026,7 @@ const registerInvoicePayment = defineTool({
       .number()
       .min(0.01)
       .max(99_999_999.99)
+      .refine(isWholeOre, { message: "paidInvoiceCurrencyAmount must be a whole number of øre." })
       .optional()
       .describe(
         "Amount the customer paid in the INVOICE's currency, required when that differs from the " +
