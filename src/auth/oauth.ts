@@ -109,7 +109,16 @@ export type OAuthDeps = {
 
 /** Result of authenticating an incoming MCP request. */
 export type AuthResult =
-  | { ok: true; grant: GrantPayload }
+  /**
+   * `passthrough` marks a grant synthesised from a raw ReAI token rather than
+   * issued by this server's OAuth flow. The distinction matters because the two
+   * have different tenant models: an OAuth grant is bound to one company at
+   * authorization time and must be, whereas passthrough deliberately leaves the
+   * tenant to each tool call unless REAI_TENANT_ID pins one. Carried explicitly
+   * rather than inferred from `subject`, so a security check never rests on a
+   * string comparison.
+   */
+  | { ok: true; grant: GrantPayload; passthrough?: true }
   | { ok: false; status: 401 | 403; error: string; description: string };
 
 export class OAuthProvider {
@@ -508,6 +517,20 @@ export class OAuthProvider {
       if (clientId && clientId !== payload.grant.clientId) {
         return err(400, "invalid_grant", "client_id does not match the refresh token.");
       }
+      // A grant with no bound tenant has no tenant boundary, and /mcp now refuses it.
+      // Minting a replacement pair anyway would hand the client credentials that can
+      // never work, and — because the new refresh token is just as untenanted — a
+      // refresh path it can loop on indefinitely instead of starting authorization.
+      // invalid_grant is the signal that sends a well-behaved client back to /authorize.
+      if (payload.grant.tenantId === undefined) {
+        return err(
+          400,
+          "invalid_grant",
+          "This authorization is not bound to a company, so it has no tenant boundary. It was " +
+            "issued before that became mandatory and cannot be refreshed. Authorize the " +
+            "connector again to pick a company.",
+        );
+      }
       // For a legacy grant, the token's own iat is the best evidence of when the
       // authorization existed, and it is trustworthy because we sealed it.
       const effectiveAuthTime = payload.grant.authTime ?? payload.iat;
@@ -627,6 +650,7 @@ export class OAuthProvider {
     if (this.deps.config.allowTokenPassthrough) {
       return {
         ok: true,
+        passthrough: true,
         grant: {
           reaiToken: bearer,
           ...(this.deps.config.defaultTenantId !== undefined

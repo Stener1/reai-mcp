@@ -309,7 +309,13 @@ async function handleMcp(
   // 90-day absolute TTL, re-minted on every refresh. Refuse them at redemption too,
   // so the promise the consent page makes ("pick the company this connection should
   // use") holds for every token in circulation rather than only for new ones.
-  if (grant.tenantId === undefined) {
+  // Passthrough is exempt, and deliberately so: it is a different mode with a
+  // different tenant model. A raw ReAI token never went through the consent page, so
+  // there is no company it could have been bound to, and unless REAI_TENANT_ID pins
+  // one the documented behaviour is to choose per tool call. Rejecting it here broke
+  // that mode outright and told the user to "re-authorize the connector" — advice
+  // that makes no sense when passthrough is what skips OAuth in the first place.
+  if (!auth.passthrough && grant.tenantId === undefined) {
     res.setHeader(
       "WWW-Authenticate",
       oauth.challengeHeader(
@@ -343,8 +349,9 @@ async function handleMcp(
       // Stateless mode: a fresh server per request means session-local state does
       // not survive, and reai_use_tenant must not claim otherwise.
       statelessSession: true,
-      defaultTenantId: grant.tenantId,
-      boundTenantId: grant.tenantId,
+      ...(grant.tenantId !== undefined
+        ? { defaultTenantId: grant.tenantId, boundTenantId: grant.tenantId }
+        : {}),
     },
     token: grant.reaiToken,
   });

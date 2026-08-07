@@ -655,3 +655,51 @@ test("X-Forwarded-* uses the value the nearest proxy added, not the client's", a
   assert.equal(lastForwardedValue(""), undefined);
   assert.equal(lastForwardedValue(", ,"), undefined);
 });
+
+// /mcp refuses a grant with no bound tenant. Refreshing one anyway returned 200 and
+// minted a replacement pair carrying the same missing tenant — credentials that can
+// never work, plus a refresh token the client can loop on forever instead of starting
+// authorization again.
+test("an untenanted grant cannot be refreshed into fresh credentials", async () => {
+  const { provider, sealer } = makeProvider();
+  const grant = {
+    reaiToken: "reai-token",
+    writeMode: "reversible",
+    subject: "legacy",
+    clientId: "client-1",
+    authTime: Math.floor(Date.now() / 1000),
+  };
+  const refresh = sealer.seal("refresh", { grant }, 3600);
+  const form = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refresh,
+    client_id: "client-1",
+  });
+  const result = await provider.handleToken(form);
+  assert.equal(result.status, 400);
+  assert.equal(result.json.error, "invalid_grant");
+  assert.match(result.json.error_description, /not bound to a company/i);
+  assert.equal(result.json.refresh_token, undefined, "must not hand back another one");
+});
+
+test("a properly bound grant still refreshes", async () => {
+  const { provider, sealer } = makeProvider();
+  const grant = {
+    reaiToken: "reai-token",
+    tenantId: 2634,
+    writeMode: "reversible",
+    subject: "current",
+    clientId: "client-1",
+    authTime: Math.floor(Date.now() / 1000),
+  };
+  const refresh = sealer.seal("refresh", { grant }, 3600);
+  const result = await provider.handleToken(
+    new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refresh,
+      client_id: "client-1",
+    }),
+  );
+  assert.equal(result.status, 200);
+  assert.ok(result.json.access_token);
+});

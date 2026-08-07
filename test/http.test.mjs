@@ -247,3 +247,43 @@ test("an oversized /register body says so, rather than blaming the JSON", async 
   const body = await res.json();
   assert.equal(body.error, "payload_too_large");
 });
+
+// Passthrough is a different mode with a different tenant model: a raw ReAI token
+// never saw the consent page, so there is no company it could have been bound to, and
+// unless REAI_TENANT_ID pins one the documented behaviour is to choose per tool call.
+// The untenanted-grant check broke that mode outright, and told the user to
+// "re-authorize the connector" — advice that makes no sense when passthrough is
+// precisely what skips OAuth.
+test("raw-token passthrough still works with no tenant configured", async () => {
+  const port = 18900 + Number(process.hrtime.bigint() % 90n);
+  const url = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ["dist/http.js"], {
+    env: {
+      ...process.env,
+      PORT: String(port),
+      PUBLIC_URL: url,
+      REAI_USER_API_TOKEN: "test-token",
+      REAI_ENCRYPTION_KEY: KEY,
+      REAI_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
+      REAI_WRITE_MODE: "read-only",
+      REAI_ALLOW_TOKEN_PASSTHROUGH: "1",
+      REAI_TENANT_ID: "",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await waitForHealth(url);
+    const res = await fetch(`${url}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer some-raw-reai-token",
+      },
+      body: JSON.stringify(initializeBody()),
+    });
+    assert.equal(res.status, 200, "passthrough must not be caught by the OAuth tenant check");
+  } finally {
+    child.kill("SIGKILL");
+  }
+});
