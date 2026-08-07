@@ -678,7 +678,7 @@ test("a truncated result never contains a partial value", async () => {
   // response came out LARGER than the limit: 29216 characters for these 4000 objects,
   // and 60165 for a list of 10000 empty strings.
   assert.ok(
-    arrayText.length <= 24_000 + 500,
+    arrayText.length <= 24_000,
     `truncated result is ${arrayText.length} characters, over the cap it claims`,
   );
   for (const pathological of [
@@ -686,13 +686,13 @@ test("a truncated result never contains a partial value", async () => {
     Array.from({ length: 5_000 }, () => "\t\t\t"),
   ]) {
     const out = ok(pathological).content[0].text;
-    assert.ok(out.length <= 24_000 + 500, `pathological array produced ${out.length} characters`);
+    assert.ok(out.length <= 24_000, `pathological array produced ${out.length} characters`);
   }
 
   // A single item bigger than the whole budget must say so rather than returning an
   // empty array under a note about "the first 0 items".
   const oversized = ok([{ id: 1, blob: "x".repeat(50_000) }]).content[0].text;
-  assert.match(oversized, /FIRST item alone exceeds/);
+  assert.match(oversized, /FIRST of 1 item\(s\) alone exceeds/);
 
   // A non-array is cut back to a line boundary, so no token is split.
   const ledger = {
@@ -717,7 +717,7 @@ test("a truncated result never contains a partial value", async () => {
     assert.equal(Object.keys(account).length, 2, "an item was cut short");
   }
   assert.match(objectText, /accounts shows \d+ of 2000/);
-  assert.ok(objectText.length <= 24_000 + 500, `object result is ${objectText.length} characters`);
+  assert.ok(objectText.length <= 24_000, `object result is ${objectText.length} characters`);
 
   // Small results are untouched.
   const small = ok([{ id: 1, closingBalance: 4812.6 }]).content[0].text;
@@ -852,7 +852,7 @@ test("a nested object is truncated by shortening its lists, not by cutting text"
   assert.match(note, /pendingTransactions shows \d+ of 200/);
   assert.match(note, /still valid JSON/);
   assert.ok(!/no value shown is partial/.test(note));
-  assert.ok(text.length <= 24000 + note.length + 4, "the whole payload must respect the cap");
+  assert.ok(text.length <= 24_000, `the whole payload must respect the cap, got ${text.length}`);
 });
 
 test("truncation falls back cleanly when shortening lists cannot help", () => {
@@ -1031,4 +1031,90 @@ test("validation matches what the API actually enforces", async () => {
   // Optional, so omitting it stays valid — a refinement next to .optional() is easy to
   // get wrong in the direction that breaks every caller who does not use the field.
   assert.equal(field("reai_create_customer", nid).safeParse(undefined).success, true);
+});
+
+// The cap is on what the CALLER receives, and the note is part of that. Three of the
+// four truncation branches sized only the body and then prepended the note, so a
+// "24,000-character" response arrived at 24,127 / 24,139 / 24,159. Each branch was
+// internally consistent; they disagreed with each other, which is what happens when two
+// rewrites each define the same constant for themselves. One shared budget now, and
+// this asserts it across every branch rather than the one that prompted it.
+test("no truncation branch exceeds the cap, note included", () => {
+  const cases = {
+    "array of objects": Array.from({ length: 4000 }, (_, i) => ({ i, v: "x".repeat(40) })),
+    "array of ints": Array.from({ length: 100_000 }, (_, i) => i),
+    "array of empty strings": Array.from({ length: 10_000 }, () => ""),
+    "plain string": "x".repeat(40_000),
+    "object cut at a line boundary": { a: { deep: "y".repeat(40_000) }, b: 1 },
+    "object with nested arrays": { rows: Array.from({ length: 5000 }, (_, i) => ({ i, v: "z".repeat(50) })), n: 5000 },
+    "many short arrays": Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`f${i}`, ["v".repeat(20)]])),
+  };
+  for (const [label, value] of Object.entries(cases)) {
+    const text = ok(value).content[0].text;
+    assert.ok(text.length <= 24_000, `${label}: produced ${text.length} characters against a 24000 cap`);
+  }
+});
+
+// An empty array is not "nothing shown", it is "no results" — valid JSON that reads as
+// an answer. The object branch already returned nothing in this case, for exactly that
+// reason; the array branch returned "[]", and its note was the only one omitting the
+// total, so three items became "[]" with no mention that three existed.
+test("an oversized first item is not reported as an empty result", () => {
+  const text = ok([{ blob: "x".repeat(50_000) }, { id: 10 }, { id: 11 }]).content[0].text;
+  assert.ok(!/\[\]/.test(text), `must not return an empty array: ${text.slice(0, 200)}`);
+  assert.match(text, /of 3 item/, "the note must say how many items there were");
+  assert.match(text, /NOT an empty result/i, "and say plainly that this is not emptiness");
+});
+
+// The fixed note reserve is a worst case for the NESTED-object note, which names every
+// trimmed field. The array note is one sentence, so reserving 1200 characters for it
+// threw away headroom — and for an item sized between the reserved budget and the true
+// cap it meant discarding the item entirely while claiming it "exceeds the
+// 24000-character limit". A 23,026-character item was dropped with 23,769 unused.
+test("the array branch sizes against its real note, not a worst-case reserve", () => {
+  const big = { blob: "x".repeat(23_000) };
+  const text = ok([big, ...Array.from({ length: 50 }, (_, i) => ({ id: i }))]).content[0].text;
+  assert.match(text, /showing the first \d+ of 51 items/, `the big item fits and must be shown: ${text.slice(0, 140)}`);
+  assert.ok(text.length <= 24_000);
+  assert.ok(text.length > 20_000, `should use the available room, used only ${text.length}`);
+
+  // A genuinely oversized item still reports nothing shown, with the total.
+  const oversized = ok([{ blob: "x".repeat(50_000) }, { id: 1 }, { id: 2 }]).content[0].text;
+  assert.match(oversized, /FIRST of 3 item\(s\) alone exceeds/);
+});
+
+// Three samples are not evidence for a bound that is now approached to within four
+// characters. This sweeps the shapes that have historically broken it — empty strings,
+// tabs, bare ints, wide unicode — and every combination of item size and count.
+test("no array shape exceeds the cap", () => {
+  const shapes = [];
+  for (const len of [0, 1, 3, 7, 17, 40, 113, 500, 2000, 9000, 23_000, 26_000]) {
+    for (const count of [1, 2, 3, 10, 57, 500, 4000, 20_000]) {
+      // Skip combinations whose raw size dwarfs the cap without testing anything new —
+      // 20,000 items of 26,000 characters is half a gigabyte and aborts the runner.
+      // Anything past a few times the cap exercises the same branch.
+      if (len * count > 4 * 24_000) continue;
+      shapes.push(Array.from({ length: count }, (_, i) => ({ i, v: "x".repeat(len) })));
+    }
+  }
+  // ...plus a few deliberately far over the cap, at sizes that stay cheap.
+  shapes.push(
+    Array.from({ length: 20_000 }, (_, i) => ({ i })),
+    Array.from({ length: 4000 }, (_, i) => ({ i, v: "x".repeat(40) })),
+    [{ blob: "x".repeat(60_000) }],
+  );
+  shapes.push(
+    Array.from({ length: 10_000 }, () => ""),
+    Array.from({ length: 5000 }, () => "\t\t\t"),
+    Array.from({ length: 300 }, (_, i) => ({ i, s: "æøå".repeat(200) })),
+    [{ a: 1 }],
+    [],
+  );
+  let worst = 0;
+  for (const shape of shapes) {
+    const length = ok(shape).content[0].text.length;
+    worst = Math.max(worst, length);
+    assert.ok(length <= 24_000, `an array of ${shape.length} produced ${length} characters`);
+  }
+  assert.ok(worst > 20_000, `the sweep should approach the cap; worst was only ${worst}`);
 });

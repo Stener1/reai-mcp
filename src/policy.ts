@@ -648,7 +648,13 @@ export function invoiceDeliveryFields(body: unknown): string[] {
 
 /** Escalate a call that redirects where invoices are delivered. */
 export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
-  if (pathRisk === "irreversible") return pathRisk;
+  // Only a reversible write can be escalated, the same rule classifyWithBody applies
+  // and states: "blocking a read because a stray field was passed alongside it would be
+  // a false positive". These two guarded on irreversible alone, so a GET carrying an
+  // `iban` in its body came back irreversible and was refused in read-only mode — the
+  // mode people point at a live business. reai_request accepts a body on any method, so
+  // it was reachable, and it blocked exactly the safe operation.
+  if (pathRisk !== "reversible") return pathRisk;
   if (!pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)))) return pathRisk;
   return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
 }
@@ -688,7 +694,13 @@ export function classifyPaymentRouting(
   body: unknown,
   method?: string,
 ): Risk {
-  if (pathRisk === "irreversible") return pathRisk;
+  // Only a reversible write can be escalated, the same rule classifyWithBody applies
+  // and states: "blocking a read because a stray field was passed alongside it would be
+  // a false positive". These two guarded on irreversible alone, so a GET carrying an
+  // `iban` in its body came back irreversible and was refused in read-only mode — the
+  // mode people point at a live business. reai_request accepts a body on any method, so
+  // it was reachable, and it blocked exactly the safe operation.
+  if (pathRisk !== "reversible") return pathRisk;
   // Both readings of the path, or a matrix parameter would put the request outside the
   // scope of this guard while classifyRequest read it as an ordinary reversible write.
   const forms = pathForms(path);
