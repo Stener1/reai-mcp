@@ -223,8 +223,8 @@ const useTenant = defineTool({
       return okText(
         `Cannot verify tenant ${args.tenantId}: GET /api/me did not return a tenant list, so ` +
           `whether this token reaches that company is unknown. This is deliberately NOT read as ` +
-          `"no access" — that would be a confident wrong answer. Retry, and check the raw ` +
-          `response with reai_request GET /api/me.`,
+          `"no access" — that would be a confident wrong answer. Retry; reai_request GET /api/me ` +
+          `shows what the API sent, filtered to the bound company if this connection is bound.`,
       );
     }
     const match = tenants.find((t) => t.id === args.tenantId);

@@ -273,3 +273,49 @@ test("whoami surfaces the tenant value it could not read", async () => {
   assert.doesNotMatch(normal, /UNKNOWN/);
   assert.doesNotMatch(normal, /rawTenants/);
 });
+
+// A bound connection is a disclosure boundary, not just an addressing one — reai_whoami
+// filters its tenant list for that reason. The boundary was tool-dependent: GET /api/me
+// through the escape hatch returned every company the underlying token reaches, and the
+// recovery instruction added in this PR pointed an agent straight at it.
+test("the tenant-disclosure boundary holds whichever tool is used", async () => {
+  const { registeredTools: tools } = await import("../dist/server.js");
+  const request = tools.find((t) => t.name === "reai_request");
+  const whoami = tools.find((t) => t.name === "reai_whoami");
+  const others = /SOMEONE ELSES COMPANY|ANOTHER CLIENT/;
+  const me = {
+    email: "a@b.no",
+    tenants: [
+      { id: 2634, companyName: "Bound Company" },
+      { id: 1581, companyName: "SOMEONE ELSES COMPANY" },
+      { id: 2613, companyName: "ANOTHER CLIENT" },
+    ],
+  };
+  const ctx = (data, config) => ({
+    client: { request: async () => ({ data, status: 200 }), deepLink: () => "link" },
+    config: { writeMode: "read-only", allowExternalSend: false, ...config },
+    session: {},
+  });
+  const text = async (tool, args, data, config) =>
+    (await tool.handler(args, ctx(data, config))).content[0].text;
+
+  const bound = { boundTenantId: 2634 };
+  const viaHatch = await text(request, { method: "GET", path: "/api/me" }, me, bound);
+  assert.doesNotMatch(viaHatch, others, "the escape hatch must not disclose what the binding hides");
+  assert.match(viaHatch, /Bound Company/, "and it must still return the bound company");
+  assert.match(viaHatch, /Filtered to tenant 2634/, "silently filtering would be its own surprise");
+  assert.doesNotMatch(await text(whoami, {}, me, bound), others);
+
+  // An unrecognised shape is withheld rather than assumed harmless.
+  const wrapped = { email: "a@b.no", tenants: { content: [{ id: 1581, companyName: "SOMEONE ELSES COMPANY" }] } };
+  const viaWrapper = await text(request, { method: "GET", path: "/api/me" }, wrapped, bound);
+  assert.doesNotMatch(viaWrapper, others);
+  assert.match(viaWrapper, /tenants field was withheld/);
+
+  // /api/tenants is the same disclosure, and it can come back as a bare array.
+  const bare = await text(request, { method: "GET", path: "/api/tenants" }, me.tenants, bound);
+  assert.doesNotMatch(bare, others);
+
+  // With no binding there is no boundary, and the full list is the correct answer.
+  assert.match(await text(request, { method: "GET", path: "/api/me" }, me, {}), others);
+});
