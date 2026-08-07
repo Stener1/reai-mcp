@@ -423,10 +423,15 @@ async function main() {
       report("reai_parse_ehf_attachment", false, String(err));
     }
 
-    // 7c. Single-record getters. Every one of these had never been called against the
-    //     live API — 12 of 43 read tools were unexercised, all but one a GET by id —
-    //     because the suite had no id to pass them. Chained off the list tools instead,
-    //     the way the bank-reconciliation check already chains off company banks.
+    // 7e. Single-record getters, chained off the list tools the way the bank-reconciliation
+    //     check already chains off company banks.
+    //
+    //     Of 43 read tools, 13 were not named in this file and 9 were not named in ANY
+    //     smoke script — seven of those nine were GETs by id, unexercised because no suite
+    //     had an id to pass them. (The other two are reai_api_notes, which reads the
+    //     bundled spec, and reai_reconcile_ui.) Several getters WERE already covered, but
+    //     only inside the write suites, which do not run against a real company by default:
+    //     reai_get_voucher and reai_get_customer read back what those scripts create.
     //
     //     An empty collection is the common case on a fresh tenant and reports SKIP with
     //     the reason. That is deliberately not a pass: "never ran" and "ran and worked"
@@ -465,6 +470,14 @@ async function main() {
     ]) {
       try {
         const listed = await client.callTool({ name: listName, arguments: listArgs });
+        // A list tool that FAILED is not a list tool that returned nothing. 403 module
+        // gating is real on this API, and reporting it as "nothing to fetch on this
+        // tenant" would be a false statement plus two silently skipped checks — the
+        // absence-read-as-success this block's own comment claims to avoid.
+        if (listed.isError) {
+          report(getName, false, `${listName} failed: ${textOf(listed).split("\n")[0].slice(0, 60)}`);
+          continue;
+        }
         const id = firstIdOf(textOf(listed));
         if (id === null) {
           console.log(`  [SKIP] ${getName} — ${listName} returned nothing to fetch on this tenant`);
@@ -484,13 +497,28 @@ async function main() {
       }
     }
 
-    // 7d. The one getter with no list endpoint behind it. Bank transactions are only
+    // 7f. The one getter with no list endpoint behind it. Bank transactions are only
     //     reachable through a reconciliation, so this walks company banks → the current
     //     month's reconciliation → the first transaction id it can find, in either the
     //     pending or the matched groups.
     try {
       const banks = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
-      const bankAccountId = firstIdOf(textOf(banks));
+      if (banks.isError) throw new Error(`reai_list_company_banks failed: ${textOf(banks).split("\n")[0]}`);
+      // The same selection the reconciliation check above makes, and for the same reason:
+      // the synced view does not apply to a manual account, and an archived one is not a
+      // working account. Taking banks[0] would have blamed the tenant for a wrong-view call.
+      const bankAccountId = (() => {
+        const body = textOf(banks).slice(textOf(banks).indexOf("\n\n") + 2);
+        let rows;
+        try {
+          rows = JSON.parse(body);
+        } catch {
+          return null;
+        }
+        if (!Array.isArray(rows)) return null;
+        const synced = rows.find((b) => !b?.archived && (b?.providerType ?? "manual") !== "manual");
+        return Number.isInteger(Number(synced?.id)) ? Number(synced.id) : null;
+      })();
       let transactionId = null;
       if (bankAccountId !== null) {
         for (const month of recentMonths(4)) {
@@ -498,7 +526,15 @@ async function main() {
             name: "reai_get_bank_reconciliation",
             arguments: { bankAccountId, month, tenantId },
           });
-          const found = /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec));
+          if (rec.isError) continue;
+          // BOTH shapes. The overview carries pendingTransactions and matchedGroups[].
+          // transactions — there is no bare `transactions` at the top level — so matching
+          // only the latter meant a tenant with unmatched transactions and no matched
+          // groups, which is precisely the state the bank workflow exists for, reported
+          // "no bank transaction on this tenant" and skipped the check.
+          const found =
+            /"pendingTransactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec)) ??
+            /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec));
           if (found) {
             transactionId = Number(found[1]);
             break;

@@ -388,24 +388,44 @@ test("the README's payment-routing table matches the classifier", async () => {
   assert.match(readme, /`invoiceEmail` \| customers, orders, subscriptions/);
 });
 
-// Six getters took `id` and the three most recently added took `<noun>Id`. Two conventions
-// is one too many: an agent that guesses wrong gets "Invalid arguments for tool", which is
-// what happened to me writing a probe against this repo's own tools. Where a tool takes a
-// single record id, it is `id`; where several ids or a period are in play — the bank
-// reconciliation's bankAccountId + month — explicit names are right and this leaves them be.
+/**
+ * `reai_get_*` tools that fetch one record by id but keep an explicit name, with the reason.
+ *
+ * The first version of this test used "at most two non-tenant keys" to exclude them, which
+ * was arbitrary in both directions: a future getter taking `fooId` plus two other params
+ * would slip through, and reai_get_bank_reconciliation was excluded only because `include`
+ * happens to make a third key — drop that optional parameter and the test would demand
+ * renaming `bankAccountId` to `id`, which is the wrong answer.
+ */
+const KEEPS_AN_EXPLICIT_ID = {
+  reai_get_bank_reconciliation:
+    "queries a PERIOD for an account (bankAccountId + month), rather than fetching a record by id",
+};
+
+// Seven getters took `id` and the three added in the last two iterations took `<noun>Id`.
+// Two conventions is one too many: an agent that guesses wrong gets "Invalid arguments for
+// tool", which is what happened writing a probe against this repo's own tools.
+test("every explicit-id exception is a real tool", () => {
+  for (const [name, reason] of Object.entries(KEEPS_AN_EXPLICIT_ID)) {
+    const tool = registeredTools.find((t) => t.name === name);
+    assert.ok(tool, `exception names an unknown tool: ${name}`);
+    assert.ok(reason.length > 20, `${name} needs a reason, not a placeholder`);
+    // And it must actually take an explicit id, or the exception is dead.
+    const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
+    assert.ok(keys.some((k) => /(^|[a-z_])id$/i.test(k) && k !== "id"), `${name} takes no explicit id`);
+  }
+});
+
 test("a getter that takes one record id calls it `id`", () => {
   const wrong = [];
   for (const tool of registeredTools) {
-    // Scoped to "fetch one record by its id" — reai_get_*. Deliberately NOT every tool
-    // with an id argument: reai_parse_ehf_attachment does something TO an attachment and
-    // reai_reconcile_ui renders a period for an account, and for those the noun carries
-    // meaning the bare word would lose. reai_get_bank_reconciliation is excluded for the
-    // same reason by the key count — it queries a period, it does not fetch a record.
     if (tool.risk !== "read" || !tool.name.startsWith("reai_get_")) continue;
+    if (tool.name in KEEPS_AN_EXPLICIT_ID) continue;
     const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
-    const ids = keys.filter((k) => /^[a-z][A-Za-z]*Id$/.test(k));
-    if (ids.length !== 1 || keys.length > 2) continue;
-    wrong.push(`${tool.name}: ${ids[0]}`);
+    // Any spelling of an id-shaped name, so fooId and foo_id are both caught.
+    const ids = keys.filter((k) => /(^|[a-z_])id$/i.test(k) && k !== "id");
+    if (ids.length === 0) continue;
+    wrong.push(`${tool.name}: ${ids.join(", ")}`);
   }
-  assert.deepEqual(wrong, [], "single-id read tools should take `id`, like the other six do");
+  assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
 });
