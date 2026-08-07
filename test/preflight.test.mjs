@@ -493,3 +493,46 @@ test("a bound tenant cannot be overridden via the path or query", async () => {
   await tool.handler({ method: "GET", path: "/api/accountant-clients/200" }, ctx(undefined));
   assert.equal(sent.length, 1);
 });
+
+test("every voucher type the API declares is accepted by the filter", async () => {
+  // Eight of sixteen were listed while the filter read as exhaustive, so "show me the
+  // VAT settlement voucher" or "which depreciation was booked" got a validation
+  // rejection from this server rather than an answer.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const raw = readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8");
+
+  const match = /"enum"\s*:\s*\[([^\]]{0,900})\]/g;
+  let declared = null;
+  for (const m of raw.matchAll(match)) {
+    if (m[1].includes("OPENING_BALANCE") && m[1].includes("MANUAL")) {
+      declared = m[1].split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
+      break;
+    }
+  }
+  assert.ok(declared && declared.length > 0, "the spec should declare voucher types");
+
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_list_vouchers");
+  const accepted = tool.inputSchema.voucherType?._def?.innerType?._def?.values
+    ?? tool.inputSchema.voucherType?._def?.values
+    ?? [];
+  const missing = declared.filter((v) => !accepted.includes(v));
+  assert.deepEqual(missing, [], `voucher types the API declares but this tool rejects: ${missing.join(", ")}`);
+});
+
+test("the account limit does not exceed the API's silent cap", async () => {
+  // The API caps limit at 100 and does so without saying so, which made a larger
+  // number look like it worked while truncating the chart of accounts — under a tool
+  // that tells the agent every posting must reference an account from this list.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_list_accounts");
+  const checks = tool.inputSchema.limit?._def?.innerType?._def?.checks
+    ?? tool.inputSchema.limit?._def?.checks
+    ?? [];
+  const max = checks.find((c) => c.kind === "max");
+  assert.ok(max, "limit should declare a maximum");
+  assert.ok(max.value <= 100, `limit allows ${max.value}, but the API caps at 100`);
+});
