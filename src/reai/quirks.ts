@@ -410,6 +410,20 @@ export const QUIRKS: readonly Quirk[] = [
 
   // --- Purchase ------------------------------------------------------------
   {
+    id: "cost-line-amount-is-gross",
+    paths: ["/api/supplier-invoices", "/api/supplier-invoices/{id}"],
+    methods: ["POST", "PATCH"],
+    kind: "shape",
+    note:
+      "The cost-line `amount` is VAT-INCLUSIVE, and neither the field name nor the spec says so. " +
+      "Verified on live books: amount 1000 with a 25% debitVatCode produced 800 on the cost " +
+      "account, 200 on input VAT (2711) and -1000 on the payable. So send the gross figure the " +
+      "supplier billed. Sending the net 800 books 640 cost and 160 VAT instead — a 20% " +
+      "understatement of the cost that still BALANCES, so neither the API nor a balance check will " +
+      "flag it. The sibling reception endpoints name the same field `amountInclVat`, which is the " +
+      "only hint anywhere.",
+  },
+  {
     id: "cost-line-explicit-accounts",
     paths: ["/api/supplier-invoices", "/api/supplier-invoices/{id}"],
     methods: ["POST", "PATCH"],
