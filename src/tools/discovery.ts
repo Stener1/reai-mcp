@@ -466,7 +466,7 @@ const request = defineTool({
     // Then payment routing, which needs the path: changing a counterparty's bank
     // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
     // happens later when a human pays the invoice in the ReAI UI.
-    const risk = classifyPaymentRouting(bodyRisk, decoded, args.body);
+    const risk = classifyPaymentRouting(bodyRisk, decoded, args.body, args.method);
     const routing = risk !== bodyRisk ? paymentRoutingFields(args.body) : [];
     const escalated =
       routing.length > 0

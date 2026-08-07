@@ -466,7 +466,19 @@ const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
   /^\/api\/supplier-invoices\/[^/]+\/payment-details(\/|$)/,
 ];
 
-const PAYMENT_ROUTING_FIELDS = new Set(["iban", "bankaccountnumber", "swiftcode", "accountnumber"]);
+// `bban` is the company-bank schema's account-number field. It was absent, so even
+// once /api/company-banks was in scope the account number itself went undetected.
+// `invoiceEmail` is not a payment field but has the same shape of harm: it redirects
+// where every future invoice for that customer is delivered, the record is trivially
+// reversible, and the disclosure happens later through a legitimate human send.
+const PAYMENT_ROUTING_FIELDS = new Set([
+  "iban",
+  "bankaccountnumber",
+  "swiftcode",
+  "accountnumber",
+  "bban",
+  "invoiceemail",
+]);
 
 /** Payment-routing fields present in a body, for use in error messages. */
 export function paymentRoutingFields(body: unknown): string[] {
@@ -488,11 +500,59 @@ export function paymentRoutingFields(body: unknown): string[] {
  * Separate from `classifyWithBody` because it needs the path: the same field on
  * /api/company-banks is benign.
  */
-export function classifyPaymentRouting(pathRisk: Risk, path: string, body: unknown): Risk {
+export function classifyPaymentRouting(
+  pathRisk: Risk,
+  path: string,
+  body: unknown,
+  method?: string,
+): Risk {
   if (pathRisk === "irreversible") return pathRisk;
   const normalized = path.toLowerCase().replace(/\/+$/, "");
-  if (!PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  const inScope =
+    PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
+    // Editing an EXISTING company bank repoints where this company's own customers
+    // pay — the money flows inward rather than outward, but it is redirected just as
+    // permanently, and invoices already issued name that account. Adding one (POST)
+    // stays ordinary work, which is why the original exemption was written; it just
+    // never distinguished adding from repointing.
+    (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST");
+  if (!inScope) return pathRisk;
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
+}
+
+const COMPANY_BANK_PATH = /^\/api\/company-banks(\/|$)/;
+
+/**
+ * Whether a CURATED tool's arguments escalate its declared risk.
+ *
+ * The escape hatch runs `classifyWithBody` and `classifyPaymentRouting` on every
+ * request, but curated tools were gated on their static `risk` alone — so
+ * `reai_update_supplier`, declared `reversible`, accepted `iban` and repointed a
+ * supplier's bank account in the DEFAULT mode, while `reai_request` refused the
+ * identical `PATCH /api/suppliers/{id}`. A curated tool quietly doing what the
+ * escape hatch forbids is the exact failure this project treats as its worst.
+ *
+ * Scoped by the tool's declared `apiPaths`, because the field names are ambiguous
+ * out of context: `accountNumber` on a supplier is a bank account, and on a
+ * bookkeeping tool it is a chart-of-accounts code like 4300. Matching on the name
+ * alone would refuse ordinary ledger work.
+ *
+ * An over-approximation by design — arguments are not the request body, and a
+ * handler may rename or drop fields. It can therefore refuse a call the body would
+ * not have escalated, and that is the direction to be wrong in.
+ */
+export function curatedArgsEscalate(
+  apiPaths: ReadonlyArray<readonly [string, string]>,
+  args: unknown,
+): { risk: Risk; fields: string[] } | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  for (const [method, path] of apiPaths) {
+    const escalated = classifyPaymentRouting("reversible", path, args, method);
+    if (escalated === "irreversible") {
+      return { risk: "irreversible", fields: paymentRoutingFields(args) };
+    }
+  }
+  return undefined;
 }
 
 /**

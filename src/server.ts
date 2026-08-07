@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ReaiClient } from "./reai/client.js";
 import { ReaiApiError, ReaiConfigError, ReaiTransportError } from "./reai/errors.js";
-import { isAllowed, WriteBlockedError } from "./policy.js";
+import { curatedArgsEscalate, isAllowed, WriteBlockedError } from "./policy.js";
 import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
@@ -116,6 +116,27 @@ export function buildServer(opts: BuildServerOptions): McpServer {
       // registry already validates and narrows, so the bridge is untyped here.
       (async (args: Record<string, unknown>) => {
         try {
+          // Re-gate on the ARGUMENTS, not just the tool's declared risk. A tool can
+          // be ordinary master-data work for most of its fields and something far
+          // heavier for a few of them: reai_update_supplier is `reversible`, and its
+          // own description promised that changing iban/swiftCode/bankAccountNumber
+          // "requires REAI_WRITE_MODE=full" — a control that was written down and
+          // never implemented, which is worse than none, because it invited running
+          // the default mode believing bank details were protected.
+          const escalated = curatedArgsEscalate(tool.apiPaths ?? [], args ?? {});
+          if (escalated && !isAllowed(escalated.risk, config.writeMode)) {
+            throw new WriteBlockedError({
+              risk: escalated.risk,
+              mode: config.writeMode,
+              what:
+                `${tool.name} called with ${escalated.fields.join(", ")} — changing where money ` +
+                `is sent. The record is reversible; the payment is not: whoever pays this ` +
+                `counterparty next, quite possibly a person in the ReAI UI long afterwards, ` +
+                `sends to whatever account is on file. Every other field on this tool is ` +
+                `unaffected, so the same call without those fields will work. Confirm new bank ` +
+                `details against something outside this conversation before changing them`,
+            });
+          }
           return await tool.handler(args ?? {}, ctx);
         } catch (err) {
           return toolError(err, tool.name);

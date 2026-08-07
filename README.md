@@ -40,6 +40,14 @@ Two properties make this more than a label:
 
 The default is deliberately the middle setting, not the permissive one.
 
+### Changing where money goes is treated as irreversible
+
+A few fields are ordinary master data as *records* and permanent as *consequences*: a supplier's `iban`, `bankAccountNumber` or `swiftCode`, a company bank's `bban`, and a customer's `invoiceEmail`. Undoing the edit is trivial. Undoing what follows is not — whoever pays that supplier next, quite possibly a person clicking through the ReAI web UI weeks later, sends money to whatever account is on file, and every future invoice for that customer goes to whatever address is on file.
+
+So a call carrying one of those fields is classified **irreversible** and refused in the default mode, on the curated tools and through `reai_request` alike, even though the endpoint itself is otherwise reversible. Every other field on the same tool is unaffected: renaming a supplier still works in `reversible`. Adding a new company bank stays ordinary work; repointing an existing one does not.
+
+This was a real gap rather than a hypothetical: `reai_update_supplier` is declared `reversible`, its description promised that the bank fields "require `REAI_WRITE_MODE=full`", and nothing enforced it — while `reai_request` refused the identical `PATCH`. A control that is written down but not implemented is worse than none, because it invites running the default mode believing the fields are protected.
+
 ### Sending things to other people is a separate switch
 
 `REAI_WRITE_MODE` answers *what can be undone in the books*. It deliberately does **not** answer *does this reach someone else* — those are different questions, and one setting cannot serve both.
@@ -279,7 +287,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_reception_documents` | The document inbox — incoming invoices and receipts not yet booked | read |
 | `reai_parse_ehf_attachment` | Parse an incoming EHF invoice into structured data | read |
 | `reai_list_expenses` | Employee expense claims, incl. per diems and mileage | read |
-| `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data and bank details | reversible |
+| `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data. Changing bank details (`iban`, `bankAccountNumber`, `swiftCode`) escalates the call to irreversible — see below | reversible |
 | `reai_create_supplier_invoice` | Register a supplier invoice directly | **irreversible** |
 | `reai_register_supplier_invoice_payment` | Record paying a supplier | **irreversible** |
 

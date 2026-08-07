@@ -224,3 +224,69 @@ test("a silent delete response does not report a deleted outcome", async () => {
   assert.match(text, /did not say whether/);
   assert.match(text, /REVERSED/);
 });
+
+// The escape hatch runs the body classifiers on every request; curated tools were
+// gated on their static `risk` alone. So reai_update_supplier, declared reversible,
+// repointed a supplier's bank account in the DEFAULT mode while reai_request refused
+// the identical PATCH /api/suppliers/{id}. A curated tool quietly doing what the
+// escape hatch forbids is the failure this project treats as its worst — and the
+// existing guard compared only apiPaths, so it structurally could not see it.
+test("a curated tool cannot do what reai_request would refuse for the same body", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const { curatedArgsEscalate, classifyPaymentRouting, isAllowed } = await import(
+    "../dist/policy.js"
+  );
+
+  // Every field name the policy treats as payment routing, as an agent would pass it.
+  const ESCALATING = {
+    iban: "NO9386011117947",
+    bankAccountNumber: "86011117947",
+    swiftCode: "DNBANOKK",
+    bban: "86011117947",
+    invoiceEmail: "attacker@evil.example",
+  };
+
+  let checked = 0;
+  for (const tool of allTools) {
+    for (const field of Object.keys(tool.inputSchema ?? {})) {
+      if (!(field in ESCALATING)) continue;
+      const args = { id: 1, [field]: ESCALATING[field] };
+
+      // What reai_request would decide for the same path and body.
+      const viaEscapeHatch = (tool.apiPaths ?? []).some(
+        ([method, path]) =>
+          classifyPaymentRouting("reversible", path, args, method) === "irreversible",
+      );
+      if (!viaEscapeHatch) continue;
+      checked += 1;
+
+      const escalated = curatedArgsEscalate(tool.apiPaths ?? [], args);
+      assert.ok(
+        escalated && escalated.risk === "irreversible",
+        `${tool.name} accepts "${field}" but does not escalate — reai_request would refuse it`,
+      );
+      // And the escalation must actually bite in the default mode.
+      assert.equal(
+        isAllowed(escalated.risk, "reversible"),
+        false,
+        `${tool.name} escalates on "${field}" but the escalation is permitted in reversible mode`,
+      );
+    }
+  }
+  assert.ok(checked >= 2, `expected to find escalating fields on curated tools, found ${checked}`);
+});
+
+// The scoping matters as much as the rule: `accountNumber` on a supplier is a bank
+// account, and on a bookkeeping tool it is a chart-of-accounts code like 4300.
+// Matching on the field name alone would refuse ordinary ledger work.
+test("escalation is scoped by path, so ledger account numbers are unaffected", async () => {
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  assert.equal(
+    curatedArgsEscalate([["POST", "/api/vouchers"]], { accountNumber: "4300", amount: 100 }),
+    undefined,
+  );
+  assert.equal(curatedArgsEscalate([["PATCH", "/api/suppliers/{id}"]], { id: 1, name: "Acme" }), undefined);
+  // Adding a company bank stays ordinary work; repointing an existing one does not.
+  assert.equal(curatedArgsEscalate([["POST", "/api/company-banks"]], { bban: "86011117947" }), undefined);
+  assert.ok(curatedArgsEscalate([["PUT", "/api/company-banks/{id}"]], { bban: "86011117947" }));
+});
