@@ -103,15 +103,25 @@ const textOf = (r) =>
     .join("\n");
 
 function jsonOf(result) {
-  const text = textOf(result);
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return undefined;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
+  // The BODY, which ok() puts in the last blank-line-separated block.
+  //
+  // This used to scan from the first `{` to the last `}`. That worked only while every note
+  // above the body was brace-free — and the moment reai_request began appending quirk notes to a
+  // SUCCESSFUL write, notes containing `{ agreementId, templateType, ... }` made the span start
+  // inside the prose and the parse fail. The symptom was a passing API call reported as a failed
+  // check ("a lease exists to edit — HTTP 201"), which is the worst shape of test bug: it blames
+  // the wrong thing.
+  const blocks = textOf(result).split("\n\n");
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i].trim();
+    if (!block.startsWith("{") && !block.startsWith("[")) continue;
+    try {
+      return JSON.parse(block);
+    } catch {
+      // Not the body after all — keep looking rather than giving up on the first candidate.
+    }
   }
+  return undefined;
 }
 
 const STAMP = `reai-mcp fullwrite ${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -192,6 +202,7 @@ async function main() {
 
   const created = {
     agreementId: undefined,
+    doomedBankId: undefined,
     warehouseId: undefined,
     productId: undefined,
     variantId: undefined,
@@ -328,6 +339,66 @@ async function main() {
       !bankRes.isError && Number.isInteger(created.bankId),
       created.bankId ? `id=${created.bankId}` : textOf(bankRes).slice(0, 200),
     );
+
+    // A full-replacement PUT on this record clears the account number when the body omits it —
+    // and the payment-routing guard cannot see an omission, which is why the path is classified
+    // irreversible outright. Demonstrated here on the throwaway bank above rather than asserted,
+    // because the whole claim is that a 200 hides it.
+    // A SECOND, throwaway bank. The first one is used as the payment source further down, and an
+    // account with an emptied bban "cannot be used for payments or reconciliation" — this repo's
+    // own quirk. Demonstrating the wipe on it would have sabotaged the payment step and pinned
+    // the failure on the payment tool.
+    const doomedRes = await client.callTool({
+      name: "reai_create_company_bank",
+      arguments: { name: `${STAMP} doomed`, countryCode: "NO", currency: "NOK", bban: "15202296179" },
+    });
+    const doomed = doomedRes.isError ? undefined : jsonOf(doomedRes);
+    if (Number.isInteger(doomed?.id)) created.doomedBankId = doomed.id;
+    report(
+      "a throwaway bank exists for the wipe demonstration",
+      Number.isInteger(created.doomedBankId),
+      created.doomedBankId ? `id=${created.doomedBankId}` : textOf(doomedRes).slice(0, 160),
+    );
+
+    if (created.doomedBankId) {
+      const readBban = async () => {
+        const r = await client.callTool({
+          name: "reai_request",
+          arguments: { method: "GET", path: `/api/company-banks/${created.doomedBankId}` },
+        });
+        // undefined means "could not read", which must never look like "the field is empty".
+        return r.isError ? undefined : { value: jsonOf(r)?.bban };
+      };
+      const before = await readBban();
+      const wipe = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/company-banks/${created.doomedBankId}`,
+          // Exactly the required set: an agent renaming the account.
+          body: { name: `${STAMP} renamed`, countryCode: "NO", currency: "NOK" },
+        },
+      });
+      const after = await readBban();
+      // Both reads must have SUCCEEDED. `!bbanAfter` alone reported a failed second read as
+      // proof of the very claim under test, in a block whose whole point is that a 200 hides it.
+      const proven =
+        !wipe.isError && before !== undefined && after !== undefined && !!before.value && !after.value;
+      report(
+        "a rename that omits the account number really does clear it",
+        proven,
+        before === undefined || after === undefined
+          ? "COULD NOT READ the account before or after — this demonstrates nothing either way"
+          : `bban ${JSON.stringify(before.value)} → ${JSON.stringify(after.value)} — the reason ` +
+            `this PUT is irreversible, and why the routing guard alone was not enough`,
+      );
+      // And the quirk must reach a caller whose write SUCCEEDED, which is the only signal here.
+      report(
+        "the successful write carried its quirk",
+        !wipe.isError && /Known quirk/.test(textOf(wipe)) && /clears it|CLEARS it/.test(textOf(wipe)),
+        firstLineOf(textOf(wipe)),
+      );
+    }
 
     // --- 4z. Agreement terms, on real data -----------------------------------
     //
@@ -836,6 +907,17 @@ async function main() {
         "supplier deleted or archived",
         () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
         (r) => textOf(r).slice(0, 90),
+      );
+    }
+    if (created.doomedBankId) {
+      await attempt(
+        "throwaway bank deleted",
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: { method: "DELETE", path: `/api/company-banks/${created.doomedBankId}` },
+          }),
+        (r) => firstLineOf(textOf(r)),
       );
     }
     if (created.bankId) {

@@ -499,6 +499,20 @@ const request = defineTool({
           : bodyRisk !== pathRisk
             ? escalatingBodyFields(args.body)
             : [];
+    // When nothing in the BODY escalated, the reason lives in the path rule — and the generic
+    // explanation is worst exactly there. If the endpoint has a quirk written about why it is
+    // irreversible, name it, so a refusal for "this PUT replaces the record" does not read as
+    // "this posts to the ledger".
+    const pathReason =
+      escalated.length === 0 && risk === "irreversible"
+        ? (() => {
+            const op = resolveOperation(method, path);
+            const q = op
+              ? quirksFor(method, op.path).find((entry) => entry.kind === "irreversible")
+              : undefined;
+            return q ? ` — ${q.note.split("\n")[0]}` : "";
+          })()
+        : "";
     assertAllowed(
       risk,
       ctx.config.writeMode,
@@ -509,7 +523,7 @@ const request = defineTool({
           `${method} ${path} with ${escalated.join(", ")}${
             routing.length > 0 || delivery.length > 0 ? "" : " (this arms an external send)"
           }`
-        : `${method} ${path}`,
+        : `${method} ${path}${pathReason}`,
     );
 
     // Separately from reversibility: does this leave the tenant? Checked after
@@ -597,6 +611,24 @@ const request = defineTool({
     const notes = [`${method} ${path} → HTTP ${res.status}`];
     if (res.location) notes.push(`Location: ${res.location}`);
     if (risk !== "read") notes.push(`Write classified as "${risk}" and permitted by policy.`);
+
+    // Quirks on a write that SUCCEEDED, not only on one that failed.
+    //
+    // enrichRequestFailure was the only place these were attached, which is fine for the notes
+    // that explain an error and useless for the ones whose whole point is that the call succeeds
+    // and does something unexpected. The case that exposed it: PUT /api/company-banks/{id}
+    // answers 200 and CLEARS the account number the body left out — so the 200 was the only
+    // thing the caller saw, and the quirk written about exactly that never appeared.
+    //
+    // Restricted to writes, because a read cannot surprise anyone this way, and to quirks with
+    // no `statuses` filter — that field means "this note is about one outcome", and those are
+    // failure notes by construction. Anything left holds regardless of outcome, which is the
+    // definition of what belongs on a success.
+    if (risk !== "read") {
+      const op = resolveOperation(method, path);
+      const always = op ? quirksFor(method, op.path).filter((q) => q.statuses === undefined) : [];
+      for (const q of always) notes.push(`Known quirk [${q.kind}]: ${q.note}`);
+    }
 
     // A bound connection must not disclose the OTHER companies the underlying ReAI token
     // reaches — reai_whoami filters its tenant list for exactly that reason, and the README

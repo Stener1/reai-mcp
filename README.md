@@ -40,6 +40,17 @@ Two properties make this more than a label:
 
 The default is deliberately the middle setting, not the permissive one.
 
+### A full replacement can erase where money goes by leaving it out
+
+Two endpoints replace the whole record and do **not** require the account number, so a body that satisfies the schema without mentioning it clears it. Measured on a live tenant, both with a rename as the intent:
+
+```
+PUT /api/company-banks/{id} {name, countryCode, currency}  → 200, bban AND iban emptied
+PUT /api/creditors/{id}     {name}                          → 200, bankAccountNumber null
+```
+
+This defeats the routing rule below, which escalates a body that *contains* a destination — it cannot see one whose danger is the omission. Both PUTs are therefore classified **irreversible** outright, creating either record stays reversible (adding diverts nothing), and a quirk tells a `reai_request` caller, because a `200` says nothing. `reai_set_customer_address` had the same shape on a smaller scale — the address PUT requires only street, city and country, so setting a street emptied the postcode — and it now reads the current address and merges.
+
 ### Changing where money goes is treated as irreversible
 
 A few fields are ordinary master data as *records* and permanent as *consequences*. Undoing the edit is trivial; undoing what follows is not, because it happens later and through someone acting perfectly normally.
@@ -471,7 +482,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **70 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **72 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
