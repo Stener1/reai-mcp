@@ -45,13 +45,6 @@ const whoami = defineTool({
     const { tenants, reported } = tenantsFrom(me);
 
     const notes: string[] = [];
-    if (!reported) {
-      notes.push(
-        "GET /api/me did not return a tenant list. That is NOT the same as the token reaching " +
-          "no companies — the field was absent or not an array, so which companies are " +
-          "reachable is unknown. The raw response is below.",
-      );
-    }
     // A grant bound at authorization time must not enumerate the OTHER companies the
     // underlying ReAI token can reach. /api/me returns all of them, and returning them
     // handed the agent every client company's name, id, currency and deep link — while
@@ -59,6 +52,22 @@ const whoami = defineTool({
     // on what can be addressed; it has to be a boundary on what is disclosed too.
     const bound = ctx.config.boundTenantId;
     const visible = bound === undefined ? tenants : tenants.filter((t) => t.id === bound);
+
+    if (!reported) {
+      notes.push(
+        "GET /api/me did not return a tenant list: the field was absent or not an array, so " +
+          "which companies this token reaches is UNKNOWN. That is not a count of zero, and " +
+          "nothing below states one — the guidance that depends on knowing the list is omitted " +
+          "rather than guessed. " +
+          // The payload withholds the raw value on a bound connection, so the note must not
+          // promise it there. Promising something the payload does not carry is the same
+          // mismatch this whole change is about.
+          (bound === undefined
+            ? "The value the API actually sent is under rawTenants."
+            : "The raw value is withheld because this connection is bound to one company, and " +
+              "it could name the others."),
+      );
+    }
 
     if (bound !== undefined) {
       notes.push(
@@ -73,8 +82,23 @@ const whoami = defineTool({
       notes.push(
         match
           ? `Active tenant: ${active} (${match.companyName ?? match.slug ?? "unnamed"}).`
-          : `Active tenant is set to ${active}, but that id is NOT in this token's tenant list — ` +
-              `calls will fail with 403 or 404. Pick one of the ids below.`,
+          : // Only a REPORTED list can establish that an id is absent from it. Saying "that id
+            // is NOT in this token's tenant list — calls will fail with 403 or 404" on the
+            // strength of a list that never arrived is the same confident wrong answer
+            // reai_use_tenant refuses to give, one function away in this file.
+            reported
+            ? `Active tenant is set to ${active}, but that id is NOT in this token's tenant list — ` +
+              `calls will fail with 403 or 404. Pick one of the ids below.`
+            : `Active tenant is set to ${active}. Whether this token reaches it could not be ` +
+              `checked, because /api/me returned no tenant list — this is NOT a report that the ` +
+              `id is invalid.`,
+      );
+    } else if (!reported) {
+      // No active tenant and no list: there is nothing truthful to say about how many
+      // companies are reachable, so say only that.
+      notes.push(
+        "No active tenant set, and the reachable companies could not be listed. Pass tenantId " +
+          "per call, or retry — reai_use_tenant cannot verify an id either while this persists.",
       );
     } else if (tenants.length === 1) {
       notes.push(
@@ -91,7 +115,7 @@ const whoami = defineTool({
       `Write policy: REAI_WRITE_MODE=${ctx.config.writeMode} ` +
         `(available modes: ${WRITE_MODES.join(", ")}).`,
     );
-    if (tenants.length === 1) {
+    if (reported && tenants.length === 1) {
       // Deliberately describes the OBSERVED behaviour rather than naming the token kind.
       // A user-scoped token belonging to a user with access to one company also returns a
       // one-element list, and /api/me exposes no field that distinguishes the two — so
@@ -135,6 +159,11 @@ const whoami = defineTool({
           ...t,
           url: ctx.client.deepLink("/", t.id),
         })),
+        // The note promises this, and without it the ONE thing the caller needs to see —
+        // what the API actually sent instead of a list — was the one thing rebuilt away.
+        // Withheld when the connection is bound, where not disclosing other companies is
+        // the point and a raw payload would leak exactly what the binding hides.
+        ...(reported || bound !== undefined ? {} : { rawTenants: me?.tenants ?? null }),
       },
       { note: notes.join("\n") },
     );

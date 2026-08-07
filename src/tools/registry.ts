@@ -216,32 +216,44 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
  * A list result, where "the API did not return a list" and "the list is empty" are
  * different answers.
  *
- * Every list tool wrote `Array.isArray(data) ? data.length : 0` and then stated that
+ * Thirteen list tools wrote `Array.isArray(data) ? data.length : 0` and then stated that
  * number. So a 200 carrying `{content: [...]}` — a shape this API already uses on
- * `/api/leads` and `/api/warehouses/inventory` — was reported as "0 customer(s)", with the
- * rows dropped from the result entirely. Nothing was wrong today, because these endpoints
- * return bare arrays today; the day one of them starts paginating, eight tools would begin
- * answering "there are none" about a company's customers, invoices and vouchers at once.
+ * `/api/leads` and `/api/warehouses/inventory` — was reported as "0 customer(s)".
+ *
+ * The rows were NOT lost: every one of those tools passed `res.data` to `ok()`, so the
+ * payload always survived and only the sentence above it was false. That is a smaller bug
+ * than the first version of this comment claimed, and worth stating accurately — an agent
+ * reads the sentence, but the data was there to be looked at.
+ *
+ * Nothing is wrong on today's endpoints, which return bare arrays. The day one of them
+ * starts paginating, thirteen tools begin answering "there are none" about a company's
+ * customers, invoices and vouchers at once.
  *
  * An HTTP error cannot reach here — the client throws ReaiApiError on any non-2xx — so this
  * is specifically about a successful response whose shape is not the expected one.
  */
 export function okList(
   data: unknown,
-  opts: { noun: string; suffix?: string; empty?: string; link?: string },
+  opts: { noun: string; suffix?: string; empty?: string },
 ): ToolResult {
-  const { noun, suffix = "", empty, link } = opts;
+  const { noun, suffix = "", empty } = opts;
   if (!Array.isArray(data)) {
     return ok(data, {
-      link,
       note:
         `The ${noun} endpoint did not return a list, so there is no count to give. The response ` +
-        `is passed through unchanged — do NOT read this as "no ${noun}s".`,
+        `is returned below as received — subject to the usual truncation note if it is large — ` +
+        `and this is NOT a report of "no ${noun}s".`,
     });
   }
   return ok(data, {
-    link,
-    note: data.length === 0 && empty ? empty : `${data.length} ${noun}(s)${suffix}`,
+    // The suffix survives the empty message. Where a suffix carries a FACT rather than
+    // punctuation — the widened-window sentences on orders, offers and invoices — the empty
+    // case is exactly when the caller needs it, since "0 results" and "0 results even after
+    // widening the window back to 2000" are different answers.
+    note:
+      data.length === 0 && empty
+        ? `${empty}${suffix.trim() === "." ? "" : suffix}`
+        : `${data.length} ${noun}(s)${suffix}`,
   });
 }
 
