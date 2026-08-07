@@ -389,9 +389,27 @@ fi
 # The summary below used to report the write mode and external-send from LOCAL shell
 # variables, under a heading that claimed verification -- so it stated the safe value
 # whatever the service was actually running. Read the deployed revision back instead.
+# One describe, parsed properly. The obvious one-liner --
+#   --format="value(...env.filter(\"name:X\").extract(value))"
+# -- renders a LIST, so every comparison saw "['reversible']" and failed against
+# "reversible": the verification refused a perfectly good deployment. Loud and wrong
+# beats quiet and wrong, but only just.
+SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
+  --project="$PROJECT" --region="$REGION" --format=json 2>/dev/null)"
+
 deployed_env() {
-  gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
-    --format="value(spec.template.spec.containers[0].env.filter(\"name:$1\").extract(value))" 2>/dev/null
+  printf '%s' "$SERVICE_JSON" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      try {
+        const env = JSON.parse(s)?.spec?.template?.spec?.containers?.[0]?.env ?? [];
+        const hit = env.find((e) => e.name === process.argv[1]);
+        process.stdout.write(hit?.value ?? "");
+      } catch {
+        process.stdout.write("");
+      }
+    });
+  ' "$1"
 }
 
 EFFECTIVE_WRITE_MODE="$(deployed_env REAI_WRITE_MODE)"
