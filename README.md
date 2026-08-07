@@ -388,7 +388,9 @@ Projects are the obvious omission here, and deliberate: the Project module is di
 | `reai_write_off_asset` | Remove the remaining carrying value — the accounting act for something scrapped, lost or sold | **irreversible** |
 | `reai_delete_asset` | Delete the record. A linked acquisition voucher is deleted **or reversed**, so this can put a counter-entry in the ledger | **irreversible** |
 
-What each of these actually does was measured, not read off the spec: on an asset with no accounting history, create, set-depreciation and write-off all post **nothing** — 0 vouchers before and after each call. They stay irreversible anyway, for the same reason a reconciliation rule is: a depreciation schedule is standing authority to post later. The linked case, where deleting an asset reverses its acquisition voucher, is documented by the API and **not** verified here — neither reachable tenant has an asset with accounting history behind it.
+What each of these does was measured rather than read off the spec, and the spec turned out to be wrong about the most consequential one. Its DELETE description says a linked acquisition voucher is *"deleted when possible or reversed when accounting history must be retained"*. It is neither: with a posted voucher referencing the asset, the call answers `409 Asset with id N is used in existing vouchers and cannot be deleted` and changes nothing. That is the safer behaviour — there is no path here that quietly puts a counter-entry in your ledger.
+
+Create, set-depreciation and write-off post **nothing** on an asset with no accounting history. They stay irreversible because `/api/assets` has always been classified that way and because write-off on an asset carrying real value could not be produced — this classifier fails closed on what it has not seen, and *not* because of any depreciation-posting mechanism, since no operation in this API posts depreciation at all.
 
 Anything not listed — leads, agreements, subscriptions, projects, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
@@ -407,7 +409,7 @@ Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation` and 
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **55 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~258 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **56 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

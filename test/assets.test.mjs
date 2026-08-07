@@ -67,29 +67,60 @@ test("creating an asset says plainly that it posted nothing", async () => {
   assert.match(text, /Registered asset 42/);
 });
 
-// The API decides the amount, so there is nothing to check locally — but the note must not
-// imply the record is gone, because it is not.
-test("write-off leaves the record in the register", async () => {
+// The endpoint has no summary and no description in the spec, AssetRes carries no
+// carrying-value or written-off field, and no asset with real value could be produced — so
+// the note must report what was seen and no more. An earlier version asserted "write-off
+// removes the carrying value", which had no source at all.
+test("write-off reports only what the response shows", async () => {
   const { calls, text } = await run("reai_write_off_asset", { assetId: 42 }, { id: 42 });
   assert.equal(calls[0].method, "POST");
   assert.equal(calls[0].path, "/api/assets/42/write-off");
   assert.equal(calls[0].body, undefined, "the endpoint takes no body");
-  assert.match(text, /The asset stays in the register/);
+  assert.match(text, /still in the register/);
+  assert.match(text, /check the ledger/i);
+  // No claim about an amount, because nothing in the response carries one.
+  assert.doesNotMatch(text, /removes the carrying value/);
 });
 
-// The spec's description says the body is always {"outcome":"deleted"}; its response schema
-// allows "reversed". Report what arrived, not what the description claims.
-test("deleting an asset reports a reversal when that is what happened", async () => {
-  const reversed = await run("reai_delete_asset", { assetId: 42 }, { outcome: "reversed" });
-  assert.match(reversed.text, /acquisition voucher REVERSED/);
-  assert.match(reversed.text, /counter-entry is now in the ledger/);
-
+// ApiLifecycleOutcomeRes is deleted | archived | reversed. Only "deleted" has been observed
+// — a referenced asset is refused with 409 rather than archived or reversed — but all three
+// are reported distinctly, because "removed" is false for an archived record.
+test("every outcome the shared enum allows is reported distinctly", async () => {
   const deleted = await run("reai_delete_asset", { assetId: 42 }, { outcome: "deleted" });
   assert.match(deleted.text, /deleted/);
-  assert.doesNotMatch(deleted.text, /REVERSED/);
+  assert.match(deleted.text, /refuses with 409/);
+
+  const archived = await run("reai_delete_asset", { assetId: 42 }, { outcome: "archived" });
+  assert.match(archived.text, /ARCHIVED, not deleted/);
+  assert.match(archived.text, /still exists in the books/);
+  assert.doesNotMatch(archived.text, /Asset 42 deleted/);
+
+  const reversed = await run("reai_delete_asset", { assetId: 42 }, { outcome: "reversed" });
+  assert.match(reversed.text, /REVERSED/);
+  assert.match(reversed.text, /has not been observed/);
 
   const silent = await run("reai_delete_asset", { assetId: 42 }, {});
-  assert.match(silent.text, /Check the ledger before assuming nothing was posted/);
+  assert.match(silent.text, /before assuming what happened/);
+});
+
+// The API's own DELETE description says a linked voucher is deleted or reversed. It is
+// refused instead — verified by booking a voucher against an asset and deleting it.
+test("the tool describes the 409, not the description the spec offers", () => {
+  const description = tool("reai_delete_asset").description;
+  assert.match(description, /409/);
+  assert.match(description, /used in existing vouchers/);
+  assert.match(description, /contradicts the API's own description/);
+  // And it must not repeat the warning the spec invites, which would be a false alarm.
+  assert.doesNotMatch(description, /can put a reversing entry in the ledger/);
+});
+
+// Land is capitalised and never depreciated; the API accepts an asset with no schedule.
+test("a non-depreciable asset can be registered", async () => {
+  const schema = tool("reai_create_asset").inputSchema;
+  assert.equal(schema.usefulLifeInMonths.isOptional(), true);
+  assert.equal(schema.depreciationMethod.isOptional(), true);
+  const { calls } = await run("reai_create_asset", { name: "Tomt", accountNumber: "1150" }, { id: 9 });
+  assert.deepEqual(calls[0].body, { name: "Tomt", accountNumber: "1150" });
 });
 
 test("the depreciation schedule is replaced whole, and the note says what it now is", async () => {

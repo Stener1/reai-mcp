@@ -34,13 +34,13 @@ All notable changes to `reai-mcp`. Format loosely follows
   write-off and delete. What each write actually does was measured on the test
   tenant rather than read off the spec, and the spec implies more than happens:
   create, set-depreciation and write-off post **no voucher** on an asset with no
-  accounting history (0 vouchers before and after each). They stay irreversible
-  regardless, because a depreciation schedule is standing authority to post
-  later — the reasoning this server already applies to reconciliation rules.
-  - `reai_delete_asset` reports whether the acquisition voucher was deleted or
-    **reversed**. The API's description says the body is always
-    `{"outcome":"deleted"}` while its response schema allows `"reversed"`; only
-    `deleted` has been observed, on an asset with no linked voucher.
+  accounting history. They stay irreversible because `/api/assets` has always
+  been classified that way and because write-off on an asset carrying value
+  could not be produced — not because of any depreciation-posting mechanism,
+  since no operation in this API posts depreciation.
+  - Deleting an asset that a voucher references is **refused with 409**, not
+    reversed as the endpoint's own description claims. Verified by booking a
+    voucher against an asset and deleting it.
 
 ### Fixed
 
