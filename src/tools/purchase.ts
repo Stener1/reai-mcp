@@ -262,8 +262,13 @@ const costLine = z.object({
   amount: z
     .number()
     .describe(
-      "Line amount. At least 0.01 on an invoice, at most -0.01 on a credit note. " +
-        "Unlike voucher postings, the sign here indicates document type, not debit versus credit.",
+      "Line amount, VAT-INCLUSIVE (gross) — send what the supplier billed, not the net figure.\n" +
+        "Verified against live books: 1000 with a 25% debitVatCode booked 800 to the cost account, " +
+        "200 to input VAT and -1000 to the payable. Sending the net 800 instead books 640 cost and " +
+        "160 VAT, understating the cost by 20% — and the voucher still balances, so nothing catches " +
+        "it.\n" +
+        "At least 0.01 on an invoice, at most -0.01 on a credit note. Unlike voucher postings, the " +
+        "sign here indicates document type, not debit versus credit.",
     ),
   debitAccount: z
     .string()
