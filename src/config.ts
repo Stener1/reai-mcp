@@ -58,6 +58,17 @@ export type ServerConfig = {
    * reach the URL acts as whoever's token they present.
    */
   allowTokenPassthrough: boolean;
+  /**
+   * Whether to expose the bank-reconciliation pairing view as an HTML resource.
+   *
+   * Off by default, because a client that does not render HTML would receive a few
+   * kilobytes of markup where it expected an answer — noise in the model's context,
+   * for no benefit. Turn it on for a client known to render MCP UI resources.
+   *
+   * It adds no capability: the view selects, it does not write. Matching still goes
+   * through reai_match_bank_transactions and the same write policy.
+   */
+  enableUi: boolean;
   /** Extra hostnames to accept, for DNS-rebinding protection. */
   allowedHosts: string[];
   /**
@@ -169,6 +180,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: intFromEnv("PORT", 8080),
     publicUrl: publicUrl ? publicUrl.replace(/\/+$/, "") : undefined,
     encryptionKey: env.REAI_ENCRYPTION_KEY?.trim() || undefined,
+    enableUi: env.REAI_ENABLE_UI === "1" || env.REAI_ENABLE_UI === "true",
     allowTokenPassthrough:
       env.REAI_ALLOW_TOKEN_PASSTHROUGH === "1" || env.REAI_ALLOW_TOKEN_PASSTHROUGH === "true",
     allowedHosts: splitHosts(env.REAI_ALLOWED_HOSTS),

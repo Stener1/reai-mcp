@@ -15,8 +15,17 @@ export type ToolContext = {
   session: SessionState;
 };
 
+/**
+ * Text is what every tool returns. The embedded-resource block exists for the single UI
+ * surface — the bank-reconciliation pairing view — and a result carrying one ALSO carries
+ * the text answer, so a client that does not render resources loses nothing.
+ */
+export type ToolContentBlock =
+  | { type: "text"; text: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; text: string } };
+
 export type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContentBlock[];
   isError?: boolean;
   structuredContent?: Record<string, unknown>;
 };

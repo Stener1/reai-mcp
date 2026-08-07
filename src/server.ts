@@ -6,6 +6,7 @@ import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
 import { metaTools } from "./tools/meta.js";
+import { uiTools } from "./tools/ui.js";
 import { discoveryTools } from "./tools/discovery.js";
 import { bookkeepingTools } from "./tools/bookkeeping.js";
 import { salesTools } from "./tools/sales.js";
@@ -93,7 +94,9 @@ export function buildServer(opts: BuildServerOptions): McpServer {
 
   const ctx: ToolContext = { client, config, session };
 
-  const selected = selectTools(config.toolsets);
+  // The pairing view is opt-in. A client that does not render HTML resources would get
+  // kilobytes of markup where it expected an answer, so it is off unless asked for.
+  const selected = [...selectTools(config.toolsets), ...(config.enableUi ? uiTools : [])];
   const allowedByWriteMode = selected.filter((t) => isAllowed(t.risk, config.writeMode));
   // A transmitting tool is hidden unless external send is explicitly enabled,
   // even in full mode: a posting can be reversed, a sent invoice cannot.
