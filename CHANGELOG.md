@@ -9,9 +9,46 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**86 tools**: 79 across seven accounting domains, plus 7 always-on.
+**93 tools**: 86 across eight accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Warehouses toolset** (7 tools) — warehouses, stock on hand, and stock
+  adjustments. Everything in the tool text was measured on the test tenant by
+  creating a warehouse and a stock product, adjusting stock, and reading the
+  ledger before and after with a voucher lister that throws on a non-200.
+  - `reai_adjust_inventory` **requires `variantId`**, which the API marks
+    optional. An adjustment that omits it is accepted with `200` and a real
+    `transactionId` while moving no stock at all — four consecutive `+3`
+    adjustments left `quantityOnHand` at 0 — and nothing that can hold stock is
+    exempt, because the API refuses a stock product with no variants. Requiring
+    the field removes the failure mode instead of detecting it.
+  - Two checks sit either side of the write. Before: the variant must be one of
+    the warehouse's stock lines, which also supplies the quantity to measure
+    against; a variant the warehouse does not track is refused with the valid
+    ones listed. After: the API echoes the variant it acted on, and a **null echo
+    against a variant that was sent** is the no-op signature — that check needs
+    nothing from the pre-read, so it still holds when the inventory response
+    cannot be read or matched.
+  - It also accepts `yyyy-MM-dd` for `occurredAt` and completes the timestamp
+    itself: the API's field is `date-time`, and a bare date is refused by the
+    deserialiser with `400 "Failed to read request"` and no `fieldErrors`, so the
+    error names neither the field nor the reason.
+  - Measured and stated in the tool: an adjustment posts **no voucher**, stock
+    goes **negative** without complaint (`-10` against 4 on hand gives `-6`), and
+    no route lists or deletes a stock transaction, so the only correction is an
+    opposite adjustment. That last one is why it is irreversible.
+  - `reai_delete_warehouse` reports deleted vs archived. A warehouse holding 2
+    units was archived and kept its stock; one whose adjustments netted back to
+    zero was deleted outright — the trigger is current stock, not history.
+  - `archived` on the list is a **filter**, not an include-toggle: archived=true
+    returns only archived warehouses, and nothing returns both sets. Combined
+    with the archive-on-delete behaviour, stock can sit in a warehouse the
+    default list does not show.
+- **Six quirks** for the same measurements, so a `reai_request` caller gets the
+  warnings the curated tools give — including `stock-product-needs-a-variant`,
+  which is a `POST /api/products` rejection whose `fieldErrors` name a synthetic
+  flag (`stockProductVariantSelectionValid`) rather than a field you can send.
 
 - **Organisation toolset** (8 tools) — departments, employees and the employee
   ledger. `reai_list_postings`, `reai_general_ledger` and `reai_list_expenses`
@@ -53,9 +90,23 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- The README's `reai_delete_asset` row repeated the spec's claim that a linked
+  acquisition voucher is "deleted **or reversed**", which the paragraph directly
+  below it already contradicted and the tool's own description refutes: the call
+  is refused with `409` and changes nothing.
+- `delete-may-archive` covered `/api/warehouses/{id}` with the wrong trigger
+  ("already has transactions"). Measured, it is current stock **on hand** — a
+  warehouse whose adjustments netted back to zero was deleted outright, history
+  and all — so warehouses now have their own quirk and are no longer listed under
+  the generic one. Handing a `reai_request` caller the disproved version is worse
+  than giving them no note.
+
 - The `delete-may-archive` quirk was missing `/api/projects/{id}` and
   `/api/warehouses/{id}`, and said only customers could be unarchived — suppliers
-  can too, and the other six cannot, which makes an archive there one-way.
+  can too, and the others cannot, which makes an archive there one-way.
+  (`/api/warehouses/{id}` was later removed from it again, on measurement: its
+  trigger is stock on hand rather than transaction history. See
+  `warehouse-delete-archives-on-stock` under Unreleased.)
 
 ## 0.3.0
 

@@ -388,7 +388,7 @@ Projects are the obvious omission here, and deliberate: the Project module is di
 | `reai_create_asset` | Add an asset and its depreciation schedule. Posts **no voucher** — the register entry and the acquisition booking are separate | **irreversible** |
 | `reai_set_asset_depreciation` | Replace the method and useful life. Changes every future depreciation posting | **irreversible** |
 | `reai_write_off_asset` | Remove the remaining carrying value — the accounting act for something scrapped, lost or sold | **irreversible** |
-| `reai_delete_asset` | Delete the record. A linked acquisition voucher is deleted **or reversed**, so this can put a counter-entry in the ledger | **irreversible** |
+| `reai_delete_asset` | Delete the record. Refused with **409** while a voucher references the asset — the spec's "deleted or reversed" does not happen | **irreversible** |
 
 What each of these does was measured rather than read off the spec, and the spec turned out to be wrong about the most consequential one. Its DELETE description says a linked acquisition voucher is *"deleted when possible or reversed when accounting history must be retained"*. It is neither: with a posted voucher referencing the asset, the call answers `409 Asset with id N is used in existing vouchers and cannot be deleted` and changes nothing. That is the safer behaviour — there is no path here that quietly puts a counter-entry in your ledger.
 
@@ -409,9 +409,26 @@ Three fields decide whether a subscription reaches a customer on its own: `outpu
 
 `POST /api/subscriptions/generate-due` is deliberately **not** curated. It bills every due subscription in one call — the operation an agent would reach for to "catch up billing", and the one where a mistake is widest. It stays available through `reai_request`, where the refusal names what it is.
 
-Anything not listed — leads, agreements, projects, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Warehouses
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_warehouses` · `reai_get_warehouse` | The warehouses stock is held in. `archived` **selects** which set you get — no call returns both | read |
+| `reai_get_warehouse_inventory` | Stock on hand per variant, with the two totals already computed. Quantities can be **negative** | read |
+| `reai_create_warehouse` · `reai_rename_warehouse` | A name is the only field this resource has. Names are not unique, so identify one by id | reversible |
+| `reai_delete_warehouse` | Deletes when nothing is on hand, **archives** when something is — the response says which | reversible |
+| `reai_adjust_inventory` | Move stock in or out. A delta, not a new total. Posts **no voucher** and cannot be undone | **irreversible** |
 
-If 86 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+Measured against the live API, and the sharpest edge here fails silently. `variantId` is optional in the schema and **required by this tool**: omitting it answers `200` with a real `transactionId` and moves **no stock at all** — four consecutive `+3` adjustments left `quantityOnHand` at 0. Nothing that can hold stock is exempt, because the API refuses a stock product with no variants, so requiring the field removes the failure mode rather than detecting it. The field to send is `variantId`; a variant in the product response is keyed `variantId`, not `id`, which is exactly how this was hit.
+
+Two checks sit either side of the write. Before: the variant must be one of the warehouse's stock lines, which also supplies the quantity to measure against — a variant the warehouse does not track is refused with the valid ones listed, and nothing is written. After: the API echoes the variant it acted on, and a **null echo against a variant that was sent** is the no-op signature. That second check needs nothing from the pre-read, so it still holds when the inventory response cannot be read or matched.
+
+Three more that the spec does not say. `occurredAt` is `date-time` and rejects a bare date with `400 "Failed to read request"` naming no field — this tool accepts `yyyy-MM-dd` and completes it. Stock goes **negative** without complaint: `-10` against 4 on hand gives `-6` and a stock value of `-600`. And an adjustment posts **no voucher** — the count never moved off 0 across every adjustment measured — so stock value never reaches the ledger, while no route lists or deletes a stock transaction, leaving an opposite adjustment as the only correction.
+
+The delete is worth reading the response of: a warehouse holding 2 units was **archived**, kept its stock and vanished from the default list, while one whose adjustments netted back to zero was deleted outright. The trigger is current stock, not history — and since archived warehouses are only returned by `archived=true`, stock can sit somewhere the default list does not show.
+
+Anything not listed — leads, agreements, projects, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 93 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
@@ -420,10 +437,11 @@ REAI_TOOLSETS=purchase             # 20 tools
 REAI_TOOLSETS=organisation         # 15 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
-(unset)                            # all 86
+REAI_TOOLSETS=warehouses           # 14 tools
+(unset)                            # all 93
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets` and `subscriptions`; listing all seven is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions` and `warehouses`; listing all eight is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
@@ -431,7 +449,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **60 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **66 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
