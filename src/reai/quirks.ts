@@ -603,15 +603,24 @@ export const QUIRKS: readonly Quirk[] = [
       "outcome field, the call simply fails. Deactivate it instead. Verified live.",
   },
   {
-    id: "order-delete-needs-its-customer",
+    id: "order-delete-can-be-refused-with-500",
     paths: ["/api/orders/{id}"],
     methods: ["DELETE"],
     kind: "gotcha",
+    statuses: [500],
     note:
-      "Deleting an order whose customer has already been deleted answers 500 \"Referenced " +
-      "record is not accessible\", and unarchiving the customer does not undo it. So clean up " +
-      "in dependency order — orders first, then the customer — or the orders become " +
-      "undeletable through the API. Learned by getting it wrong on a test tenant.",
+      'Deleting an order can answer 500 "Referenced record is not accessible" and leave the ' +
+      "order in place — a 500 here is a refusal, not necessarily a server fault, so do not " +
+      "retry it. Eight orders on a test tenant have been stuck this way since being generated " +
+      "by a subscription.\n\n" +
+      "What is NOT the cause: their customer. This note previously blamed a deleted customer " +
+      "and prescribed deleting orders first. Re-measured, the 500 reproduces identically with " +
+      "that customer archived AND after POST /api/customers/{id}/unarchive puts it back to " +
+      "active, so the customer's state does not decide it. What the stuck orders have in common " +
+      "is a subscription that generated them and cannot itself be deleted once it has billing " +
+      "history — the likely holder, though it could not be isolated, because deleting that " +
+      "subscription to test is the one thing the API refuses. Clean up in dependency order " +
+      "anyway, and prefer deactivating a subscription over trying to unpick what it produced.",
   },
   {
     id: "subscription-created-active",
