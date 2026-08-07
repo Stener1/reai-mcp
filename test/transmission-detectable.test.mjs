@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { classifyRequest, classifyWithBody, classifyTransmission, isAllowed, WRITE_MODES } from "../dist/policy.js";
 import { allTools } from "../dist/server.js";
 
@@ -22,16 +23,38 @@ import { allTools } from "../dist/server.js";
  */
 
 /** Mirrors the list in scripts/smoke-http.mjs. */
-const TRANSMITTING_TOOLS = ["reai_create_invoice_from_order", "reai_credit_invoice"];
+/**
+ * The watch list, READ FROM THE SCRIPT rather than copied.
+ *
+ * This was a hand-maintained duplicate, which is the shape of guard this repo has been
+ * caught by twice: a test that mirrors the thing it guards tests the mirror. Adding a
+ * transmitting tool to the script and not to the copy, or the reverse, would leave both
+ * directions of the assertion below green while they disagreed.
+ */
+const SMOKE_HTTP = readFileSync(new URL("../scripts/smoke-http.mjs", import.meta.url), "utf8");
+const TRANSMITTING_TOOLS = (() => {
+  const block = /const TRANSMITTING_TOOLS = \[([\s\S]*?)\];/.exec(SMOKE_HTTP);
+  assert.ok(block, "could not find TRANSMITTING_TOOLS in scripts/smoke-http.mjs");
+  const names = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(names.length > 0, "parsed an empty watch list — the regex has drifted");
+  return names;
+})();
 
-/** Mirrors the paths that script probes. */
-const PROBED = [
-  { method: "POST", path: "/api/invoices/1/ehf", body: {} },
-  { method: "POST", path: "/api/invoices/1/email", body: { email: "x@example.invalid" } },
-  { method: "POST", path: "/api/peppol/messages/sendsbdh", body: {} },
-  { method: "POST", path: "/api/tax-returns/2026/submit", body: {} },
-  { method: "POST", path: "/api/orders", body: { customerId: 1, sendEhf: true, orderLines: [] } },
-];
+/**
+ * The paths the script probes, READ FROM THE SCRIPT.
+ *
+ * This was a hand-maintained mirror, and the commit that fixed the same problem for
+ * TRANSMITTING_TOOLS left it stale by exactly the two entries it added — so a regression
+ * making POST /api/subscriptions permitted in every mode would leave this file green while
+ * the script created a live auto-invoicing subscription on real books.
+ */
+const PROBED = (() => {
+  const block = /const sendingPaths = \[([\s\S]*?)\n  \];/.exec(SMOKE_HTTP);
+  assert.ok(block, "could not find sendingPaths in scripts/smoke-http.mjs");
+  const rows = [...block[1].matchAll(/\[\s*\n?\s*"[^"]*",\s*\n?\s*"([A-Z]+)",\s*\n?\s*"([^"]+)",\s*\n?\s*(\{[\s\S]*?\})\s*,?\s*\n?\s*\]/g)];
+  assert.ok(rows.length >= 5, `parsed ${rows.length} probed paths — the regex has drifted`);
+  return rows.map(([, method, path, body]) => ({ method, path, body: JSON.parse(body.replace(/(\w+):/g, '"$1":').replace(/'/g, '"')) }));
+})();
 
 const riskOf = (p) => classifyWithBody(classifyRequest(p.method, p.path), p.body);
 

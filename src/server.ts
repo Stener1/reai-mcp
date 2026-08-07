@@ -19,6 +19,7 @@ import { purchaseTools } from "./tools/purchase.js";
 import { bankVatTools } from "./tools/bankvat.js";
 import { organisationTools } from "./tools/organisation.js";
 import { assetTools } from "./tools/assets.js";
+import { subscriptionTools } from "./tools/subscriptions.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.3.0";
@@ -35,6 +36,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   bank: bankVatTools,
   organisation: organisationTools,
   assets: assetTools,
+  subscriptions: subscriptionTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];
@@ -276,6 +278,7 @@ const GROUP_BLURBS: Record<string, string> = {
   bank: "bank reconciliation and VAT (company accounts, reconciliation rules, matching, VAT periods)",
   organisation: "departments and employees, and the employee ledger — the ids that postings and expenses are tagged with",
   assets: "the fixed-asset register (anleggsmidler): what the company capitalises, and how it depreciates",
+  subscriptions: "recurring billing (abonnement): what bills whom, how often, and whether it goes out on its own",
 };
 
 function describeEnabledGroups(toolsets: readonly string[]): string {

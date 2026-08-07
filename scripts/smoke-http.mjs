@@ -361,7 +361,14 @@ async function main() {
   // external send is on, so a visible one means exactly the dangerous
   // configuration — and every path below classifies as irreversible, so in any
   // other configuration the refusal happens before a request is built.
-  const TRANSMITTING_TOOLS = ["reai_create_invoice_from_order", "reai_credit_invoice"];
+  const TRANSMITTING_TOOLS = [
+    "reai_create_invoice_from_order",
+    "reai_credit_invoice",
+    // Billing a subscription produces the document its outputMode names — a numbered
+    // invoice reaches the customer, so the tool is declared transmitting and is hidden
+    // unless external sending is on.
+    "reai_generate_subscription_billing",
+  ];
   const registeredTools = new Set(tools.map((t) => t.name));
   const visibleTransmitters = TRANSMITTING_TOOLS.filter((n) => registeredTools.has(n));
   const sendingEnabled = visibleTransmitters.length > 0;
@@ -372,6 +379,13 @@ async function main() {
     ["POST /api/peppol/messages/sendsbdh", "POST", "/api/peppol/messages/sendsbdh", {}],
     ["POST /api/tax-returns/{year}/submit", "POST", "/api/tax-returns/2026/submit", {}],
     ["POST /api/orders with sendEhf", "POST", "/api/orders", { customerId: 1, sendEhf: true, orderLines: [] }],
+    [
+      "POST /api/subscriptions with automaticBillingGeneration",
+      "POST",
+      "/api/subscriptions",
+      { customerId: 1, outputMode: "create_invoice", automaticBillingGeneration: true },
+    ],
+    ["POST /api/subscriptions/{id}/generate", "POST", "/api/subscriptions/1/generate", {}],
   ];
   // Two independent gates can refuse these, and which one fires depends on the
   // deployment's write mode. In `reversible` the write policy rejects them as

@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**77 tools**: 70 across six accounting domains, plus 7 always-on.
+**86 tools**: 79 across seven accounting domains, plus 7 always-on.
 
 ### Added
 
@@ -41,6 +41,15 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Deleting an asset that a voucher references is **refused with 409**, not
     reversed as the endpoint's own description claims. Verified by booking a
     voucher against an asset and deleting it.
+
+- **Subscriptions toolset** (9 tools) — recurring billing: list, read, billing
+  history, create, replace, activate, deactivate, bill-now and delete. The three
+  fields that make a subscription reach a customer on its own —
+  `outputMode: "create_invoice"`, `automaticBillingGeneration`, `sendEhf` — are
+  refused unless the server runs with `REAI_WRITE_MODE=full` **and**
+  `REAI_ALLOW_EXTERNAL_SEND`; a draft-order subscription that bills on request
+  needs neither. `POST /api/subscriptions/generate-due` is deliberately not
+  curated: it bills every due subscription at once.
 
 ### Fixed
 
