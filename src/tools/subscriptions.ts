@@ -42,10 +42,34 @@ const vatCodeArg = z
 
 const subscriptionLine = z
   .object({
-    itemName: z.string().min(1).describe("What is being billed."),
-    quantity: z.number().describe("Quantity per period."),
-    unitPrice: z.number().describe("Price per unit, excluding VAT."),
-    discount: z.number().optional().describe("Discount percentage, 0–100."),
+    // Optional in the spec, and deliberately optional here: a line that names a variantId
+    // takes its name from the product, so requiring itemName would have blocked the ordinary
+    // way to bill a catalogue item. The refinement below insists on one of the two.
+    itemName: z
+      .string()
+      .min(1)
+      .max(255, "The API caps itemName at 255 characters.")
+      .optional()
+      .describe("What is being billed. Omit only when variantId supplies it."),
+    // Bounds taken from SubscriptionLineReq, so a call that cannot succeed is refused here
+    // with the reason rather than at the API with a bare 400.
+    quantity: z
+      .number()
+      .min(1, "The API requires quantity to be at least 1.")
+      .max(100000, "The API caps quantity at 100000.")
+      .describe("Quantity per period, 1–100000."),
+    unitPrice: z
+      .number()
+      .min(-10_000_000, "The API caps unitPrice at ±10,000,000.")
+      .max(10_000_000, "The API caps unitPrice at ±10,000,000.")
+      .describe("Price per unit excluding VAT, within ±10,000,000."),
+    discount: z
+      .number()
+      .int("The API requires a WHOLE-number discount percentage: 50, not 50.5.")
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("Discount percentage, a whole number from 0 to 100."),
     comment: z.string().optional().describe("Line comment, visible to the customer."),
     vatCode: vatCodeArg,
     variantId: z
@@ -54,6 +78,9 @@ const subscriptionLine = z
       .positive()
       .optional()
       .describe("Product variant to bill, from the product's variants. Sets price and VAT."),
+  })
+  .refine((line) => line.itemName !== undefined || line.variantId !== undefined, {
+    message: "A line needs either an itemName or a variantId — otherwise it bills something unnamed.",
   })
   .describe("One recurring line.");
 
@@ -204,10 +231,15 @@ const getSubscription = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
+    // Resolved once and used for BOTH the request and the link. Passing the raw argument
+    // meant an omitted tenantId — the normal case once reai_use_tenant has run, or on a
+    // bound connector — left deepLink falling back to the environment default, so the URL
+    // could name a different company than the record it was showing.
+    const tenantId = requireTenantId(args.tenantId, ctx);
     const res = await ctx.client.request<Record<string, unknown>>({
       method: "GET",
       path: `/api/subscriptions/${args.id}`,
-      tenantId: requireTenantId(args.tenantId, ctx),
+      tenantId,
     });
     const s = res.data ?? {};
     const note =
@@ -220,7 +252,7 @@ const getSubscription = defineTool({
         : s.active === true
           ? `Active but not automatic: it bills only when reai_generate_subscription_billing is called.`
           : `Not active — it produces nothing until activated.`;
-    return ok(res.data, { note, link: ctx.client.deepLink(`/subscriptions/${args.id}`, args.tenantId) });
+    return ok(res.data, { note, link: ctx.client.deepLink(`/subscriptions/${args.id}`, tenantId) });
   },
 });
 

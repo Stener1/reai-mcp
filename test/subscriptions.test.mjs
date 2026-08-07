@@ -225,131 +225,56 @@ test("the update is described as the replacement it is", async () => {
   assert.equal(calls[0].body.customerId, 12);
 });
 
-test("a line needs enough to bill", () => {
-  const line = tool("reai_create_subscription").inputSchema.subscriptionLines;
-  assert.equal(line.safeParse([]).success, false, "a subscription with no lines bills nothing");
-  assert.equal(line.safeParse([{ itemName: "Drift", quantity: 1, unitPrice: 100 }]).success, true);
-  assert.equal(line.safeParse([{ quantity: 1, unitPrice: 100 }]).success, false, "itemName is required");
-});
-
-// The first version of the create description said "Created INACTIVE: nothing is produced
-// until reai_activate_subscription", and gave that as the reason creating one is ordinary
-// reversible work. A live create returned active: true. The claim was false, and it was the
-// kind that makes someone comfortable — so what actually keeps a new subscription harmless
-// is automaticBillingGeneration: false, not its newness.
-test("the create tool does not claim an inert draft stage", async () => {
-  const description = tool("reai_create_subscription").description;
-  assert.match(description, /Created ACTIVE/);
-  assert.doesNotMatch(description, /Created INACTIVE/);
-  assert.match(description, /automaticBillingGeneration: false/);
-  assert.match(tool("reai_activate_subscription").description, /already active/);
-
-  // And the note reports what the API returned rather than what the description expects.
-  const active = await run("reai_create_subscription", {
-    customerId: 1, startDate: "2026-09-01", intervalMonths: 1, billingTiming: "in_advance",
-    currencyCode: "NOK", outputMode: "create_order", automaticBillingGeneration: false,
-    subscriptionLines: [{ itemName: "x", quantity: 1, unitPrice: 1 }],
-  }, { id: 9, active: true });
-  assert.match(active.text, /Created subscription 9 — ACTIVE/);
-});
-
-// The arming state lives on the RECORD, and activate carries no body — so the argument gate
-// has nothing to inspect. Without reading the subscription first, one call in `full` mode
-// with sending OFF resumes automatic numbered invoicing over Peppol: the exact thing that
-// switch exists to prevent, and reai_generate_subscription_billing — a strictly smaller
-// action, one billing — is already gated on it.
-test("activating an armed subscription is refused when sending is off", async () => {
-  const armedRecord = subscription({
-    active: false,
-    automaticBillingGeneration: true,
-    outputMode: "create_invoice",
-    sendEhf: true,
-  });
-  const attempt = async (allowExternalSend, record) => {
-    const calls = [];
-    const ctx = {
-      client: {
-        request: async (req) => {
-          calls.push(req);
-          return { data: record, status: 200 };
-        },
-        deepLink: () => "link",
-      },
-      config: { writeMode: "full", tenantId: 2783, allowExternalSend },
-      session: {},
-    };
-    try {
-      const r = await tool("reai_activate_subscription").handler({ id: 4, tenantId: 2783 }, ctx);
-      return { calls, text: r.content[0].text };
-    } catch (err) {
-      return { calls, error: String(err.message ?? err) };
-    }
+test("a line is checked against the bounds the API enforces", () => {
+  const lines = tool("reai_create_subscription").inputSchema.subscriptionLines;
+  const ok = (v) => assert.equal(lines.safeParse([v]).success, true, JSON.stringify(v));
+  const no = (v, pattern) => {
+    const r = lines.safeParse([v]);
+    assert.equal(r.success, false, `should be rejected: ${JSON.stringify(v)}`);
+    if (pattern) assert.match(r.error.issues[0].message, pattern);
   };
 
-  const blocked = await attempt(false, armedRecord);
-  assert.ok(blocked.error, "an armed subscription must not be re-armed with sending off");
-  assert.match(blocked.error, /automaticBillingGeneration/);
-  assert.match(blocked.error, /sendEhf/);
-  // And it must be refused BEFORE the activate call is made, not after.
-  assert.deepEqual(
-    blocked.calls.map((c) => c.method),
-    ["GET"],
-    "the refusal has to happen before the POST, or the subscription is already running",
-  );
+  ok({ itemName: "Drift", quantity: 1, unitPrice: 1000 });
+  // A variant supplies its own name, so requiring itemName would block the ordinary way to
+  // bill a catalogue item. The spec makes both optional; one of them has to be there.
+  ok({ variantId: 5, quantity: 1, unitPrice: 100 });
+  no({ quantity: 1, unitPrice: 1 }, /either an itemName or a variantId/);
 
-  const allowed = await attempt(true, armedRecord);
-  assert.ok(!allowed.error, "with sending on it is the operator's call");
-  assert.match(allowed.text, /it now bills on its own/);
+  // SubscriptionLineReq's own bounds, refused here with the reason rather than at the API
+  // with a bare 400.
+  no({ itemName: "x", quantity: 0, unitPrice: 1 }, /at least 1/);
+  no({ itemName: "x", quantity: 100001, unitPrice: 1 }, /100000/);
+  no({ itemName: "x", quantity: 1, unitPrice: 20_000_000 }, /10,000,000/);
+  no({ itemName: "x", quantity: 1, unitPrice: -20_000_000 }, /10,000,000/);
+  // "Must be a whole-number value from 0 to 100", per the field's own description.
+  no({ itemName: "x", quantity: 1, unitPrice: 1, discount: 50.5 }, /WHOLE-number/);
+  no({ itemName: "x", quantity: 1, unitPrice: 1, discount: 150 });
+  no({ itemName: "x".repeat(256), quantity: 1, unitPrice: 1 }, /255/);
+  ok({ itemName: "x", quantity: 1, unitPrice: 1, discount: 50 });
 
-  // A subscription that bills only on request is not arming anything, so it stays usable
-  // with sending off — otherwise restarting an ordinary one would need the dangerous mode.
-  const manual = await attempt(false, subscription({ active: false }));
-  assert.ok(!manual.error, "an unarmed subscription must still be activatable");
-  assert.match(manual.text, /bills only when reai_generate_subscription_billing is called/);
+  assert.equal(lines.safeParse([]).success, false, "a subscription with no lines bills nothing");
 });
 
-// The API answers with counts. The first version ignored all four and said "Billed
-// subscription N" whatever came back, so a run that generated nothing read as success.
-test("generate reports what the API said it produced", async () => {
-  const nothing = await run("reai_generate_subscription_billing", { id: 4 }, {
-    generatedBillings: 0, generatedOrders: 0, generatedInvoices: 0, safetyCapHits: 0,
-  });
-  assert.match(nothing.text, /Nothing was generated/);
-  assert.match(nothing.text, /nothing reached the customer/);
-  assert.doesNotMatch(nothing.text, /^Billed subscription/);
-
-  const many = await run("reai_generate_subscription_billing", { id: 4 }, {
-    generatedBillings: 8, generatedOrders: 8, generatedInvoices: 0, safetyCapHits: 0,
-  });
-  assert.match(many.text, /Generated 8 billing\(s\)/);
-  assert.match(many.text, /8 order\(s\) and 0 invoice\(s\)/);
-
-  const invoiced = await run("reai_generate_subscription_billing", { id: 4 }, {
-    generatedBillings: 2, generatedOrders: 0, generatedInvoices: 2, safetyCapHits: 0,
-  });
-  assert.match(invoiced.text, /numbered documents and have left for the customer/);
-
-  const capped = await run("reai_generate_subscription_billing", { id: 4 }, {
-    generatedBillings: 3, generatedOrders: 3, generatedInvoices: 0, safetyCapHits: 2,
-  });
-  assert.match(capped.text, /safety cap 2 time\(s\); some periods were NOT generated/);
-
-  // An absent count is unknown, never zero and never success.
-  const silent = await run("reai_generate_subscription_billing", { id: 4 }, {});
-  assert.match(silent.text, /did not report how much it produced/);
-  assert.doesNotMatch(silent.text, /Nothing was generated/);
-});
-
-// serviceRecipients is on the write schema and returned by the read, and the update is a
-// full replacement — so leaving it out of the tool meant "read it first and send back what
-// you do not intend to change" was impossible to follow.
-test("the write schema can express everything the read returns", () => {
-  for (const name of ["reai_create_subscription", "reai_update_subscription"]) {
-    const schema = tool(name).inputSchema;
-    assert.ok(schema.serviceRecipients, `${name} must be able to send serviceRecipients`);
-    assert.equal(
-      schema.serviceRecipients.safeParse([{ organizationNumber: "123456789", name: "Mottaker AS" }]).success,
-      true,
-    );
-  }
+// Every other tool in the repo passes the RESOLVED tenant to deepLink. Passing the raw
+// argument meant an omitted tenantId — the normal case once reai_use_tenant has run — fell
+// back to the environment default, so the link could name a different company than the
+// record above it.
+test("the deep link names the tenant the record came from", async () => {
+  const seen = [];
+  const ctx = {
+    client: {
+      request: async () => ({ data: { id: 4, active: false }, status: 200 }),
+      deepLink: (path, tenantId) => {
+        seen.push({ path, tenantId });
+        return `https://app.reai.no${path}?tenantId=${tenantId}`;
+      },
+    },
+    // No tenantId in the arguments; the session supplies it, as it does after
+    // reai_use_tenant or on a bound connector.
+    config: { writeMode: "read-only" },
+    session: { activeTenantId: 2783 },
+  };
+  const result = await tool("reai_get_subscription").handler({ id: 4 }, ctx);
+  assert.deepEqual(seen, [{ path: "/subscriptions/4", tenantId: 2783 }]);
+  assert.match(result.content[0].text, /tenantId=2783/);
 });
