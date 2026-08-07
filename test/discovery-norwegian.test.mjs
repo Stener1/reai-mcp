@@ -75,12 +75,36 @@ test("a Norwegian query finds the endpoint it is about", () => {
   assert.ok(outsideTop3.length <= 2, `too many outside the top 3: ${outsideTop3.join(", ")}`);
 });
 
-test("the English queries did not regress", () => {
-  const misses = [];
+// Presence in the top 25 was all this asserted, so an English query could slide from first
+// to twenty-fifth and still pass — and a rank regression is precisely what it exists to
+// catch. The compound pass caused one: because a term's weight was pinned by whichever token
+// mentioned it first, "fakturagebyr på faktura" put /api/invoices fourth while the same two
+// words in the other order kept it first. Ranks are asserted now.
+test("the English queries did not regress in RANK, not merely in presence", () => {
+  const worse = [];
   for (const [query, want] of ENGLISH) {
-    if (rankOf(query, want) < 0) misses.push(`${query} → ${want}`);
+    const rank = rankOf(query, want);
+    if (rank < 0) worse.push(`${query} → not found`);
+    else if (rank >= 3) worse.push(`${query} → rank ${rank + 1}`);
   }
-  assert.deepEqual(misses, []);
+  // "salary run" sits outside the top three on main as well; it is the one query here that
+  // was already mediocre, and this change does not affect it either way.
+  assert.deepEqual(worse, ["salary run → rank 8"], "an English query lost ground");
+});
+
+// The order-dependence bug in its own right, since it is the kind that hides: both phrasings
+// have to give the same answer, or the ranking depends on which word a user types first.
+test("word order does not change the answer", () => {
+  for (const [a, b, want] of [
+    ["fakturagebyr på faktura", "faktura på fakturagebyr", "GET /api/invoices"],
+    ["fakturagebyr fakturaer", "fakturaer fakturagebyr", "GET /api/invoices"],
+    ["lønnskjøring bilag", "bilag lønnskjøring", "POST /api/vouchers"],
+  ]) {
+    const rankA = rankOf(a, want);
+    const rankB = rankOf(b, want);
+    assert.ok(rankA >= 0 && rankB >= 0, `${want} should be found for both orderings`);
+    assert.equal(rankA, rankB, `"${a}" and "${b}" rank ${want} differently (${rankA + 1} vs ${rankB + 1})`);
+  }
 });
 
 // The mechanism, separately from the vocabulary: a compound has to decompose even when its
@@ -104,4 +128,21 @@ test("a Norwegian compound is decomposed", () => {
     !kontor.includes("/api/chart-of-accounts"),
     "a coincidental substring must not become a synonym",
   );
+
+  // An unanchored `includes` matched a stem anywhere in the token, so ordinary Norwegian
+  // words returned accounting endpoints with confidence: "kolonner" (columns) and
+  // "belønning" (reward) both reached payroll, "sekunder" (seconds) the customer ledger,
+  // "slager" (a hit song) the warehouse. Compounds keep their elements at the edges, so a
+  // stem is only accepted at one — with at least two characters left over for the other.
+  for (const word of ["kolonner", "belønning", "sekunder", "slager", "lønnsomhet"]) {
+    assert.equal(
+      searchOperations({ query: word, limit: 3 }).length,
+      0,
+      `"${word}" is not an accounting term and should match nothing`,
+    );
+  }
+  // "lønnsomhet" shares a root with lønn rather than merely containing it, which no string
+  // rule separates — it is listed as an exception, and the multi-word phrasing still works
+  // because the real resource term carries it.
+  assert.ok(rankOf("lønnsomhet per avdeling", "GET /api/departments") >= 0);
 });
