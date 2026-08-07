@@ -125,3 +125,59 @@ test("describeOperation terminates on recursive schemas", () => {
     assert.doesNotThrow(() => JSON.stringify(describeOperation(op, 4)), `${op.method} ${op.path}`);
   }
 });
+
+// An enum is a closed set, so a silently-shortened one is worse than none: the agent
+// reads it as exhaustive and concludes the missing values are illegal. Both the index
+// and describeOperation used to cut at 8 and 12 with no marker, which is how
+// GET /api/vouchers advertised 8 of its 16 voucher types.
+test("enums are published in full, and truncation is always marked", () => {
+  const index = getSpecIndex();
+  const vouchers = index.operations.find((o) => o.method === "GET" && o.path === "/api/vouchers");
+  const voucherType = vouchers.params.find((p) => p.name === "voucherType").type;
+  for (const value of ["MANUAL", "VAT_RETURN", "LOAN", "CUSTOMER_INVOICE_ADJUSTMENT"]) {
+    assert.ok(voucherType.includes(value), `voucherType enum is missing ${value}: ${voucherType}`);
+  }
+  assert.ok(!/\+\d+ more/.test(voucherType), "16 values fit under the limit; nothing should be dropped");
+
+  // Every enum that IS shortened says so, in the index and at runtime alike.
+  for (const op of index.operations) {
+    for (const p of op.params ?? []) {
+      if (!p.type.startsWith("enum(")) continue;
+      const shown = p.type.slice(5, p.type.lastIndexOf(")")).split("|");
+      assert.ok(
+        shown.length <= 24 || /\+\d+ more/.test(p.type),
+        `${op.method} ${op.path} ${p.name}: ${shown.length} values with no truncation marker`,
+      );
+    }
+  }
+});
+
+// An array parameter carries its enum on `items`, which the array branch read past
+// entirely — so three live parameters rendered as a bare `string[]` with their legal
+// values published nowhere in the server's output.
+test("array-valued enums keep their values", () => {
+  const index = getSpecIndex();
+  const op = index.operations.find(
+    (o) => o.method === "GET" && o.path === "/api/bank-reconciliations/{bankAccountId}",
+  );
+  const include = op.params.find((p) => p.name === "include");
+  assert.match(include.type, /^enum\(/, `expected an enum, got ${include.type}`);
+  assert.ok(include.type.endsWith("[]"), `expected an array marker, got ${include.type}`);
+  for (const value of ["summary", "pending_transactions", "pending_postings", "matched_groups"]) {
+    assert.ok(include.type.includes(value), `missing ${value}`);
+  }
+  // ...and the same value survives the runtime path, which re-derives from the raw spec.
+  const described = describeOperation(op).parameters.find((p) => p.name === "include");
+  assert.ok(described.type.includes("matched_groups"), described.type);
+});
+
+// A 45-value enum exists (user permission codes), so the limit really does bind
+// somewhere. When it does, the full set must remain reachable — the compact index is
+// a search summary, describe is authoritative.
+test("a truncated enum is still recoverable in full from describeOperation", () => {
+  const index = getSpecIndex();
+  const op = index.operations.find((o) => o.method === "POST" && o.path === "/api/users");
+  assert.match(op.body.fields.directPermissionCodes, /\+\d+ more/);
+  const full = describeOperation(op).requestBody?.schema?.properties?.directPermissionCodes;
+  assert.ok(full.items.enum.length > 24, `expected the full set, got ${full.items.enum?.length}`);
+});

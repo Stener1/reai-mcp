@@ -478,7 +478,11 @@ export function describeOperation(op: SpecOperation, maxDepth = 4): DescribedOpe
     const key = `${p.in}:${p.name}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const schema = deref(p.schema, ctx) as { type?: unknown; enum?: unknown[]; format?: string };
+    const raw = deref(p.schema, ctx) as SchemaShape & { items?: unknown };
+    // An array parameter's enum lives on `items`, which may itself be a $ref.
+    const schema: SchemaShape = raw?.items
+      ? { ...raw, items: deref(raw.items, ctx) as SchemaShape }
+      : raw;
     parameters.push({
       name: p.name,
       in: p.in ?? "query",
@@ -571,7 +575,9 @@ function expand(node: unknown, ctx: Ctx, depth: number, seen = new Set<string>()
   return out;
 }
 
-function describeType(schema: { type?: unknown; enum?: unknown[]; format?: string } | undefined): string {
+type SchemaShape = { type?: unknown; enum?: unknown[]; format?: string; items?: SchemaShape };
+
+function describeType(schema: SchemaShape | undefined): string {
   if (!schema) return "string";
   const t = schema.type;
   let base: string;
@@ -582,11 +588,15 @@ function describeType(schema: { type?: unknown; enum?: unknown[]; format?: strin
   } else {
     base = typeof t === "string" ? t : "string";
   }
-  if (schema.enum) {
-    return `enum(${schema.enum
-      .filter((e) => e !== null)
-      .slice(0, 12)
-      .join("|")})`;
+  // Kept in step with ENUM_LIMIT in scripts/build-spec-index.mjs, and truncating is
+  // marked rather than silent: a partial enum reads as exhaustive, so an agent shown
+  // 12 of 16 voucher types concludes the missing four are not valid filters. Arrays
+  // carry the enum on `items`.
+  const enumValues = (schema.enum ?? schema.items?.enum)?.filter((e) => e !== null);
+  if (enumValues?.length) {
+    const shown = enumValues.slice(0, 24).join("|");
+    const suffix = enumValues.length > 24 ? `|+${enumValues.length - 24} more` : "";
+    return `enum(${shown}${suffix})${base.startsWith("array") ? "[]" : ""}`;
   }
   if (schema.format) base = `${base.replace("?", "")}(${schema.format})${base.endsWith("?") ? "?" : ""}`;
   return base;
