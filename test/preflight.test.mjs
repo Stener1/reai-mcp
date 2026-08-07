@@ -943,3 +943,44 @@ test("the list endpoint warns that reversed supplier invoices are hidden", () =>
   );
   assert.match((del.quirks ?? []).map((q) => q.note).join(" "), /outcome/i);
 });
+
+// Settled by writing to a live tenant, which is the only thing that could settle it: the
+// spec states the rule in prose but declares no `minimum`, and a review flagged the local
+// guard as possibly over-tight because a Norwegian supplier invoice ordinarily carries a
+// negative discount or øre-rounding line. It is not over-tight — the API enforces it per
+// line — so the guard stays, and the refusal now says how to express a discount instead.
+test("a mixed-sign supplier invoice is refused with a way forward", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_create_supplier_invoice");
+  let sent = 0;
+  const ctx = {
+    client: { request: async () => { sent += 1; return { data: { id: 1 }, status: 201 } }, deepLink: () => "l" },
+    config: { writeMode: "full", tenantId: 2783 },
+    session: {},
+  };
+  const line = (amount, description) => ({ amount, debitAccount: "6700", description });
+  const args = (costLines) => ({ supplierId: 1, date: "2026-08-07", dueDate: "2026-09-07", costLines, tenantId: 2783 });
+
+  const mixed = await tool.handler(args([line(1000, "Varer"), line(-200, "Rabatt")]), ctx);
+  assert.equal(sent, 0, "nothing may be sent for a document the API will reject");
+  const text = mixed.content.map((c) => c.text).join("\n");
+  assert.match(text, /-200/, "name the offending amount");
+  // The part that matters: the caller is told what to do instead.
+  assert.match(text, /netting it into the line it discounts/);
+  assert.match(text, /documentType="credit_note"/);
+  assert.match(text, /API's own rule/, "say whose rule this is, so it is not read as our restriction");
+
+  // An ordinary all-positive invoice still goes through.
+  const ok = await tool.handler(args([line(1000, "Varer"), line(250, "Frakt")]), ctx);
+  assert.equal(ok.isError, undefined);
+  assert.equal(sent, 1);
+
+  // And an all-negative credit note.
+  sent = 0;
+  const credit = await tool.handler(
+    { ...args([line(-1000, "Kreditnota")]), documentType: "credit_note" },
+    ctx,
+  );
+  assert.equal(credit.isError, undefined);
+  assert.equal(sent, 1);
+});

@@ -434,6 +434,24 @@ export const QUIRKS: readonly Quirk[] = [
       "an invoice, at most -0.01 on a credit note.",
   },
   {
+    // Verified against a live tenant rather than read off the schema: the spec states
+    // the rule in prose but declares no `minimum`, so it was not knowable which way the
+    // API would go until a real POST settled it.
+    id: "supplier-invoice-costline-signs",
+    paths: ["/api/supplier-invoices"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [400],
+    note:
+      "Cost-line signs are enforced PER LINE, not per document: every amount must be at least " +
+      "0.01 on documentType=invoice and at most -0.01 on credit_note. Verified live — " +
+      "[1000, 250] posts, [1000, -200] and even [1000, -0.4] are rejected with " +
+      '"costLines amount must be at least 0.01 for invoice and at most -0.01 for credit_note". ' +
+      "So a discount or an øre-rounding line cannot ride along as a negative line on an " +
+      "invoice, which is how such a document usually looks on paper. Net it into the line it " +
+      "discounts, or send the credit as its own credit_note document with all amounts negative.",
+  },
+  {
     // The consequence half of supplier-invoice-reverses, scoped to the endpoint where
     // it actually bites. It was recorded only on the DELETE, so an agent asking "is
     // this invoice already registered?" through the LIST got no warning — and
