@@ -368,22 +368,34 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_apply_reconciliation_rules` | Run the rules over a period (background job) | **irreversible** |
 | `reai_create_vat_return` | Settle and **lock** a VAT term — does *not* file with Skatteetaten | **irreversible** |
 
-Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, employees, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Organisation
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_departments` · `reai_get_department` | Departments and their ids — what postings, employees and reports are tagged with | read |
+| `reai_create_department` · `reai_update_department` · `reai_delete_department` | Manage departments. `DELETE` **archives instead of deleting** when something references the record, and says which in `{"outcome":…}`; departments have no unarchive endpoint | reversible |
+| `reai_list_employees` | Everyone on the payroll, as a summary — the `id` is the `employeeId` postings, the ledger and expenses take | read |
+| `reai_get_employee` | One full record. The national identity number and bank account are **redacted** unless `includePersonalData` is set | read |
+| `reai_employee_ledger` | What is owed to or from each employee, with the postings behind it. `isOpenPosting` widens the window back to 2000, so an unsettled refund from last year is not hidden | read |
 
-If 63 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
+
+Anything not listed — leads, agreements, subscriptions, projects, assets, warehouses, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 71 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 37 tools
 REAI_TOOLSETS=purchase             # 20 tools
-(unset)                            # all 59
+REAI_TOOLSETS=organisation         # 15 tools
+(unset)                            # all 71
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase` and `bank`; listing all four is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank` and `organisation`; listing all five is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **50 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~258 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **53 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~258 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

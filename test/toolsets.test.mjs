@@ -85,6 +85,24 @@ test("every tool declares a risk the policy knows", () => {
 
 // --- The guard that matters most -------------------------------------------
 
+// reai_delete_department shipped without `destructive: true` while all eight other delete
+// tools had it — so a host that prompts before destructive tools would have confirmed
+// deleting a customer, which can be unarchived, and run the one delete whose archive branch
+// is one-way. The annotation is the only thing left protecting a call the write mode allows,
+// so the sweep is mechanical rather than per-tool.
+test("every tool that deletes is annotated destructive", () => {
+  const undeclared = registeredTools
+    .filter((t) => t.name.startsWith("reai_delete_") || (t.apiPaths ?? []).some(([m]) => m === "DELETE"))
+    .filter((t) => t.destructive !== true && t.risk !== "irreversible")
+    .map((t) => t.name);
+  assert.deepEqual(
+    undeclared,
+    [],
+    "a DELETE tool without destructive:true gets destructiveHint:false, so a client that " +
+      "asks before destructive actions will run it silently",
+  );
+});
+
 test("no curated tool is more permissive than the escape hatch would be", () => {
   // The worst bug class in this codebase is a curated tool that quietly does
   // what reai_request refuses -- it would silently defeat REAI_WRITE_MODE. Each

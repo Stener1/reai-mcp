@@ -389,13 +389,52 @@ export const QUIRKS: readonly Quirk[] = [
       // reai_request caller got no warning, even though the curated tools say it.
       "/api/products/{id}",
       "/api/company-banks/{id}",
+      // The last two sharing the identical spec wording, found by matching on the
+      // sentence rather than by listing them from memory.
+      "/api/projects/{id}",
+      "/api/warehouses/{id}",
     ],
     methods: ["DELETE"],
     kind: "gotcha",
     note:
       "DELETE archives instead of deleting when the record already has transactions, preserving the " +
-      'audit trail. The response says which happened (outcome: "deleted" | "archived"). Customers ' +
-      "can be unarchived with POST /api/customers/{id}/unarchive.",
+      'audit trail. The response says which happened (outcome: "deleted" | "archived") — read it ' +
+      "rather than treating 200 as deletion. ONLY customers and suppliers can be unarchived " +
+      "(POST /api/{customers,suppliers}/{id}/unarchive); for the other six an archive is one-way, " +
+      "and the record stays hidden from the active list.",
+  },
+
+  {
+    id: "employee-list-is-a-projection",
+    paths: ["/api/employees"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "The COLLECTION returns id, name and email only — EmployeeSummaryRes, not the full " +
+      "record. Department, phone, employment dates, bank account and national identity number " +
+      "come from GET /api/employees/{id}. Verified by creating an employee and reading the list " +
+      "back. Filtering the list on a field it does not return finds nothing, rather than failing.",
+  },
+  {
+    id: "employee-name-is-title-cased",
+    paths: ["/api/employees", "/api/employees/{id}"],
+    methods: ["POST", "PATCH"],
+    kind: "gotcha",
+    note:
+      'The API normalises the name\'s capitalisation: "ZZ MCP Shape Probe" was stored as ' +
+      '"Zz Mcp Shape Probe". Observed on a live create. So a read-back will not match what was ' +
+      "sent for names with deliberate casing (McDonald, van der Berg, initialisms), and an " +
+      "equality check against the value you sent will fail.",
+  },
+  {
+    id: "employee-delete-is-hard",
+    paths: ["/api/employees/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "DELETE answers 204 with no body and the record is gone — employees do NOT follow the " +
+      "delete-or-archive contract that customers, suppliers, departments and five others use, " +
+      "and there is no outcome field to read. Verified on a live create/delete round-trip.",
   },
 
   // --- Subscriptions -------------------------------------------------------

@@ -150,13 +150,39 @@ test("the lockfile version tracks package.json", () => {
   assert.equal(lock.packages[""].version, PKG.version, 'package-lock.json packages[""] version');
 });
 
+// The (unset) row in .env.example claimed "all 59" while the real total was 71, and the
+// existing sweep could not see it: its regex only matches rows naming a group, so the row
+// stating the TOTAL — the one an operator reads first — was the one nothing checked.
+test(".env.example states the real total, not just the per-group counts", () => {
+  const row = /^#\s+\(unset\)\s+->\s+all (\d+)$/m.exec(ENV_EXAMPLE);
+  assert.ok(row, ".env.example should keep an (unset) -> all N row");
+  assert.equal(Number(row[1]), allTools.length, "the (unset) total is stale");
+
+  // And the prose listing the valid groups has to name every group that exists. It said
+  // "bookkeeping, sales, purchase, bank" for a while after a fifth group shipped.
+  const groups = Object.keys(TOOL_GROUPS);
+  for (const source of [ENV_EXAMPLE, README]) {
+    const sentence = /Valid groups[^.]*\./.exec(source)?.[0] ?? "";
+    if (!sentence) continue;
+    for (const group of groups) {
+      assert.ok(sentence.includes(group), `"Valid groups" omits ${group}: ${sentence}`);
+    }
+  }
+});
+
 test("tool counts stated in the changelog match the groups", () => {
   // The changelog said "59 curated tools across four domains, plus discovery",
   // which read as 59 domain tools with discovery on top. It is 52 + 7.
   const domainTotal = Object.values(TOOL_GROUPS).flat().length;
+  // The domain COUNT is part of the sentence, and it was hardcoded to "four" — so adding a
+  // fifth group made this fail against the 0.3.0 entry, which is a historical record and
+  // correct as written. The current total belongs in the unreleased section; released
+  // entries describe what shipped then.
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"];
+  const domains = Object.keys(TOOL_GROUPS).length;
   assert.ok(
-    CHANGELOG.includes(`${domainTotal} across four accounting domains`),
-    `changelog should say ${domainTotal} domain tools`,
+    CHANGELOG.includes(`${domainTotal} across ${words[domains]} accounting domains`),
+    `changelog should say ${domainTotal} tools across ${words[domains]} accounting domains`,
   );
   assert.ok(
     CHANGELOG.includes(`${alwaysOnTools.length} always-on`),

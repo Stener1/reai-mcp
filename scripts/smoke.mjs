@@ -248,6 +248,25 @@ async function main() {
       ["reai_list_reception_documents", { tenantId }, (t) => /document\(s\) awaiting processing/.test(t)],
       ["reai_list_reception_documents", { tenantId, kind: "invoice" }, (t) => /invoice document\(s\)/.test(t)],
       ["reai_list_expenses", { tenantId }, (t) => /expense claim\(s\)/.test(t)],
+      // Organisation. An empty tenant is the common case here, and the assertion is on the
+      // sentence that distinguishes "none are defined" from "unavailable" — the two readings
+      // this server exists to keep apart.
+      [
+        "reai_list_departments",
+        { tenantId },
+        (t) => /department\(s\)\.$/m.test(t) || /No departments\. That is not the same/.test(t),
+      ],
+      [
+        "reai_list_employees",
+        { tenantId },
+        (t) => /employee\(s\), summarised/.test(t) || /No employees are registered/.test(t),
+      ],
+      ["reai_employee_ledger", { tenantId }, (t) => /Employee ledger \d{4}-\d{2}-\d{2} to/.test(t)],
+      [
+        "reai_employee_ledger",
+        { tenantId, isOpenPosting: true },
+        (t) => /Employee ledger 2000-01-01 to/.test(t) && /window widened/.test(t),
+      ],
     ]) {
       try {
         const res = await client.callTool({ name, arguments: args });
