@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveOperation, missingRequired, findOperation, getSpecIndex } from "../dist/reai/spec.js";
+import { resolveOperation, missingRequired, findOperation, getSpecIndex, describeOperation } from "../dist/reai/spec.js";
 import { allTools } from "../dist/server.js";
 import { ok } from "../dist/tools/registry.js";
 
@@ -887,4 +887,54 @@ test("nested truncation is fast, fair, and counts its own note", () => {
   const many = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`field${i}`, ["v".repeat(20)]]));
   const wide = ok(many).content[0].text;
   assert.ok(wide.length <= 24_000, `note plus body came to ${wide.length} characters`);
+});
+
+// Money fields on the two irreversible payment tools accepted sub-øre precision, which
+// the spec forbids (multipleOf 0.01). isWholeOre existed and was applied to line
+// quantities but to no amount field.
+test("money amounts must be whole øre", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const { isWholeOre } = await import("../dist/tools/registry.js");
+
+  const field = (tool, name) => allTools.find((t) => t.name === tool).inputSchema[name];
+  for (const [tool, name] of [
+    ["reai_register_invoice_payment", "receivedAmount"],
+    ["reai_register_supplier_invoice_payment", "invoiceAmount"],
+  ]) {
+    const schema = field(tool, name);
+    assert.equal(schema.safeParse(100).success, true, `${tool}.${name} must accept 100`);
+    assert.equal(schema.safeParse(100.55).success, true, `${tool}.${name} must accept 100.55`);
+    assert.equal(schema.safeParse(1234.567).success, false, `${tool}.${name} must reject sub-øre`);
+  }
+
+  // The exponent guard used to read only the FRACTION, and String(1e-7) is "1e-7" with
+  // no decimal point at all — so the fraction came out empty and passed.
+  assert.equal(isWholeOre(1e-7), false);
+  assert.equal(isWholeOre(1.5e-7), false);
+  assert.equal(isWholeOre(1e21), false);
+  // And the value that a fixed 1e-9 epsilon wrongly rejected still passes: 279796.4 is
+  // a valid multiple of 0.01 even though 279796.4 * 100 is off by ~3.7e-9.
+  assert.equal(isWholeOre(279796.4), true);
+  assert.equal(isWholeOre(1.005), false);
+  assert.equal(isWholeOre(0.01), true);
+});
+
+// A quirk recorded against the DELETE said that GET /api/supplier-invoices hides
+// reversed invoices — the consequence half — but was scoped so it never surfaced there.
+// An agent asking "is invoice 10009 already registered?" through the list got no
+// warning, and re-registering posts to the ledger a second time.
+test("the list endpoint warns that reversed supplier invoices are hidden", () => {
+  const index = getSpecIndex();
+  const list = describeOperation(
+    index.operations.find((o) => o.method === "GET" && o.path === "/api/supplier-invoices"),
+  );
+  const notes = (list.quirks ?? []).map((q) => q.note).join(" ");
+  assert.match(notes, /NON-REVERSED/i, "the list must warn about hidden reversals");
+  assert.match(notes, /absence from this list is not evidence/i);
+
+  // And the DELETE keeps its own note, which is about the outcome string.
+  const del = describeOperation(
+    index.operations.find((o) => o.method === "DELETE" && o.path === "/api/supplier-invoices/{id}"),
+  );
+  assert.match((del.quirks ?? []).map((q) => q.note).join(" "), /outcome/i);
 });

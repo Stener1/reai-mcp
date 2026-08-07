@@ -300,6 +300,30 @@ function countFittingSerialized(items: unknown[]): number {
 }
 
 /** Shared `tenantId` argument. Every tenant-scoped tool accepts it. */
+/**
+ * Whether a number is a whole number of øre.
+ *
+ * A fixed 1e-9 tolerance is smaller than floating-point error at the magnitudes this
+ * API accepts: 279796.4 is a valid multiple of 0.01, yet 279796.4 * 100 differs from
+ * its rounded value by about 3.7e-9, so a fixed epsilon rejected a perfectly valid
+ * quantity. Comparing the decimal representation avoids the arithmetic entirely.
+ */
+export function isWholeOre(value: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  const text = String(value);
+  // Exponential notation is checked on the WHOLE string, not just the fraction. 1e-7
+  // stringifies as "1e-7" with no decimal point at all, so a fraction-only check saw
+  // an empty decimals part and passed it — which is how a quantity of 1e-7 got through.
+  if (text.includes("e") || text.includes("E")) return false;
+  const decimals = text.split(".")[1] ?? "";
+  return decimals.length <= 2;
+}
+
+/** A monetary amount in whole øre, which is the only precision ReAI accepts. */
+export const oreAmount = z
+  .number()
+  .refine(isWholeOre, { message: "Amount must be a whole number of øre (at most 2 decimals)." });
+
 export const tenantIdArg = z
   .number()
   .int()
