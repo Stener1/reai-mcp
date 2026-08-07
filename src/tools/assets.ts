@@ -275,8 +275,15 @@ const deleteAsset = defineTool({
           ? `Asset ${args.assetId} was removed and a linked voucher REVERSED — a counter-entry is ` +
             `now in the ledger. This has not been observed; check the ledger.`
           : outcome === "deleted"
-            ? `Asset ${args.assetId} deleted. Nothing referenced it — the API refuses with 409 ` +
-              `when a voucher does.`
+            // Says nothing about a voucher. `outcome` reports what happened to the ASSET, and
+            // the enum does not establish that it describes the acquisition voucher too — so
+            // inferring "nothing referenced it" from "deleted" would generalise one observed
+            // case (a manual posting line, refused with 409) over a path the endpoint's own
+            // description contemplates and that could not be produced here.
+            ? `Asset ${args.assetId} deleted. That is the outcome for the ASSET; if it had an ` +
+              `acquisition booked, check the ledger — a manual posting referencing an asset makes ` +
+              `this call fail with 409 instead, but the API documents a reversal path that could ` +
+              `not be reproduced.`
             : `Asset ${args.assetId}: the API reported outcome ${JSON.stringify(outcome)}. ` +
               `Check the register and the ledger before assuming what happened.`;
     return ok(res.data ?? { outcome }, { note });

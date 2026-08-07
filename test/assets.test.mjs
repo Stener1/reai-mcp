@@ -86,9 +86,13 @@ test("write-off reports only what the response shows", async () => {
 // — a referenced asset is refused with 409 rather than archived or reversed — but all three
 // are reported distinctly, because "removed" is false for an archived record.
 test("every outcome the shared enum allows is reported distinctly", async () => {
+  // "deleted" is the outcome for the ASSET. Reading it as "and therefore no counter-entry
+  // exists" is an inference the shared enum does not support, and it would be wrong in
+  // exactly the case where checking the ledger matters most.
   const deleted = await run("reai_delete_asset", { assetId: 42 }, { outcome: "deleted" });
-  assert.match(deleted.text, /deleted/);
-  assert.match(deleted.text, /refuses with 409/);
+  assert.match(deleted.text, /the outcome for the ASSET/);
+  assert.match(deleted.text, /check the ledger/);
+  assert.doesNotMatch(deleted.text, /Nothing referenced it/);
 
   const archived = await run("reai_delete_asset", { assetId: 42 }, { outcome: "archived" });
   assert.match(archived.text, /ARCHIVED, not deleted/);
