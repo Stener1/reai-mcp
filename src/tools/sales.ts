@@ -399,6 +399,7 @@ const customerLedger = defineTool({
     // The ledger only returns customers with activity IN the period, so defaulting
     // an open-items query to the current year would hide exactly the old unpaid
     // invoices it is being asked about.
+    const widened = args.startDate === undefined && args.isOpenPosting === true;
     const startDate = args.startDate ?? (args.isOpenPosting ? OPEN_ITEM_FLOOR : startOfYear());
     const endDate = args.endDate ?? today();
     const path = args.customerId ? `/api/ledger/customer/${args.customerId}` : "/api/ledger/customer";
@@ -411,7 +412,12 @@ const customerLedger = defineTool({
     return ok(res.data, {
       note:
         `Customer ledger ${startDate} to ${endDate}` +
-        `${args.isOpenPosting ? " (open postings only — window widened to catch older unpaid items)" : ""}.`,
+        // Only claim the widening when it happened. A caller who scoped the query itself was
+        // told the window reached back to 2000, and would have read a current-year figure as
+        // total outstanding. reai_supplier_ledger already gates this; this one did not.
+        `${args.isOpenPosting ? " (open postings only" : ""}` +
+        `${widened ? " — window widened to catch older unpaid items" : ""}` +
+        `${args.isOpenPosting ? ")" : ""}.`,
     });
   },
 });

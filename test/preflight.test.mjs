@@ -545,6 +545,32 @@ const SHAPES_THE_RESPONSE = {
     "the redaction test in test/organisation.test.mjs",
 };
 
+// The exemption map says each entry "owes a test proving the field actually changes the
+// output". That was a comment, and a comment is not a link: if redact() were deleted
+// tomorrow, includePersonalData becomes a genuinely dropped input and the sweep below —
+// the only mechanical guard against that class of bug — would stay green. So check the
+// entries are real and that the test they name exists and exercises the field.
+test("every response-shaping exemption names a real field and a real test", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { registeredTools } = await import("../dist/server.js");
+  for (const [entry, reason] of Object.entries(SHAPES_THE_RESPONSE)) {
+    const [toolName, field] = entry.split(": ");
+    const tool = registeredTools.find((t) => t.name === toolName);
+    assert.ok(tool, `exemption names an unknown tool: ${toolName}`);
+    assert.ok(tool.inputSchema?.[field], `${toolName} has no input called ${field}`);
+
+    const named = /test\/([\w.-]+\.mjs)/.exec(reason);
+    assert.ok(named, `exemption for ${entry} must name the test file that proves it`);
+    const proof = readFileSync(new URL(`./${named[1]}`, import.meta.url), "utf8");
+    assert.ok(proof.includes(field), `${named[1]} never mentions ${field}`);
+    // And that test has to actually run the tool both ways, or it proves nothing.
+    assert.ok(
+      proof.includes(`${field}: true`) || proof.includes(`${field}:true`),
+      `${named[1]} never exercises ${field} being set`,
+    );
+  }
+});
+
 test("no read tool accepts an input it never sends", async () => {
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude

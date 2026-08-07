@@ -69,23 +69,66 @@ test("an employee's national identity number is redacted unless asked for", asyn
   // A record without those fields says so rather than claiming a redaction that did not
   // happen — otherwise "redacted" reads as "there is one here and I am hiding it".
   const bare = await run("reai_get_employee", { employeeId: 12 }, { id: 12, name: "Ola" });
-  assert.match(bare.text, /carries no national identity number or bank account/);
+  assert.match(bare.text, /No national identity number or bank account was found/);
   assert.doesNotMatch(bare.text, /redacted/);
 });
 
-test("the employee list is a summary, and never carries personal data", async () => {
-  const { text } = await run("reai_list_employees", {}, [employee(), { ...employee(), id: 13 }]);
-  assert.ok(!text.includes("15057512345"), "a list of who works here must not carry fødselsnummer");
-  assert.ok(!text.includes("12345678903"));
-  // Not merely redacted — absent, along with the rest of the record's bulk.
-  assert.ok(!text.includes("redacted"));
-  assert.ok(!text.includes("employmentRelations"));
-  assert.ok(!text.includes("Kongens gate"));
-  // What it IS for: resolving a name to the id other tools take.
+// The collection's real projection, established by POSTing an employee to the test tenant
+// and reading the list back: exactly id, name and email — matching the spec's
+// EmployeeSummaryRes, and NOT the full record. An earlier version of this test fed the
+// list endpoint an EmployeeRes-shaped row and asserted departmentId came through, which
+// would have passed against a shape the endpoint never sends.
+const listRow = (over = {}) => ({ id: 12, name: "Kari Nordmann", email: "kari@example.no", ...over });
+
+test("the employee list is what the API really returns, and carries no personal data", async () => {
+  const { text } = await run("reai_list_employees", {}, [listRow(), listRow({ id: 13, name: "Ola" })]);
   assert.match(text, /Kari Nordmann/);
   assert.match(text, /"id": 12/);
-  assert.match(text, /"departmentId": 3/);
   assert.match(text, /2 employee\(s\)/);
+  assert.match(text, /id, name and email only/);
+  // No claim that anything was stripped, because the endpoint never sent it.
+  assert.ok(!text.includes("redacted"));
+
+  // summarise() earns its place only if the projection ever widens: fed a full record it
+  // still drops the identity number and bank details rather than passing them through.
+  const wide = await run("reai_list_employees", {}, [employee()]);
+  assert.ok(!wide.text.includes("15057512345"), "a widened projection must not leak fødselsnummer");
+  assert.ok(!wide.text.includes("12345678903"));
+  assert.ok(!wide.text.includes("employmentRelations"));
+});
+
+// Absence manufactured out of a shape surprise is the failure this repo has shipped once.
+test("a list endpoint that stops returning a list does not become zero", async () => {
+  const wrapped = { content: [listRow()], totalElements: 1 };
+  const employees = await run("reai_list_employees", {}, wrapped);
+  assert.doesNotMatch(employees.text, /No employees are registered/);
+  assert.match(employees.text, /did not return a list/);
+  assert.match(employees.text, /Kari Nordmann/, "the payload must survive, not be replaced by []");
+
+  const departments = await run("reai_list_departments", {}, { content: [{ id: 1, name: "Drift" }] });
+  assert.doesNotMatch(departments.text, /No departments/);
+  assert.match(departments.text, /did not return a list/);
+  assert.match(departments.text, /Drift/);
+
+  // A row that is not an object must not throw, and must not vanish from a stated count.
+  const ragged = await run("reai_list_employees", {}, [listRow(), null]);
+  assert.match(ragged.text, /2 employee\(s\)/);
+  assert.match(ragged.text, /unexpectedRow/);
+});
+
+// The note asserts a NEGATIVE, so it has to be true of the whole record, not of two keys.
+test("redaction reaches nested copies, and the note only claims what was checked", async () => {
+  const nested = await run("reai_get_employee", { employeeId: 12 }, {
+    id: 12,
+    name: "Kari",
+    employmentRelations: [{ id: 1, bankAccount: { iban: "NO9386011117947" } }],
+    previous: { nationalIdentityNumber: "15057512345" },
+  });
+  assert.ok(!nested.text.includes("NO9386011117947"), "an IBAN nested in an array must not survive");
+  assert.ok(!nested.text.includes("15057512345"), "nor a nested identity number");
+  assert.match(nested.text, /nationalIdentityNumber and bankAccount redacted|bankAccount and nationalIdentityNumber redacted/);
+  // The surrounding structure is preserved — this redacts, it does not flatten.
+  assert.match(nested.text, /employmentRelations/);
 });
 
 // An empty list is an answer; "no employees" and "employees unavailable" are different
@@ -110,6 +153,17 @@ test("a delete that archived instead says so", async () => {
   // And an API that stops answering with an outcome must not be read as either.
   const silent = await run("reai_delete_department", { departmentId: 7 }, {});
   assert.match(silent.text, /did not say whether it was deleted or archived/);
+});
+
+// "window widened" is a claim about what this tool DID. Saying it when the caller supplied
+// the window would tell an agent its deliberately-scoped query reached back to 2000.
+test("the ledger only claims to widen the window when it actually did", async () => {
+  const widened = await run("reai_employee_ledger", { isOpenPosting: true }, {});
+  assert.match(widened.text, /window widened/);
+  const scoped = await run("reai_employee_ledger", { isOpenPosting: true, startDate: "2026-01-01" }, {});
+  assert.equal(scoped.calls[0].query.startDate, "2026-01-01");
+  assert.match(scoped.text, /open postings only/);
+  assert.doesNotMatch(scoped.text, /window widened/);
 });
 
 test("the employee ledger fills in the dates the API requires", async () => {
@@ -154,6 +208,8 @@ test("the toolset is registered, read-only where it should be, and transmits not
   for (const name of ["reai_create_department", "reai_update_department", "reai_delete_department"]) {
     assert.equal(tool(name).risk, "reversible", name);
   }
+  // Reversible, but still a delete — and the one whose archive branch is one-way.
+  assert.equal(tool("reai_delete_department").destructive, true);
   // No project tools: the Project module is off on every tenant this repo can reach, so
   // nothing about their success path could be verified.
   assert.equal(registeredTools.filter((t) => /project/i.test(t.name)).length, 0);

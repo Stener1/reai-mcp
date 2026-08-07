@@ -45,17 +45,50 @@ const PERSONAL_FIELDS = ["nationalIdentityNumber", "bankAccount"] as const;
 
 type EmployeeRecord = Record<string, unknown>;
 
-function redact(employee: EmployeeRecord): EmployeeRecord {
-  const out: EmployeeRecord = { ...employee };
-  for (const field of PERSONAL_FIELDS) {
-    if (out[field] === undefined || out[field] === null) continue;
-    out[field] = `[redacted — pass includePersonalData: true to see it]`;
+/**
+ * Remove the personal fields wherever they appear, not only at the top level.
+ *
+ * The documented record puts both at the top level and a shallow copy was adequate for it.
+ * But the note this tool prints asserts a NEGATIVE — "carries no national identity number"
+ * — and a two-key top-level check cannot support that claim for a shape it has not seen.
+ * Walking the record makes the claim true instead of narrowing it, which is the version
+ * worth having when the thing being claimed is that a fødselsnummer is not in the output.
+ */
+function redact(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((element) => redact(element, depth + 1));
+  const out: EmployeeRecord = {};
+  for (const [key, inner] of Object.entries(value as EmployeeRecord)) {
+    out[key] = PERSONAL_FIELDS.includes(key as (typeof PERSONAL_FIELDS)[number])
+      ? "[redacted — pass includePersonalData: true to see it]"
+      : redact(inner, depth + 1);
   }
   return out;
 }
 
+/** Where the personal fields actually occur, so the note describes what was found. */
+function personalFieldsIn(value: unknown, depth = 0): string[] {
+  if (depth > 6 || value === null || typeof value !== "object") return [];
+  if (Array.isArray(value)) return [...new Set(value.flatMap((e) => personalFieldsIn(e, depth + 1)))];
+  const found: string[] = [];
+  for (const [key, inner] of Object.entries(value as EmployeeRecord)) {
+    if (PERSONAL_FIELDS.includes(key as (typeof PERSONAL_FIELDS)[number])) {
+      if (inner !== null && inner !== undefined) found.push(key);
+    } else {
+      found.push(...personalFieldsIn(inner, depth + 1));
+    }
+  }
+  return [...new Set(found)];
+}
+
 /** The fields that answer "who is this and where do they sit". */
-function summarise(employee: EmployeeRecord): EmployeeRecord {
+function summarise(employee: unknown): EmployeeRecord {
+  if (!employee || typeof employee !== "object" || Array.isArray(employee)) {
+    // A row that is not an object cannot be summarised, and dropping it silently would
+    // shrink a count the note is about to state. Hand it back untouched.
+    return { unexpectedRow: employee } as EmployeeRecord;
+  }
+  const record = employee as EmployeeRecord;
   const keep = [
     "id",
     "name",
@@ -65,7 +98,7 @@ function summarise(employee: EmployeeRecord): EmployeeRecord {
     "dateOfEmployment",
     "endDateOfEmployment",
   ];
-  return Object.fromEntries(keep.filter((k) => employee[k] !== undefined).map((k) => [k, employee[k]]));
+  return Object.fromEntries(keep.filter((k) => record[k] !== undefined).map((k) => [k, record[k]]));
 }
 
 const listDepartments = defineTool({
@@ -83,13 +116,19 @@ const listDepartments = defineTool({
       path: "/api/departments",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const rows = Array.isArray(res.data) ? res.data : [];
+    if (!Array.isArray(res.data)) {
+      return ok(res.data, {
+        note:
+          "The departments endpoint did not return a list. The response is passed through " +
+          "unchanged — do NOT read this as 'no departments'.",
+      });
+    }
     return ok(res.data, {
       note:
-        rows.length === 0
+        res.data.length === 0
           ? "No departments. That is not the same as departments being unavailable — an empty " +
             "list means none are defined, so nothing can be tagged with one yet."
-          : `${rows.length} department(s).`,
+          : `${res.data.length} department(s).`,
     });
   },
 });
@@ -172,8 +211,13 @@ const deleteDepartment = defineTool({
     "There is no unarchive endpoint for departments — only customers and suppliers have one — so " +
     "an archived department stays hidden from the active list.",
   risk: "reversible",
+  // Every other delete tool in this server carries this, and it is what a host keys on to
+  // ask before running one. Omitting it here would have singled out the one delete whose
+  // archive branch is ONE-WAY — departments have no unarchive — as the only one not worth
+  // confirming. (`idempotent: false` was set instead, which does nothing: the annotation
+  // is `idempotent === true`, and the HTTP client already treats DELETE as retry-safe.)
+  destructive: true,
   apiPaths: [["DELETE", "/api/departments/{id}"]],
-  idempotent: false,
   inputSchema: {
     departmentId: z.number().int().positive().describe("Department id."),
     tenantId: tenantIdArg,
@@ -204,13 +248,12 @@ const listEmployees = defineTool({
   name: "reai_list_employees",
   title: "List employees",
   description:
-    "Everyone on the payroll, as a summary: id, name, email, phone, department and employment " +
-    "dates. The id is what reai_list_postings, reai_general_ledger and reai_list_expenses take " +
-    "as employeeId.\n\n" +
-    "Deliberately a summary. The full record carries a national identity number and the bank " +
-    "account salary is paid into, and a question about who works here should not put either in " +
-    "the conversation. Use reai_get_employee with includePersonalData for one person when you " +
-    "actually need them.",
+    "Everyone on the payroll: id, name and email. That is the whole projection the API returns " +
+    "for the collection — department, phone and employment dates need reai_get_employee for one " +
+    "person. The id is what reai_list_postings, reai_general_ledger and reai_list_expenses take " +
+    "as employeeId, which is what this exists for.\n\n" +
+    "The list carries no national identity number and no bank account, because the endpoint does " +
+    "not return them. reai_get_employee redacts both unless asked.",
   risk: "read",
   apiPaths: [["GET", "/api/employees"]],
   inputSchema: { tenantId: tenantIdArg },
@@ -220,13 +263,26 @@ const listEmployees = defineTool({
       path: "/api/employees",
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const rows = Array.isArray(res.data) ? res.data : [];
+    // Verified against the live API rather than the description: POST an employee, read the
+    // collection, and it comes back with exactly id, name and email — matching the spec's
+    // EmployeeSummaryRes. summarise() therefore removes nothing today and is kept only so a
+    // widened projection cannot start leaking a fødselsnummer into a list result.
+    if (!Array.isArray(res.data)) {
+      // Not the documented shape. Returning `[]` here would report zero employees AND throw
+      // the payload away — absence manufactured out of a shape surprise.
+      return ok(res.data, {
+        note:
+          "The employees endpoint did not return a list. The response is passed through " +
+          "unchanged — do NOT read this as 'no employees'.",
+      });
+    }
+    const rows = res.data;
     return ok(rows.map(summarise), {
       note:
         rows.length === 0
           ? "No employees are registered on this tenant."
-          : `${rows.length} employee(s), summarised — national identity numbers and bank details ` +
-            `are not included. reai_get_employee returns one full record.`,
+          : `${rows.length} employee(s). The collection returns id, name and email only; ` +
+            `reai_get_employee returns one full record.`,
     });
   },
 });
@@ -261,20 +317,20 @@ const getEmployee = defineTool({
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     const record = res.data ?? {};
-    const held = PERSONAL_FIELDS.filter((f) => record[f] !== undefined && record[f] !== null);
+    const held = personalFieldsIn(record);
     if (args.includePersonalData === true) {
       return ok(record, {
         note:
           held.length > 0
             ? `Includes ${held.join(" and ")} because includePersonalData was set.`
-            : `The record carries no national identity number or bank account.`,
+            : `No national identity number or bank account was found in this record.`,
       });
     }
     return ok(redact(record), {
       note:
         held.length > 0
           ? `${held.join(" and ")} redacted. Pass includePersonalData: true if the task needs them.`
-          : `The record carries no national identity number or bank account.`,
+          : `No national identity number or bank account was found in this record.`,
     });
   },
 });
@@ -307,6 +363,7 @@ const employeeLedger = defineTool({
   handler: async (args, ctx) => {
     // startDate and endDate are REQUIRED by the API — omitting them answers
     // 400 "startDate is required" rather than defaulting — so they are filled in here.
+    const widened = args.startDate === undefined && args.isOpenPosting === true;
     const startDate = args.startDate ?? (args.isOpenPosting ? OPEN_ITEM_FLOOR : startOfYear());
     const endDate = args.endDate ?? today();
     const path = args.employeeId
@@ -321,7 +378,9 @@ const employeeLedger = defineTool({
     return ok(res.data, {
       note:
         `Employee ledger ${startDate} to ${endDate}` +
-        `${args.isOpenPosting ? " (open postings only — window widened to catch older unsettled items)" : ""}.`,
+        `${args.isOpenPosting ? " (open postings only" : ""}` +
+        `${widened ? " — window widened to catch older unsettled items" : ""}` +
+        `${args.isOpenPosting ? ")" : ""}.`,
     });
   },
 });
