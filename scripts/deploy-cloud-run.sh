@@ -17,7 +17,14 @@
 #   --allow-external-send       Permit EHF/Peppol, invoice email, reminders and
 #                               invoice issuance. Off by default. Enable this for
 #                               a real business doing its own invoicing
-#   --env KEY=VALUE             Extra env var; repeatable
+#   --public-url URL            Only for a custom domain in front of Cloud Run.
+#                               Defaults to the URL Cloud Run reports
+#   --allowed-hosts H           Comma-separated hostnames the server answers to.
+#                               Defaults to every hostname Cloud Run reports, which
+#                               is what you want unless a proxy adds one
+#   --env KEY=VALUE             Extra env var; repeatable. Keys this script manages
+#                               are refused -- use the flag above instead, so the
+#                               safety gates and the closing summary stay honest
 #
 # Prerequisites:
 #   gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
@@ -49,6 +56,10 @@ ALLOWED_REDIRECT_HOSTS="claude.ai"
 SECRET_NAME="reai-mcp-encryption-key"
 SERVICE_ACCOUNT=""
 ALLOW_EXTERNAL_SEND="false"
+# Set only for a custom domain. Empty means "use the URL and hostnames Cloud Run
+# reports", which is right for every default deployment.
+CUSTOM_PUBLIC_URL=""
+CUSTOM_ALLOWED_HOSTS=""
 EXTRA_ENV=()
 
 usage() {
@@ -75,6 +86,8 @@ while [[ $# -gt 0 ]]; do
     --service-account) need_value "$1" $#; SERVICE_ACCOUNT="$2"; shift 2 ;;
     --secret-name) need_value "$1" $#; SECRET_NAME="$2"; shift 2 ;;
     --allow-external-send) ALLOW_EXTERNAL_SEND="true"; shift ;;
+    --public-url) need_value "$1" $#; CUSTOM_PUBLIC_URL="$2"; shift 2 ;;
+    --allowed-hosts) need_value "$1" $#; CUSTOM_ALLOWED_HOSTS="$2"; shift 2 ;;
     --env) need_value "$1" $#; EXTRA_ENV+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1  (try --help)" >&2; exit 2 ;;
@@ -101,6 +114,8 @@ MANAGED_ENV_KEYS=(
   REAI_WRITE_MODE:--write-mode
   REAI_ALLOW_EXTERNAL_SEND:--allow-external-send
   REAI_ALLOWED_REDIRECT_HOSTS:--allowed-redirect-hosts
+  REAI_ALLOWED_HOSTS:--allowed-hosts
+  PUBLIC_URL:--public-url
 )
 for kv in ${EXTRA_ENV+"${EXTRA_ENV[@]}"}; do
   [[ "$kv" == *=* ]] || { echo "--env expects KEY=VALUE (got '$kv')." >&2; exit 2; }
@@ -303,6 +318,18 @@ ALL_HOSTS="$(gcloud run services describe "$SERVICE" \
   | tr -d '[]"' | tr ',' '\n' | sed 's|https://||' | grep -v '^$' | paste -sd, -)"
 [[ -n "$ALL_HOSTS" ]] || ALL_HOSTS="${URL#https://}"
 
+# A custom domain in front of Cloud Run serves on a hostname the API does not
+# report, so the issuer and the allowlist both have to come from the operator. The
+# run.app hostnames stay in the allowlist: the OAuth flow can legitimately complete
+# on either, and dropping them is the "authorizes fine, then every call fails" bug.
+if [[ -n "$CUSTOM_PUBLIC_URL" ]]; then
+  URL="${CUSTOM_PUBLIC_URL%/}"
+  ALL_HOSTS="${URL#https://},${ALL_HOSTS}"
+fi
+if [[ -n "$CUSTOM_ALLOWED_HOSTS" ]]; then
+  ALL_HOSTS="$CUSTOM_ALLOWED_HOSTS"
+fi
+
 if [[ -z "$URL" ]]; then
   echo "Could not read the service URL back from Cloud Run. Refusing to continue: without" >&2
   echo "it, PUBLIC_URL and REAI_ALLOWED_HOSTS would both be left unset on a public service." >&2
@@ -395,7 +422,22 @@ if [[ -n "$EFFECTIVE_PASSTHROUGH" && "$EFFECTIVE_PASSTHROUGH" != "0" ]]; then
 fi
 
 if [[ -n "$EFFECTIVE_HOSTS" ]]; then
-  echo "    host allowlist pinned: $EFFECTIVE_HOSTS"
+  # Presence is not enough. The /mcp probe below cannot answer this: authentication
+  # runs before the transport that enforces allowedHosts is even constructed, so an
+  # unauthenticated request returns 401 whatever the allowlist says -- including an
+  # allowlist that omits the very hostname this script is about to print as the
+  # endpoint. That is precisely the "authorizes fine, then every call fails" failure
+  # the pinning step exists to prevent, so check the hostname directly.
+  canonical_host="${URL#https://}"
+  canonical_host="${canonical_host%%/*}"
+  if [[ ",${EFFECTIVE_HOSTS}," == *",${canonical_host},"* ]]; then
+    echo "    host allowlist includes ${canonical_host}: $EFFECTIVE_HOSTS"
+  else
+    echo "    REAI_ALLOWED_HOSTS is '${EFFECTIVE_HOSTS}', which does not include" >&2
+    echo "    '${canonical_host}' -- the hostname clients will use. The OAuth flow would" >&2
+    echo "    succeed and then every MCP call would fail with 'Invalid Host header'." >&2
+    fail=1
+  fi
 else
   echo "    REAI_ALLOWED_HOSTS is not set on the deployed revision, so DNS-rebinding" >&2
   echo "    protection is off and a spoofed Host decides the advertised issuer." >&2
@@ -414,7 +456,7 @@ if [[ "$mcp_status" == "401" ]]; then
   echo "    /mcp reachable and requires authorization (401)"
 else
   echo "    /mcp returned HTTP ${mcp_status}, expected 401 (reachable but unauthorized)." >&2
-  echo "    400 with 'Invalid Host header' means REAI_ALLOWED_HOSTS is missing a hostname." >&2
+  echo "    404 means the route is absent -- an old image, or traffic on the wrong revision." >&2
   fail=1
 fi
 
