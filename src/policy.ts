@@ -272,22 +272,30 @@ export function hasAmbiguousSegments(path: string): boolean {
 export function classifyRequest(method: HttpMethod, path: string): Risk {
   if (method === "GET") return "read";
 
+  // Canonicalize first: classifying a raw string that resolves to a different path is
+  // how a reversible-looking call reaches the ledger. A path we cannot resolve is
+  // treated as the most dangerous case.
+  const canonical = canonicalizeApiPath(path);
+  if (!canonical) return "irreversible";
+
+  // Every form this request could be matched as, strictest answer wins.
+  let worst: Risk = "read";
+  for (const normalized of pathForms(canonical.pathname)) {
+    worst = strictestRisk(worst, classifyNormalizedPath(method, normalized));
+  }
+  return worst;
+}
+
+function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
   // Method-specific, because the same path differs sharply by verb. Replacing an
   // attachment's bytes "updates the bytes for every owner that references this
   // attachment id" — the spec's own words — so overwriting the file on a posted
   // voucher destroys the accounting documentation of every voucher pointing at it,
   // and no DELETE exists under /api/attachments to undo it. UPLOADING a new
   // attachment is additive and stays reversible, so a prefix would be too blunt.
-  if ((method === "PATCH" || method === "PUT") && /^\/api\/attachments\/[^/]+$/i.test(path.replace(/\/+$/, ""))) {
+  if ((method === "PATCH" || method === "PUT") && /^\/api\/attachments\/[^/]+$/i.test(normalized)) {
     return "irreversible";
   }
-
-  // Canonicalize first: classifying a raw string that resolves to a different
-  // path is how a reversible-looking call reaches the ledger. A path we cannot
-  // resolve is treated as the most dangerous case.
-  const canonical = canonicalizeApiPath(path);
-  if (!canonical) return "irreversible";
-  const normalized = normalize(canonical.pathname);
 
   if (matchesPrefix(normalized, IRREVERSIBLE_PREFIXES)) return "irreversible";
 
@@ -374,6 +382,34 @@ const ESCALATING_BODY_FIELDS: Readonly<Record<string, (value: unknown) => boolea
 };
 
 /**
+ * The objects whose top-level fields the body inspectors examine.
+ *
+ * An object root yields itself. An ARRAY root yields each object element, because all
+ * three inspectors previously returned early on an array and so saw nothing:
+ *
+ *   PATCH /api/suppliers/5  body={"iban":"..."}    -> irreversible, blocked
+ *   PATCH /api/suppliers/5  body=[{"iban":"..."}]  -> reversible, permitted
+ *
+ * No operation in the spec takes an array root today, so this was latent — but
+ * `reai_request` forwards whatever body it is given verbatim, so it becomes live the
+ * day ReAI adds a bulk endpoint under a reversible prefix, with nothing here to notice.
+ * "Not currently reachable" is a poor reason to leave a hole in a safety classifier.
+ *
+ * Still top level only, deliberately: recursing into arbitrary nested payloads would
+ * flag fields that merely RECORD whether something was sent.
+ */
+function inspectableObjects(body: unknown): Array<Record<string, unknown>> {
+  if (!body || typeof body !== "object") return [];
+  if (Array.isArray(body)) {
+    return body.filter(
+      (element): element is Record<string, unknown> =>
+        !!element && typeof element === "object" && !Array.isArray(element),
+    );
+  }
+  return [body as Record<string, unknown>];
+}
+
+/**
  * Re-classify a call once its body is known. Returns the more severe of the
  * path-based risk and anything the body implies.
  *
@@ -386,29 +422,92 @@ export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
   // because a stray field was passed alongside it would be a false positive —
   // and an irreversible call is already at the ceiling.
   if (pathRisk !== "reversible") return pathRisk;
-  if (!body || typeof body !== "object" || Array.isArray(body)) return pathRisk;
 
-  for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
-    const trigger = ESCALATING_BODY_FIELDS[key.toLowerCase()];
-    if (trigger?.(value)) return "irreversible";
+  for (const candidate of inspectableObjects(body)) {
+    for (const [key, value] of Object.entries(candidate)) {
+      if (ESCALATING_BODY_FIELDS[key.toLowerCase()]?.(value)) return "irreversible";
+    }
   }
   return pathRisk;
 }
 
 /** Names of body fields that escalate risk, for use in error messages. */
 export function escalatingBodyFields(body: unknown): string[] {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
-  return Object.entries(body as Record<string, unknown>)
-    .filter(([key, value]) => ESCALATING_BODY_FIELDS[key.toLowerCase()]?.(value) === true)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+  return [
+    ...new Set(
+      inspectableObjects(body).flatMap((candidate) =>
+        Object.entries(candidate)
+          .filter(([key, value]) => ESCALATING_BODY_FIELDS[key.toLowerCase()]?.(value) === true)
+          .map(([key, value]) => `${key}=${JSON.stringify(value)}`),
+      ),
+    ),
+  ];
 }
 
 /** Strip the query string and trailing slash; lowercase for prefix comparison. */
+/**
+ * Strip the query string and trailing slash; lowercase for prefix comparison.
+ */
 function normalize(path: string): string {
   const withoutQuery = path.split("?")[0] ?? path;
   const trimmed = withoutQuery.replace(/\/+$/, "") || "/";
   return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
 }
+
+/**
+ * The path as a ROUTER would match it: matrix parameters gone, duplicate slashes
+ * collapsed, a trailing dot dropped.
+ *
+ *   /api/subscriptions/1/generate;a=b   ->  /api/subscriptions/1/generate
+ *   /api/attachments//9                 ->  /api/attachments/9
+ *   /api/subscriptions/1/generate.      ->  /api/subscriptions/1/generate
+ *
+ * This is NOT a replacement for `normalize` — it is a second reading of the same
+ * request, and every guard takes the STRICTER of the two, exactly as it already does
+ * for the raw and percent-decoded forms.
+ *
+ * Substituting it outright was wrong, and wrong in the dangerous direction. The premise
+ * "stripping can only make a path match a pattern it otherwise missed" does not hold:
+ * `/api/suppliers;foo/5` matched no prefix and therefore failed CLOSED as irreversible,
+ * and stripping made it match the reversible `/api/suppliers` prefix. Three shapes came
+ * out weaker than before. A dot-only segment is left intact for the same reason —
+ * emptying `...` shortens the path and can drop a pattern match entirely
+ * (`/api/invoices/.../email` lost its transmission match).
+ */
+function routedForm(path: string): string {
+  const withoutQuery = path.split("?")[0] ?? path;
+  const routed = withoutQuery
+    .split("/")
+    .map((segment) => segment.split(";")[0] ?? segment)
+    // Only a trailing dot on a segment that has other content. Never empty a segment
+    // that was not already empty.
+    .map((segment) => {
+      const stripped = segment.replace(/\.+$/, "");
+      return stripped === "" ? segment : stripped;
+    })
+    .filter((segment, index) => segment !== "" || index === 0)
+    .join("/");
+  const trimmed = routed.replace(/\/+$/, "") || "/";
+  return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
+}
+
+/**
+ * Every string form one request may be matched as. A guard that checks all of them and
+ * takes the strictest answer cannot be weakened by a shape it did not anticipate.
+ */
+function pathForms(path: string): string[] {
+  const plain = normalize(path);
+  const routed = routedForm(path);
+  return routed === plain ? [plain] : [plain, routed];
+}
+
+const RISK_SEVERITY: Record<Risk, number> = { read: 0, reversible: 1, irreversible: 2 };
+
+/** The more severe of two readings of the same request. */
+export function strictestRisk(a: Risk, b: Risk): Risk {
+  return RISK_SEVERITY[a] >= RISK_SEVERITY[b] ? a : b;
+}
+
 
 /**
  * Whether a call sends something to a third party.
@@ -550,22 +649,26 @@ export function invoiceDeliveryFields(body: unknown): string[] {
 /** Escalate a call that redirects where invoices are delivered. */
 export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
   if (pathRisk === "irreversible") return pathRisk;
-  const normalized = path.toLowerCase().replace(/\/+$/, "");
-  if (!INVOICE_DELIVERY_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  if (!pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)))) return pathRisk;
   return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
 }
 
 function presentFields(body: unknown, names: ReadonlySet<string>): string[] {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
-  return Object.entries(body as Record<string, unknown>)
-    .filter(
-      ([key, value]) =>
-        names.has(key.toLowerCase()) &&
-        value !== undefined &&
-        value !== null &&
-        String(value).trim() !== "",
-    )
-    .map(([key]) => key);
+  return [
+    ...new Set(
+      inspectableObjects(body).flatMap((candidate) =>
+        Object.entries(candidate)
+          .filter(
+            ([key, value]) =>
+              names.has(key.toLowerCase()) &&
+              value !== undefined &&
+              value !== null &&
+              String(value).trim() !== "",
+          )
+          .map(([key]) => key),
+      ),
+    ),
+  ];
 }
 
 /** Payment-routing fields present in a body, for use in error messages. */
@@ -586,15 +689,19 @@ export function classifyPaymentRouting(
   method?: string,
 ): Risk {
   if (pathRisk === "irreversible") return pathRisk;
-  const normalized = path.toLowerCase().replace(/\/+$/, "");
-  const inScope =
-    PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
+  // Both readings of the path, or a matrix parameter would put the request outside the
+  // scope of this guard while classifyRequest read it as an ordinary reversible write.
+  const forms = pathForms(path);
+  const inScope = forms.some(
+    (normalized) =>
+      PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
     // Editing an EXISTING company bank repoints where this company's own customers
     // pay — the money flows inward rather than outward, but it is redirected just as
     // permanently, and invoices already issued name that account. Adding one (POST)
     // stays ordinary work, which is why the original exemption was written; it just
     // never distinguished adding from repointing.
-    (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST");
+      (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST"),
+  );
   if (!inScope) return pathRisk;
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
 }
@@ -686,7 +793,9 @@ export function classifyTransmission(
   body?: unknown,
 ): Transmission {
   const canonical = canonicalizeApiPath(path);
-  const normalized = normalize(canonical?.pathname ?? path);
+  // Every reading of the path: a transmitting pattern that matches ANY of them counts,
+  // so a matrix parameter or a doubled slash cannot hide an EHF send behind a shape.
+  const forms = pathForms(canonical?.pathname ?? path);
 
   // GET is normally a read, and treating it as such is right for the whole API bar
   // two endpoints that reach a third party despite the verb. `read-only` is the mode
@@ -699,13 +808,13 @@ export function classifyTransmission(
   // direction when the alternative is an unannounced AS4 ping onto the Peppol network
   // or a sync with Altinn.
   if (method === "GET") {
-    return TRANSMITTING_GETS.some((re) => re.test(normalized)) ? "external" : "none";
+    return forms.some((n) => TRANSMITTING_GETS.some((re) => re.test(n))) ? "external" : "none";
   }
 
-  if (TRANSMITTING_PATTERNS.some((re) => re.test(normalized))) return "external";
+  if (forms.some((n) => TRANSMITTING_PATTERNS.some((re) => re.test(n)))) return "external";
 
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+  for (const candidate of inspectableObjects(body)) {
+    for (const [key, value] of Object.entries(candidate)) {
       if (TRANSMITTING_BODY_FIELDS[key.toLowerCase()]?.(value)) return "external";
     }
   }
@@ -714,10 +823,15 @@ export function classifyTransmission(
 
 /** Names the body fields that made a call transmitting, for error messages. */
 export function transmittingBodyFields(body: unknown): string[] {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
-  return Object.entries(body as Record<string, unknown>)
-    .filter(([k, v]) => TRANSMITTING_BODY_FIELDS[k.toLowerCase()]?.(v) === true)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  return [
+    ...new Set(
+      inspectableObjects(body).flatMap((candidate) =>
+        Object.entries(candidate)
+          .filter(([k, v]) => TRANSMITTING_BODY_FIELDS[k.toLowerCase()]?.(v) === true)
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`),
+      ),
+    ),
+  ];
 }
 
 export class ExternalSendBlockedError extends Error {
