@@ -11,6 +11,7 @@ import {
   type ToolDef,
   type ToolContext,
   isWholeOre,
+  requiredName,
 } from "./registry.js";
 
 /**
@@ -112,21 +113,28 @@ const createCustomer = defineTool({
   description:
     "Create a customer. Two kinds exist: set privateContact=true for a private individual, " +
     "otherwise a company is created and a Norwegian company requires a valid organizationNumber. " +
-    "ReAI looks the company up in Brønnøysundregistrene and fills in the name and address, so " +
-    "supplying just the organisation number is usually enough — pass skipRegistryLookup to opt out.\n\n" +
+    "ReAI looks the company up in Brønnøysundregistrene from the organizationNumber and fills in " +
+    "the address — pass skipRegistryLookup to opt out. Two things about that lookup are worth " +
+    "knowing, both measured against the live API rather than inferred:\n" +
+    "  - A name is still REQUIRED. An empty one is refused with \"name is required\" even when a " +
+    "valid organizationNumber is supplied, so \"the org number alone is enough\" — which this " +
+    "description used to claim — does not work.\n" +
+    "  - The name you send is then DISCARDED. Sending name=\"Lookup Probe\" with Skatteetaten's " +
+    "org number stores \"Skatteetaten\". So pass the real name if you know it, and expect the " +
+    "registry to win if you do not.\n\n" +
     "Note that ReAI normalizes the stored name to title case, so it may not come back exactly as sent.\n\n" +
     "Creation accepts only the fields listed here. Invoice email, phone and payment terms are not " +
     "among them — set those with reai_update_customer afterwards.",
   risk: "reversible",
   apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
-    name: z
-      .string()
-      .max(75)
+    name: requiredName(75)
       .describe(
-        "Customer or company name, at most 75 characters. May be EMPTY when organizationNumber is " +
-          "supplied and skipRegistryLookup is not set — the Brønnøysund lookup fills it in, which " +
-          "is the documented way to create a company by its org number alone.",
+        "Customer or company name, at most 75 characters. Required, and whitespace alone will " +
+          "not do — the API answers \"name is required\" for both. This field was previously " +
+          "documented as optional when organizationNumber is supplied, on the reading that the " +
+          "Brønnøysund lookup fills it in; tested against the live API, that is not so, and a " +
+          "blank name is rejected with or without an org number.",
       ),
     organizationNumber: z
       .string()
@@ -137,7 +145,14 @@ const createCustomer = defineTool({
       .optional()
       .describe("True for a private individual rather than a company."),
     email: z.string().optional().describe("General email address."),
-    nationalIdentityNumber: z.string().optional().describe("Fødselsnummer, for private customers."),
+    nationalIdentityNumber: z
+      .string()
+      .regex(/^\d{11}$/, "nationalIdentityNumber must be exactly 11 digits, and digits only")
+      .optional()
+      .describe(
+        "Fødselsnummer, for private customers. Exactly 11 digits, no spaces or separators — the " +
+          'API answers "must contain only digits" and "must be exactly 11 digits".',
+      ),
     countryCode: COUNTRY_CODE.optional().describe('ISO country code. Defaults to "NO".'),
     addressPart1: z.string().optional().describe("Street address."),
     addressPart2: z.string().optional().describe("Second address line."),
@@ -187,7 +202,14 @@ const updateCustomer = defineTool({
       .string()
       .optional()
       .describe('Phone number. A "+47" prefix on a Norwegian number is rejected — write it plain, e.g. "22334455".'),
-    nationalIdentityNumber: z.string().optional().describe("Fødselsnummer, for private customers."),
+    nationalIdentityNumber: z
+      .string()
+      .regex(/^\d{11}$/, "nationalIdentityNumber must be exactly 11 digits, and digits only")
+      .optional()
+      .describe(
+        "Fødselsnummer, for private customers. Exactly 11 digits, no spaces or separators — the " +
+          'API answers "must contain only digits" and "must be exactly 11 digits".',
+      ),
     iban: z.string().optional().describe("IBAN."),
     bankAccountNumber: z.string().optional().describe("Norwegian bank account number."),
     swiftCode: z.string().optional().describe("SWIFT/BIC code."),
@@ -429,7 +451,9 @@ const createProduct = defineTool({
   risk: "reversible",
   apiPaths: [["POST", "/api/products"]],
   inputSchema: {
-    title: z.string().describe("Product name."),
+    title: requiredName().describe(
+      "Product name. Required and non-blank: the schema says minLength 1 and the API enforces it.",
+    ),
     description: z.string().optional().describe("Product description."),
     stockItem: z.boolean().optional().describe("Track this product in inventory."),
     vatCode: z
