@@ -288,7 +288,14 @@ function enrichRequestFailure(
   body: unknown,
 ): unknown {
   if (!(err instanceof ReaiApiError)) return err;
-  if (err.status < 400 || err.status >= 500) return err;
+  // 5xx used to return here, which skipped the QUIRKS along with the payload diagnosis. Those
+  // are different things: guessing at a payload on a server error is noise, but a quirk
+  // written about a 500 is only ever useful on a 500. The order-delete refusal is exactly
+  // that — the API answers 500 to a delete it will not perform, and the note saying "this is
+  // a refusal, do not retry" was unreachable at the one status it describes.
+  //
+  // Below 400 there is nothing to enrich, and above 599 is not a status this API produces.
+  if (err.status < 400 || err.status > 599) return err;
 
   const op = resolveOperation(method, path);
   if (!op) return err;

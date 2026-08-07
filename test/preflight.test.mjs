@@ -1156,3 +1156,39 @@ test("no array shape exceeds the cap", () => {
   }
   assert.ok(worst > 20_000, `the sweep should approach the cap; worst was only ${worst}`);
 });
+
+/**
+ * A 5xx used to return before the quirk block, so a quirk written ABOUT a 500 could never
+ * appear on one. That is the only status it is useful at: the order delete answers 500 to a
+ * delete it will not perform, and the note saying "this is a refusal, do not retry" was
+ * unreachable at exactly the failure it explains.
+ */
+test("a 500 that is really a refusal still gets its quirk", async () => {
+  const text = await callFailing(
+    { method: "DELETE", path: "/api/orders/4105" },
+    { status: 500, detail: "Referenced record is not accessible" },
+  );
+  assert.match(text, /Known quirk/, "a 500-specific quirk must reach the 500 it was written for");
+  assert.match(text, /do not retry it/);
+  assert.match(text, /BEFORE THEIR CUSTOMER/);
+});
+
+test("a 500 does not get payload guesswork, which is what the early return was protecting", async () => {
+  // Skipping the quirks was the bug; skipping the payload diagnosis was correct. On a server
+  // error "these required parameters were not sent" is a true sentence pointing away from the
+  // cause, which is the same mistake the 403 case above exists to prevent.
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 500, detail: "Internal error" },
+  );
+  assert.doesNotMatch(text, /marks these query parameters as required/);
+  assert.doesNotMatch(text, /projectId, startDate, endDate/);
+});
+
+test("a status this API does not produce is left alone", async () => {
+  const text = await callFailing(
+    { method: "GET", path: "/api/timesheets" },
+    { status: 600, detail: "not a real status" },
+  );
+  assert.doesNotMatch(text, /Known quirk/);
+});
