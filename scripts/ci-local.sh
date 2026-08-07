@@ -157,6 +157,19 @@ for major in "${NODE_MAJORS[@]}"; do
   echo "  Node $major ($version): startup without a token is actionable"
 done
 
+# The audit job. Without this the local harness reported "everything the workflow
+# checks passes" while skipping a blocking step — exactly the gap this script exists
+# to close, since it is used precisely when Actions cannot run.
+echo
+if npm audit --omit=dev --audit-level=high >/tmp/reai-audit.log 2>&1; then
+  echo "  npm audit (production deps): no high or critical advisories"
+else
+  echo "  npm audit (production deps): FAILED"
+  grep -E "Severity|^[a-z@/-]+ +[0-9<>=]" /tmp/reai-audit.log | head -8 | sed 's/^/      /'
+  failures=$((failures + 1))
+fi
+rm -f /tmp/reai-audit.log
+
 # The fourth job: what would actually ship to npm.
 echo
 # The workflow pins this job to Node 22, so resolve that rather than using

@@ -30,6 +30,9 @@ jobs:
       # so a new moderate cannot arrive unnoticed.
       - name: npm audit (production dependencies)
         run: npm audit --omit=dev --audit-level=high
+
+  build:
+    name: Build and test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
