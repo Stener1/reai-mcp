@@ -78,24 +78,62 @@ const NOT_A_DESTINATION = {
   recipientemail: "an email address on an internal warning endpoint",
 };
 
-/** Every property name reachable in a request body, following $ref, arrays and unions. */
-function fieldsOf(node, seen = new Set(), depth = 0) {
-  if (depth > 6 || !node || typeof node !== "object") return new Set();
+/**
+ * Every property reachable in a request body, as `field -> [dotted location, ...]`.
+ *
+ * The locations matter, not just the names. An earlier version collected a flat set and
+ * the invariant below then probed `{ swiftBic: "..." }` — a shape the API never receives,
+ * since the supplier invoice carries its destination as `paymentDetails.swiftBic`. So the
+ * test would have passed against a top-level-only inspector, which is exactly the bug it
+ * was supposed to be guarding. Depth is generous: the fields sit at 4-5 through the oneOf
+ * wrappers, and a cap of 6 left one wrap of headroom before they vanish silently.
+ */
+function locationsOf(node, seen = new Set(), depth = 0, prefix = "") {
+  const out = new Map();
+  if (depth > 12 || !node || typeof node !== "object") return out;
+  const merge = (other) => {
+    for (const [field, where] of other) {
+      if (!out.has(field)) out.set(field, []);
+      out.get(field).push(...where);
+    }
+  };
   if (node.$ref) {
     const name = node.$ref.split("/").pop();
-    if (seen.has(name)) return new Set();
-    return fieldsOf(SCHEMAS[name] ?? {}, new Set([...seen, name]), depth + 1);
+    if (seen.has(name)) return out;
+    return locationsOf(SCHEMAS[name] ?? {}, new Set([...seen, name]), depth + 1, prefix);
   }
-  const out = new Set();
   for (const key of ["allOf", "anyOf", "oneOf"]) {
-    for (const sub of node[key] ?? []) for (const f of fieldsOf(sub, seen, depth + 1)) out.add(f);
+    for (const sub of node[key] ?? []) merge(locationsOf(sub, seen, depth + 1, prefix));
   }
-  if (node.items) for (const f of fieldsOf(node.items, seen, depth + 1)) out.add(f);
+  if (node.items) merge(locationsOf(node.items, seen, depth + 1, `${prefix}[]`));
   for (const [name, schema] of Object.entries(node.properties ?? {})) {
-    out.add(name);
-    for (const f of fieldsOf(schema, seen, depth + 1)) out.add(f);
+    const location = prefix ? `${prefix}.${name}` : name;
+    if (!out.has(name)) out.set(name, []);
+    out.get(name).push(location);
+    merge(locationsOf(schema, seen, depth + 1, location));
   }
   return out;
+}
+
+/** Build the body the API would actually receive for a field at `location`. */
+function bodyAt(location, value) {
+  const body = {};
+  let cursor = body;
+  const parts = location.split(".");
+  parts.forEach((raw, i) => {
+    const isArray = raw.endsWith("[]");
+    const key = isArray ? raw.slice(0, -2) : raw;
+    const last = i === parts.length - 1;
+    if (last) {
+      if (isArray) cursor[key] = [value];
+      else cursor[key] = value;
+      return;
+    }
+    const child = {};
+    cursor[key] = isArray ? [child] : child;
+    cursor = child;
+  });
+  return body;
 }
 
 /** [{ method, path, fields }] for every write operation, from the spec. */
@@ -105,11 +143,14 @@ function writeOperations() {
     for (const [method, op] of Object.entries(item)) {
       const m = method.toUpperCase();
       if (!["POST", "PUT", "PATCH"].includes(m)) continue;
-      const fields = new Set();
+      const locations = new Map();
       for (const media of Object.values(op?.requestBody?.content ?? {})) {
-        for (const f of fieldsOf(media.schema ?? {})) fields.add(f);
+        for (const [field, where] of locationsOf(media.schema ?? {})) {
+          if (!locations.has(field)) locations.set(field, []);
+          locations.get(field).push(...where);
+        }
       }
-      ops.push({ method: m, path, fields });
+      ops.push({ method: m, path, fields: new Set(locations.keys()), locations });
     }
   }
   return ops;
@@ -139,10 +180,14 @@ test("the spec scan finds what it is looking for", () => {
     find("PATCH", "/api/employees/{id}")?.fields.has("accountNumber"),
     "the field this whole PR is about is not being found",
   );
-  assert.ok(
-    find("POST", "/api/supplier-invoices")?.fields.has("iban"),
-    "nested oneOf traversal lost paymentDetails.iban",
-  );
+  const invoice = find("POST", "/api/supplier-invoices");
+  assert.ok(invoice?.fields.has("iban"), "nested oneOf traversal lost paymentDetails.iban");
+  // And it must know WHERE the field lives. Codex's point on the first commit: probing
+  // `{ swiftBic }` flat is not a shape this API ever receives, so a test built that way
+  // passes against the very top-level-only inspector it exists to catch.
+  assert.deepEqual(invoice.locations.get("iban"), ["paymentDetails.iban"]);
+  assert.deepEqual(bodyAt("paymentDetails.iban", "X"), { paymentDetails: { iban: "X" } });
+  assert.deepEqual(bodyAt("costLines[].accountNumber", "X"), { costLines: [{ accountNumber: "X" }] });
   assert.ok(
     find("PUT", "/api/agreements/rent-agreement/{id}")?.fields.has("depositAccountNumber"),
     "rent-agreement fields lost",
@@ -192,47 +237,89 @@ const NOT_A_DESTINATION_PATH = {
     "registering the company's OWN account is ordinary work; only repointing one escalates",
   "POST /api/agreements/rent-agreement":
     "a new lease establishes an arrangement rather than diverting one, and a human signs it before anyone pays; PUT escalates",
+  // Paths where the in-set name `accountNumber` is a chart-of-accounts code. These are all
+  // irreversible by path anyway — the next test proves it — but they are listed here rather
+  // than skipped for being irreversible, because skipping on path risk is what hid the
+  // nested paymentDetails bug from this very test.
+  "POST /api/vouchers": "postings[].accountNumber is the ledger account a line is booked to",
+  "PUT /api/vouchers/{id}": "postings[].accountNumber is the ledger account a line is booked to",
+  "POST /api/reconciliation-rules": "accountNumber is the account to book to ($ref AccountNumber)",
+  "PUT /api/reconciliation-rules/{id}": "accountNumber is the account to book to ($ref AccountNumber)",
+  "POST /api/assets": "accountNumber is the balance-sheet account, pinned to pattern 1\\d{3}",
 };
 
 // The other half: knowing a field routes money is useless if the path carrying it is out
-// of scope. This asks the POLICY, rather than re-deriving which paths are in scope — the
-// first version of this test matched PAYMENT_ROUTING_PATHS itself and reported
-// PUT /api/company-banks/{id} as unprotected, because that escalation lives in a separate
-// rule. A guard that reimplements what it is guarding tests the reimplementation.
+// of scope. Two things this test learned the hard way:
+//
+// It asks the POLICY rather than re-deriving which paths are in scope. The first version
+// matched PAYMENT_ROUTING_PATHS itself and reported PUT /api/company-banks/{id} as
+// unprotected, because that escalation lived in a separate rule. A guard that reimplements
+// what it guards tests the reimplementation.
+//
+// And it asks the ROUTING layer on its own, with pathRisk forced to "reversible", instead
+// of skipping paths that are already irreversible. Skipping them is what let the nested
+// paymentDetails bug through both this test and Codex's first read of it: the endpoints
+// were safe via their path classification, so the test never exercised the layer whose
+// whole purpose is to be a second line if that classification is ever relaxed — which this
+// repo has relaxed once already.
 test("every write path that accepts a routing field is refused in the default mode", () => {
   const unprotected = [];
-  for (const { method, path, fields } of writeOperations()) {
+  for (const { method, path, fields, locations } of writeOperations()) {
     const routing = [...fields].filter((f) => paymentRoutingFieldNames.has(f.toLowerCase()));
     if (routing.length === 0) continue;
     if (`${method} ${path}` in NOT_A_DESTINATION_PATH) continue;
 
     const target = concrete(path);
-    // Already refused on the strength of the path alone — creating a supplier invoice, or
-    // posting a voucher — which is a legitimate way to be safe.
-    if (classifyRequest(method, target) === "irreversible") continue;
-
-    // Otherwise the routing rules must escalate it, for every routing field it accepts.
     for (const field of routing) {
-      const body = { [field]: "12345678903" };
-      const verdict = classifyPaymentRouting(
-        classifyWithBody(classifyRequest(method, target), body),
-        target,
-        body,
-        method,
-      );
+      // Probed at the location the API really puts it, not flattened to the top level.
+      const where = (locations.get(field) ?? [field])[0];
+      const body = bodyAt(where, "12345678903");
+      const verdict = classifyPaymentRouting("reversible", target, body, method);
       if (isAllowed(verdict, "reversible")) {
-        unprotected.push(`${method} ${path} accepts ${field} and classifies ${verdict}`);
+        unprotected.push(`${method} ${path} accepts ${where} and the routing layer says ${verdict}`);
       }
     }
   }
-  assert.deepEqual(unprotected, [], "a payment destination can be written in the default write mode");
+  assert.deepEqual(unprotected, [], "a payment destination is not caught by the payment-routing layer");
+});
+
+// Belt and braces: whatever the routing layer says, the call must actually be refused in
+// the default mode as the server assembles it.
+test("no write carrying a payment destination is permitted in the default mode", () => {
+  const permitted = [];
+  for (const { method, path, fields, locations } of writeOperations()) {
+    const routing = [...fields].filter((f) => paymentRoutingFieldNames.has(f.toLowerCase()));
+    if (routing.length === 0) continue;
+    if (`${method} ${path}` in NOT_A_DESTINATION_PATH) continue;
+    const target = concrete(path);
+    for (const field of routing) {
+      const body = bodyAt((locations.get(field) ?? [field])[0], "12345678903");
+      const pathRisk = classifyRequest(method, target);
+      const verdict = classifyPaymentRouting(classifyWithBody(pathRisk, body), target, body, method);
+      if (isAllowed(verdict, "reversible")) permitted.push(`${method} ${path} (${field})`);
+    }
+  }
+  assert.deepEqual(permitted, [], "a payment destination can be written in the default write mode");
 });
 
 // The exemptions are claims about the API, so check them rather than trusting the comment.
 test("the exempted paths really do mean a chart-of-accounts code", () => {
-  const sub = SPEC.paths["/api/general-sub-accounts"].post.requestBody.content["application/json"].schema.$ref;
-  const props = SCHEMAS[sub.split("/").pop()].properties;
-  assert.match(JSON.stringify(props.accountNumber), /AccountNumber/);
+  const reqSchema = (path, method) =>
+    SCHEMAS[
+      SPEC.paths[path][method].requestBody.content["application/json"].schema.$ref.split("/").pop()
+    ];
+
+  assert.match(JSON.stringify(reqSchema("/api/general-sub-accounts", "post").properties.accountNumber), /AccountNumber/);
+  // The claims in NOT_A_DESTINATION_PATH, each checked rather than trusted.
+  assert.equal(reqSchema("/api/assets", "post").properties.accountNumber.pattern, "1\\d{3}");
+  assert.match(
+    JSON.stringify(reqSchema("/api/reconciliation-rules", "post").properties.accountNumber),
+    /AccountNumber/,
+  );
+  // A voucher's accountNumber lives on a posting line, which is what makes it a ledger code.
+  const voucher = writeOperations().find((o) => o.method === "POST" && o.path === "/api/vouchers");
+  assert.deepEqual(voucher.locations.get("accountNumber"), ["postings[].accountNumber"]);
+  assert.match(JSON.stringify(SCHEMAS.AccountNumber.description), /chart of accounts/i);
 
   // And adding a company bank stays ordinary while repointing one does not — the whole
   // point of that exemption being method-scoped.
