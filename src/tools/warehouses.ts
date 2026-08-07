@@ -381,8 +381,31 @@ const adjustInventory = defineTool({
       query: { warehouseId: String(args.warehouseId) },
       tenantId,
     });
-    const rowsForProduct = (before.data?.rows ?? []).filter((r) => r.productId === args.productId);
+    // `?? []` would only cover null and undefined. A non-array `rows` — the shape change the
+    // sibling read tool already guards against — made `.filter` throw a TypeError here, so the
+    // pre-read that exists to prevent a silent write instead crashed the call. Checked the same
+    // way in both places now.
+    const rows = before.data?.rows;
+    const stockLinesReadable = Array.isArray(rows);
+    const rowsForProduct = stockLinesReadable ? rows.filter((r) => r.productId === args.productId) : [];
     const variantRows = rowsForProduct.filter((r) => r.variantId != null);
+
+    if (!stockLinesReadable && args.variantId === undefined) {
+      // Fail closed on exactly the case the pre-read exists for. Without the stock lines
+      // there is no way to tell whether this product is variant-tracked, and proceeding
+      // would risk the accepted-but-moved-nothing write with nothing left to detect it.
+      // A supplied variantId removes that failure mode, so that path is allowed through
+      // below with the missing check stated.
+      return fail(
+        `Could not read the stock lines for warehouse ${args.warehouseId}: the inventory ` +
+          `response had no \`rows\` array, so there is no way to tell whether product ` +
+          `${args.productId} is tracked per variant. Nothing was written.\n\n` +
+          `An adjustment that omits ${VARIANT_ID_FIELD} on a variant-tracked product is ` +
+          `accepted with a transaction id and moves no stock, so this refuses rather than ` +
+          `guess. Pass ${VARIANT_ID_FIELD} explicitly, or check ` +
+          `reai_get_warehouse_inventory first.`,
+      );
+    }
 
     if (args.variantId === undefined && variantRows.length > 0) {
       // Refusing is the whole point: the API would answer 200 here and move nothing.
@@ -446,6 +469,14 @@ const adjustInventory = defineTool({
             `and check that variantId names the right variant.`,
         );
       }
+    } else if (!stockLinesReadable) {
+      // The comparison is the only thing that would have caught a no-op here, and it could
+      // not run. Saying so beats letting its absence pass for a clean result.
+      parts.push(
+        `The stock lines for this warehouse could not be read beforehand, so the resulting ` +
+          `quantity was NOT verified against an expected total. Confirm with ` +
+          `reai_get_warehouse_inventory.`,
+      );
     } else if (after !== undefined && args.quantityChange !== 0 && after === 0 && quantityBefore === undefined) {
       parts.push(
         `Note: this product had no stock line in warehouse ${args.warehouseId} beforehand, and ` +

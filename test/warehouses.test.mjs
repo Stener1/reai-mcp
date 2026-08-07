@@ -321,3 +321,41 @@ test("the read-before-write is declared, so the gate sees both calls it makes", 
     "the pre-read must be declared, or apiPaths understates what the tool does",
   );
 });
+
+// `?? []` covers null and undefined, not a wrong type — so a non-array `rows` made the
+// pre-read that exists to prevent a silent write throw a TypeError instead. The sibling read
+// tool in the same file already handled this shape; the adjust handler did not.
+test("an unreadable pre-read fails closed instead of crashing or writing blind", async () => {
+  for (const rows of [{ "0": { productId: 1 } }, "rows", 7, null]) {
+    const attempt = await run(
+      "reai_adjust_inventory",
+      { productId: 1, warehouseId: 2, quantityChange: 3 },
+      (req, n) => (n === 1 ? { warehouseId: 2, rows } : { transactionId: 1, quantityOnHand: 0 }),
+    );
+    assert.equal(attempt.result.isError, true, `rows=${JSON.stringify(rows)} should refuse`);
+    assert.deepEqual(
+      attempt.calls.map((c) => c.method),
+      ["GET"],
+      `rows=${JSON.stringify(rows)} must not be written blind`,
+    );
+    assert.match(attempt.text, /no `rows` array/);
+    assert.match(attempt.text, /Nothing was written/);
+  }
+});
+
+test("a supplied variantId is allowed through an unreadable pre-read, with the gap stated", async () => {
+  // The refusal above exists for a MISSING variantId. Supplying one removes that failure
+  // mode, so blocking it would be a refusal with nothing behind it — but the verification
+  // genuinely did not run, and that must not pass for a clean result.
+  const { calls, result, text } = await run(
+    "reai_adjust_inventory",
+    { productId: 1, warehouseId: 2, quantityChange: 3, variantId: 99 },
+    (req, n) => (n === 1 ? { warehouseId: 2, rows: undefined } : { transactionId: 5, quantityOnHand: 3, variantId: 99 }),
+  );
+  assert.notEqual(result.isError, true);
+  assert.equal(calls[1].method, "POST");
+  assert.equal(calls[1].body.variantId, 99);
+  assert.match(text, /NOT verified against an expected total/);
+  // And it must not also claim the stock did not move, which it has no basis for.
+  assert.doesNotMatch(text, /WARNING: stock did NOT move/);
+});
