@@ -622,22 +622,63 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
  * is an ordinary thing to do in the default mode. Only a counterparty's destination
  * escalates.
  */
-const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
+export const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
   /^\/api\/suppliers(\/|$)/,
   /^\/api\/creditors(\/|$)/,
   /^\/api\/customers(\/|$)/,
-  /^\/api\/supplier-invoices\/[^/]+\/payment-details(\/|$)/,
+  // An EMPLOYEE's account is where their salary lands, which makes this the sharpest
+  // member of the class rather than an afterthought: salary is paid on a schedule, by
+  // machinery nobody re-examines each month, and the person who notices is the employee
+  // whose pay did not arrive. It was missing, so PATCH /api/employees/{id} carrying
+  // accountNumber was ordinary reversible master data in the default mode.
+  /^\/api\/employees(\/|$)/,
+  // The supplier-invoice PAYMENT DETAILS, at every path that writes them. The nested
+  // /payment-details sub-resource was covered and the parent was not — yet
+  // POST /api/supplier-invoices and PATCH /api/supplier-invoices/{id} accept the same
+  // paymentDetails object, and that account is what an outgoing payment actually uses.
+  /^\/api\/supplier-invoices(\/|$)/,
+  // Same object again, reached from the receiving side: turning a received EHF document
+  // into a supplier invoice carries the beneficiary's bank details with it.
+  /^\/api\/invoice-reception-documents\/[^/]+\/supplier-invoice(\/|$)/,
 ];
 
-// `bban` is the company-bank schema's account-number field. It was absent, so even
-// once /api/company-banks was in scope the account number itself went undetected.
+/**
+ * Field names that NAME A DESTINATION for money.
+ *
+ * Two were missing because the set was written against the supplier and company-bank
+ * schemas and never checked against the others: the supplier-invoice payment details call
+ * the same concepts `swiftBic` ("The beneficiary bank SWIFT/BIC") and `routingNumber`
+ * ("The bank routing number"). `test/payment-routing.test.mjs` now reads the OpenAPI
+ * document and fails if any routing-shaped field is neither in this set nor explicitly
+ * exempted, so the next rename does not slip through the same gap.
+ *
+ * Deliberately NOT here:
+ *
+ * - `bankAccountCategory`, `localClearingSystem`, `routingType` — they change the rails a
+ *   payment travels on, not the account it arrives in. A destination is always written
+ *   alongside them by one of the fields above, so the call is caught anyway.
+ * - `bankCountryCode` — on its own it does not name an account, and it is settable on
+ *   ordinary employee edits.
+ * - Every `*AccountNumber` that is a CHART-OF-ACCOUNTS code: `accrualAccountNumber`,
+ *   `principalAccountNumber`, `interestExpenseAccountNumber` and the rest carry
+ *   `$ref: AccountNumber`, and `POST /api/assets` pins its own to `pattern: 1\d{3}`.
+ *   Escalating those would refuse a booking with "this changes where a payment will go",
+ *   which is false — a misleading refusal teaches an operator to distrust the real ones.
+ */
 const PAYMENT_ROUTING_FIELDS = new Set([
   "iban",
   "bankaccountnumber",
-  "swiftcode",
-  "accountnumber",
+  // `bban` is the company-bank schema's account-number field. It was absent, so even
+  // once /api/company-banks was in scope the account number itself went undetected.
   "bban",
+  "accountnumber",
+  "swiftcode",
+  "swiftbic",
+  "routingnumber",
 ]);
+
+/** Exported for the spec-driven invariant test, which has to see the real set. */
+export const paymentRoutingFieldNames: ReadonlySet<string> = PAYMENT_ROUTING_FIELDS;
 
 /**
  * Redirecting invoice DELIVERY. The same shape of harm as payment routing — trivially
