@@ -181,3 +181,65 @@ test("a truncated enum is still recoverable in full from describeOperation", () 
   const full = describeOperation(op).requestBody?.schema?.properties?.directPermissionCodes;
   assert.ok(full.items.enum.length > 24, `expected the full set, got ${full.items.enum?.length}`);
 });
+
+// The `*-ctrl` tag heuristic hides 85 operations, and is right about nearly all of
+// them — UI typeahead, Adyen and Shopify webhooks, point-of-sale auth. But registering
+// a payroll payment is not an undocumented internal, and hiding it made an agent asked
+// to do that report the capability as absent, which is worse than refusing because it
+// is false. None of these has a documented twin; four candidates were dropped because
+// they did.
+test("business operations behind the -ctrl heuristic are discoverable", () => {
+  const index = getSpecIndex();
+  const exposed = index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"));
+  assert.ok(exposed.length > 0, "the allowlist should expose something");
+
+  // A path's literal segments, singularised and with the /api prefix dropped, so
+  // /project/{id}/sub-project/{x} and /api/projects/{id}/sub-projects/{x}/name are
+  // comparable. Matching on the LAST segment alone was too weak: it read those two as
+  // different because one ends in a parameter and the other in "name", and missed
+  // that renameSubProject and updateSubProjectName are the same action.
+  const segments = (path) =>
+    path
+      .split("/")
+      .filter((s) => s && !s.startsWith("{") && s !== "api")
+      .map((s) => s.replace(/s$/, "").replace(/ie$/, "y"));
+
+  for (const op of exposed) {
+    assert.ok(!/-ctrl$/.test(op.tag), `${op.path} carries the internal tag ${op.tag}`);
+    assert.ok(index.tags[op.tag] > 0, `${op.path} has tag ${op.tag}, absent from the tag index`);
+
+    // A documented operation covering the same resources with the same method is a
+    // twin even when its path is longer — the extra segment names the action.
+    const mine = segments(op.path);
+    const twin = index.operations.find(
+      (o) =>
+        !o.internal &&
+        o.path.startsWith("/api/") &&
+        o.method === op.method &&
+        mine.every((s) => segments(o.path).includes(s)),
+    );
+    assert.equal(twin, undefined, `${op.method} ${op.path} duplicates ${twin?.path}`);
+  }
+
+  const salary = exposed.find((o) => o.path === "/salary/{id}/register-payment");
+  assert.ok(salary, "registering a payroll payment must be reachable");
+  assert.equal(salary.tag, "Salary Payments");
+});
+
+// Advertising something reai_request cannot call is the same false signal this
+// allowlist exists to remove, pointing the other way. POST /invoice/setting/receiver-bank
+// takes a required object-valued query parameter and no body, which the tool's
+// scalar-and-scalar-array query model cannot express; it is excluded for that reason.
+test("every exposed business operation is actually callable through reai_request", () => {
+  const index = getSpecIndex();
+  for (const op of index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"))) {
+    const described = describeOperation(op);
+    for (const p of described.parameters ?? []) {
+      if (p.in !== "query") continue;
+      assert.ok(
+        !/^object|^oneOf/.test(p.type),
+        `${op.method} ${op.path}: query parameter "${p.name}" is ${p.type}, which reai_request cannot send`,
+      );
+    }
+  }
+});

@@ -71,7 +71,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Cross-cutting -------------------------------------------------------
   // Note: quirks true of the whole API (tenant scoping, deep links needing
   // ?tenantId) deliberately live in the server instructions instead. Attached
-  // here they would match all 313 operations and drown the endpoint-specific
+  // here they would match all 321 operations and drown the endpoint-specific
   // notes that are the point of this registry.
   {
     id: "tenant-header-ignored-single-tenant",

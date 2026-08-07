@@ -11,7 +11,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 ## Why this exists
 
-ReAI's API is genuinely good — 313 documented operations covering the whole accounting domain. But that is far too many to expose as 313 MCP tools: it would exhaust any client's tool budget and bury the agent in choices.
+ReAI's API is genuinely good — 321 documented operations covering the whole accounting domain. But that is far too many to expose as 321 MCP tools: it would exhaust any client's tool budget and bury the agent in choices.
 
 So this server does two things at once:
 
@@ -223,7 +223,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | Tool | Purpose |
 |---|---|
 | `reai_list_api_tags` | All 52 API domains with operation counts — a map of what the system can do |
-| `reai_search_endpoints` | Keyword search across all 313 public operations |
+| `reai_search_endpoints` | Keyword search across all 321 public operations |
 | `reai_describe_endpoint` | Full schema for one endpoint, nested objects resolved — **with known quirks first** |
 | `reai_api_notes` | Browse the known API quirks (see [below](#api-quirks-worth-knowing)) |
 | `reai_request` | Call any endpoint. Auth and tenant handled; writes are policy-checked |

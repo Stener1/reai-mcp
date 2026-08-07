@@ -37,10 +37,66 @@ const INTERNAL_PATH_PREFIXES = [
 /** Spring bean names leak into tags as `*-ctrl`; those endpoints are undocumented internals. */
 const isInternalTag = (tag) => /-ctrl$/.test(tag);
 
-const isInternal = (path, tags) =>
-  INTERNAL_PATH_PREFIXES.some((p) => path === p || path.startsWith(p + "/")) ||
-  tags.length === 0 ||
-  tags.every(isInternalTag);
+/**
+ * Operations the `-ctrl` heuristic hides that are real accounting work.
+ *
+ * The heuristic is right about the great majority of the 85 it catches: UI typeahead
+ * (`/customer/search`, `/country/search`, 40-odd of them), Adyen and Shopify webhooks,
+ * point-of-sale mobile auth, `/frontend-error`. But registering a payroll payment is
+ * not an "undocumented internal", and hiding it means an agent asked to do that
+ * reports the capability as absent — which is worse than refusing, because it is
+ * false. None of these appear anywhere else in the public set, so discovery was the
+ * only way to reach them.
+ *
+ * Exposing them does not widen what may be CALLED: `internal` is a discovery flag,
+ * not a policy boundary, and every write below currently classifies as irreversible
+ * (the fail-closed default for an unrecognised write path), so `reversible` mode
+ * still refuses them. Discovery's job is to describe the API truthfully; the write
+ * policy decides what happens next.
+ *
+ * Exact paths, deliberately — a prefix would sweep the `/invoice/.../search` and
+ * `/salary/...` typeahead back in with them.
+ *
+ * Two rules govern what may be listed here, and both are enforced by tests rather
+ * than trusted to this comment.
+ *
+ * No documented twin. Surfacing an unsupported duplicate of a supported endpoint is
+ * worse than hiding it: it gives an agent two ways to do one job and no reason to
+ * prefer the documented one. Five candidates were dropped for having one —
+ * `POST /salary/{id}/complete`, `DELETE /subscription/{id}` and `GET /attachments/{id}`
+ * duplicate `/api/salary-payments/{id}/complete`, `/api/subscriptions/{id}` and
+ * `/api/attachments/{id}`; `/attachments/{id}/view/{filename}` is covered by
+ * `/api/attachments/{id}/content`; and `PUT /project/{id}/sub-project/{subProjectId}`
+ * (`renameSubProject`) is the same action as the documented
+ * `PUT /api/projects/{id}/sub-projects/{subProjectId}/name` (`updateSubProjectName`).
+ *
+ * And it has to be callable. `POST /invoice/setting/receiver-bank` takes a required
+ * object-valued QUERY parameter and no body, which `reai_request` cannot express, so
+ * advertising it would offer a capability that fails the moment it is used —
+ * precisely the false signal this allowlist exists to remove, pointing the other way.
+ */
+const BUSINESS_OPERATIONS = new Map([
+  // Payroll: complete a run, record when and how it was paid.
+  ["POST /salary/{id}/register-payment", "Salary Payments"],
+  ["POST /salary/{id}/payment-date", "Salary Payments"],
+  // Payments: correct the date or the company bank account a payment settles on.
+  ["POST /payments/{id}/payment-date", "Invoices"],
+  ["POST /payments/{id}/company-bank", "Invoices"],
+  ["POST /invoice/payment/{paymentId}/company-bank", "Invoices"],
+  // The default payment terms applied to every future invoice.
+  ["POST /invoice/setting/daysUntilDue", "Invoices"],
+  // Reading back what was filed: the Altinn sync state of a VAT return, and the raw
+  // Skatteetaten feedback on an A-melding. Both read-only, and both answer a question
+  // ("did it go through, and what did they say") that nothing else does.
+  ["GET /vat-return/altinn-sync", "VAT returns"],
+  ["GET /amelding/{id}/feedback-raw", "Salary Payments"],
+]);
+
+const isInternal = (path, tags, method) =>
+  !BUSINESS_OPERATIONS.has(`${method} ${path}`) &&
+  (INTERNAL_PATH_PREFIXES.some((p) => path === p || path.startsWith(p + "/")) ||
+    tags.length === 0 ||
+    tags.every(isInternalTag));
 
 const spec = JSON.parse(readFileSync(SRC, "utf8"));
 
@@ -183,13 +239,20 @@ for (const [path, item] of Object.entries(spec.paths ?? {})) {
       id: operationId(method, path),
       method: method.toUpperCase(),
       path,
-      tag: tags.find((t) => !isInternalTag(t)) ?? tags[0] ?? "Other",
+      // An allowlisted operation gets the tag its domain actually uses. Otherwise its
+      // leaked Spring bean name ("salary-ctrl") would appear in reai_list_api_tags
+      // beside the real ones, and searching the Salary Payments tag would not find it.
+      tag:
+        BUSINESS_OPERATIONS.get(`${method.toUpperCase()} ${path}`) ??
+        tags.find((t) => !isInternalTag(t)) ??
+        tags[0] ??
+        "Other",
       tags,
       summary: trim(op.summary, 200),
       description: trim(op.description, 500),
       params: params.length ? params : undefined,
       body,
-      internal: isInternal(path, tags),
+      internal: isInternal(path, tags, method.toUpperCase()),
       deprecated: op.deprecated === true || undefined,
     });
   }

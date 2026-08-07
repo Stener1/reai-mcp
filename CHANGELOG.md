@@ -27,8 +27,8 @@ connector, and has been verified against live ReAI data throughout.
     rules, transaction matching and booking, VAT settlement, tax return.
 - **Discovery escape hatch** (part of the 7 always-on) —
   `reai_search_endpoints`, `reai_describe_endpoint`, `reai_list_api_tags`,
-  `reai_api_notes` and `reai_request` reach all 313 documented operations, so the
-  256 with no curated tool are still usable.
+  `reai_api_notes` and `reai_request` reach all 321 documented operations, so the
+  264 with no curated tool are still usable.
 - **A write policy**, which is the core safety contract. Every operation is
   classified `read` / `reversible` / `irreversible` and gated by
   `REAI_WRITE_MODE` (default `reversible`). Tools a mode forbids are never
