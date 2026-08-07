@@ -188,13 +188,19 @@ the HTTP transport, the build and deploy pipeline, and the result formatter:
 
 ### Known limitations
 
-- **The tenant boundary is enforced by this server, not by the API.** ReAI ignores
-  `X-Tenant-Id` when a token reaches only one company — every value, including a
-  nonexistent id, returns that company's data. Isolation between *users* is
-  intact, but we could not verify that the API enforces a tenant switch, because
-  every token available for testing reaches exactly one company. The guarantee
-  holds for calls made through these tools and says nothing about the same token
-  used directly.
+- **The tenant boundary is enforced by this server, not by the API** — and this is
+  still unverified rather than known false. ReAI ignores `X-Tenant-Id` when a token
+  reaches only one company: every value, including a nonexistent id, returns that
+  company's data. Isolation between *users* is intact, but whether the API enforces
+  a tenant *switch* could not be tested, because every token available during
+  development was tenant-scoped and reached exactly one company.
+
+  The spec says a **user-scoped** token behaves differently — `X-Tenant-Id` is
+  "required for tenant-scoped requests when authenticating with a user access
+  token" — so this is testable the moment one exists: list two companies from
+  `GET /api/me`, read a known record from each, and check the header actually
+  selects between them. Until then the guarantee holds for calls made through
+  these tools and says nothing about the same token used directly.
 
 - **Individual tokens cannot be revoked** before they expire. Sealed tokens carry
   no server-side record, so rotating `REAI_ENCRYPTION_KEY` — which invalidates

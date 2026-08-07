@@ -205,3 +205,57 @@ test("a transmitting tool names both switches it needs", async () => {
     );
   }
 });
+
+// The multi-tenant branch of reai_whoami had no guidance at all, because no token
+// available during development reached more than one company — so the case this server
+// exists to serve well was the one never exercised. The rules genuinely invert between
+// token scopes: the tenant header goes from ignored to load-bearing.
+test("reai_whoami explains the token scope it is actually looking at", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const whoami = allTools.find((t) => t.name === "reai_whoami");
+  const config = {
+    baseUrl: "https://app.reai.no",
+    writeMode: "reversible",
+    timeoutMs: 5000,
+    maxRetries: 0,
+    verbose: false,
+  };
+  const ctxWith = (tenants) => ({
+    client: { request: async () => ({ data: { email: "a@b.no", name: "A", tenants } }), deepLink: (_p, t) => `x/${t}` },
+    config,
+    session: {},
+  });
+
+  const single = (await whoami.handler({}, ctxWith([{ id: 2634, companyName: "One", currencyCode: "NOK" }])))
+    .content[0].text;
+  assert.match(single, /TENANT-SCOPED/);
+  assert.match(single, /ignores the tenant header/i);
+  assert.match(single, /USER-scoped token would list every company/i, "must say what the other kind does");
+
+  const many = (
+    await whoami.handler(
+      {},
+      ctxWith([
+        { id: 2634, companyName: "One", currencyCode: "NOK" },
+        { id: 2783, companyName: "Two", currencyCode: "NOK" },
+        { id: 9001, companyName: "Three", currencyCode: "EUR" },
+      ]),
+    )
+  ).content[0].text;
+  assert.match(many, /USER-scoped/);
+  assert.match(many, /load-bearing/, "the header stops being ignored — say so");
+  assert.ok(!/ignores the tenant header/i.test(many), "must not repeat the single-tenant caveat");
+  // Amounts are in each company's own currency, so a mixed-currency list needs saying.
+  assert.match(many, /do not share a currency \(NOK, EUR\)/);
+
+  const sameCurrency = (
+    await whoami.handler(
+      {},
+      ctxWith([
+        { id: 1, companyName: "A", currencyCode: "NOK" },
+        { id: 2, companyName: "B", currencyCode: "NOK" },
+      ]),
+    )
+  ).content[0].text;
+  assert.ok(!/do not share a currency/.test(sameCurrency), "no warning when they agree");
+});

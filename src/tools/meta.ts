@@ -46,7 +46,7 @@ const whoami = defineTool({
     } else {
       notes.push(
         `No active tenant set and this token reaches ${tenants.length} companies. ` +
-          `Call reai_use_tenant before using tenant-scoped tools.`,
+          `Call reai_use_tenant before using tenant-scoped tools, or pass tenantId per call.`,
       );
     }
     notes.push(
@@ -55,11 +55,31 @@ const whoami = defineTool({
     );
     if (tenants.length === 1) {
       notes.push(
-        `This token reaches exactly one company. Note that ReAI IGNORES the tenant header in that ` +
-          `case — any tenant id returns this company's data, including ids that do not exist — so a ` +
-          `successful response is not evidence you reached the tenant you asked for. This list is ` +
-          `authoritative; a company missing from it is not reachable, even if it exists in the UI.`,
+        `This token reaches exactly one company, which means it is TENANT-SCOPED. ReAI ignores the ` +
+          `tenant header for such a token — any tenant id returns this company's data, including ids ` +
+          `that do not exist — so a successful response is not evidence you reached the tenant you ` +
+          `asked for. This list is authoritative; a company missing from it is not reachable, even ` +
+          `if it exists in the UI. A USER-scoped token would list every company the user can open, ` +
+          `and then the tenant header is both required and honoured.`,
       );
+    } else if (tenants.length > 1) {
+      // The multi-tenant branch had no equivalent guidance, because no token available
+      // during development reached more than one company. The rules genuinely invert:
+      // the header goes from ignored to load-bearing.
+      notes.push(
+        `This token reaches ${tenants.length} companies, so it is USER-scoped and the tenant header ` +
+          `is load-bearing rather than ignored: every tenant-scoped call needs one, and it selects ` +
+          `which company you are writing to. Set it once with reai_use_tenant, or pass tenantId per ` +
+          `call — do not rely on a default.`,
+      );
+      const currencies = [...new Set(tenants.map((t) => t.currencyCode).filter(Boolean))];
+      if (currencies.length > 1) {
+        notes.push(
+          `These companies do not share a currency (${currencies.join(", ")}), and amounts are in ` +
+            `the company's own currency — so a figure is only comparable across them after ` +
+            `conversion. Check the currency below before reading any total.`,
+        );
+      }
     }
 
     return ok(
