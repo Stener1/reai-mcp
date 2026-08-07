@@ -180,7 +180,9 @@ const getBankReconciliation = defineTool({
         "Which sections to return. Omit to include ALL of them, which on a busy account is large " +
           "enough to be shortened before you see it — the tool trims the longest lists to fit and " +
           "says so, but a trimmed list is not an answer to \"what is left to reconcile\". Narrowing " +
-          "this to the section you actually need is the reliable way to get a complete one.",
+          "to the one section you need gives it the whole budget and usually avoids trimming, but " +
+          "does not guarantee it: a single busy month can exceed the cap on its own. Either way, " +
+          "read the note and compare the count fields before treating a list as complete.",
       ),
     tenantId: tenantIdArg,
   },

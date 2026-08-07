@@ -432,7 +432,14 @@ const createProduct = defineTool({
     title: z.string().describe("Product name."),
     description: z.string().optional().describe("Product description."),
     stockItem: z.boolean().optional().describe("Track this product in inventory."),
-    vatCode: z.string().optional().describe("VAT code from reai_list_vat_codes."),
+    vatCode: z
+      .string()
+      .optional()
+      .describe(
+        "Default VAT code for this product, from reai_list_vat_codes. The unfiltered list returns " +
+          "EVERY code ReAI supports rather than the ones THIS tenant may use, and a wrong default " +
+          "here propagates onto every order and invoice line that picks the product up.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
