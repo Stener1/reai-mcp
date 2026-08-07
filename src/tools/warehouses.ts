@@ -20,18 +20,26 @@ import {
  *
  * ## An adjustment without variantId is accepted and changes nothing
  *
- * The worst of the four. `variantId` is optional in the schema, and omitting it on a product
- * that has variants answers 200 with a real `transactionId` — and moves no stock at all:
+ * The worst of the four, and the reason `variantId` is REQUIRED by this tool although the API
+ * marks it optional. Omitting it on a product that has variants answers 200 with a real
+ * `transactionId` — and moves no stock at all:
  *
  *   POST /api/warehouses/inventory/adjust {productId, warehouseId, quantityChange: 3}
  *     → 200 {"transactionId":147036, "variantId":null, "quantityChange":3, "quantityOnHand":0}
  *
  * Four such calls in a row (net +12) left `quantityOnHand` at 0 and `stockValue` at 0. The
  * response is honest — `quantityOnHand` is the truth and `variantId` comes back null — but
- * nothing in the status code or the transaction id says the write was a no-op. So this tool
- * reads the warehouse's stock lines FIRST and refuses before writing when the product has
- * variant rows and no variantId was given, then verifies the resulting on-hand against the
- * expected total afterwards.
+ * nothing in the status code or the transaction id says the write was a no-op.
+ *
+ * Nothing that can hold stock is exempt: the API refuses a stock product with no variants
+ * (see the `stock-product-needs-a-variant` quirk), so there is no adjustment worth making
+ * that omits the field. Requiring it removes the failure mode instead of detecting it.
+ *
+ * Two checks sit either side of the write. Before: the variant must be one of the
+ * warehouse's stock lines, which also supplies the quantity to measure against. After: the
+ * API echoes the variant it acted on, and a null echo against a variant that was sent is the
+ * no-op signature — that one needs nothing from the pre-read, so it still holds when the
+ * inventory response cannot be read or matched.
  *
  * Note the field name that made this easy to hit: a variant in ProductRes is keyed
  * `variantId`, not `id`. Reading `.id` yields undefined, `JSON.stringify` drops it, and the
@@ -59,8 +67,9 @@ import {
  *
  * There is no route that lists or deletes a stock transaction: transactions/{id} and
  * adjust/{id} both 404 on DELETE, and GET transactions 404s. The only correction is an
- * opposite adjustment, which leaves both movements in the history. `/api/warehouses` has
- * also been in IRREVERSIBLE_PREFIXES for the adjust path since before this toolset existed.
+ * opposite adjustment, which leaves both movements in the history. `/api/warehouses/inventory
+ * /adjust` was also already the one entry under `/api/warehouses` in IRREVERSIBLE_PREFIXES,
+ * ahead of this toolset; the rest of `/api/warehouses` is in the reversible list.
  */
 
 /** The API's own field name, and the one to pass back. Documented because `.id` is the trap. */
@@ -72,6 +81,8 @@ type InventoryRow = {
   variantId?: number | null;
   sku?: string;
   quantityOnHand?: number;
+  stockUnitCost?: number;
+  retailUnitPrice?: number;
   stockValue?: number;
 };
 
@@ -294,14 +305,49 @@ const getInventory = defineTool({
           `will, whether or not it has been bought or sold.`
         : `${rows.length} stock line(s), total stock value ${res.data?.totalStockValue ?? "?"}, ` +
           `total retail value ${res.data?.totalRetailValue ?? "?"}.` +
-          (negative.length
-            ? ` ${negative.length} line(s) are NEGATIVE (${negative
-                .map((r) => `${r.sku ?? r.productTitle ?? r.productId}: ${r.quantityOnHand}`)
-                .join(", ")}) — more was taken out than was put in.`
-            : "");
+          (negative.length ? ` ${describeNegative(negative)}` : "");
     return ok(res.data, { note });
   },
 });
+
+/** At most this many negative lines are named; the rest are counted. */
+const NEGATIVE_SAMPLE = 10;
+
+/**
+ * Names the negative lines, bounded.
+ *
+ * ok() truncates the response BODY to the result budget but does not shorten a note the tool
+ * supplied, so joining every negative line could push the result past the advertised cap on a
+ * warehouse with a lot of them — and an all-warehouse read is one call.
+ */
+function describeNegative(negative: InventoryRow[]): string {
+  const named = negative
+    .slice(0, NEGATIVE_SAMPLE)
+    .map((r) => `${r.sku ?? r.productTitle ?? r.productId}: ${r.quantityOnHand}`)
+    .join(", ");
+  const rest = negative.length - Math.min(negative.length, NEGATIVE_SAMPLE);
+  return (
+    `${negative.length} line(s) are NEGATIVE (${named}${rest > 0 ? `, and ${rest} more` : ""}) — ` +
+    `more was taken out than was put in.`
+  );
+}
+
+/**
+ * `yyyy-MM-dd` or a full ISO timestamp, and nothing else.
+ *
+ * Accepting the date form is the point — every other date argument in this server uses it, and
+ * the API's rejection of one here names no field. But an unvalidated `z.string()` passed
+ * "01.08.2026" and "2026-8-1" straight through to produce exactly the bare 400 the argument
+ * promises to prevent, which is the looseness commit 25925c0 went through fifteen arguments
+ * to remove.
+ */
+const STOCK_MOVEMENT_TIME = z
+  .string()
+  .regex(
+    /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/,
+    "Use yyyy-MM-dd or a full ISO timestamp such as 2026-08-01T10:00:00Z. The API's field is " +
+      "date-time and rejects anything else with a 400 that names no field.",
+  );
 
 /**
  * Accepts the `yyyy-MM-dd` every other date argument here uses, as well as a full timestamp,
@@ -327,10 +373,14 @@ const adjustInventory = defineTool({
     "transactions/{id}, DELETE adjust/{id} and GET transactions all 404), so the only " +
     "correction is an opposite adjustment, and both movements stay in the history. That is why " +
     "this needs REAI_WRITE_MODE=full.\n\n" +
-    "variantId is optional in the API but required in practice for a product that has variants: " +
-    "omitting it answers 200 with a real transaction id and moves nothing at all. This tool " +
-    "reads the warehouse's stock lines first and refuses before writing in that case, then " +
-    "checks the resulting quantity against what was asked for.",
+    "variantId is optional in the API and REQUIRED here. Anything that can hold stock has at " +
+    "least one variant — the API refuses a stock product without one — and an adjustment that " +
+    "omits variantId answers 200 with a real transaction id while moving nothing at all. So " +
+    "there is no call this tool could make without it that would do what the caller asked. It " +
+    "also reads the warehouse's stock lines first and refuses if the variant is not one of " +
+    "them, checks the resulting quantity against the pre-read plus the delta, and reports the " +
+    "API's echoed variantId coming back null — which is the no-op signature — whatever the " +
+    "pre-read said.",
   risk: "irreversible",
   apiPaths: [
     ["POST", "/api/warehouses/inventory/adjust"],
@@ -352,24 +402,26 @@ const adjustInventory = defineTool({
       .number()
       .int()
       .positive()
-      .optional()
       .describe(
-        "Which variant of the product. Required whenever the product has variants — without it " +
-          "the API accepts the call and moves no stock. Read it from the `variantId` field of a " +
-          "product's variants (NOT `id`, which does not exist there) or from a stock line.",
+        "Which variant of the product. Optional in the API and required here: without it the " +
+          "API accepts the call and moves no stock. Read it from the `variantId` field of a " +
+          "product's variants (NOT `id`, which does not exist there) or from a stock line in " +
+          "reai_get_warehouse_inventory.",
       ),
     unitCost: z
       .number()
       .optional()
-      .describe("Stock unit cost to value the movement at. Defaults to the variant's cost price."),
-    occurredAt: z
-      .string()
-      .optional()
       .describe(
-        "When the movement happened. Accepts yyyy-MM-dd (sent as 00:00:00Z) or a full " +
-          "timestamp. Defaults to now. The API rejects a bare date itself with an error naming " +
-          "no field, so this tool completes the date for you.",
+        "Stock unit cost to value the movement at. What the API uses when this is omitted was " +
+          "not established — a movement made without it valued the line at the variant's cost " +
+          "price, but that was the only case measured, so pass it if the valuation matters.",
       ),
+    occurredAt: STOCK_MOVEMENT_TIME.optional().describe(
+      "When the movement happened. Accepts yyyy-MM-dd (sent as 00:00:00Z) or a full ISO " +
+        "timestamp. Defaults to now. The API's field is date-time and it refuses a bare date " +
+        "with an error naming no field, so this tool completes the date — but anything that is " +
+        "neither form is rejected here rather than passed on to produce that error.",
+    ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -388,53 +440,48 @@ const adjustInventory = defineTool({
     const rows = before.data?.rows;
     const stockLinesReadable = Array.isArray(rows);
     const rowsForProduct = stockLinesReadable ? rows.filter((r) => r.productId === args.productId) : [];
-    const variantRows = rowsForProduct.filter((r) => r.variantId != null);
 
-    if (!stockLinesReadable && args.variantId === undefined) {
-      // Fail closed on exactly the case the pre-read exists for. Without the stock lines
-      // there is no way to tell whether this product is variant-tracked, and proceeding
-      // would risk the accepted-but-moved-nothing write with nothing left to detect it.
-      // A supplied variantId removes that failure mode, so that path is allowed through
-      // below with the missing check stated.
-      return fail(
-        `Could not read the stock lines for warehouse ${args.warehouseId}: the inventory ` +
-          `response had no \`rows\` array, so there is no way to tell whether product ` +
-          `${args.productId} is tracked per variant. Nothing was written.\n\n` +
-          `An adjustment that omits ${VARIANT_ID_FIELD} on a variant-tracked product is ` +
-          `accepted with a transaction id and moves no stock, so this refuses rather than ` +
-          `guess. Pass ${VARIANT_ID_FIELD} explicitly, or check ` +
-          `reai_get_warehouse_inventory first.`,
-      );
+    // The variant has to be one this warehouse actually tracks. A stock line exists at
+    // quantity 0 for every stock variant, including in a warehouse created after the product
+    // — measured both ways round — so an absent line means this is not something the
+    // warehouse holds, and the adjustment would be the accepted-but-moved-nothing write.
+    if (stockLinesReadable) {
+      const matching = rowsForProduct.filter((r) => r.variantId === args.variantId);
+      if (matching.length !== 1) {
+        const available = rowsForProduct.length
+          ? `Stock lines for product ${args.productId} in this warehouse:\n` +
+            rowsForProduct
+              .map(
+                (r) =>
+                  `  ${VARIANT_ID_FIELD} ${r.variantId ?? "(none)"}  ${r.sku ?? "(no sku)"}  ` +
+                  `${r.quantityOnHand ?? 0} on hand${r.productTitle ? `  — ${r.productTitle}` : ""}`,
+              )
+              .join("\n")
+          : `Product ${args.productId} has no stock line in warehouse ${args.warehouseId} at all. ` +
+            `Only stock-tracked variants get one, so check that this product is a stock item.`;
+        return fail(
+          (matching.length === 0
+            ? `Variant ${args.variantId} is not a stock line of product ${args.productId} in ` +
+              `warehouse ${args.warehouseId}.`
+            : `Variant ${args.variantId} matches ${matching.length} stock lines of product ` +
+              `${args.productId} in warehouse ${args.warehouseId}, so which one to measure ` +
+              `against is ambiguous.`) +
+            ` Nothing was written — an adjustment the warehouse does not track is accepted with ` +
+            `a transaction id and moves no stock.\n\n${available}`,
+        );
+      }
     }
 
-    if (args.variantId === undefined && variantRows.length > 0) {
-      // Refusing is the whole point: the API would answer 200 here and move nothing.
-      return fail(
-        `Product ${args.productId} is tracked per variant in warehouse ${args.warehouseId}, and ` +
-          `no variantId was given. Nothing was written — the API would have accepted this and ` +
-          `moved no stock, returning a transaction id anyway.\n\n` +
-          `Pass one of these as ${VARIANT_ID_FIELD}:\n` +
-          variantRows
-            .map(
-              (r) =>
-                `  ${r.variantId}  ${r.sku ?? "(no sku)"}  ${r.quantityOnHand ?? 0} on hand` +
-                `${r.productTitle ? `  — ${r.productTitle}` : ""}`,
-            )
-            .join("\n"),
-      );
-    }
-
-    const matching = rowsForProduct.find((r) =>
-      args.variantId === undefined ? true : r.variantId === args.variantId,
-    );
-    const quantityBefore = matching?.quantityOnHand;
+    const quantityBefore = stockLinesReadable
+      ? rowsForProduct.find((r) => r.variantId === args.variantId)?.quantityOnHand
+      : undefined;
 
     const body: Record<string, unknown> = {
       productId: args.productId,
       warehouseId: args.warehouseId,
       quantityChange: args.quantityChange,
+      variantId: args.variantId,
     };
-    if (args.variantId !== undefined) body.variantId = args.variantId;
     if (args.unitCost !== undefined) body.unitCost = args.unitCost;
     if (args.occurredAt !== undefined) body.occurredAt = normaliseOccurredAt(args.occurredAt);
 
@@ -451,38 +498,44 @@ const adjustInventory = defineTool({
 
     const after = res.data?.quantityOnHand;
     const parts = [
-      `Adjusted product ${args.productId}${args.variantId ? ` variant ${args.variantId}` : ""} in ` +
-        `warehouse ${args.warehouseId} by ${args.quantityChange > 0 ? "+" : ""}${args.quantityChange}` +
+      `Adjusted product ${args.productId} variant ${args.variantId} in warehouse ` +
+        `${args.warehouseId} by ${args.quantityChange > 0 ? "+" : ""}${args.quantityChange}` +
         `${after === undefined ? "" : `; ${after} now on hand`}` +
         `${res.data?.transactionId ? ` (transaction ${res.data.transactionId})` : ""}.`,
     ];
 
-    // The check the silent no-op needs: the response's on-hand is the only honest signal, so
-    // compare it against what the pre-read plus the delta says it should be.
+    // The detector that needs nothing from the pre-read: the API echoes the variant it acted
+    // on, and a null echo against a variant that was sent is the no-op signature itself. The
+    // first version declared this field in the response type and never read it, leaving the
+    // pre-read comparison as the only check — which is silent whenever the pre-read could not
+    // be matched or read.
+    if (res.data?.variantId == null) {
+      parts.push(
+        `WARNING: the API echoed back variantId: null although variant ${args.variantId} was ` +
+          `sent, which is the signature of an adjustment that is accepted and moves no stock. ` +
+          `Treat this as having changed nothing until reai_get_warehouse_inventory says otherwise.`,
+      );
+    }
+
     if (quantityBefore !== undefined && after !== undefined) {
       const expected = quantityBefore + args.quantityChange;
       if (after !== expected) {
         parts.push(
           `WARNING: stock did NOT move as asked. It was ${quantityBefore} before, ${args.quantityChange} ` +
             `was requested, so ${expected} was expected — the API reports ${after}. The call was ` +
-            `accepted regardless. Verify with reai_get_warehouse_inventory before adjusting again, ` +
-            `and check that variantId names the right variant.`,
+            `accepted regardless. Verify with reai_get_warehouse_inventory before adjusting again.`,
         );
       }
-    } else if (!stockLinesReadable) {
-      // The comparison is the only thing that would have caught a no-op here, and it could
-      // not run. Saying so beats letting its absence pass for a clean result.
+    } else {
+      // No comparison was possible. Which of the two reasons it was matters to what the caller
+      // should check, and neither may pass for a clean result — an absent field reported as
+      // nothing wrong is the failure this server exists to prevent.
       parts.push(
-        `The stock lines for this warehouse could not be read beforehand, so the resulting ` +
-          `quantity was NOT verified against an expected total. Confirm with ` +
-          `reai_get_warehouse_inventory.`,
-      );
-    } else if (after !== undefined && args.quantityChange !== 0 && after === 0 && quantityBefore === undefined) {
-      parts.push(
-        `Note: this product had no stock line in warehouse ${args.warehouseId} beforehand, and ` +
-          `on-hand is 0 after a change of ${args.quantityChange}. That is the signature of an ` +
-          `adjustment that was accepted but moved nothing. Confirm with ` +
-          `reai_get_warehouse_inventory.`,
+        after === undefined
+          ? `The response carried no quantityOnHand, so what this call left on hand is UNKNOWN — ` +
+            `not zero, and not what was asked for. Read it with reai_get_warehouse_inventory.`
+          : `The stock lines for this warehouse could not be read beforehand, so ${after} on hand ` +
+            `was NOT verified against an expected total. Confirm with reai_get_warehouse_inventory.`,
       );
     }
 

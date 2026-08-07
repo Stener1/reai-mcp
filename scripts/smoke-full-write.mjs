@@ -142,6 +142,26 @@ function listOf(result) {
   }
   return undefined;
 }
+
+/**
+ * How many items a list tool ACTUALLY matched, truncation included.
+ *
+ * listOf alone is not enough for a count: ok() trims an oversized array at an item boundary
+ * and re-serialises it as valid JSON, so 200, 201, 400 and 401 vouchers all come back as a
+ * parsable array of 186. Comparing those lengths before and after a write would satisfy the
+ * "posted no voucher" invariant automatically on any tenant with real history — the check
+ * passing because it could not see, which is the failure mode this suite exists to catch.
+ *
+ * The truncation note carries the real total ("showing the first 186 of 400 items"), so read
+ * it when present and use the array length only when it is not. Returns undefined when
+ * neither is available, so the caller reports "could not count" instead of a number.
+ */
+function countOf(result) {
+  if (result.isError) return undefined;
+  const truncated = /showing the first \d+ of (\d+) items/.exec(textOf(result));
+  if (truncated) return Number(truncated[1]);
+  return listOf(result)?.length;
+}
 const today = new Date().toISOString().slice(0, 10);
 
 async function main() {
@@ -363,16 +383,34 @@ async function main() {
         row ? `variantId=${created.variantId} qty=${row.quantityOnHand}` : textOf(invRes).slice(0, 200),
       );
 
-      // The refusal. Without a variantId the API would answer 200 and move nothing, so the
-      // tool must not send it — and must not have written anything when it declines.
+      // Without a variantId the API would answer 200 and move nothing. The tool requires the
+      // field, so this is refused at the schema layer — before the handler runs and therefore
+      // before any request is made, which is a stronger guarantee than declining after a read.
       const refused = await client.callTool({
         name: "reai_adjust_inventory",
         arguments: { productId: created.productId, warehouseId: created.warehouseId, quantityChange: 3 },
       });
       report(
-        "an adjustment with no variantId is refused, not silently dropped",
-        refused.isError === true && /Nothing was written/.test(textOf(refused)),
+        "an adjustment with no variantId cannot be made at all",
+        refused.isError === true && /variantId/.test(textOf(refused)),
         firstLineOf(textOf(refused)),
+      );
+
+      // And a variant this warehouse does not track is refused by the pre-read, which is the
+      // check that cannot be expressed in a schema.
+      const untracked = await client.callTool({
+        name: "reai_adjust_inventory",
+        arguments: {
+          productId: created.productId,
+          warehouseId: created.warehouseId,
+          variantId: created.variantId + 900000,
+          quantityChange: 3,
+        },
+      });
+      report(
+        "a variant the warehouse does not track is refused before writing",
+        untracked.isError === true && /Nothing was written/.test(textOf(untracked)),
+        firstLineOf(textOf(untracked)),
       );
       const afterRefusal = await client.callTool({
         name: "reai_get_warehouse_inventory",
@@ -389,7 +427,7 @@ async function main() {
         name: "reai_list_vouchers",
         arguments: { startDate: "2000-01-01", endDate: "2030-12-31" },
       });
-      const countBefore = vouchersBefore.isError ? undefined : listOf(vouchersBefore)?.length;
+      const countBefore = countOf(vouchersBefore);
 
       const upRes = await client.callTool({
         name: "reai_adjust_inventory",
@@ -423,7 +461,7 @@ async function main() {
         name: "reai_list_vouchers",
         arguments: { startDate: "2000-01-01", endDate: "2030-12-31" },
       });
-      const countAfter = vouchersAfter.isError ? undefined : listOf(vouchersAfter)?.length;
+      const countAfter = countOf(vouchersAfter);
       report(
         "the adjustment posted NO voucher",
         Number.isInteger(countBefore) && Number.isInteger(countAfter) && countBefore === countAfter,
@@ -607,6 +645,43 @@ async function main() {
     // The product before the warehouse: deleting a record whose dependents are still
     // around answers 500 "Referenced record is not accessible", which is how a previous
     // run stranded four orders. Dependency order, cheapest first.
+    // Zero the stock before deleting anything. The -4 inside the try only runs on the happy
+    // path; any failure after the +4 would otherwise leave stock on hand, which makes the
+    // delete ARCHIVE the warehouse — and there is no unarchive endpoint, and archived
+    // warehouses are absent from the default list. That is permanent invisible litter on a
+    // live tenant, so the cleanup does not depend on the happy path having completed.
+    if (created.warehouseId && created.productId && created.variantId) {
+      const inv = await client.callTool({
+        name: "reai_get_warehouse_inventory",
+        arguments: { warehouseId: created.warehouseId },
+      });
+      const onHand = inv.isError
+        ? undefined
+        : jsonOf(inv)?.rows?.find((r) => r.variantId === created.variantId)?.quantityOnHand;
+      if (Number.isInteger(onHand) && onHand !== 0) {
+        await attempt(
+          `stock returned to zero (was ${onHand})`,
+          () =>
+            client.callTool({
+              name: "reai_adjust_inventory",
+              arguments: {
+                productId: created.productId,
+                warehouseId: created.warehouseId,
+                variantId: created.variantId,
+                quantityChange: -onHand,
+              },
+            }),
+          (r) => firstLineOf(textOf(r)),
+        );
+      } else if (!Number.isInteger(onHand)) {
+        report(
+          "stock on hand could be read before cleanup",
+          false,
+          `could not read on-hand for warehouse ${created.warehouseId} — if stock is left, the ` +
+            `delete will archive it and it will not show in the default list`,
+        );
+      }
+    }
     if (created.productId) {
       await attempt(
         "stock product deleted",

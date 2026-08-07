@@ -70,20 +70,49 @@ test("an adjustment that would silently move nothing is refused before it is wri
   assert.match(text, /7 on hand/);
 });
 
-test("a product with no variant rows is adjusted without a variantId", async () => {
-  const { calls, result } = await run(
+// The API marks variantId optional. Anything that can hold stock has at least one variant
+// (the API refuses a stock product without one), and an adjustment that omits it is accepted
+// while moving nothing — so there is no useful call without it. Requiring it removes the
+// failure mode rather than detecting it after the fact.
+test("variantId is required, not optional as the API has it", () => {
+  const schema = tool("reai_adjust_inventory").inputSchema.variantId;
+  assert.equal(schema.isOptional(), false, "the whole silent-no-op class hinges on this");
+  assert.equal(schema.safeParse(undefined).success, false);
+  assert.equal(schema.safeParse(231671).success, true);
+  // And it is always sent, so `variantId: null` — the shape the API answers 200 to while
+  // moving nothing — can never originate from this tool.
+  assert.equal(schema.safeParse(0).success, false);
+});
+
+test("a variant the warehouse does not track is refused before the write", async () => {
+  const { calls, result, text } = await run(
     "reai_adjust_inventory",
-    { productId: 900, warehouseId: 356, quantityChange: 2 },
-    (req, n) =>
-      n === 1
-        ? inventory([{ productId: 900, variantId: null, quantityOnHand: 5 }])
-        : { transactionId: 1, quantityOnHand: 7 },
+    { productId: 55252, warehouseId: 356, quantityChange: 4, variantId: 999999 },
+    inventory([
+      { productId: 55252, variantId: 231671, sku: "ZZ-A", quantityOnHand: 7, productTitle: "Probe" },
+      { productId: 777, variantId: 231680, sku: "OTHER", quantityOnHand: 1 },
+    ]),
   );
-  assert.notEqual(result.isError, true);
-  assert.equal(calls[1].method, "POST");
-  // Absent, not null: sending variantId: null is the shape the API answers 200 to while
-  // moving nothing, so it must not be introduced by the tool itself.
-  assert.equal("variantId" in calls[1].body, false);
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+  assert.match(text, /not a stock line of product 55252/);
+  // It must name what IS available, or the caller cannot recover.
+  assert.match(text, /231671/);
+  assert.match(text, /7 on hand/);
+  // ...and must not offer another product's variant as a candidate.
+  assert.doesNotMatch(text, /231680/);
+});
+
+test("a product with no stock line at all is refused, with the likely reason", async () => {
+  const { calls, result, text } = await run(
+    "reai_adjust_inventory",
+    { productId: 900, warehouseId: 356, quantityChange: 2, variantId: 5 },
+    inventory([{ productId: 1, variantId: 2, quantityOnHand: 0 }]),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+  assert.match(text, /no stock line in warehouse 356 at all/);
+  assert.match(text, /check that this product is a stock item/);
 });
 
 test("the resulting quantity is checked against the pre-read, not trusted", async () => {
@@ -136,28 +165,36 @@ test("negative stock is called out, because the API accepts it silently", async 
 
 test("occurredAt is completed to a timestamp, since a bare date is refused with no field name", async () => {
   const responses = (req, n) =>
-    n === 1 ? inventory([{ productId: 1, variantId: null, quantityOnHand: 0 }]) : { transactionId: 1, quantityOnHand: 1 };
+    n === 1
+      ? inventory([{ productId: 1, variantId: 9, quantityOnHand: 0 }])
+      : { transactionId: 1, quantityOnHand: 1, variantId: 9 };
+  const base = { productId: 1, warehouseId: 2, quantityChange: 1, variantId: 9 };
 
-  const date = await run(
-    "reai_adjust_inventory",
-    { productId: 1, warehouseId: 2, quantityChange: 1, occurredAt: "2026-08-01" },
-    responses,
-  );
+  const date = await run("reai_adjust_inventory", { ...base, occurredAt: "2026-08-01" }, responses);
   assert.equal(date.calls[1].body.occurredAt, "2026-08-01T00:00:00Z");
 
   // Already a timestamp: passed through untouched, offset and all.
-  for (const given of ["2026-08-01T10:00:00Z", "2026-08-01T10:00:00+02:00"]) {
-    const full = await run(
-      "reai_adjust_inventory",
-      { productId: 1, warehouseId: 2, quantityChange: 1, occurredAt: given },
-      responses,
-    );
+  for (const given of ["2026-08-01T10:00:00Z", "2026-08-01T10:00:00+02:00", "2026-08-01T10:00"]) {
+    const full = await run("reai_adjust_inventory", { ...base, occurredAt: given }, responses);
     assert.equal(full.calls[1].body.occurredAt, given);
   }
 
   // Omitted entirely rather than sent as undefined, so the API applies its own default.
-  const none = await run("reai_adjust_inventory", { productId: 1, warehouseId: 2, quantityChange: 1 }, responses);
+  const none = await run("reai_adjust_inventory", base, responses);
   assert.equal("occurredAt" in none.calls[1].body, false);
+});
+
+// An unvalidated z.string() passed these straight through to produce exactly the bare 400
+// the argument's own description promises to prevent.
+test("a date the API cannot parse is rejected here, not forwarded", () => {
+  const schema = tool("reai_adjust_inventory").inputSchema.occurredAt;
+  for (const good of ["2026-08-01", "2026-08-01T10:00", "2026-08-01T10:00:00", "2026-08-01T10:00:00Z", "2026-08-01T10:00:00.123Z", "2026-08-01T10:00:00+02:00"]) {
+    assert.equal(schema.safeParse(good).success, true, good);
+  }
+  for (const bad of ["01.08.2026", "2026-8-1", "2026-08-01 10:00", "yesterday", "", "2026/08/01", "2026-08-01T"]) {
+    assert.equal(schema.safeParse(bad).success, false, `${bad} should be rejected`);
+  }
+  assert.match(schema.safeParse("01.08.2026").error.issues[0].message, /yyyy-MM-dd or a full ISO timestamp/);
 });
 
 test("a zero adjustment is rejected: it would record a movement of nothing", () => {
@@ -313,49 +350,103 @@ test("every warehouse tool is inside the sweeps, and none is softer than the pol
   assert.equal(tool("reai_delete_warehouse").destructive, true);
 });
 
-test("the read-before-write is declared, so the gate sees both calls it makes", () => {
+// Not "so the gate sees both calls": the gate skips GET entirely (policy.ts returns early on
+// it, and the spec-bounds and escalation sweeps skip it too), so declaring the pre-read grants
+// and changes nothing there. The reason is narrower and worth stating correctly — apiPaths is
+// what a reader consults for what a tool touches, and omitting a call the tool always makes
+// would understate it.
+test("the read-before-write is declared, so apiPaths does not understate the tool", () => {
   const paths = tool("reai_adjust_inventory").apiPaths.map(([m, p]) => `${m} ${p}`);
   assert.ok(paths.includes("POST /api/warehouses/inventory/adjust"));
-  assert.ok(
-    paths.includes("GET /api/warehouses/inventory"),
-    "the pre-read must be declared, or apiPaths understates what the tool does",
-  );
+  assert.ok(paths.includes("GET /api/warehouses/inventory"), "the pre-read must be declared");
+  // And the declaration must not soften the risk: GET classifies as read, so if a GET entry
+  // could lower a tool's tier this would be the tool where it mattered most.
+  assert.equal(tool("reai_adjust_inventory").risk, "irreversible");
 });
 
 // `?? []` covers null and undefined, not a wrong type — so a non-array `rows` made the
 // pre-read that exists to prevent a silent write throw a TypeError instead. The sibling read
 // tool in the same file already handled this shape; the adjust handler did not.
-test("an unreadable pre-read fails closed instead of crashing or writing blind", async () => {
-  for (const rows of [{ "0": { productId: 1 } }, "rows", 7, null]) {
+// `?? []` covers null and undefined, not a wrong type — so a non-array `rows` made the
+// pre-read that exists to prevent a silent write throw a TypeError instead. The sibling read
+// tool in the same file already handled this shape; the adjust handler did not.
+test("an unreadable pre-read neither crashes nor swallows the missing check", async () => {
+  for (const rows of [{ "0": { productId: 1 } }, "rows", 7, null, undefined]) {
     const attempt = await run(
       "reai_adjust_inventory",
-      { productId: 1, warehouseId: 2, quantityChange: 3 },
-      (req, n) => (n === 1 ? { warehouseId: 2, rows } : { transactionId: 1, quantityOnHand: 0 }),
+      { productId: 1, warehouseId: 2, quantityChange: 3, variantId: 9 },
+      (req, n) => (n === 1 ? { warehouseId: 2, rows } : { transactionId: 1, quantityOnHand: 3, variantId: 9 }),
     );
-    assert.equal(attempt.result.isError, true, `rows=${JSON.stringify(rows)} should refuse`);
-    assert.deepEqual(
-      attempt.calls.map((c) => c.method),
-      ["GET"],
-      `rows=${JSON.stringify(rows)} must not be written blind`,
-    );
-    assert.match(attempt.text, /no `rows` array/);
-    assert.match(attempt.text, /Nothing was written/);
+    // The variant was supplied, so the no-op failure mode is gone and the write may proceed.
+    assert.notEqual(attempt.result.isError, true, `rows=${JSON.stringify(rows)}`);
+    assert.equal(attempt.calls[1].method, "POST");
+    // But the comparison genuinely did not run, and that must not read as a clean result.
+    assert.match(attempt.text, /NOT verified against an expected total/, `rows=${JSON.stringify(rows)}`);
+    assert.doesNotMatch(attempt.text, /WARNING: stock did NOT move/);
   }
 });
 
-test("a supplied variantId is allowed through an unreadable pre-read, with the gap stated", async () => {
-  // The refusal above exists for a MISSING variantId. Supplying one removes that failure
-  // mode, so blocking it would be a refusal with nothing behind it — but the verification
-  // genuinely did not run, and that must not pass for a clean result.
-  const { calls, result, text } = await run(
+// The API echoes the variant it acted on. A null echo against a variant that WAS sent is the
+// no-op signature itself, and it needs nothing from the pre-read — so it still fires in the
+// cases where the pre-read could not be read or matched.
+test("a null variantId echoed back is reported as having moved nothing", async () => {
+  const { text } = await run(
     "reai_adjust_inventory",
-    { productId: 1, warehouseId: 2, quantityChange: 3, variantId: 99 },
-    (req, n) => (n === 1 ? { warehouseId: 2, rows: undefined } : { transactionId: 5, quantityOnHand: 3, variantId: 99 }),
+    { productId: 55252, warehouseId: 356, quantityChange: 3, variantId: 231671 },
+    (req, n) =>
+      n === 1
+        ? inventory([{ productId: 55252, variantId: 231671, quantityOnHand: 0 }])
+        : { transactionId: 147036, quantityOnHand: 0, variantId: null },
   );
-  assert.notEqual(result.isError, true);
-  assert.equal(calls[1].method, "POST");
-  assert.equal(calls[1].body.variantId, 99);
-  assert.match(text, /NOT verified against an expected total/);
-  // And it must not also claim the stock did not move, which it has no basis for.
-  assert.doesNotMatch(text, /WARNING: stock did NOT move/);
+  assert.match(text, /echoed back variantId: null/);
+  assert.match(text, /accepted and moves no stock/);
+});
+
+test("an absent quantityOnHand is reported as unknown, not as zero or as success", async () => {
+  const { text } = await run(
+    "reai_adjust_inventory",
+    { productId: 1, warehouseId: 2, quantityChange: 3, variantId: 9 },
+    (req, n) =>
+      n === 1
+        ? inventory([{ productId: 1, variantId: 9, quantityOnHand: 0 }])
+        : { transactionId: 5, variantId: 9 },
+  );
+  assert.match(text, /carried no quantityOnHand/);
+  assert.match(text, /UNKNOWN/);
+  assert.match(text, /not zero/);
+});
+
+// Landing on exactly zero is the workflow reai_delete_warehouse recommends, so a real
+// adjustment that ends at 0 must not be reported as one that moved nothing.
+test("an adjustment that legitimately lands on zero is not flagged", async () => {
+  const { text } = await run(
+    "reai_adjust_inventory",
+    { productId: 1, warehouseId: 2, quantityChange: -4, variantId: 9 },
+    (req, n) =>
+      n === 1
+        ? inventory([{ productId: 1, variantId: 9, quantityOnHand: 4 }])
+        : { transactionId: 6, quantityOnHand: 0, variantId: 9 },
+  );
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /moved nothing/);
+  assert.match(text, /0 now on hand/);
+});
+
+test("the negative-line summary is bounded, since ok() does not shorten a note", async () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({
+    productId: i,
+    sku: `SKU-${"x".repeat(40)}-${i}`,
+    quantityOnHand: -1 - i,
+    stockValue: -100,
+  }));
+  const { text } = await run("reai_get_warehouse_inventory", {}, inventory(many));
+  assert.match(text, /40 line\(s\) are NEGATIVE/);
+  assert.match(text, /and 30 more/, "the sample must be bounded, and the remainder counted");
+  // Measured on the NOTE alone. The body is legitimately long and ok() already trims it to
+  // the result budget; the note is the part ok() does not shorten, so it is the part that
+  // has to bound itself. An earlier version asserted on note + body and failed for that
+  // reason rather than for the one it was written about.
+  const note = text.split("\n\n").find((b) => !b.trim().startsWith("[")) ?? text;
+  assert.ok(note.length < 1200, `the note alone grew to ${note.length} characters`);
+  assert.equal((note.match(/SKU-/g) ?? []).length, 10, "exactly the sample, not every line");
 });

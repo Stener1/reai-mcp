@@ -178,26 +178,29 @@ async function main() {
         invRes.isError ? textOf(invRes).slice(0, 160) : `rows=${inv?.rows?.length} totalStockValue=${inv?.totalStockValue}`,
       );
 
-      // The adjustment is irreversible, so a reversible-mode run must not be able to reach
-      // it. The guarantee turned out to be stronger than a refusal: the tool is not
-      // registered at all at this write ceiling, so there is nothing to call. Asserted by
-      // listing the tools, because calling it and reading the error would have passed on
-      // "tool not found" for the wrong reason — a renamed tool would look like a working gate.
-      const listed = await client.listTools();
-      const names = new Set(listed.tools.map((tool) => tool.name));
-      report(
-        "reai_adjust_inventory is not exposed in reversible mode",
-        !names.has("reai_adjust_inventory"),
-        names.has("reai_adjust_inventory") ? "EXPOSED — an irreversible tool is reachable" : "hidden",
-      );
-      // ...and the read-only ones from the same toolset are, so the absence above is the
-      // write ceiling rather than the whole toolset failing to register.
-      report(
-        "its read-only siblings are exposed",
-        names.has("reai_get_warehouse_inventory") && names.has("reai_list_warehouses"),
-        `${[...names].filter((n) => n.includes("warehouse")).length} warehouse tools visible`,
-      );
     }
+
+    // The write ceiling, asserted independently of whether the warehouse above was created —
+    // this is about the server's gate, not about the record, and nesting it inside a
+    // successful create meant a failed create silently skipped the most safety-relevant
+    // check in this suite.
+    //
+    // Asserted by LISTING the tools rather than by calling the adjustment and reading the
+    // error: "tool not found" would also be the answer if the tool were simply renamed, so
+    // the call-and-match version would have passed for the wrong reason.
+    const exposed = new Set((await client.listTools()).tools.map((tool) => tool.name));
+    report(
+      "reai_adjust_inventory is not exposed in reversible mode",
+      !exposed.has("reai_adjust_inventory"),
+      exposed.has("reai_adjust_inventory") ? "EXPOSED — an irreversible tool is reachable" : "hidden",
+    );
+    // ...and the read-only ones from the same toolset are, so the absence above is the write
+    // ceiling rather than the whole toolset failing to register.
+    report(
+      "its read-only siblings are exposed",
+      exposed.has("reai_get_warehouse_inventory") && exposed.has("reai_list_warehouses"),
+      `${[...exposed].filter((n) => n.includes("warehouse")).length} warehouse tools visible`,
+    );
 
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
     //    real company gets attached to the test record.

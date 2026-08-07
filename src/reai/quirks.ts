@@ -268,8 +268,10 @@ export const QUIRKS: readonly Quirk[] = [
       "write did nothing — the only honest signals are `quantityOnHand` in the response and a " +
       "null `variantId` echoed back, so read them. The field to send is the one a variant carries " +
       "in ProductRes, which is `variantId`, NOT `id`; reading `.id` yields undefined, " +
-      "JSON.stringify drops it, and the call becomes this no-op. reai_adjust_inventory reads the " +
-      "stock lines first and refuses instead.",
+      "JSON.stringify drops it, and the call becomes this no-op. Nothing that can hold stock is " +
+      "exempt, because the API refuses a stock product with no variants — so treat variantId as " +
+      "REQUIRED on this endpoint. reai_adjust_inventory does: it requires the field, refuses when " +
+      "the variant is not one of the warehouse's stock lines, and reports a null echo afterwards.",
   },
   {
     id: "inventory-adjust-occurredat-needs-time",
@@ -300,6 +302,23 @@ export const QUIRKS: readonly Quirk[] = [
       "opposite adjustment, leaving both movements in the history. And stock goes NEGATIVE " +
       "without complaint: -10 against 4 on hand gives -6 on hand and a stock value of -600, with " +
       "no clamp and no refusal, so a sign error is absorbed silently.",
+  },
+  {
+    id: "warehouse-delete-archives-on-stock",
+    paths: ["/api/warehouses/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      'The response says which happened ({"outcome":"deleted"} or {"outcome":"archived"}), and the ' +
+      "trigger is CURRENT STOCK ON HAND rather than transaction history — which is where this " +
+      "endpoint differs from the other records that archive on delete, and why it is not covered " +
+      "by delete-may-archive. Measured: a warehouse holding 2 units was archived, kept its stock, " +
+      "still answered 200 by id with archived: true and could still be renamed; one whose " +
+      "adjustments netted back to zero on hand was DELETED outright, its stock transaction history " +
+      "with it. There is no unarchive endpoint for warehouses, so the archive branch is one-way, " +
+      "and archived warehouses are returned only by GET /api/warehouses?archived=true — while GET " +
+      "/api/warehouses/inventory still reports their stock. Bring stock to zero first if a real " +
+      "delete is what you want.",
   },
   {
     id: "warehouse-archived-is-a-filter",
@@ -468,7 +487,11 @@ export const QUIRKS: readonly Quirk[] = [
       // The last two sharing the identical spec wording, found by matching on the
       // sentence rather than by listing them from memory.
       "/api/projects/{id}",
-      "/api/warehouses/{id}",
+      // /api/warehouses/{id} is deliberately NOT here. It shares the spec wording, but the
+      // trigger was measured to be current stock ON HAND rather than transaction history —
+      // a warehouse whose adjustments netted back to zero was deleted outright, history and
+      // all. Listing it would hand a reai_request caller the disproved version, which is
+      // worse than no note. See warehouse-delete-archives-on-stock.
     ],
     methods: ["DELETE"],
     kind: "gotcha",
@@ -476,7 +499,7 @@ export const QUIRKS: readonly Quirk[] = [
       "DELETE archives instead of deleting when the record already has transactions, preserving the " +
       'audit trail. The response says which happened (outcome: "deleted" | "archived") — read it ' +
       "rather than treating 200 as deletion. ONLY customers and suppliers can be unarchived " +
-      "(POST /api/{customers,suppliers}/{id}/unarchive); for the other six an archive is one-way, " +
+      "(POST /api/{customers,suppliers}/{id}/unarchive); for the other five an archive is one-way, " +
       "and the record stays hidden from the active list.",
   },
 
