@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveOperation, missingRequired, findOperation } from "../dist/reai/spec.js";
 import { allTools } from "../dist/server.js";
+import { ok } from "../dist/tools/registry.js";
 
 /**
  * Resolving a concrete path back to its spec operation, and using that to explain a
@@ -704,4 +705,31 @@ test("a truncated result never contains a partial value", async () => {
   const small = ok([{ id: 1, closingBalance: 4812.6 }]).content[0].text;
   assert.doesNotMatch(small, /truncated/);
   assert.deepEqual(JSON.parse(small), [{ id: 1, closingBalance: 4812.6 }]);
+});
+
+// The array path was fixed once already; these are the residual cases. `stringify`
+// returns a plain string unindented and unquoted, so there was no newline to cut back
+// to and the whole body was discarded — a 40,000-character response came back as the
+// NOTE alone, whose text ("it stops at a line boundary, so no value shown is partial")
+// describes a prefix that was not there.
+test("truncating a long plain-text response keeps the text", () => {
+  const text = ok("x".repeat(40000)).content[0].text;
+  assert.match(text, /text truncated/);
+  assert.ok(text.includes("x".repeat(1000)), "the prefix itself must survive");
+  assert.match(text, /ends mid-text/, "a text prefix IS partial and must say so");
+});
+
+// One oversized field early in an object — a base64 attachment, a long description —
+// pushed the first line boundary past the cut, leaving a lone "{" under a note that
+// invited the reader to treat it as a partial record.
+test("an object whose first field is oversized reports that nothing fits", () => {
+  const text = ok({ blob: "A".repeat(40000), id: 7 }).content[0].text;
+  assert.match(text, /nothing is shown/);
+  assert.ok(!/\bfields after the cut are\b/.test(text), "must not imply a partial record is shown");
+  assert.ok(text.length < 1000, `expected a short explanation, got ${text.length} chars`);
+});
+
+test("a response under the limit is untouched", () => {
+  const text = ok({ id: 1, name: "ok" }).content[0].text;
+  assert.equal(text, '{\n  "id": 1,\n  "name": "ok"\n}');
 });

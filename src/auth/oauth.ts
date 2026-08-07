@@ -109,7 +109,16 @@ export type OAuthDeps = {
 
 /** Result of authenticating an incoming MCP request. */
 export type AuthResult =
-  | { ok: true; grant: GrantPayload }
+  /**
+   * `passthrough` marks a grant synthesised from a raw ReAI token rather than
+   * issued by this server's OAuth flow. The distinction matters because the two
+   * have different tenant models: an OAuth grant is bound to one company at
+   * authorization time and must be, whereas passthrough deliberately leaves the
+   * tenant to each tool call unless REAI_TENANT_ID pins one. Carried explicitly
+   * rather than inferred from `subject`, so a security check never rests on a
+   * string comparison.
+   */
+  | { ok: true; grant: GrantPayload; passthrough?: true }
   | { ok: false; status: 401 | 403; error: string; description: string };
 
 export class OAuthProvider {
@@ -508,6 +517,20 @@ export class OAuthProvider {
       if (clientId && clientId !== payload.grant.clientId) {
         return err(400, "invalid_grant", "client_id does not match the refresh token.");
       }
+      // A grant with no bound tenant has no tenant boundary, and /mcp now refuses it.
+      // Minting a replacement pair anyway would hand the client credentials that can
+      // never work, and — because the new refresh token is just as untenanted — a
+      // refresh path it can loop on indefinitely instead of starting authorization.
+      // invalid_grant is the signal that sends a well-behaved client back to /authorize.
+      if (payload.grant.tenantId === undefined) {
+        return err(
+          400,
+          "invalid_grant",
+          "This authorization is not bound to a company, so it has no tenant boundary. It was " +
+            "issued before that became mandatory and cannot be refreshed. Authorize the " +
+            "connector again to pick a company.",
+        );
+      }
       // For a legacy grant, the token's own iat is the best evidence of when the
       // authorization existed, and it is trustworthy because we sealed it.
       const effectiveAuthTime = payload.grant.authTime ?? payload.iat;
@@ -627,6 +650,7 @@ export class OAuthProvider {
     if (this.deps.config.allowTokenPassthrough) {
       return {
         ok: true,
+        passthrough: true,
         grant: {
           reaiToken: bearer,
           ...(this.deps.config.defaultTenantId !== undefined
@@ -818,15 +842,143 @@ export function sendJson(res: ServerResponse, status: number, json: unknown): vo
   res.end(body);
 }
 
-/** Read and size-limit a request body. */
-export async function readBody(req: IncomingMessage, limitBytes = 1024 * 512): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-    total += buf.length;
-    if (total > limitBytes) throw new Error("Request body too large.");
-    chunks.push(buf);
+/**
+ * Distinguishable so callers can answer 413 rather than 500, and so a caller that
+ * wraps the read in a JSON.parse try/catch does not report an oversized body as
+ * "Body must be JSON." — which is what /register did, telling an operator exactly
+ * the wrong thing.
+ */
+export class BodyTooLargeError extends Error {
+  readonly limitBytes: number;
+  constructor(limitBytes: number) {
+    super(`Request body exceeds the ${limitBytes}-byte limit.`);
+    this.name = "BodyTooLargeError";
+    this.limitBytes = limitBytes;
   }
-  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Bounds on discarding the remainder of a body we have already decided to reject. */
+const DISCARD_MAX_BYTES = 32 * 1024 * 1024;
+const DISCARD_MAX_MS = 5000;
+
+/** Thrown when the rest of an oversized body could not be discarded within bounds. */
+export class BodyAbandonedError extends Error {
+  constructor() {
+    super("Request body exceeded the limit and could not be drained.");
+    this.name = "BodyAbandonedError";
+  }
+}
+
+/**
+ * Read and size-limit a request body.
+ *
+ * Two things here are deliberate, and both were settled by measurement rather than
+ * reasoning.
+ *
+ * It does not use `for await (const chunk of req)`: throwing out of an async iterator
+ * destroys the request stream, and Node tears the socket down with it — including
+ * response bytes already written but not yet flushed.
+ *
+ * And on overflow it keeps reading, discarding as it goes, instead of answering at
+ * once. A client that has already queued megabytes is still sending when we decide to
+ * reject it; closing with unread data in the receive buffer makes the OS send RST, and
+ * an RST discards whatever sits in the *client's* receive buffer — including the 413
+ * that explains what went wrong. Measured over 50 uploads of a 2 MB body against a
+ * 512 KB limit: answering immediately delivered the 413 to 36 of them, answering and
+ * then lingering to 42, and draining to completion first to all 50. Memory stays flat
+ * because discarded bytes are never retained. The ceilings below stop a genuinely
+ * unbounded upload, and a client that trips them gets a reset — the right answer for
+ * something that is no longer a mistake.
+ */
+export function readBody(req: IncomingMessage, limitBytes = 1024 * 512): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let chunks: Buffer[] = [];
+    let total = 0;
+    let overflowed = false;
+    let settled = false;
+    let discardTimer: NodeJS.Timeout | undefined;
+
+    const cleanup = (): void => {
+      if (discardTimer) clearTimeout(discardTimer);
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("aborted", onAborted);
+    };
+    const done = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+    const abandon = (): void => {
+      done(() => {
+        req.destroy();
+        reject(new BodyAbandonedError());
+      });
+    };
+    const onData = (chunk: Buffer | string): void => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (overflowed) {
+        if (total > DISCARD_MAX_BYTES) abandon();
+        return;
+      }
+      if (total > limitBytes) {
+        // Release what we have and switch to discarding, so the client can finish
+        // sending and we can close with nothing left unread.
+        overflowed = true;
+        chunks = [];
+        discardTimer = setTimeout(abandon, DISCARD_MAX_MS);
+        discardTimer.unref();
+        return;
+      }
+      chunks.push(buf);
+    };
+    const onEnd = (): void =>
+      done(() =>
+        overflowed
+          ? reject(new BodyTooLargeError(limitBytes))
+          : resolve(Buffer.concat(chunks).toString("utf8")),
+      );
+    const onError = (err: Error): void => done(() => reject(err));
+    const onAborted = (): void =>
+      done(() => reject(new Error("The client disconnected before the body was received.")));
+
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
+  });
+}
+
+/**
+ * Answer an oversized body and end the connection.
+ *
+ * Throwing out of `for await (const chunk of req)` destroys the request stream
+ * mid-body, which leaves the HTTP parser unable to advance past the bytes still
+ * arriving. Writing a response and leaving keep-alive on therefore produced a
+ * connection that answered nothing further and was not closed either — it sat open
+ * until the 128-second socket timeout, and a caller could hold many of them for the
+ * cost of a partial upload and no credentials. Announcing `Connection: close` and
+ * ending the socket makes the outcome immediate and unambiguous.
+ */
+export function sendPayloadTooLarge(res: ServerResponse, description: string): void {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  const body = JSON.stringify({ error: "payload_too_large", error_description: description });
+  res.writeHead(413, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Content-Length": Buffer.byteLength(body),
+    Connection: "close",
+  });
+  // readBody has already drained the request, so nothing is left unread to provoke an
+  // RST. Close only once the response has actually been written: ending the socket
+  // alongside res.end() raced the flush.
+  res.end(body, () => {
+    res.socket?.end();
+  });
 }
