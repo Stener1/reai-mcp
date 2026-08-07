@@ -93,16 +93,17 @@ for (const t of tenants) {
 }
 console.log("");
 if (tenants.length === 0) {
-  console.log("    This token reaches NO company. Nothing tenant-scoped will work with it.");
-  process.exit(3);
+  console.log("    This token reaches NO company. Nothing tenant-scoped will work with it, and this");
+  console.log("    server refuses an authorization with no bound company outright.");
+  process.exit(4);
 }
 if (tenants.length === 1) {
   console.log("    One company only. Two possibilities, and /api/me cannot tell them apart:");
   console.log("      - the token is scoped to this company, or");
   console.log("      - it covers the whole user account and the user can open only this one.");
-  console.log("    Either way the tenant header is IGNORED here: any id, even a nonexistent one,");
-  console.log("    returns this company’s data. So a request that appears to reach another");
-  console.log("    company has not.");
+  console.log("    So the header behaviour here is UNKNOWN, not merely irrelevant. A tenant-scoped");
+  console.log("    token ignores X-Tenant-Id, and any id returns this company data; a user-scoped");
+  console.log("    one requires it. Do not assume either. The probe below settles it.");
   process.exit(3);
 }
 console.log(`    USER-SCOPED: ${tenants.length} companies, so the tenant header selects between them`);
@@ -161,14 +162,44 @@ if (a.body === b.body) {
   console.log("    IDENTICAL responses. Either the header did not select, or both companies genuinely");
   console.log("    have the same chart of accounts — a fresh test company plausibly does. Inconclusive.");
 } else {
-  console.log("    DIFFERENT responses — the header genuinely selects the company, so the tenant");
-  console.log("    boundary is enforced by the API and not only by this server.");
+  console.log("    SELECTION works: different payloads, so X-Tenant-Id chooses the company.");
 }
+
+// Selection is not isolation. Comparing two companies the token is ALLOWED to reach
+// proves only that the header affects routing; it says nothing about whether the API
+// refuses one the token may not reach. That needs an id outside the token list — an
+// implausible one, so the probe never touches anybody real.
+const outside = [99999999, 1];
+const denied = [];
+for (const id of outside) {
+  const res = await fetch(`${base}/api/chart-of-accounts`, {
+    headers: { Authorization: `Bearer ${token}`, "X-Tenant-Id": String(id) },
+  });
+  denied.push({ id, status: res.status });
+}
+for (const d of denied) console.log(`    tenant ${d.id} (not on this token): HTTP ${d.status}`);
+if (denied.every((d) => d.status === 403 || d.status === 404)) {
+  console.log("    ISOLATION works: the API refuses a tenant this token may not reach.");
+} else {
+  console.log("    WARNING: a tenant outside this token list did not come back 403/404. Isolation");
+  console.log("    between companies cannot be assumed from here.");
+}
+console.log("");
+console.log("    Note what this does NOT show. The per-authorization binding in the remote connector");
+console.log("    is enforced by THIS SERVER only: ReAI sees the underlying user token, which");
+console.log("    legitimately reaches every company above, so it cannot tell that a given");
+console.log("    authorization was scoped to one of them.");
 '
 fi
 
 if [[ "$SAVE" -eq 1 ]]; then
   echo
+  # A token reaching no company cannot support this server at all, and storing it would
+  # replace a working `latest` with something unusable. Not a question worth asking.
+  if [[ "$STATUS" -eq 4 ]]; then
+    echo "Refusing to store a token that reaches no company." >&2
+    exit 4
+  fi
   if [[ "$STATUS" -ne 0 ]]; then
     reply=""
     if [[ -t 0 ]]; then
