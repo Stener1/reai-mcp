@@ -427,6 +427,8 @@ Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `as
 
 ## API quirks worth knowing
 
+Discovery works in Norwegian, which for this API is not a nicety. Measured before any of it was written: English queries found the right operation 12 times out of 14, and both Norwegian queries in the set found **nothing** — `lønnskjøring` returned zero results while `lonn` was already a synonym, and *"hvor mye lager har vi"* returned the chart of accounts. Two causes: most of the everyday vocabulary was missing, and Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Both are handled now, and `test/discovery-norwegian.test.mjs` holds the measurement at 19 Norwegian queries plus 10 English ones so the fix cannot be bought with a regression.
+
 An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **60 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:

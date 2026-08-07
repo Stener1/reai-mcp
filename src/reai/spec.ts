@@ -814,7 +814,99 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   overdue: ["unpaid", "due", "reminders"],
   reconcile: ["reconciliation"],
   reconciling: ["reconciliation"],
+
+  // --- Norwegian ----------------------------------------------------------------
+  //
+  // This is a Norwegian accounting system, so an agent talking to a Norwegian user
+  // receives Norwegian words. A handful were already here; these are the rest of the
+  // everyday vocabulary, measured against queries a bookkeeper would actually ask.
+  // Keys are ASCII-folded because lookupForms folds before looking up: "lonn", not "lønn".
+  lager: ["warehouse", "inventory", "stock"],
+  varelager: ["warehouse", "inventory"],
+  beholdning: ["warehouse", "inventory"],
+  avstemming: ["reconciliation"],
+  avstemme: ["reconciliation"],
+  abonnement: ["subscription"],
+  avdeling: ["department"],
+  prosjekt: ["project"],
+  avskrivning: ["depreciation", "asset"],
+  anleggsmiddel: ["asset"],
+  anleggsmidler: ["asset"],
+  driftsmiddel: ["asset"],
+  tilbud: ["offer"],
+  ordre: ["order"],
+  purring: ["reminders", "dunning"],
+  kreditnota: ["credit", "invoice"],
+  innbetaling: ["payment", "customer"],
+  utbetaling: ["payment", "supplier"],
+  betaling: ["payment"],
+  skattemelding: ["tax-returns"],
+  utgift: ["expense"],
+  utgifter: ["expense"],
+  timeliste: ["timesheet"],
+  timer: ["timesheet"],
+  avtale: ["agreement"],
+  avtaler: ["agreement"],
+  // "lån" folds to "lan" — foldDiacritics maps å to a, not aa. The first attempt keyed
+  // this as "laan" and matched nothing.
+  lan: ["loan"],
+  aksje: ["share-investments"],
+  aksjer: ["share-investments"],
+  apningsbalanse: ["opening-balances"],
+  aarsregnskap: ["annual-accounts"],
+  resultat: ["result", "income"],
+  balanse: ["balance"],
+  regnskap: ["accounting", "ledger"],
+  kontoplan: ["chart-of-accounts"],
+  hovedbok: ["ledger", "general"],
+  kundefaktura: ["invoice", "customer"],
+  leverandorfaktura: ["supplier-invoices"],
+  lonnsslipp: ["salary", "payslip"],
+  lonnskjoring: ["salary", "salary-payments"],
+  ansatte: ["employee"],
+  eiendel: ["asset"],
+  eiendeler: ["asset"],
 };
+
+/**
+ * Norwegian stems worth finding INSIDE a longer word.
+ *
+ * Norwegian glues nouns together, so the word a user types is often a compound whose
+ * meaning lives in one half: "lønnskjøring" is lønn+kjøring, "varelager" is vare+lager,
+ * "lagerbeholdning" is lager+beholdning. None of those are reachable by the plural and
+ * diacritic rules in lookupForms, so "lønnskjøring" found nothing at all while "lonn" was
+ * already in the table.
+ *
+ * Substring matching earns its keep here and would not in English, where compounds are
+ * written with spaces and a substring rule mostly produces noise. Kept to stems of four
+ * characters or more, and to words specific enough that a coincidental match is unlikely —
+ * "konto" is deliberately absent, because it sits inside "kontor" (an office) and inside
+ * "kontant" (cash).
+ */
+const NORWEGIAN_COMPOUND_STEMS: readonly string[] = [
+  "lonn",
+  "lager",
+  "faktura",
+  "bilag",
+  "kunde",
+  "leverandor",
+  "ansatt",
+  "avdeling",
+  "prosjekt",
+  "abonnement",
+  "avstemming",
+  "avskrivning",
+  "reskontro",
+  "timeliste",
+  "skattemelding",
+  "kreditnota",
+  "purring",
+  "betaling",
+  "regnskap",
+  "aksje",
+  "eiendel",
+  "tilbud",
+];
 
 /**
  * Turn a natural-language query into the terms to score against, each carrying a
@@ -859,6 +951,13 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
     for (const variant of lookupForms(token)) {
       push(variant, weight);
       for (const syn of TERM_SYNONYMS[variant] ?? []) push(syn, weight);
+    }
+    // Norwegian compounds: the meaning is in one half of a word written as one word.
+    // Slightly below a direct hit, because a stem found inside a longer word is weaker
+    // evidence than the word itself.
+    for (const stem of compoundStemsIn(token)) {
+      push(stem, weight * COMPOUND_WEIGHT);
+      for (const syn of TERM_SYNONYMS[stem] ?? []) push(syn, weight * COMPOUND_WEIGHT);
     }
   }
   return { terms, resourceCount };
@@ -918,6 +1017,23 @@ function fieldNamesOf(op: SpecOperation): string {
 /** æøå -> aoa, so an ASCII synonym key matches what a Norwegian user types. */
 function foldDiacritics(term: string): string {
   return term.replace(/æ/g, "ae").replace(/ø/g, "o").replace(/å/g, "a");
+}
+
+/** How much of a term's weight a stem found inside a compound carries. */
+const COMPOUND_WEIGHT = 0.8;
+
+/**
+ * Norwegian stems inside a compound token, longest first.
+ *
+ * Only fires when the stem is a proper substring — a token that IS the stem is already
+ * handled by the synonym table directly, and contributing it twice would double its weight.
+ */
+function compoundStemsIn(token: string): string[] {
+  const folded = foldDiacritics(token);
+  if (folded.length < 6) return [];
+  return NORWEGIAN_COMPOUND_STEMS.filter((stem) => folded !== stem && folded.includes(stem)).sort(
+    (a, b) => b.length - a.length,
+  );
 }
 
 /** The forms of a query token worth trying against the synonym table. */
