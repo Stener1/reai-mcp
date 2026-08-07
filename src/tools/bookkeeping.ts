@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  CURRENCY_CODE,
   defineTool,
   fail,
   isoDate,
@@ -189,6 +190,7 @@ const getVoucher = defineTool({
 const postingInput = z.object({
   accountNumber: z
     .string()
+    .min(1, "A posting line needs an account number; the API requires a non-empty value.")
     .describe('Chart-of-accounts number, e.g. "1920". Must exist — check with reai_list_accounts.'),
   amount: z
     .number()
@@ -198,7 +200,7 @@ const postingInput = z.object({
     ),
   postingDate: isoDate.optional().describe("Date for this posting. Defaults to the voucher date."),
   description: z.string().optional().describe("Line description. Falls back to the voucher description."),
-  currency: z.string().length(3).optional().describe('ISO 4217 code. Defaults to "NOK".'),
+  currency: CURRENCY_CODE.optional().describe('ISO 4217 code. Defaults to "NOK".'),
   currencyAmount: z
     .number()
     .optional()
@@ -215,6 +217,9 @@ const postingInput = z.object({
   rowNumber: z
     .number()
     .int()
+    // The spec's minimum is 0, and assignRowNumbers respects a caller-supplied value, so a
+    // negative one was forwarded and failed the whole voucher POST with a bare 400.
+    .min(0, "The API requires a rowNumber of 0 or more.")
     .optional()
     .describe("Groups postings into voucher rows; a matching debit and credit share a row number."),
   supplierId: z.number().int().optional().describe("Link the posting to a supplier."),

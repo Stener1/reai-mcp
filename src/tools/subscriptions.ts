@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { assertTransmitAllowed } from "../policy.js";
 import {
+  CURRENCY_CODE,
+  COUNTRY_CODE,
   defineTool,
   isoDate,
   ok,
@@ -91,12 +93,15 @@ const writeFields = {
   intervalMonths: z
     .number()
     .int()
-    .positive()
-    .describe("Months between billings — 1 monthly, 3 quarterly, 12 annually."),
+    .min(1)
+    // The API caps this at 12, so annual is the longest interval a subscription can have —
+    // a biennial arrangement is not expressible and would have failed with a bare 400.
+    .max(12, "The API caps intervalMonths at 12, so annual is the longest interval.")
+    .describe("Months between billings, 1–12 — 1 monthly, 3 quarterly, 12 annually."),
   billingTiming: z
     .enum(["in_advance", "after_period"])
     .describe("Bill at the start of the period or after it has run."),
-  currencyCode: z.string().describe("Currency, e.g. NOK."),
+  currencyCode: CURRENCY_CODE.describe('Currency, e.g. "NOK".'),
   outputMode: z
     .enum(["create_order", "create_invoice"])
     .describe(
@@ -116,11 +121,18 @@ const writeFields = {
     .enum(["calendar_boundary", "start_date"])
     .optional()
     .describe("Whether periods snap to calendar boundaries or run from the start date."),
-  daysUntilDue: z.number().int().optional().describe("Payment terms in days."),
+  daysUntilDue: z
+    .number()
+    .int()
+    .min(0, "Payment terms cannot be negative.")
+    .max(3000, "The API caps daysUntilDue at 3000.")
+    .optional()
+    .describe("Payment terms in days, 0–3000."),
   invoiceComment: z.string().optional().describe("Comment on the produced document."),
   internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
   invoiceEmail: z
     .string()
+    .max(100, "The API caps invoiceEmail at 100 characters.")
     .optional()
     .describe(
       "Override the delivery address for what this subscription produces. Changing where " +
@@ -143,9 +155,20 @@ const writeFields = {
   serviceRecipients: z
     .array(
       z.object({
-        organizationNumber: z.string().min(1).describe("The recipient organisation's number."),
-        name: z.string().optional().describe("Recipient name."),
-        countryCode: z.string().optional().describe("Two-letter country code."),
+        organizationNumber: z
+          .string()
+          .min(1)
+          .max(36, "The API caps organizationNumber at 36 characters.")
+          .describe("The recipient organisation's number."),
+        name: z
+          .string()
+          .max(255, "The API caps a recipient name at 255 characters.")
+          .optional()
+          .describe("Recipient name."),
+        // A bare z.string() here accepted "no" and "norway"; the spec's CountryCode is
+        // ^[A-Z]{2}$. Inside an array, which is exactly where the first version of the
+        // bounds sweep could not look.
+        countryCode: COUNTRY_CODE.optional().describe('Two-letter country code, e.g. "NO".'),
       }),
     )
     .optional()

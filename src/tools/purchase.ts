@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  CURRENCY_CODE,
+  COUNTRY_CODE,
   defineTool,
   fail,
   isoDate,
@@ -37,10 +39,6 @@ const OPEN_ITEM_FLOOR = "2000-01-01";
  * attachment, which is what bokføringsloven actually requires, so it is the one
  * worth reaching for.
  */
-
-const COUNTRY_CODE = z
-  .string()
-  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
 
 // --- Suppliers -------------------------------------------------------------
 
@@ -115,7 +113,11 @@ const createSupplier = defineTool({
           "not do — the API answers \"name is required\" for both, with or without an " +
           "organizationNumber. Verified against the live API, which contradicts the schema.",
       ),
-    organizationNumber: z.string().optional().describe("Norwegian organisation number."),
+    organizationNumber: z
+      .string()
+      .max(36, "The API caps organizationNumber at 36 characters.")
+      .optional()
+      .describe("Norwegian organisation number."),
     privateContact: z.boolean().optional().describe("True for a private individual."),
     email: z.string().optional().describe("Email address."),
     countryCode: COUNTRY_CODE.optional().describe('ISO country code. Defaults to "NO".'),
@@ -158,7 +160,14 @@ const updateSupplier = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Supplier id."),
-    name: z.string().max(75).optional().describe("New name. At most 75 characters."),
+    // The API's pattern is .*\S.* — a blank name is rejected, so refuse it here with the
+    // reason rather than sending an update that cannot succeed.
+    name: z
+      .string()
+      .max(75)
+      .refine((v) => v.trim().length > 0, { message: "A name cannot be blank; the API rejects it." })
+      .optional()
+      .describe("New name. At most 75 characters, and not blank."),
     email: z.string().optional().describe("Email address."),
     phone: z
       .string()
@@ -381,7 +390,7 @@ const createSupplierInvoice = defineTool({
       .enum(["invoice", "credit_note"])
       .optional()
       .describe('Defaults to "invoice". A credit note needs negative cost-line amounts.'),
-    currency: z.string().optional().describe('ISO 4217 code. Defaults to the tenant currency.'),
+    currency: CURRENCY_CODE.optional().describe('ISO 4217 code. Defaults to the tenant currency.'),
     kidNumber: z.string().optional().describe("Norwegian KID payment reference."),
     paymentReference: z.string().optional().describe("Free-text payment reference."),
     tenantId: tenantIdArg,
@@ -469,6 +478,7 @@ const paySupplierInvoice = defineTool({
     invoiceAmount: z
       .number()
       .min(0.01)
+      .max(9_999_999_999_999.99, "The API caps invoiceAmount at 9999999999999.99.")
       .refine(isWholeOre, { message: "invoiceAmount must be a whole number of øre." })
       .describe(
         "Amount of the invoice to settle. Must be positive. Ignored in effect when " +
@@ -493,6 +503,7 @@ const paySupplierInvoice = defineTool({
     bankDebitAmount: z
       .number()
       .min(0.01)
+      .max(9_999_999_999_999.99, "The API caps bankDebitAmount at 9999999999999.99.")
       .refine(isWholeOre, { message: "bankDebitAmount must be a whole number of øre." })
       .optional()
       .describe(

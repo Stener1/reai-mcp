@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  COUNTRY_CODE,
   defineTool,
   fail,
   isoDate,
@@ -43,10 +44,6 @@ const CURRENCY = z
   .string()
   .regex(/^[A-Z]{3}$/, 'Must be an uppercase ISO 4217 code, e.g. "NOK".')
   .describe('ISO 4217 currency code, e.g. "NOK". Use reai_request GET /api/currencies for the full list.');
-
-const COUNTRY_CODE = z
-  .string()
-  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
 
 // --- Customers -------------------------------------------------------------
 
@@ -138,6 +135,7 @@ const createCustomer = defineTool({
       ),
     organizationNumber: z
       .string()
+      .max(36, "The API caps organizationNumber at 36 characters.")
       .optional()
       .describe("Norwegian organisation number. Required for Norwegian company customers."),
     privateContact: z
@@ -193,7 +191,14 @@ const updateCustomer = defineTool({
   idempotent: true,
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
-    name: z.string().max(75).optional().describe("New name. At most 75 characters."),
+    // The API's pattern is .*\S.* — a blank name is rejected, so refuse it here with the
+    // reason rather than sending an update that cannot succeed.
+    name: z
+      .string()
+      .max(75)
+      .refine((v) => v.trim().length > 0, { message: "A name cannot be blank; the API rejects it." })
+      .optional()
+      .describe("New name. At most 75 characters, and not blank."),
     email: z.string().optional().describe("New email address."),
     invoiceEmail: z.string().optional().describe("Where invoices should be sent."),
     invoiceInEnglish: z.boolean().optional().describe("Issue this customer's invoices in English."),
@@ -693,8 +698,16 @@ const createOrder = defineTool({
     issueDate: isoDate.optional().describe("Order date. Defaults to today."),
     comment: z.string().optional().describe("Comment visible to the customer."),
     internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
-    buyerReference: z.string().optional().describe("The customer's own reference (deres ref)."),
-    externalReference: z.string().optional().describe("Your reference from an external system."),
+    buyerReference: z
+      .string()
+      .max(255, "The API caps buyerReference at 255 characters.")
+      .optional()
+      .describe("The customer's own reference (deres ref)."),
+    externalReference: z
+      .string()
+      .max(100, "The API caps externalReference at 100 characters.")
+      .optional()
+      .describe("Your reference from an external system."),
     projectId: z.number().int().optional().describe("Link the order to a project."),
     tenantId: tenantIdArg,
   },

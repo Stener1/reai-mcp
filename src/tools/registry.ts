@@ -508,6 +508,27 @@ export function requireTenantId(explicit: number | undefined, ctx: ToolContext):
 }
 
 /** ISO `yyyy-MM-dd`, which is what every date field in the ReAI API expects. */
+/**
+ * Two-letter uppercase ISO country code, matching the spec's `CountryCode` pattern.
+ *
+ * Was defined identically in sales.ts and purchase.ts, and the third place that needed it —
+ * a subscription's service recipients — got a bare `z.string()` instead, so `"no"` was
+ * accepted there and rejected by the API.
+ */
+export const COUNTRY_CODE = z
+  .string()
+  .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');
+
+/**
+ * Three-letter uppercase currency code, matching the spec's `CurrencyCode` pattern.
+ *
+ * Its pattern lives behind a `$ref`, which the first version of the bounds sweep did not
+ * follow — so four tools accepted "nok" and "norwegian" and failed at the API.
+ */
+export const CURRENCY_CODE = z
+  .string()
+  .regex(/^[A-Z]{3}$/, 'Must be a three-letter uppercase ISO currency code, e.g. "NOK".');
+
 export const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be ISO format yyyy-MM-dd, e.g. 2026-03-31");
