@@ -504,26 +504,74 @@ const paySupplierInvoice = defineTool({
       );
     }
 
-    const res = await ctx.client.request<{ approvalUrl?: string; voucherId?: number }>({
+    const res = await ctx.client.request<{
+      approvalUrl?: string;
+      voucherId?: number;
+      paymentId?: number;
+      status?: string;
+    }>({
       method: "POST",
       path: `/api/supplier-invoices/${id}/payments`,
       body,
       tenantId: resolved,
     });
 
-    // An approvalUrl means ReAI is waiting for a human to approve a real
-    // payment. Saying "payment registered" there would be a lie.
+    // A payment awaiting approval is NOT paid -- but branching on approvalUrl alone
+    // was wrong twice over. It caught only awaiting_approval among the API's several
+    // non-terminal states, and it missed awaiting_approval itself whenever the URL was
+    // null, which the response schema permits. The STATUS is the authority; the URL is
+    // just how a human finishes the job.
     const notes: string[] = [];
-    if (res.data?.approvalUrl) {
+    const status = res.data?.status;
+    // HTTP 200 rather than 201 means "existing idempotent payment returned": this call
+    // created nothing. That says nothing about whether the invoice is SETTLED -- the
+    // existing payment can itself be failed, in flight, or a partial amount -- so it is
+    // reported as "already existed" and the settlement question is left to the status
+    // above. Claiming "already paid, do not retry" would have contradicted a preceding
+    // "NOT PAID" line, and could leave a genuinely unpaid invoice looking closed.
+    const replayed = res.status === 200;
+    const settled = status === undefined || status === "completed";
+
+    if (status === "awaiting_approval" || res.data?.approvalUrl) {
       notes.push(
-        `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval. ` +
-          `Someone must complete it (BankID) here: ${res.data.approvalUrl}`,
+        `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval.` +
+          (res.data?.approvalUrl
+            ? ` Someone must complete it (BankID) here: ${res.data.approvalUrl}`
+            : ` No approval URL was returned, so it has to be completed from within ReAI.`),
+      );
+    } else if (status === "failed" || status === "reversed") {
+      notes.push(
+        `NOT PAID — the payment ${status === "failed" ? "FAILED" : "was REVERSED"}. ReAI reports ` +
+          `status "${status}", so the invoice is still outstanding. Check the company bank account ` +
+          `and the amount before retrying; do not record it as settled.`,
+      );
+    } else if (status === "in_process" || status === "customer_action_required") {
+      notes.push(
+        `NOT YET SETTLED. ReAI reports status "${status}", so the payment is in flight rather than ` +
+          `done` +
+          `${status === "customer_action_required" ? " and is waiting on an action from you in ReAI or your bank" : ""}. ` +
+          `Re-read the invoice before treating it as paid.`,
       );
     } else if (args.paidPrivately) {
-      notes.push(`Supplier invoice ${id} settled IN FULL from a private account.`);
+      notes.push(
+        `Supplier invoice ${id} settled IN FULL from a private account` +
+          `${status ? ` (status "${status}")` : ""}.`,
+      );
     } else {
       notes.push(
-        `Payment of ${args.invoiceAmount} recorded on supplier invoice ${id}, dated ${args.paymentDate}.`,
+        `Payment of ${args.invoiceAmount} recorded on supplier invoice ${id}, dated ${args.paymentDate}` +
+          `${status ? ` (status "${status}")` : ""}.`,
+      );
+    }
+    if (replayed) {
+      notes.push(
+        `This call created NOTHING: the API returned an existing payment` +
+          `${res.data?.paymentId ? ` (id ${res.data.paymentId})` : ""} rather than a new one, so a ` +
+          `payment for this invoice was already registered. Do not send it again.` +
+          (settled
+            ? ""
+            : ` Note the state above — an existing payment is not necessarily a settled invoice.`) +
+          ` If the amount was a partial payment, re-read the invoice to see what remains.`,
       );
     }
     return ok(res.data, {

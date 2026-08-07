@@ -290,3 +290,136 @@ test("escalation is scoped by path, so ledger account numbers are unaffected", a
   assert.equal(curatedArgsEscalate([["POST", "/api/company-banks"]], { bban: "86011117947" }), undefined);
   assert.ok(curatedArgsEscalate([["PUT", "/api/company-banks/{id}"]], { bban: "86011117947" }));
 });
+
+// A success message that asserts an outcome the API did not confirm is the defect
+// class already guarded for reai_delete_voucher ("reports a REVERSAL rather than
+// claiming deletion"). Three more tools had it. The bank matcher is the worst:
+// POST .../matches answers HTTP 200 whether or not it matched, and the note was built
+// from the REQUEST, so {status:"not_matched"} was reported as "Matched 3
+// transaction(s)" — an agent then calls the month reconciled, or redoes the work
+// another way and double-books it.
+test("a tool never claims an outcome the API did not report", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const fakeCtx = (data, status = 201) => ({
+    client: { request: async () => ({ data, status }), deepLink: () => "link" },
+    config: { writeMode: "full", tenantId: 2634 },
+    session: {},
+  });
+  const firstLine = (r) => r.content[0].text.split("\n")[0];
+  const tool = (name) => {
+    const t = allTools.find((x) => x.name === name);
+    assert.ok(t, `${name} not found`);
+    return t;
+  };
+
+  const match = tool("reai_match_bank_transactions");
+  const matchArgs = { bankAccountId: 1, transactionIds: [1, 2, 3], postingIds: [9], tenantId: 2634 };
+
+  const notMatched = await match.handler(
+    matchArgs,
+    fakeCtx({ status: "not_matched", success: false, requiresDiscrepancyAccount: true, discrepancy: -256.12, reconciledTransactionIds: [], errors: ["Discrepancy account required"] }),
+  );
+  assert.match(firstLine(notMatched), /NOT matched/);
+  assert.ok(!/^Matched/.test(firstLine(notMatched)), "must not claim a match");
+  assert.match(notMatched.content[0].text, /discrepancyAccount/, "must say how to proceed");
+
+  const already = await match.handler(matchArgs, fakeCtx({ status: "already_matched", reconciledTransactionIds: [] }));
+  assert.match(firstLine(already), /Already matched/);
+  assert.match(firstLine(already), /changed nothing/);
+
+  // On success the counts come from the response, not the request.
+  const ok3 = await match.handler(
+    { ...matchArgs, transactionIds: [1, 2, 3, 4, 5] },
+    fakeCtx({ status: "matched", reconciledTransactionIds: [1, 2], reconciledPostingIds: [9], voucherIds: [900] }),
+  );
+  assert.match(firstLine(ok3), /Matched 2 transaction\(s\)/, `got: ${firstLine(ok3)}`);
+  assert.match(firstLine(ok3), /you asked for 5/, "a shortfall must be called out");
+
+  // Booking: same rule.
+  const book = tool("reai_book_bank_transactions");
+  const booked = await book.handler(
+    { bankAccountId: 1, transactionIds: [1, 2, 3, 4, 5], account: "7770", description: "x", tenantId: 2634 },
+    fakeCtx({ voucherIds: [900], reconciledTransactionIds: [1, 2] }),
+  );
+  assert.match(firstLine(booked), /Booked 2 transaction\(s\)/, `got: ${firstLine(booked)}`);
+  assert.match(firstLine(booked), /voucher\(s\) 900/);
+
+  // A payment the bank rejected, or one still in flight, is not "recorded".
+  const pay = tool("reai_register_supplier_invoice_payment");
+  const payArgs = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", manualPayment: true, companyBankId: 1, tenantId: 2634 };
+  for (const [status, expected] of [
+    ["failed", /NOT PAID/],
+    ["reversed", /NOT PAID/],
+    ["in_process", /NOT YET SETTLED/],
+    ["customer_action_required", /NOT YET SETTLED/],
+  ]) {
+    const r = await pay.handler(payArgs, fakeCtx({ status }));
+    assert.match(firstLine(r), expected, `status ${status} gave: ${firstLine(r)}`);
+    assert.ok(!/^Payment of/.test(firstLine(r)), `status ${status} must not claim the payment was recorded`);
+  }
+  // HTTP 200 is "existing idempotent payment returned" — the call created nothing.
+  const replay = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 77 }, 200));
+  assert.match(replay.content[0].text, /created NOTHING/);
+  assert.match(replay.content[0].text, /Do not send it again/);
+  // And a genuine 201 still reads as done.
+  const fresh = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 78 }, 201));
+  assert.match(firstLine(fresh), /^Payment of 300 recorded/);
+  assert.ok(!/created NOTHING/.test(fresh.content[0].text));
+});
+
+// The first version of the fix above traded one confident assumption for another: it
+// read counts from the response but turned an ABSENT array into a definite zero, and
+// treated HTTP 200 as proof the invoice was paid. Absent means unknown. Saying
+// "Matched 0" under a status of "matched", or "already paid" over a preceding
+// "NOT PAID", is the same defect as trusting the request — pointed the other way.
+test("an absent response field is reported as unknown, not as zero", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const fakeCtx = (data, status = 201) => ({
+    client: { request: async () => ({ data, status }), deepLink: () => "link" },
+    config: { writeMode: "full", tenantId: 2634 },
+    session: {},
+  });
+  const text = (r) => r.content[0].text;
+  const tool = (n) => allTools.find((x) => x.name === n);
+
+  // A deployment returning `status` but not the newer id arrays must not read as zero.
+  const matched = await tool("reai_match_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1, 2, 3], postingIds: [9], tenantId: 2634 },
+    fakeCtx({ status: "matched" }, 200),
+  );
+  assert.match(text(matched), /did not say how many/);
+  assert.ok(!/Matched 0/.test(text(matched)), `must not invent a zero: ${text(matched)}`);
+
+  // A discrepancy account supplied but nothing to book: do not claim a posting exists.
+  const balanced = await tool("reai_match_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1], postingIds: [9], discrepancyAccount: "7770", tenantId: 2634 },
+    fakeCtx({ status: "matched", reconciledTransactionIds: [1], reconciledPostingIds: [9], discrepancy: 0 }, 200),
+  );
+  assert.match(balanced.content[0].text, /balanced exactly, so nothing was booked/);
+  assert.ok(!/difference of/.test(text(balanced)));
+
+  // 201 with vouchers but no id list: the booking clearly happened.
+  const booked = await tool("reai_book_bank_transactions").handler(
+    { bankAccountId: 1, transactionIds: [1, 2], account: "7770", description: "x", tenantId: 2634 },
+    fakeCtx({ voucherIds: [900] }),
+  );
+  assert.ok(!/Booked 0/.test(text(booked)), `must not say zero: ${text(booked)}`);
+  assert.match(text(booked), /voucher\(s\) 900/);
+  assert.match(text(booked), /did not report how many/);
+
+  const pay = tool("reai_register_supplier_invoice_payment");
+  const payArgs = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", manualPayment: false, companyBankId: 1, tenantId: 2634 };
+
+  // awaiting_approval with a null URL — the schema permits it, and the status is the
+  // authority. Branching on the URL alone let this read as "recorded".
+  const awaiting = await pay.handler(payArgs, fakeCtx({ status: "awaiting_approval", approvalUrl: null }));
+  assert.match(text(awaiting), /NOT YET PAID/);
+  assert.match(text(awaiting), /completed from within ReAI/);
+
+  // A replayed payment that FAILED must not be reported as already paid.
+  const replayFailed = await pay.handler(payArgs, fakeCtx({ status: "failed", paymentId: 77 }, 200));
+  assert.match(text(replayFailed), /NOT PAID/);
+  assert.match(text(replayFailed), /created NOTHING/);
+  assert.ok(!/already paid/.test(text(replayFailed)), `must not contradict itself: ${text(replayFailed)}`);
+  assert.match(text(replayFailed), /not necessarily a settled invoice/);
+});
