@@ -31,7 +31,7 @@ const searchEndpoints = defineTool({
   name: "reai_search_endpoints",
   title: "Search ReAI API endpoints",
   description:
-    "Search the full ReAI OpenAPI surface (323 public operations) by keyword, tag or HTTP method. " +
+    "Search the full ReAI OpenAPI surface (321 public operations) by keyword, tag or HTTP method. " +
     "Use this whenever no curated tool covers what you need — for example leads, agreements, " +
     "subscriptions, assets, warehouses, share investments, salary or Peppol. " +
     "Returns matching operations with their path, parameters and request-body field names. " +

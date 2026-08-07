@@ -57,13 +57,23 @@ const isInternalTag = (tag) => /-ctrl$/.test(tag);
  * Exact paths, deliberately — a prefix would sweep the `/invoice/.../search` and
  * `/salary/...` typeahead back in with them.
  *
- * Every entry was checked for a documented twin, and four candidates were dropped for
- * having one: `POST /salary/{id}/complete`, `DELETE /subscription/{id}` and
- * `GET /attachments/{id}` are undocumented duplicates of `/api/salary-payments/{id}/complete`,
- * `/api/subscriptions/{id}` and `/api/attachments/{id}`, and `/attachments/{id}/view/{filename}`
- * is covered by `/api/attachments/{id}/content`. Surfacing an unsupported twin of a
- * supported endpoint is worse than hiding it: it gives an agent two ways to do one
- * job and no reason to prefer the one that is actually documented.
+ * Two rules govern what may be listed here, and both are enforced by tests rather
+ * than trusted to this comment.
+ *
+ * No documented twin. Surfacing an unsupported duplicate of a supported endpoint is
+ * worse than hiding it: it gives an agent two ways to do one job and no reason to
+ * prefer the documented one. Five candidates were dropped for having one —
+ * `POST /salary/{id}/complete`, `DELETE /subscription/{id}` and `GET /attachments/{id}`
+ * duplicate `/api/salary-payments/{id}/complete`, `/api/subscriptions/{id}` and
+ * `/api/attachments/{id}`; `/attachments/{id}/view/{filename}` is covered by
+ * `/api/attachments/{id}/content`; and `PUT /project/{id}/sub-project/{subProjectId}`
+ * (`renameSubProject`) is the same action as the documented
+ * `PUT /api/projects/{id}/sub-projects/{subProjectId}/name` (`updateSubProjectName`).
+ *
+ * And it has to be callable. `POST /invoice/setting/receiver-bank` takes a required
+ * object-valued QUERY parameter and no body, which `reai_request` cannot express, so
+ * advertising it would offer a capability that fails the moment it is used —
+ * precisely the false signal this allowlist exists to remove, pointing the other way.
  */
 const BUSINESS_OPERATIONS = new Map([
   // Payroll: complete a run, record when and how it was paid.
@@ -73,11 +83,8 @@ const BUSINESS_OPERATIONS = new Map([
   ["POST /payments/{id}/payment-date", "Invoices"],
   ["POST /payments/{id}/company-bank", "Invoices"],
   ["POST /invoice/payment/{paymentId}/company-bank", "Invoices"],
-  // Invoicing defaults that decide what goes out on every future invoice.
-  ["POST /invoice/setting/receiver-bank", "Invoices"],
+  // The default payment terms applied to every future invoice.
   ["POST /invoice/setting/daysUntilDue", "Invoices"],
-  // Project structure.
-  ["PUT /project/{id}/sub-project/{subProjectId}", "Projects"],
   // Reading back what was filed: the Altinn sync state of a VAT return, and the raw
   // Skatteetaten feedback on an A-melding. Both read-only, and both answer a question
   // ("did it go through, and what did they say") that nothing else does.

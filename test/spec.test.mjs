@@ -193,16 +193,30 @@ test("business operations behind the -ctrl heuristic are discoverable", () => {
   const exposed = index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"));
   assert.ok(exposed.length > 0, "the allowlist should expose something");
 
+  // A path's literal segments, singularised and with the /api prefix dropped, so
+  // /project/{id}/sub-project/{x} and /api/projects/{id}/sub-projects/{x}/name are
+  // comparable. Matching on the LAST segment alone was too weak: it read those two as
+  // different because one ends in a parameter and the other in "name", and missed
+  // that renameSubProject and updateSubProjectName are the same action.
+  const segments = (path) =>
+    path
+      .split("/")
+      .filter((s) => s && !s.startsWith("{") && s !== "api")
+      .map((s) => s.replace(/s$/, "").replace(/ie$/, "y"));
+
   for (const op of exposed) {
-    // A leaked Spring bean name must never reach the public tag list.
     assert.ok(!/-ctrl$/.test(op.tag), `${op.path} carries the internal tag ${op.tag}`);
     assert.ok(index.tags[op.tag] > 0, `${op.path} has tag ${op.tag}, absent from the tag index`);
 
-    // No documented twin: surfacing an unsupported duplicate of a supported endpoint
-    // gives an agent two ways to do one job and no reason to prefer the right one.
-    const leaf = op.path.split("/").pop();
+    // A documented operation covering the same resources with the same method is a
+    // twin even when its path is longer — the extra segment names the action.
+    const mine = segments(op.path);
     const twin = index.operations.find(
-      (o) => !o.internal && o.path.startsWith("/api/") && o.method === op.method && o.path.split("/").pop() === leaf,
+      (o) =>
+        !o.internal &&
+        o.path.startsWith("/api/") &&
+        o.method === op.method &&
+        mine.every((s) => segments(o.path).includes(s)),
     );
     assert.equal(twin, undefined, `${op.method} ${op.path} duplicates ${twin?.path}`);
   }
@@ -210,4 +224,22 @@ test("business operations behind the -ctrl heuristic are discoverable", () => {
   const salary = exposed.find((o) => o.path === "/salary/{id}/register-payment");
   assert.ok(salary, "registering a payroll payment must be reachable");
   assert.equal(salary.tag, "Salary Payments");
+});
+
+// Advertising something reai_request cannot call is the same false signal this
+// allowlist exists to remove, pointing the other way. POST /invoice/setting/receiver-bank
+// takes a required object-valued query parameter and no body, which the tool's
+// scalar-and-scalar-array query model cannot express; it is excluded for that reason.
+test("every exposed business operation is actually callable through reai_request", () => {
+  const index = getSpecIndex();
+  for (const op of index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"))) {
+    const described = describeOperation(op);
+    for (const p of described.parameters ?? []) {
+      if (p.in !== "query") continue;
+      assert.ok(
+        !/^object|^oneOf/.test(p.type),
+        `${op.method} ${op.path}: query parameter "${p.name}" is ${p.type}, which reai_request cannot send`,
+      );
+    }
+  }
 });
