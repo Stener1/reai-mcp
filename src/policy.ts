@@ -466,15 +466,55 @@ const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
   /^\/api\/supplier-invoices\/[^/]+\/payment-details(\/|$)/,
 ];
 
-const PAYMENT_ROUTING_FIELDS = new Set(["iban", "bankaccountnumber", "swiftcode", "accountnumber"]);
+// `bban` is the company-bank schema's account-number field. It was absent, so even
+// once /api/company-banks was in scope the account number itself went undetected.
+const PAYMENT_ROUTING_FIELDS = new Set([
+  "iban",
+  "bankaccountnumber",
+  "swiftcode",
+  "accountnumber",
+  "bban",
+]);
 
-/** Payment-routing fields present in a body, for use in error messages. */
-export function paymentRoutingFields(body: unknown): string[] {
+/**
+ * Redirecting invoice DELIVERY. The same shape of harm as payment routing — trivially
+ * reversible as a record, permanent as a disclosure, and realised later by a
+ * legitimate human send — but a different consequence and a different thing to check,
+ * so it is kept separate rather than folded into the payment set. Reporting "this
+ * changes where a payment will go" for an email address tells the agent the wrong
+ * thing to verify.
+ *
+ * Scoped more widely than the customer record: `invoiceEmail` is also a field on
+ * CreateOrderReq, UpdateOrderReq and SubscriptionWriteReq, so an address set on an
+ * order or a subscription reaches the same disclosure by a different door.
+ */
+const INVOICE_DELIVERY_FIELDS = new Set(["invoiceemail"]);
+
+const INVOICE_DELIVERY_PATHS: readonly RegExp[] = [
+  /^\/api\/customers(\/|$)/,
+  /^\/api\/orders(\/|$)/,
+  /^\/api\/subscriptions(\/|$)/,
+];
+
+/** Invoice-delivery fields present in a body, for use in error messages. */
+export function invoiceDeliveryFields(body: unknown): string[] {
+  return presentFields(body, INVOICE_DELIVERY_FIELDS);
+}
+
+/** Escalate a call that redirects where invoices are delivered. */
+export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
+  if (pathRisk === "irreversible") return pathRisk;
+  const normalized = path.toLowerCase().replace(/\/+$/, "");
+  if (!INVOICE_DELIVERY_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
+}
+
+function presentFields(body: unknown, names: ReadonlySet<string>): string[] {
   if (!body || typeof body !== "object" || Array.isArray(body)) return [];
   return Object.entries(body as Record<string, unknown>)
     .filter(
       ([key, value]) =>
-        PAYMENT_ROUTING_FIELDS.has(key.toLowerCase()) &&
+        names.has(key.toLowerCase()) &&
         value !== undefined &&
         value !== null &&
         String(value).trim() !== "",
@@ -482,17 +522,86 @@ export function paymentRoutingFields(body: unknown): string[] {
     .map(([key]) => key);
 }
 
+/** Payment-routing fields present in a body, for use in error messages. */
+export function paymentRoutingFields(body: unknown): string[] {
+  return presentFields(body, PAYMENT_ROUTING_FIELDS);
+}
+
 /**
- * Escalate a counterparty write that changes payment routing.
+ * Escalate a call that changes where money is sent.
  *
- * Separate from `classifyWithBody` because it needs the path: the same field on
- * /api/company-banks is benign.
+ * Reversible as a RECORD and irreversible as a PAYMENT: the loss happens later, when
+ * a human pays the invoice in the ReAI UI to whatever account is on file.
  */
-export function classifyPaymentRouting(pathRisk: Risk, path: string, body: unknown): Risk {
+export function classifyPaymentRouting(
+  pathRisk: Risk,
+  path: string,
+  body: unknown,
+  method?: string,
+): Risk {
   if (pathRisk === "irreversible") return pathRisk;
   const normalized = path.toLowerCase().replace(/\/+$/, "");
-  if (!PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  const inScope =
+    PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
+    // Editing an EXISTING company bank repoints where this company's own customers
+    // pay — the money flows inward rather than outward, but it is redirected just as
+    // permanently, and invoices already issued name that account. Adding one (POST)
+    // stays ordinary work, which is why the original exemption was written; it just
+    // never distinguished adding from repointing.
+    (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST");
+  if (!inScope) return pathRisk;
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
+}
+
+const COMPANY_BANK_PATH = /^\/api\/company-banks(\/|$)/;
+
+/**
+ * Whether a CURATED tool's arguments escalate its declared risk.
+ *
+ * The escape hatch runs `classifyWithBody` and `classifyPaymentRouting` on every
+ * request, but curated tools were gated on their static `risk` alone — so
+ * `reai_update_supplier`, declared `reversible`, accepted `iban` and repointed a
+ * supplier's bank account in the DEFAULT mode, while `reai_request` refused the
+ * identical `PATCH /api/suppliers/{id}`. A curated tool quietly doing what the
+ * escape hatch forbids is the exact failure this project treats as its worst.
+ *
+ * Scoped by the tool's declared `apiPaths`, because the field names are ambiguous
+ * out of context: `accountNumber` on a supplier is a bank account, and on a
+ * bookkeeping tool it is a chart-of-accounts code like 4300. Matching on the name
+ * alone would refuse ordinary ledger work.
+ *
+ * An over-approximation by design — arguments are not the request body, and a
+ * handler may rename or drop fields. It can therefore refuse a call the body would
+ * not have escalated, and that is the direction to be wrong in.
+ */
+export function curatedArgsEscalate(
+  apiPaths: ReadonlyArray<readonly [string, string]>,
+  args: unknown,
+): { risk: Risk; fields: string[]; consequence: string; verify: string } | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  for (const [method, path] of apiPaths) {
+    if (classifyPaymentRouting("reversible", path, args, method) === "irreversible") {
+      return {
+        risk: "irreversible",
+        fields: paymentRoutingFields(args),
+        consequence:
+          "this changes where money is sent — whoever pays this counterparty next, quite " +
+          "possibly a person in the ReAI UI long afterwards, sends to whatever account is on file",
+        verify: "confirm the new bank details against something outside this conversation",
+      };
+    }
+    if (classifyInvoiceDelivery("reversible", path, args) === "irreversible") {
+      return {
+        risk: "irreversible",
+        fields: invoiceDeliveryFields(args),
+        consequence:
+          "this changes where invoices are delivered — every future invoice goes to that " +
+          "address, and the disclosure happens later, when someone issues one normally",
+        verify: "confirm the address with the customer through a channel you already trust",
+      };
+    }
+  }
+  return undefined;
 }
 
 /**

@@ -17,6 +17,8 @@ import {
   classifyTransmission,
   classifyWithBody,
   classifyPaymentRouting,
+  classifyInvoiceDelivery,
+  invoiceDeliveryFields,
   escalatingBodyFields,
   paymentRoutingFields,
   transmittingBodyFields,
@@ -466,14 +468,21 @@ const request = defineTool({
     // Then payment routing, which needs the path: changing a counterparty's bank
     // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
     // happens later when a human pays the invoice in the ReAI UI.
-    const risk = classifyPaymentRouting(bodyRisk, decoded, args.body);
-    const routing = risk !== bodyRisk ? paymentRoutingFields(args.body) : [];
+    const routingRisk = classifyPaymentRouting(bodyRisk, decoded, args.body, args.method);
+    // And invoice delivery, which is the same shape of harm with a different
+    // consequence: reversible as a record, permanent as a disclosure. Kept apart so
+    // the refusal names the right thing to go and check.
+    const risk = classifyInvoiceDelivery(routingRisk, decoded, args.body);
+    const routing = routingRisk !== bodyRisk ? paymentRoutingFields(args.body) : [];
+    const delivery = risk !== routingRisk ? invoiceDeliveryFields(args.body) : [];
     const escalated =
       routing.length > 0
         ? [`${routing.join(", ")} (this changes where a payment will go)`]
-        : bodyRisk !== pathRisk
-          ? escalatingBodyFields(args.body)
-          : [];
+        : delivery.length > 0
+          ? [`${delivery.join(", ")} (this changes where invoices are delivered)`]
+          : bodyRisk !== pathRisk
+            ? escalatingBodyFields(args.body)
+            : [];
     assertAllowed(
       risk,
       ctx.config.writeMode,
@@ -482,7 +491,7 @@ const request = defineTool({
           // arms a send, or because it repoints a payment, and calling the second one an
           // external send would be simply untrue.
           `${method} ${path} with ${escalated.join(", ")}${
-            routing.length > 0 ? "" : " (this arms an external send)"
+            routing.length > 0 || delivery.length > 0 ? "" : " (this arms an external send)"
           }`
         : `${method} ${path}`,
     );

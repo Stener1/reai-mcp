@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ReaiClient } from "./reai/client.js";
 import { ReaiApiError, ReaiConfigError, ReaiTransportError } from "./reai/errors.js";
-import { isAllowed, WriteBlockedError } from "./policy.js";
+import { curatedArgsEscalate, isAllowed, WriteBlockedError } from "./policy.js";
 import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
@@ -49,6 +49,17 @@ export type BuildServerOptions = {
   token?: string;
   session?: SessionState;
 };
+
+/**
+ * Whether any argument this tool accepts can escalate a call to irreversible. Probed
+ * through the real classifier rather than a second list, so the annotation cannot
+ * drift from the gate that enforces it.
+ */
+function hasEscalatingFields(tool: ToolDef): boolean {
+  return Object.keys(tool.inputSchema ?? {}).some(
+    (field) => curatedArgsEscalate(tool.apiPaths ?? [], { [field]: "probe" }) !== undefined,
+  );
+}
 
 export function buildServer(opts: BuildServerOptions): McpServer {
   const { config } = opts;
@@ -107,7 +118,14 @@ export function buildServer(opts: BuildServerOptions): McpServer {
         annotations: {
           title: tool.title,
           readOnlyHint: tool.risk === "read" && !tool.destructive,
-          destructiveHint: tool.destructive === true || tool.risk === "irreversible",
+          // Annotations are per TOOL and cannot vary per invocation, so a tool that
+          // is ordinary for most of its fields and irreversible for a few has to be
+          // annotated for the worst call it can make. Otherwise a client that asks
+          // for confirmation before destructive tools would present "repoint this
+          // supplier's bank account" as an ordinary edit — in `full` mode, where the
+          // call is permitted, that annotation is the only thing left protecting it.
+          destructiveHint:
+            tool.destructive === true || tool.risk === "irreversible" || hasEscalatingFields(tool),
           idempotentHint: tool.idempotent === true,
           openWorldHint: true,
         },
@@ -116,6 +134,24 @@ export function buildServer(opts: BuildServerOptions): McpServer {
       // registry already validates and narrows, so the bridge is untyped here.
       (async (args: Record<string, unknown>) => {
         try {
+          // Re-gate on the ARGUMENTS, not just the tool's declared risk. A tool can
+          // be ordinary master-data work for most of its fields and something far
+          // heavier for a few of them: reai_update_supplier is `reversible`, and its
+          // own description promised that changing iban/swiftCode/bankAccountNumber
+          // "requires REAI_WRITE_MODE=full" — a control that was written down and
+          // never implemented, which is worse than none, because it invited running
+          // the default mode believing bank details were protected.
+          const escalated = curatedArgsEscalate(tool.apiPaths ?? [], args ?? {});
+          if (escalated && !isAllowed(escalated.risk, config.writeMode)) {
+            throw new WriteBlockedError({
+              risk: escalated.risk,
+              mode: config.writeMode,
+              what:
+                `${tool.name} called with ${escalated.fields.join(", ")} — ${escalated.consequence}. ` +
+                `Every other field on this tool is unaffected, so the same call without those ` +
+                `fields will work. Before changing them, ${escalated.verify}`,
+            });
+          }
           return await tool.handler(args ?? {}, ctx);
         } catch (err) {
           return toolError(err, tool.name);
