@@ -46,6 +46,11 @@ const NORWEGIAN = [
   // Nested under an invoice — there is no /api/reminders, and the first version of this
   // list asserted one, which the search was right to ignore.
   ["purringer", "GET /api/invoices/{id}/reminders"],
+  // Both of these slipped past the first version of this list, which is why they broke:
+  // "årsregnskap" folds to "arsregnskap" and the synonym was keyed on a guess, and
+  // "driftsmidler" is an irregular plural no suffix rule reaches.
+  ["årsregnskap", "GET /api/annual-accounts/{year}"],
+  ["driftsmidler", "GET /api/ledger/asset"],
 ];
 
 /** English, so the Norwegian work cannot be bought with a regression. */
@@ -145,4 +150,14 @@ test("a Norwegian compound is decomposed", () => {
   // rule separates — it is listed as an exception, and the multi-word phrasing still works
   // because the real resource term carries it.
   assert.ok(rankOf("lønnsomhet per avdeling", "GET /api/departments") >= 0);
+
+  // "beklager" ("sorry") ends in "lager", so a conversational apology was read as a
+  // question about the warehouse: "beklager, hvor er abonnementene" ranked stock above
+  // subscriptions. It is a filler word, so it belongs in the stopword list rather than in a
+  // compound exception — and a polite question must give the same answer as a blunt one.
+  assert.deepEqual(
+    searchOperations({ query: "beklager, hvor er abonnementene", limit: 3 }).map((h) => h.path),
+    searchOperations({ query: "hvor er abonnementene", limit: 3 }).map((h) => h.path),
+    "a Norwegian filler word must not change the answer",
+  );
 });

@@ -656,6 +656,16 @@ const STOPWORDS = new Set([
   "with", "from", "by", "at", "as", "it", "its", "if", "so", "any", "some",
   "want", "need", "please", "about", "into", "out", "up", "down", "again",
   "exist", "exists", "s",
+  // Norwegian equivalents of the fillers above. "beklager" ("sorry") earns its place
+  // twice: it carries no signal about which endpoint is wanted, AND it ends in "lager",
+  // so compound decomposition read a conversational apology as a question about the
+  // warehouse — "beklager, hvor er abonnementene" ranked stock above subscriptions.
+  "hvordan", "hva", "hvilken", "hvilke", "hvem", "naar", "hvor", "hvorfor",
+  "kan", "skal", "vil", "er", "var", "har", "hadde", "blir",
+  "jeg", "vi", "min", "mitt", "vaar", "vaare", "meg", "oss", "du", "din", "ditt",
+  "den", "det", "dette", "disse", "der", "som", "til", "fra", "med", "paa", "av",
+  "og", "eller", "ikke", "noen", "noe", "alle", "vennligst", "takk", "hei",
+  "beklager", "unnskyld",
 ]);
 
 /**
@@ -833,6 +843,9 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   anleggsmiddel: ["asset"],
   anleggsmidler: ["asset"],
   driftsmiddel: ["asset"],
+  // Irregular: lookupForms strips -er to "driftsmidl" and -r to "driftsmidle", so the
+  // plural has to be its own key. Same reason anleggsmidler and eiendeler are listed.
+  driftsmidler: ["asset"],
   tilbud: ["offer"],
   ordre: ["order"],
   purring: ["reminders", "dunning"],
