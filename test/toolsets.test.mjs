@@ -103,6 +103,74 @@ test("every tool that deletes is annotated destructive", () => {
   );
 });
 
+// The path half of that guard is above. This is the BODY half, which was missing: the
+// invariant compared a tool's declared risk against classifyRequest on its path alone, so a
+// tool declared `reversible` that accepted sendEhf, outputMode or automaticBillingGeneration
+// would have armed a send in the default mode while reai_request refused the identical call.
+// No shipped tool took one of those fields — a subscription tool would have been the first,
+// and finding this by shipping it is the wrong order.
+test("a curated tool accepting an arms-a-send field escalates like the escape hatch", async () => {
+  const { escalatingBodyFieldNames, curatedArgsEscalate, classifyWithBody, isAllowed } = await import(
+    "../dist/policy.js"
+  );
+  // A value each field actually escalates on, so the probe means something.
+  const arming = {
+    sendehf: true,
+    automaticbillinggeneration: true,
+    outputmode: "create_invoice",
+  };
+  for (const name of escalatingBodyFieldNames) {
+    assert.ok(name in arming, `no probe value for the escalating field ${name} — add one`);
+    assert.equal(
+      classifyWithBody("reversible", { [name]: arming[name] }),
+      "irreversible",
+      `${name} is declared escalating but does not escalate on ${JSON.stringify(arming[name])}`,
+    );
+  }
+
+  const unguarded = [];
+  for (const tool of registeredTools) {
+    if (!tool.apiPaths || tool.risk === "read") continue;
+    for (const input of Object.keys(tool.inputSchema ?? {})) {
+      const key = input.toLowerCase();
+      if (!escalatingBodyFieldNames.includes(key)) continue;
+      const args = { [input]: arming[key] };
+      const escalated = curatedArgsEscalate(tool.apiPaths, args);
+      const effective = escalated?.risk ?? tool.risk;
+      if (isAllowed(effective, "reversible")) {
+        unguarded.push(`${tool.name} accepts ${input} and stays ${effective}`);
+      }
+    }
+  }
+  assert.deepEqual(unguarded, [], "a curated tool can arm a send in the default write mode");
+
+  // No shipped tool accepts one of these fields, so the sweep above passes vacuously today
+  // — neutering the escalation in policy.ts leaves it green. What it is really guarding is
+  // the NEXT tool, so check the mechanism against a tool shaped like that one: a reversible
+  // subscription create, which is exactly what prompted this.
+  const hypothetical = {
+    name: "reai_create_subscription",
+    risk: "reversible",
+    apiPaths: [["POST", "/api/subscriptions"]],
+    inputSchema: { customerId: {}, outputMode: {}, sendEhf: {}, automaticBillingGeneration: {} },
+  };
+  for (const [field, value] of [
+    ["sendEhf", true],
+    ["outputMode", "create_invoice"],
+    ["automaticBillingGeneration", true],
+  ]) {
+    const escalated = curatedArgsEscalate(hypothetical.apiPaths, { [field]: value });
+    assert.equal(escalated?.risk, "irreversible", `${field} must escalate a curated tool`);
+    assert.match(escalated.consequence, /arms an external send|issue invoices on its own/);
+    assert.equal(isAllowed(escalated.risk, "reversible"), false);
+  }
+  // And the benign values must NOT escalate, or the tool becomes unusable for the ordinary
+  // case: a subscription that produces a draft order and bills nobody automatically.
+  assert.equal(curatedArgsEscalate(hypothetical.apiPaths, { outputMode: "create_order" }), undefined);
+  assert.equal(curatedArgsEscalate(hypothetical.apiPaths, { automaticBillingGeneration: false }), undefined);
+  assert.equal(curatedArgsEscalate(hypothetical.apiPaths, { sendEhf: false }), undefined);
+});
+
 test("no curated tool is more permissive than the escape hatch would be", () => {
   // The worst bug class in this codebase is a curated tool that quietly does
   // what reai_request refuses -- it would silently defeat REAI_WRITE_MODE. Each

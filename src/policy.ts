@@ -442,6 +442,9 @@ export function classifyWithBody(pathRisk: Risk, body: unknown): Risk {
   return pathRisk;
 }
 
+/** Exported for the invariant that checks curated tools against these same fields. */
+export const escalatingBodyFieldNames: readonly string[] = Object.keys(ESCALATING_BODY_FIELDS);
+
 /** Names of body fields that escalate risk, for use in error messages. */
 export function escalatingBodyFields(body: unknown): string[] {
   return [
@@ -899,6 +902,25 @@ export function curatedArgsEscalate(
           "this changes where invoices are delivered — every future invoice goes to that " +
           "address, and the disclosure happens later, when someone issues one normally",
         verify: "confirm the address with the customer through a channel you already trust",
+      };
+    }
+    // The same body fields the escape hatch escalates on. This helper checked payment
+    // routing and invoice delivery only, so a curated tool declared `reversible` that
+    // accepted sendEhf, outputMode or automaticBillingGeneration would have armed a send
+    // in the default mode while reai_request refused the identical call — the exact bug
+    // class this helper exists for, with the arms-a-send half missing. No shipped tool
+    // took one of those fields, so nothing was reachable; adding a subscription tool is
+    // what would have made it reachable, which is a poor way to find out.
+    if (classifyWithBody("reversible", args) === "irreversible") {
+      return {
+        risk: "irreversible",
+        fields: escalatingBodyFields(args),
+        consequence:
+          "this arms an external send or lets ReAI issue invoices on its own — the document " +
+          "leaves for a counterparty later, without another call, and cannot be recalled",
+        verify:
+          "confirm the recipient and the schedule, and check REAI_ALLOW_EXTERNAL_SEND is meant " +
+          "to be on for this deployment",
       };
     }
   }
