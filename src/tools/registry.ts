@@ -82,21 +82,44 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
     if (Array.isArray(data)) {
       // An array can be cut at an ITEM boundary and re-serialised, so what remains is
       // always valid JSON and every value in it is whole.
-      const shown = countFittingSerialized(data, BODY_BUDGET);
+      //
+      // Sized against the REAL note, not the fixed reserve. The reserve is a worst case
+      // for the nested-object note, which names every trimmed field; the array note is a
+      // single sentence. Using it here threw away 1200 characters of headroom, and for
+      // one item between the reserved budget and the true cap that meant discarding it
+      // entirely while claiming it "exceeds the 24000-character limit" — a 23,026-char
+      // item was dropped with 23,769 characters left unused.
+      const arrayNote = (count: number): string =>
+        count === 0
+          ? `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
+            `${MAX_RESULT_CHARS}-character limit, so no whole item fits. This is NOT an empty ` +
+            `result. Fetch the item by id, or use a tool that returns a summary rather than the ` +
+            `full record.`
+          : `NOTE: response truncated — showing the first ${count} of ${data.length} items, complete. ` +
+            `Narrow the result with date, status or id filters, or use the limit/page parameters.`;
+
+      const overhead = parts.reduce((n, part) => n + part.length + 1, 0) + 2;
+      let shown = countFittingSerialized(data, BODY_BUDGET);
+      const refined = countFittingSerialized(
+        data,
+        MAX_RESULT_CHARS - overhead - arrayNote(Math.max(shown, 1)).length,
+      );
+      if (refined > shown) shown = refined;
+      // The note grows by a digit or two as the count rises, so confirm rather than
+      // assume: step down until the assembled result genuinely fits.
+      while (
+        shown > 0 &&
+        stringify(data.slice(0, shown)).length + arrayNote(shown).length + overhead > MAX_RESULT_CHARS
+      ) {
+        shown -= 1;
+      }
+
       // An empty array is not "nothing shown", it is "no results" — valid JSON that
       // reads as an answer. The object branch already returns nothing in this case for
       // exactly that reason; these two disagreed. And the note omitted the total, so
       // ok([oversized, {id:10}, {id:11}]) said "[]" and never mentioned three items.
       body = shown === 0 ? "" : stringify(data.slice(0, shown));
-      parts.push(
-        shown === 0
-          ? `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
-              `${MAX_RESULT_CHARS}-character limit, so no whole item fits. This is NOT an empty ` +
-              `result. Fetch the item by id, or use a tool that returns a summary rather than the ` +
-              `full record.`
-          : `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
-              `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
-      );
+      parts.push(arrayNote(shown));
     } else if (typeof data === "string") {
       // Plain text is not serialised with indentation, so the line-boundary rule below
       // has nothing to cut back to and discarded the entire response — 40,000 characters

@@ -1065,3 +1065,56 @@ test("an oversized first item is not reported as an empty result", () => {
   assert.match(text, /of 3 item/, "the note must say how many items there were");
   assert.match(text, /NOT an empty result/i, "and say plainly that this is not emptiness");
 });
+
+// The fixed note reserve is a worst case for the NESTED-object note, which names every
+// trimmed field. The array note is one sentence, so reserving 1200 characters for it
+// threw away headroom — and for an item sized between the reserved budget and the true
+// cap it meant discarding the item entirely while claiming it "exceeds the
+// 24000-character limit". A 23,026-character item was dropped with 23,769 unused.
+test("the array branch sizes against its real note, not a worst-case reserve", () => {
+  const big = { blob: "x".repeat(23_000) };
+  const text = ok([big, ...Array.from({ length: 50 }, (_, i) => ({ id: i }))]).content[0].text;
+  assert.match(text, /showing the first \d+ of 51 items/, `the big item fits and must be shown: ${text.slice(0, 140)}`);
+  assert.ok(text.length <= 24_000);
+  assert.ok(text.length > 20_000, `should use the available room, used only ${text.length}`);
+
+  // A genuinely oversized item still reports nothing shown, with the total.
+  const oversized = ok([{ blob: "x".repeat(50_000) }, { id: 1 }, { id: 2 }]).content[0].text;
+  assert.match(oversized, /FIRST of 3 item\(s\) alone exceeds/);
+});
+
+// Three samples are not evidence for a bound that is now approached to within four
+// characters. This sweeps the shapes that have historically broken it — empty strings,
+// tabs, bare ints, wide unicode — and every combination of item size and count.
+test("no array shape exceeds the cap", () => {
+  const shapes = [];
+  for (const len of [0, 1, 3, 7, 17, 40, 113, 500, 2000, 9000, 23_000, 26_000]) {
+    for (const count of [1, 2, 3, 10, 57, 500, 4000, 20_000]) {
+      // Skip combinations whose raw size dwarfs the cap without testing anything new —
+      // 20,000 items of 26,000 characters is half a gigabyte and aborts the runner.
+      // Anything past a few times the cap exercises the same branch.
+      if (len * count > 4 * 24_000) continue;
+      shapes.push(Array.from({ length: count }, (_, i) => ({ i, v: "x".repeat(len) })));
+    }
+  }
+  // ...plus a few deliberately far over the cap, at sizes that stay cheap.
+  shapes.push(
+    Array.from({ length: 20_000 }, (_, i) => ({ i })),
+    Array.from({ length: 4000 }, (_, i) => ({ i, v: "x".repeat(40) })),
+    [{ blob: "x".repeat(60_000) }],
+  );
+  shapes.push(
+    Array.from({ length: 10_000 }, () => ""),
+    Array.from({ length: 5000 }, () => "\t\t\t"),
+    Array.from({ length: 300 }, (_, i) => ({ i, s: "æøå".repeat(200) })),
+    [{ a: 1 }],
+    [],
+  );
+  let worst = 0;
+  for (const shape of shapes) {
+    const length = ok(shape).content[0].text.length;
+    worst = Math.max(worst, length);
+    assert.ok(length <= 24_000, `an array of ${shape.length} produced ${length} characters`);
+  }
+  assert.ok(worst > 20_000, `the sweep should approach the cap; worst was only ${worst}`);
+});
