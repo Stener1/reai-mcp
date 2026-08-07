@@ -9,10 +9,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**93 tools**: 86 across eight accounting domains, plus 7 always-on.
+**98 tools**: 91 across nine accounting domains, plus 7 always-on.
 
 ### Added
 
+- **Agreements toolset** (5 tools) — leases, employment contracts, purchase and
+  service agreements: list, read, change terms, read signers, delete. Measured on
+  the test tenant, and the headline is a trap the API documents nowhere.
+  - `reai_update_agreement` exists because `PUT` on an agreement is a **full
+    replacement**. On a live lease, a `PUT` carrying only the landlord's name left
+    `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the
+    house rules all null — and `GET /pdf` still answered `200`, producing a
+    document that looks like a contract with no terms in it. The tool reads the
+    agreement, merges the requested changes over the existing terms and writes the
+    whole thing back. That the round-trip is lossless was verified rather than
+    assumed: the 78-key sub-object a GET returns was written back verbatim with no
+    field changing value. It refuses outright if it cannot read the current terms,
+    since a merge with no base is the destructive replacement it exists to prevent.
+  - **Nothing is required**: `POST /api/agreements/rent-agreement {}` answers `201`
+    with a draft in which every term is null, and the PDF renders for that too.
+  - The identifier is `agreementId`, **not** `id` — the same shape of trap as
+    `variantId` in warehouses, and it swallowed the first cleanup in this
+    toolset's own measurement.
+  - `GET /api/agreements/{id}` is a **wrapper** with five nullable sub-objects, one
+    populated, so a lease's rent is at `rentAgreement.monthlyRent`. DELETE answers
+    `204` with no body — no outcome field and no archive branch.
+  - Some fields the schema types as plain strings are validated as enums the spec
+    never lists; the API names the allowed set in its `400`.
+  - Deliberately **not** curated: the five create endpoints (78-field bodies the
+    spec documents, with every trap above now carried as a quirk), the three
+    signing endpoints (they email a counterparty, so `reai_request` is the right
+    route — the refusal there names what would have gone out), and the PDF
+    download, following the invoice-PDF precedent.
+  - Not enforced, and said so in the tools: Norwegian tenancy law caps a deposit at
+    six months' rent and wants a statutory reason for a short fixed term. A deposit
+    of 9 999 999 against a rent of 10 000 was accepted, as was a four-month fixed
+    term with no reason. Refusing those would be this server inventing law.
 - **Warehouses toolset** (7 tools) — warehouses, stock on hand, and stock
   adjustments. Everything in the tool text was measured on the test tenant by
   creating a warehouse and a stock product, adjusting stock, and reading the
@@ -55,6 +87,8 @@ All notable changes to `reai-mcp`. Format loosely follows
   phone call. The derived half alone would have been the mistake this repo keeps
   making: it takes its own subject from the policy, so deleting a transmitting
   pattern shrinks the set and stays green.
+- **Four agreement quirks** carrying the traps above to a reai_request caller,
+  since the five create endpoints and the signing flow are reached that way.
 - **Six quirks** for the same measurements, so a `reai_request` caller gets the
   warnings the curated tools give — including `stock-product-needs-a-variant`,
   which is a `POST /api/products` rejection whose `fieldErrors` name a synthetic

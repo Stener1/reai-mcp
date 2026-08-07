@@ -21,6 +21,7 @@ import { organisationTools } from "./tools/organisation.js";
 import { assetTools } from "./tools/assets.js";
 import { subscriptionTools } from "./tools/subscriptions.js";
 import { warehouseTools } from "./tools/warehouses.js";
+import { agreementTools } from "./tools/agreements.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.3.0";
@@ -39,6 +40,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   assets: assetTools,
   subscriptions: subscriptionTools,
   warehouses: warehouseTools,
+  agreements: agreementTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];

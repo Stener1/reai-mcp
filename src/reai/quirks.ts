@@ -473,6 +473,79 @@ export const QUIRKS: readonly Quirk[] = [
       "A Norwegian company is looked up in Brønnøysundregistrene from organizationNumber and its " +
       "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
   },
+  // --- Agreements -----------------------------------------------------------
+  {
+    id: "agreement-put-replaces-everything",
+    paths: [
+      "/api/agreements/rent-agreement/{id}",
+      "/api/agreements/employee-contract/{id}",
+      "/api/agreements/accounting-services/{id}",
+      "/api/agreements/service-agreement/{id}",
+      "/api/agreements/purchase-agreement/{id}",
+    ],
+    methods: ["PUT"],
+    kind: "irreversible",
+    note:
+      "This REPLACES the agreement — it does not patch it. Send the one field you mean to change " +
+      "and every other term is set to null. Measured on a live lease: a PUT carrying only " +
+      "landlordName left monthlyRent, tenantName, depositAmount, depositAccountNumber and the " +
+      "house rules all empty, answered 200, and GET /pdf still rendered a document — so the " +
+      "result looks like a contract with nothing in it. Read the agreement first, merge your " +
+      "change into the template sub-object it returns, and write the whole thing back; that " +
+      "round-trip is lossless (a 78-key sub-object written back verbatim changed no field). " +
+      "reai_update_agreement does exactly this. Editing through the wrong template's path is " +
+      'refused: 400 "Avtalen må redigeres fra riktig avtalemal."',
+  },
+  {
+    id: "agreement-accepts-an-empty-body",
+    paths: [
+      "/api/agreements/rent-agreement",
+      "/api/agreements/employee-contract",
+      "/api/agreements/accounting-services",
+      "/api/agreements/service-agreement",
+      "/api/agreements/purchase-agreement",
+    ],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "No field is required in any of the five agreement schemas, so POST {} answers 201 and " +
+      "creates a draft in which every term is null — and the PDF renders for it. A 201 here is " +
+      "not evidence that a usable contract exists; count the populated fields. Some values the " +
+      "schema types as plain strings are validated as enums the document does not list, and the " +
+      "API names the allowed set in its 400: leaseDurationType is indefinite | fixed_standard | " +
+      "fixed_special_reason, depositType is deposit | guarantee. Norwegian tenancy law caps a " +
+      "deposit at six months' rent and wants a statutory reason for a fixed term under three " +
+      "years; neither is enforced — a deposit of 9 999 999 against a rent of 10 000 was accepted, " +
+      "as was a four-month fixed_standard lease with no reason.",
+  },
+  {
+    id: "agreement-shapes",
+    paths: ["/api/agreements", "/api/agreements/{id}", "/api/agreements/{id}/sign-requests"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "Three shapes worth knowing. The identifier is `agreementId`, NOT `id` — reading `.id` " +
+      "yields undefined, and a cleanup loop keyed on it deletes nothing. GET /api/agreements/{id} " +
+      "returns a WRAPPER: { agreementId, templateType, signStatus, documentId, ... } plus five " +
+      "nullable sub-objects (accountingServices, employeeContract, rentAgreement, " +
+      "serviceAgreement, purchaseAgreement) of which exactly one is populated, so a lease's rent " +
+      "is at rentAgreement.monthlyRent and not at the top level. GET .../sign-requests returns an " +
+      "OBJECT — { agreementId, documentId, signStatus, signRequests } — with the signers under " +
+      "`signRequests`. The list endpoint carries only a summary and none of the terms.",
+  },
+  {
+    id: "agreement-delete-has-no-body",
+    paths: ["/api/agreements/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "Answers 204 with an EMPTY body: no {\"outcome\": ...} field and no archive branch, unlike " +
+      "customers, suppliers, departments, products or warehouses. So there is nothing in the " +
+      "response to read — the status is the whole answer, and GET /api/agreements is how to " +
+      "confirm. What this does to an agreement already SIGNED is not established: producing a " +
+      "signature needs a signing request sent to a real person, which cannot be done with " +
+      "external sending off.",
+  },
   {
     id: "delete-may-archive",
     paths: [

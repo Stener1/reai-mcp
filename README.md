@@ -429,9 +429,25 @@ Three more that the spec does not say. `occurredAt` is `date-time` and rejects a
 
 The delete is worth reading the response of: a warehouse holding 2 units was **archived**, kept its stock and vanished from the default list, while one whose adjustments netted back to zero was deleted outright. The trigger is current stock, not history — and since archived warehouses are only returned by `archived=true`, stock can sit somewhere the default list does not show.
 
-Anything not listed — leads, agreements, projects, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Agreements
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_agreements` · `reai_get_agreement` | Leases, employment contracts, purchase and service agreements, with signing status. The terms are **nested** under a sub-object named for the template | read |
+| `reai_list_agreement_signers` | Who was asked to sign and what happened since. Reading sends nothing; asking does | read |
+| `reai_update_agreement` | Change terms **without destroying the rest** — see below | reversible |
+| `reai_delete_agreement` | Remove an agreement and its document. Answers `204`, no outcome field, no archive branch | reversible |
 
-If 93 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+`reai_update_agreement` exists because the underlying call does the opposite. `PUT` on an agreement is a **full replacement**: measured on a live lease, a `PUT` carrying only the landlord's name left `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the house rules all null — and `GET /pdf` still returned `200`, producing a document that looks like a contract with nothing in it. The tool reads the agreement, merges your changes over the existing terms and writes the whole thing back; that the round-trip is lossless was verified rather than assumed, by writing a 78-key sub-object back verbatim and confirming no field changed.
+
+Three more measured surprises. **Nothing is required** — `POST /api/agreements/rent-agreement {}` answers `201` with a draft in which every term is null. The identifier is **`agreementId`, not `id`**. And some fields the schema types as plain strings are validated as enums the spec never lists; the API names the allowed set in its `400` (`leaseDurationType` is `indefinite | fixed_standard | fixed_special_reason`, `depositType` is `deposit | guarantee`).
+
+The five **create** endpoints are deliberately not curated: their bodies run to 78 fields that the spec documents properly, `reai_describe_endpoint` shows them, and every trap above now reaches a `reai_request` caller as a quirk. The three **signing** endpoints are not curated either — they email a counterparty, so they need `REAI_ALLOW_EXTERNAL_SEND` and are better reached through `reai_request`, where the refusal names what would have gone out. The PDF is a download: `reai_request GET /api/agreements/{id}/pdf` with `binary=true`.
+
+What the API does **not** check: Norwegian tenancy law caps a deposit at six months' rent and requires a statutory reason for a fixed term under three years. A deposit of 9 999 999 against a rent of 10 000 was accepted, and so was a four-month fixed term with no reason. This server does not enforce either — that would be inventing law — but the tools say so.
+
+Anything not listed — leads, projects, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 98 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
@@ -441,10 +457,11 @@ REAI_TOOLSETS=organisation         # 15 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
-(unset)                            # all 93
+REAI_TOOLSETS=agreements           # 12 tools
+(unset)                            # all 98
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions` and `warehouses`; listing all eight is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses` and `agreements`; listing all nine is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
@@ -452,7 +469,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **66 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **70 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

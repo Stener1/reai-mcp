@@ -130,6 +130,7 @@ async function main() {
     offerId: undefined,
     supplierId: undefined,
     warehouseId: undefined,
+    agreementId: undefined,
   };
 
   try {
@@ -201,6 +202,98 @@ async function main() {
       exposed.has("reai_get_warehouse_inventory") && exposed.has("reai_list_warehouses"),
       `${[...exposed].filter((n) => n.includes("warehouse")).length} warehouse tools visible`,
     );
+
+    // 0b. Agreement round-trip. The interesting part is the UPDATE: the API replaces rather
+    //     than patches, so this checks on real data that the untouched terms survive.
+    const agRes = await client.callTool({
+      name: "reai_request",
+      arguments: {
+        method: "POST",
+        path: "/api/agreements/rent-agreement",
+        // No depositAccountNumber here deliberately — that field is a payment destination and
+        // is refused in this mode, which is asserted separately below.
+        body: {
+          landlordName: `${STAMP} utleier`,
+          tenantName: `${STAMP} leietaker`,
+          propertyAddress: "Prøvegata 1",
+          monthlyRent: 12000,
+          rentDueDayOfMonth: 1,
+          leaseDurationType: "indefinite",
+          depositType: "deposit",
+          depositAmount: 36000,
+          otherTerms: `${STAMP} original terms`,
+        },
+      },
+    });
+    const agreement = agRes.isError ? undefined : jsonOf(agRes);
+    // The id field is `agreementId`, not `id`.
+    if (Number.isInteger(agreement?.agreementId)) created.agreementId = agreement.agreementId;
+    report(
+      "a rent agreement is created",
+      !agRes.isError && Number.isInteger(created.agreementId),
+      created.agreementId ? `agreementId=${created.agreementId}` : textOf(agRes).slice(0, 200),
+    );
+
+    if (created.agreementId) {
+      const readRes = await client.callTool({
+        name: "reai_get_agreement",
+        arguments: { id: created.agreementId },
+      });
+      const wrapper = readRes.isError ? undefined : jsonOf(readRes);
+      report(
+        "reai_get_agreement finds the terms in the template sub-object",
+        wrapper?.rentAgreement?.monthlyRent === 12000 && /under `rentAgreement`/.test(textOf(readRes)),
+        readRes.isError ? textOf(readRes).slice(0, 160) : `rent=${wrapper?.rentAgreement?.monthlyRent}`,
+      );
+
+      // The whole point of the toolset: change one term, keep the rest.
+      const updRes = await client.callTool({
+        name: "reai_update_agreement",
+        arguments: { id: created.agreementId, changes: { monthlyRent: 13500 } },
+      });
+      report("reai_update_agreement changes one term", !updRes.isError, firstLineOf(textOf(updRes)));
+
+      const afterRes = await client.callTool({
+        name: "reai_get_agreement",
+        arguments: { id: created.agreementId },
+      });
+      const after = afterRes.isError ? undefined : jsonOf(afterRes)?.rentAgreement;
+      const kept =
+        after?.monthlyRent === 13500 &&
+        after?.tenantName === `${STAMP} leietaker` &&
+        after?.depositAmount === 36000 &&
+        after?.otherTerms === `${STAMP} original terms`;
+      report(
+        "the untouched terms survived a PUT that replaces",
+        kept,
+        kept
+          ? "rent changed, tenant/deposit/terms intact"
+          : `TERMS LOST — rent=${after?.monthlyRent} tenant=${JSON.stringify(after?.tenantName)} ` +
+            `deposit=${after?.depositAmount} terms=${JSON.stringify(after?.otherTerms)}`,
+      );
+
+      // A lease names the account a tenant pays into, so setting it must escalate out of this
+      // mode exactly as repointing a supplier's bank details does.
+      const routed = await client.callTool({
+        name: "reai_update_agreement",
+        arguments: { id: created.agreementId, changes: { depositAccountNumber: "15031234567" } },
+      });
+      report(
+        "setting a deposit account is refused in reversible mode",
+        routed.isError === true && /payment|destination|money/i.test(textOf(routed)),
+        firstLineOf(textOf(routed)),
+      );
+
+      const signersRes = await client.callTool({
+        name: "reai_list_agreement_signers",
+        arguments: { id: created.agreementId },
+      });
+      report(
+        "reai_list_agreement_signers reads the object shape",
+        !signersRes.isError && /Nobody has been asked to sign/.test(textOf(signersRes)),
+        firstLineOf(textOf(signersRes)),
+      );
+    }
 
     // 1. Create a customer. Private contact avoids a Brønnøysund lookup, so no
     //    real company gets attached to the test record.
@@ -471,6 +564,25 @@ async function main() {
         );
       } catch (err) {
         report("supplier cleanup", false, `remove supplier ${created.supplierId} by hand: ${err}`);
+      }
+    }
+    if (created.agreementId) {
+      try {
+        const delRes = await client.callTool({
+          name: "reai_delete_agreement",
+          arguments: { id: created.agreementId },
+        });
+        report("reai_delete_agreement cleans up", !delRes.isError, firstLineOf(textOf(delRes)));
+        // 204 with no body, so the list is the only confirmation available.
+        const after = await client.callTool({ name: "reai_list_agreements", arguments: {} });
+        const gone = after.isError !== true && !textOf(after).includes(String(created.agreementId));
+        report(
+          "the test agreement is gone afterwards",
+          gone,
+          gone ? "verified" : `STILL PRESENT — delete agreement ${created.agreementId} by hand`,
+        );
+      } catch (err) {
+        report("agreement cleanup", false, `remove agreement ${created.agreementId} by hand: ${err}`);
       }
     }
     if (created.warehouseId) {
