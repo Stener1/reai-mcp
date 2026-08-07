@@ -82,13 +82,18 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
     if (Array.isArray(data)) {
       // An array can be cut at an ITEM boundary and re-serialised, so what remains is
       // always valid JSON and every value in it is whole.
-      const shown = countFittingSerialized(data);
-      body = stringify(data.slice(0, shown));
+      const shown = countFittingSerialized(data, BODY_BUDGET);
+      // An empty array is not "nothing shown", it is "no results" — valid JSON that
+      // reads as an answer. The object branch already returns nothing in this case for
+      // exactly that reason; these two disagreed. And the note omitted the total, so
+      // ok([oversized, {id:10}, {id:11}]) said "[]" and never mentioned three items.
+      body = shown === 0 ? "" : stringify(data.slice(0, shown));
       parts.push(
         shown === 0
-          ? `NOTE: nothing is shown — the FIRST item alone exceeds the ${MAX_RESULT_CHARS}-character ` +
-              `limit, so no whole item fits. Fetch it by id, or use a tool that returns a summary ` +
-              `rather than the full record.`
+          ? `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
+              `${MAX_RESULT_CHARS}-character limit, so no whole item fits. This is NOT an empty ` +
+              `result. Fetch the item by id, or use a tool that returns a summary rather than the ` +
+              `full record.`
           : `NOTE: response truncated — showing the first ${shown} of ${data.length} items, complete. ` +
               `Narrow the result with date, status or id filters, or use the limit/page parameters.`,
       );
@@ -99,9 +104,9 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       // no JSON token to split, so a prefix is safe; it is simply partial, and the note
       // has to say that rather than the opposite.
       const total = body.length;
-      body = body.slice(0, MAX_RESULT_CHARS);
+      body = body.slice(0, BODY_BUDGET);
       parts.push(
-        `NOTE: text truncated — showing the first ${MAX_RESULT_CHARS} of ${total} characters. ` +
+        `NOTE: text truncated — showing the first ${BODY_BUDGET} of ${total} characters. ` +
           `It ends mid-text, so do not read the tail as the end of the document.`,
       );
     } else if (trimNestedArrays(data) !== undefined) {
@@ -136,7 +141,7 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       // Otherwise drop back to a line boundary and discard the final line, which may
       // be a partial token. JSON.stringify with indentation puts each scalar on its
       // own line, so a whole-line cut cannot split a number or a string.
-      const cut = body.slice(0, MAX_RESULT_CHARS);
+      const cut = body.slice(0, BODY_BUDGET);
       const lastNewline = cut.lastIndexOf("\n");
       const kept = lastNewline > 0 ? cut.slice(0, lastNewline) : "";
       // One early oversized field — a base64 attachment, a long description — pushes the
@@ -177,6 +182,17 @@ export function fail(message: string): ToolResult {
 
 /** Space held back for the truncation note, which is part of what the caller sees. */
 const TRUNCATION_NOTE_RESERVE = 1200;
+
+/**
+ * What the BODY may occupy, for every branch.
+ *
+ * The cap is on what the caller receives, and the note is part of that. Three of the
+ * four branches sized only the body and then prepended the note, so a "24,000-character"
+ * response came back at 24,127 / 24,139 / 24,159. Each branch was internally consistent
+ * and they disagreed with each other, which is what happens when two rewrites each
+ * define the same constant for themselves.
+ */
+const BODY_BUDGET = MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE;
 
 /** How many trimmed fields the note names before summarising the rest. */
 const TRUNCATION_NOTE_MAX_FIELDS = 6;
@@ -220,7 +236,7 @@ function trimNestedArrays(
   // The note counts against the cap too: it names every trimmed field, so an object
   // with a thousand short arrays produced a 23.9 KB body under an 18.7 KB note — a
   // "capped" response of 42.6 KB, still crowding out the conversation.
-  const budget = MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE;
+  const budget = BODY_BUDGET;
   const base = stringify(build()).length;
   if (base > budget) return undefined;
 
@@ -287,13 +303,13 @@ function stringify(data: unknown): string {
  * Binary search rather than a linear walk: each probe serializes up to the whole
  * prefix, so a walk would be quadratic on a long list.
  */
-function countFittingSerialized(items: unknown[]): number {
+function countFittingSerialized(items: unknown[], budget: number): number {
   if (items.length === 0) return 0;
   let low = 0;
   let high = items.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (stringify(items.slice(0, mid)).length <= MAX_RESULT_CHARS) low = mid;
+    if (stringify(items.slice(0, mid)).length <= budget) low = mid;
     else high = mid - 1;
   }
   return low;
