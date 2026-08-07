@@ -266,9 +266,12 @@ const setCustomerAddress = defineTool({
     // Every part is optional now that the current address is merged in: requiring the three the
     // API requires would have made "change the street" mean "and retype the city", which is the
     // shape that lost postcodes in the first place. Null clears a part deliberately.
-    addressPart1: z.string().nullable().optional().describe("Street address."),
-    city: z.string().nullable().optional().describe("City."),
-    countryCode: COUNTRY_CODE.nullable().optional().describe('ISO country code, e.g. "NO".'),
+    // These three are REQUIRED by the endpoint and non-nullable in the document, so a null is not
+    // something a caller can mean: there is no way to clear a required field. They were nullable
+    // by reflex, alongside the optional three below where the document does allow it.
+    addressPart1: z.string().optional().describe("Street address."),
+    city: z.string().optional().describe("City."),
+    countryCode: COUNTRY_CODE.optional().describe('ISO country code, e.g. "NO".'),
     addressPart2: z.string().nullable().optional().describe("Second address line."),
     postalCode: z.string().nullable().optional().describe("Postal code."),
     province: z.string().nullable().optional().describe("Province or region."),

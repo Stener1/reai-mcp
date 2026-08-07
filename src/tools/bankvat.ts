@@ -706,6 +706,10 @@ const updateCompanyBank = defineTool({
       .regex(/^[A-Z]{3}$/, 'Three-letter uppercase ISO 4217 code, e.g. "NOK".')
       .optional()
       .describe("ISO 4217 currency of the account."),
+    // Deliberately nullable although CompanyBankReq is not: the handler REFUSES a null or empty
+    // value before anything is sent, and it can only do that if the value reaches it. With
+    // `.min(1)` the caller got "Invalid arguments for tool ..." instead of an explanation. This
+    // is the one place where accepting what the API would reject buys a better answer.
     bban: z
       .string()
       .nullable()
@@ -724,9 +728,11 @@ const updateCompanyBank = defineTool({
           'ending in the "XXX" primary-branch suffix is stored as the 8-character form, so ' +
           '"DNBANOKKXXX" reads back as "DNBANOKK". That is the API, not a failed write.',
       ),
+    // NOT nullable: CompanyBankReq types this as a plain boolean, so a null would pass local
+    // validation only to be refused by the API. `.nullable()` was added here by reflex, along
+    // with the two fields where the document actually allows it.
     excludeFromReconciliationTodos: z
       .boolean()
-      .nullable()
       .optional()
       .describe("Keep this account out of the reconciliation to-do list."),
     tenantId: tenantIdArg,

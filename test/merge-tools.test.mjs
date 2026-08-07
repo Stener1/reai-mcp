@@ -94,6 +94,22 @@ test("a deliberate null is kept and an absent undefined is dropped", () => {
   assert.deepEqual(out.given, ["swiftCode"]);
 });
 
+// Pinned as a PREFERENCE, not a correctness guard, and said so: removing the null-exclusion from
+// the base failed no test, because for a nullable field an explicit null and an absent key mean
+// the same thing, and for a required one the missing-check catches it either way. Whether this API
+// distinguishes them anywhere is unverified — not echoing is the narrower choice, so it is the one
+// taken, and this records it so the mutation is at least visible.
+test("a stored null is not echoed back into the write", () => {
+  const out = mergeForReplacement({
+    existing: { name: "x", swiftCode: null, bban: "15201353103" },
+    changes: { name: "y" },
+    settable: ["name", "swiftCode", "bban"],
+  });
+  assert.equal("swiftCode" in out.merged, false, "an unset field is left out, not sent as null");
+  assert.equal(out.merged.bban, "15201353103");
+  assert.equal(out.kept.includes("swiftCode"), false, "and it is not claimed as carried over");
+});
+
 test("a missing required field is reported rather than sent", () => {
   const out = mergeForReplacement({
     existing: { name: "x" },
@@ -315,4 +331,69 @@ test("no tool is softer than the policy for any path it declares", () => {
     }
   }
   assert.deepEqual(softer, [], "a curated tool must not be a softer route than reai_request");
+});
+
+/**
+ * A tool argument must not accept `null` where the document says the field cannot be null.
+ *
+ * Doing so passes local validation and fails at the API, which is the opposite of what these
+ * schemas are for — `excludeFromReconciliationTodos` was exactly that, made `.nullable()` by
+ * reflex alongside two fields where the document does allow it. Swept rather than checked by
+ * hand, because "I added .nullable() without looking" is not a mistake one notices twice.
+ */
+const NULLABLE_ON_PURPOSE = {
+  "reai_update_company_bank.bban":
+    "the handler REFUSES a null or empty account number before anything is sent, and it can only " +
+    "do that if the value reaches it; with .min(1) the caller got a bare validation error instead " +
+    "of an explanation and a pointer at reai_delete_company_bank",
+};
+
+test("no tool accepts null where the spec says the field cannot be null", async () => {
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const index = getSpecIndex();
+  const offenders = [];
+  let checked = 0;
+  for (const t of registeredTools) {
+    for (const [method, path] of t.apiPaths ?? []) {
+      if (method === "GET") continue;
+      const op = index.operations.find((o) => o.method === method && o.path === path);
+      const fields = op?.body?.fields ?? {};
+      for (const [field, descriptor] of Object.entries(fields)) {
+        const schema = t.inputSchema?.[field];
+        if (!schema) continue;
+        // The index marks a nullable type with a trailing "?" — the meaning this repo got wrong
+        // once already, so it is spelled out here: this is nullability, not optionality.
+        const specNullable = String(descriptor).endsWith("?");
+        if (specNullable) continue;
+        checked += 1;
+        if (schema.safeParse(null).success !== true) continue;
+        const key = `${t.name}.${field}`;
+        if (key in NULLABLE_ON_PURPOSE) continue;
+        offenders.push(`${key} accepts null; ${method} ${path} declares ${descriptor}`);
+      }
+    }
+  }
+  assert.ok(checked >= 20, `expected non-nullable fields to compare against; checked ${checked}`);
+  assert.deepEqual(
+    offenders,
+    [],
+    "these would pass local validation and be refused by the API — drop .nullable(), or record " +
+      "the exception in NULLABLE_ON_PURPOSE with the reason it buys a better answer",
+  );
+});
+
+test("every deliberate nullable exception is real and still needed", () => {
+  for (const [key, reason] of Object.entries(NULLABLE_ON_PURPOSE)) {
+    const [toolName, field] = key.split(".");
+    const t = registeredTools.find((x) => x.name === toolName);
+    assert.ok(t, `exception names an unknown tool: ${toolName}`);
+    assert.ok(t.inputSchema?.[field], `${toolName} has no ${field} argument`);
+    assert.ok(reason.length > 40, `${key} needs a reason, not a placeholder`);
+    // If it stops accepting null, the exception is stale and hiding the next one.
+    assert.equal(
+      t.inputSchema[field].safeParse(null).success,
+      true,
+      `${key} no longer accepts null — drop the exception`,
+    );
+  }
 });

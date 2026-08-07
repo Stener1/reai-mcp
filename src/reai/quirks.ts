@@ -518,10 +518,10 @@ export const QUIRKS: readonly Quirk[] = [
       "body carrying those three is accepted and empties the rest. Measured: postalCode " +
       '"0150" → null, province "Oslo" → null, addressPart2 "Oppgang B" → null, on a 200. An ' +
       "invoice addressed without a postcode is the visible consequence.\n\n" +
-      "reai_set_customer_address reads the current address and merges, so the two customer paths " +
-      "have a safe route. /api/suppliers/{id}/address has NO curated tool, so a raw call is the " +
-      "only way to change a supplier address — read it back from GET /api/suppliers/{id} and send " +
-      "every part you want kept.",
+      "reai_set_customer_address and reai_set_supplier_address both read the current address and " +
+      "merge, so every one of these three paths has a safe route — prefer them. A raw call has to " +
+      "read the record back itself (GET /api/customers/{id} or /api/suppliers/{id}) and send every " +
+      "part it wants kept.",
   },
   // --- Agreements -----------------------------------------------------------
   {
