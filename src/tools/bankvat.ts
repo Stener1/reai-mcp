@@ -350,10 +350,56 @@ const matchBankTransactions = defineTool({
       body,
       tenantId: requireTenantId(tenantId, ctx),
     });
+    // The API answers 200 whether or not it matched, and says which in `status`.
+    // Reporting the REQUESTED counts as though they were the result meant
+    // "Matched 3 transaction(s)" for a response of {status:"not_matched"} — an agent
+    // then reports the month reconciled, or re-attempts the same work another way.
+    // This is the same defect already guarded for reai_delete_voucher, which reports
+    // a reversal rather than claiming a deletion.
+    const data = res.data as
+      | {
+          status?: string;
+          success?: boolean;
+          requiresDiscrepancyAccount?: boolean;
+          discrepancy?: number;
+          reconciledTransactionIds?: unknown[];
+          reconciledPostingIds?: unknown[];
+          voucherIds?: unknown[];
+          errors?: unknown[];
+        }
+      | undefined;
+    const status = data?.status ?? (data?.success === false ? "not_matched" : undefined);
+    const matchedTx = data?.reconciledTransactionIds?.length ?? 0;
+    const matchedPost = data?.reconciledPostingIds?.length ?? 0;
+    const errors = (data?.errors ?? []).map(String).filter(Boolean);
+
+    if (status === "not_matched" || data?.success === false) {
+      return ok(res.data, {
+        note:
+          `NOT matched — nothing was reconciled. The API returned status "${status ?? "not_matched"}"` +
+          `${errors.length ? `: ${errors.join("; ")}` : "."}` +
+          (data?.requiresDiscrepancyAccount
+            ? ` The totals differ by ${data.discrepancy ?? "an unstated amount"}, so this needs a ` +
+              `discrepancyAccount to book the difference to. Re-issue the call with one, having ` +
+              `first checked that the difference is genuinely a fee or rounding rather than a ` +
+              `missing posting.`
+            : " Re-check the transaction and posting ids before retrying."),
+      });
+    }
+    if (status === "already_matched") {
+      return ok(res.data, {
+        note:
+          "Already matched — this call changed nothing. The transactions were reconciled before " +
+          "it ran, so do not read this as having just done the work.",
+      });
+    }
     return ok(res.data, {
       note:
-        `Matched ${args.transactionIds.length} transaction(s) to ${args.postingIds.length} posting(s)` +
-        `${args.discrepancyAccount ? `, booking any difference to ${args.discrepancyAccount}` : ""}.`,
+        `Matched ${matchedTx} transaction(s) to ${matchedPost} posting(s)` +
+        `${data?.voucherIds?.length ? `, voucher(s) ${data.voucherIds.join(", ")}` : ""}` +
+        `${args.discrepancyAccount ? `, difference booked to ${args.discrepancyAccount}` : ""}. ` +
+        `Reported by the API, not assumed from the request` +
+        `${matchedTx !== args.transactionIds.length ? ` — note you asked for ${args.transactionIds.length}` : ""}.`,
     });
   },
 });
@@ -395,8 +441,20 @@ const bookBankTransactions = defineTool({
       body,
       tenantId: requireTenantId(tenantId, ctx),
     });
+    // Same rule as the matcher: report what the API says it did, not what was asked
+    // for. The response names the vouchers it created and the transactions it
+    // actually reconciled, and one voucher is created per calendar month spanned.
+    const data = res.data as
+      | { voucherIds?: unknown[]; reconciledTransactionIds?: unknown[] }
+      | undefined;
+    const booked = data?.reconciledTransactionIds?.length ?? 0;
+    const vouchers = data?.voucherIds ?? [];
     return ok(res.data, {
-      note: `Booked ${args.transactionIds.length} transaction(s) to account ${args.account}.`,
+      note:
+        `Booked ${booked} transaction(s) to account ${args.account}` +
+        `${vouchers.length ? `, creating voucher(s) ${vouchers.join(", ")}` : ""}. ` +
+        `ReAI creates one voucher per calendar month spanned` +
+        `${booked !== args.transactionIds.length ? `. You asked for ${args.transactionIds.length}` : ""}.`,
     });
   },
 });

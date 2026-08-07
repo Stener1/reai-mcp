@@ -504,26 +504,63 @@ const paySupplierInvoice = defineTool({
       );
     }
 
-    const res = await ctx.client.request<{ approvalUrl?: string; voucherId?: number }>({
+    const res = await ctx.client.request<{
+      approvalUrl?: string;
+      voucherId?: number;
+      paymentId?: number;
+      status?: string;
+    }>({
       method: "POST",
       path: `/api/supplier-invoices/${id}/payments`,
       body,
       tenantId: resolved,
     });
 
-    // An approvalUrl means ReAI is waiting for a human to approve a real
-    // payment. Saying "payment registered" there would be a lie.
+    // An approvalUrl means ReAI is waiting for a human to approve a real payment.
+    // Saying "payment registered" there would be a lie -- but so was the fallback:
+    // branching on approvalUrl ALONE caught only `awaiting_approval`, and the API also
+    // returns in_process, customer_action_required, failed and reversed. A
+    // bank-integrated payment the bank REJECTED was reported as recorded.
     const notes: string[] = [];
+    const status = res.data?.status;
+    // HTTP 200 rather than 201 means "existing idempotent payment returned" -- the
+    // call created nothing, and reporting it as a fresh payment invites a second one.
+    const replayed = res.status === 200;
+
     if (res.data?.approvalUrl) {
       notes.push(
         `NOT YET PAID. ReAI started a bank-integrated payment and is waiting for approval. ` +
           `Someone must complete it (BankID) here: ${res.data.approvalUrl}`,
       );
+    } else if (status === "failed" || status === "reversed") {
+      notes.push(
+        `NOT PAID — the payment ${status === "failed" ? "FAILED" : "was REVERSED"}. ReAI reports ` +
+          `status "${status}", so the invoice is still outstanding. Check the company bank account ` +
+          `and the amount before retrying; do not record it as settled.`,
+      );
+    } else if (status === "in_process" || status === "customer_action_required") {
+      notes.push(
+        `NOT YET SETTLED. ReAI reports status "${status}", so the payment is in flight rather than ` +
+          `done` +
+          `${status === "customer_action_required" ? " and is waiting on an action from you in ReAI or your bank" : ""}. ` +
+          `Re-read the invoice before treating it as paid.`,
+      );
     } else if (args.paidPrivately) {
-      notes.push(`Supplier invoice ${id} settled IN FULL from a private account.`);
+      notes.push(
+        `Supplier invoice ${id} settled IN FULL from a private account` +
+          `${status ? ` (status "${status}")` : ""}.`,
+      );
     } else {
       notes.push(
-        `Payment of ${args.invoiceAmount} recorded on supplier invoice ${id}, dated ${args.paymentDate}.`,
+        `Payment of ${args.invoiceAmount} recorded on supplier invoice ${id}, dated ${args.paymentDate}` +
+          `${status ? ` (status "${status}")` : ""}.`,
+      );
+    }
+    if (replayed) {
+      notes.push(
+        `This call created NOTHING: the API returned an existing payment` +
+          `${res.data?.paymentId ? ` (id ${res.data.paymentId})` : ""} rather than a new one, so the ` +
+          `invoice was already paid. Do not retry.`,
       );
     }
     return ok(res.data, {

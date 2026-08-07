@@ -290,3 +290,79 @@ test("escalation is scoped by path, so ledger account numbers are unaffected", a
   assert.equal(curatedArgsEscalate([["POST", "/api/company-banks"]], { bban: "86011117947" }), undefined);
   assert.ok(curatedArgsEscalate([["PUT", "/api/company-banks/{id}"]], { bban: "86011117947" }));
 });
+
+// A success message that asserts an outcome the API did not confirm is the defect
+// class already guarded for reai_delete_voucher ("reports a REVERSAL rather than
+// claiming deletion"). Three more tools had it. The bank matcher is the worst:
+// POST .../matches answers HTTP 200 whether or not it matched, and the note was built
+// from the REQUEST, so {status:"not_matched"} was reported as "Matched 3
+// transaction(s)" — an agent then calls the month reconciled, or redoes the work
+// another way and double-books it.
+test("a tool never claims an outcome the API did not report", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const fakeCtx = (data, status = 201) => ({
+    client: { request: async () => ({ data, status }), deepLink: () => "link" },
+    config: { writeMode: "full", tenantId: 2634 },
+    session: {},
+  });
+  const firstLine = (r) => r.content[0].text.split("\n")[0];
+  const tool = (name) => {
+    const t = allTools.find((x) => x.name === name);
+    assert.ok(t, `${name} not found`);
+    return t;
+  };
+
+  const match = tool("reai_match_bank_transactions");
+  const matchArgs = { bankAccountId: 1, transactionIds: [1, 2, 3], postingIds: [9], tenantId: 2634 };
+
+  const notMatched = await match.handler(
+    matchArgs,
+    fakeCtx({ status: "not_matched", success: false, requiresDiscrepancyAccount: true, discrepancy: -256.12, reconciledTransactionIds: [], errors: ["Discrepancy account required"] }),
+  );
+  assert.match(firstLine(notMatched), /NOT matched/);
+  assert.ok(!/^Matched/.test(firstLine(notMatched)), "must not claim a match");
+  assert.match(notMatched.content[0].text, /discrepancyAccount/, "must say how to proceed");
+
+  const already = await match.handler(matchArgs, fakeCtx({ status: "already_matched", reconciledTransactionIds: [] }));
+  assert.match(firstLine(already), /Already matched/);
+  assert.match(firstLine(already), /changed nothing/);
+
+  // On success the counts come from the response, not the request.
+  const ok3 = await match.handler(
+    { ...matchArgs, transactionIds: [1, 2, 3, 4, 5] },
+    fakeCtx({ status: "matched", reconciledTransactionIds: [1, 2], reconciledPostingIds: [9], voucherIds: [900] }),
+  );
+  assert.match(firstLine(ok3), /Matched 2 transaction\(s\)/, `got: ${firstLine(ok3)}`);
+  assert.match(firstLine(ok3), /you asked for 5/, "a shortfall must be called out");
+
+  // Booking: same rule.
+  const book = tool("reai_book_bank_transactions");
+  const booked = await book.handler(
+    { bankAccountId: 1, transactionIds: [1, 2, 3, 4, 5], account: "7770", description: "x", tenantId: 2634 },
+    fakeCtx({ voucherIds: [900], reconciledTransactionIds: [1, 2] }),
+  );
+  assert.match(firstLine(booked), /Booked 2 transaction\(s\)/, `got: ${firstLine(booked)}`);
+  assert.match(firstLine(booked), /voucher\(s\) 900/);
+
+  // A payment the bank rejected, or one still in flight, is not "recorded".
+  const pay = tool("reai_register_supplier_invoice_payment");
+  const payArgs = { id: 42, invoiceAmount: 300, paymentDate: "2026-08-07", manualPayment: true, companyBankId: 1, tenantId: 2634 };
+  for (const [status, expected] of [
+    ["failed", /NOT PAID/],
+    ["reversed", /NOT PAID/],
+    ["in_process", /NOT YET SETTLED/],
+    ["customer_action_required", /NOT YET SETTLED/],
+  ]) {
+    const r = await pay.handler(payArgs, fakeCtx({ status }));
+    assert.match(firstLine(r), expected, `status ${status} gave: ${firstLine(r)}`);
+    assert.ok(!/^Payment of/.test(firstLine(r)), `status ${status} must not claim the payment was recorded`);
+  }
+  // HTTP 200 is "existing idempotent payment returned" — the call created nothing.
+  const replay = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 77 }, 200));
+  assert.match(replay.content[0].text, /created NOTHING/);
+  assert.match(replay.content[0].text, /Do not retry/);
+  // And a genuine 201 still reads as done.
+  const fresh = await pay.handler(payArgs, fakeCtx({ status: "completed", paymentId: 78 }, 201));
+  assert.match(firstLine(fresh), /^Payment of 300 recorded/);
+  assert.ok(!/created NOTHING/.test(fresh.content[0].text));
+});
