@@ -4,10 +4,18 @@
  * client, then exercises read-only tools against the live ReAI API.
  *
  * Usage:
- *   REAI_USER_API_TOKEN=... node scripts/smoke.mjs [--tenant 1234] [--verbose]
+ *   REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234 [--verbose]
+ *   REAI_READ_TENANTS=1234 REAI_USER_API_TOKEN=... node scripts/smoke.mjs
  *
  * Only read-only tools are called, so this is safe to run against production
  * books. It is the fastest way to confirm a self-hosted deployment works.
+ *
+ * The tenant must be named, either by --tenant or by REAI_READ_TENANTS. It used to
+ * take the first id from GET /api/me, which was harmless while every token reached
+ * exactly one company. With a user-scoped token that first id is whatever company
+ * happens to sort first — someone else's business, quite possibly — and this script
+ * then reads 40-odd endpoints from it. Reads are not writes, but choosing which of
+ * a user's companies to open is not a decision a script should make silently.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -78,10 +86,30 @@ async function main() {
     const okFlag = !res.isError && text.includes("tenants");
     report("reai_whoami", okFlag, okFlag ? firstLine(text) : text.slice(0, 200));
     if (!tenantId) {
-      const match = /"id":\s*(\d+)/.exec(text);
-      if (match) {
-        tenantId = Number(match[1]);
-        console.log(`  (using discovered tenant ${tenantId})`);
+      // Only a tenant that has been explicitly declared safe to READ. This used to
+      // take the first id out of /api/me, which was harmless while every token
+      // reached exactly one company — and stopped being harmless the moment a
+      // user-scoped token arrived: the first id became someone else's business, and
+      // this script read 41 endpoints from it. Reads are not writes, but "which of
+      // your companies shall I open" is not a decision a script gets to make.
+      const allowed = (process.env.REAI_READ_TENANTS ?? "")
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const ids = [...text.matchAll(/"id":\s*(\d+)/g)].map((m) => m[1]);
+      const pick = ids.find((id) => allowed.includes(id));
+      if (pick) {
+        tenantId = Number(pick);
+        console.log(`  (using tenant ${tenantId}, declared in REAI_READ_TENANTS)`);
+      } else if (ids.length > 0) {
+        console.log(
+          `  This token reaches ${ids.length} companies and none is declared in\n` +
+            `  REAI_READ_TENANTS, so every tenant-scoped check will be skipped. Name the one\n` +
+            `  you want read:\n\n` +
+            `    REAI_READ_TENANTS=2634 node scripts/smoke.mjs\n` +
+            `    node scripts/smoke.mjs --tenant 2634\n\n` +
+            `  It is not for this script to choose which of your companies to open.`,
+        );
       }
     }
   } catch (err) {
