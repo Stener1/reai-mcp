@@ -206,7 +206,12 @@ const postingInput = z.object({
   vatCode: z
     .string()
     .optional()
-    .describe("VAT code from reai_list_vat_codes. Required on most revenue and cost accounts."),
+    .describe(
+      "VAT code from reai_list_vat_codes. Required on most revenue and cost accounts. " +
+        "Note that the unfiltered list returns EVERY code ReAI supports, not the ones THIS tenant " +
+        "may use — it shows 25% codes even for a company that is not VAT-registered — and booking " +
+        "one the tenant cannot use invents VAT that does not exist.",
+    ),
   rowNumber: z
     .number()
     .int()

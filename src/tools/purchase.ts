@@ -51,7 +51,14 @@ const listSuppliers = defineTool({
   apiPaths: [["GET", "/api/suppliers"]],
   inputSchema: {
     name: z.string().optional().describe("Filter by name (partial match)."),
-    archived: z.boolean().optional().describe("Include archived suppliers instead of active ones."),
+    archived: z
+      .boolean()
+      .optional()
+      .describe(
+        "true returns archived suppliers ONLY, false active ones only — the spec says so outright, " +
+          "and it is confirmed against live data. So this replaces the default set rather than " +
+          "adding to it: there is no single call that returns both.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -95,7 +102,9 @@ const createSupplier = defineTool({
     "Create a supplier. As with customers, a Norwegian company is looked up in " +
     "Brønnøysundregistrene from its organizationNumber, so that plus a name is usually enough. " +
     "Set privateContact=true for a private individual.\n\n" +
-    "Bank details are not accepted here — set them afterwards with reai_update_supplier.",
+    "Bank details are not accepted here — set them afterwards with reai_update_supplier.\n\n" +
+    "ReAI normalizes stored names to title case, so what comes back is not byte-equal with what " +
+    "you sent (\"acme as\" returns as \"Acme As\"). Do not treat that as a failed write.",
   risk: "reversible",
   apiPaths: [["POST", "/api/suppliers"]],
   inputSchema: {
@@ -180,7 +189,8 @@ const deleteSupplier = defineTool({
   name: "reai_delete_supplier",
   title: "Delete or archive a supplier",
   description:
-    "Delete a supplier. ReAI archives instead of deleting when the supplier already has " +
+    "Delete a supplier. Archiving is reversible via reai_request POST /api/suppliers/{id}/unarchive. " +
+    "ReAI archives instead of deleting when the supplier already has " +
     "transactions, so the audit trail survives — the response says which happened.",
   risk: "reversible",
   apiPaths: [["DELETE", "/api/suppliers/{id}"]],

@@ -140,3 +140,68 @@ test("declared API paths exist in the OpenAPI spec", () => {
     }
   }
 });
+
+// Quirk vat-codes-tenant-specific warns that the unfiltered VAT-code list returns every
+// code ReAI supports rather than the tenant's, so "booking one invents VAT that does not
+// exist". Several tools take a vatCode and post to the ledger with it — and a
+// reconciliation rule does so repeatedly and unattended — while pointing at
+// reai_list_vat_codes.
+//
+// The first version of this test named two tools by hand and passed while
+// reai_create_voucher, which accepts postings[].vatCode and is irreversible, had the
+// identical gap. A test that lists its own subjects cannot enforce a rule; it walks the
+// schemas now, nested fields included.
+function vatCodeFields(schema, depth = 0, path = "") {
+  if (!schema || depth > 6) return [];
+  const def = schema._def ?? schema;
+  const found = [];
+  const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+  if (shape) {
+    for (const [key, value] of Object.entries(shape)) {
+      const here = path ? `${path}.${key}` : key;
+      if (/^vatcode$/i.test(key)) {
+        found.push({ path: here, description: value._def?.description ?? value.description ?? "" });
+      }
+      found.push(...vatCodeFields(value, depth + 1, here));
+    }
+  }
+  for (const key of ["innerType", "type", "schema", "element", "valueType"]) {
+    if (def[key]) found.push(...vatCodeFields(def[key], depth + 1, path));
+  }
+  return found;
+}
+
+test("every ledger-booking tool that takes a vatCode carries the tenant-specific caveat", async () => {
+  const { allTools } = await import("../dist/server.js");
+  let checked = 0;
+  for (const tool of allTools) {
+    if (tool.risk !== "irreversible") continue;
+    for (const [name, schema] of Object.entries(tool.inputSchema ?? {})) {
+      const fields = /^vatcode$/i.test(name)
+        ? [{ path: name, description: schema._def?.description ?? "" }, ...vatCodeFields(schema, 0, name)]
+        : vatCodeFields(schema, 0, name);
+      for (const field of fields) {
+        checked += 1;
+        assert.match(
+          field.description,
+          /not VAT-registered|THIS tenant|invents VAT/i,
+          `${tool.name}.${field.path} takes a VAT code and books with it, but gives no caveat`,
+        );
+      }
+    }
+  }
+  assert.ok(checked >= 3, `expected several booking tools with a vatCode, found ${checked}`);
+});
+
+// Issuing an invoice needs BOTH switches, and saying only "requires full" invites an
+// operator to set full and wonder why the tool is still missing.
+test("a transmitting tool names both switches it needs", async () => {
+  const { allTools } = await import("../dist/server.js");
+  for (const tool of allTools.filter((t) => t.transmits === true)) {
+    assert.match(
+      tool.description,
+      /REAI_ALLOW_EXTERNAL_SEND/,
+      `${tool.name} transmits but never mentions REAI_ALLOW_EXTERNAL_SEND`,
+    );
+  }
+});

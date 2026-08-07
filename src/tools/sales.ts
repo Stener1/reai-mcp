@@ -60,7 +60,16 @@ const listCustomers = defineTool({
     name: z.string().optional().describe("Filter by name (partial match)."),
     organizationNumber: z.string().optional().describe("Filter by Norwegian organisation number."),
     email: z.string().optional().describe("Filter by email address."),
-    archived: z.boolean().optional().describe("Include archived customers instead of active ones."),
+    archived: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether this REPLACES the default set or adds to it is not settled for customers. The " +
+          "supplier spec says outright that true means archived-only and false active-only, and " +
+          "that is confirmed live; the customer spec says only \"Include archived customers\", which " +
+          "reads the other way, and no tenant available for testing has any customers. Treat the " +
+          "result as archived-only and check the records you get back rather than assuming a total.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -278,7 +287,9 @@ const deleteProduct = defineTool({
   description:
     "Delete a product. As with customers, ReAI archives instead of deleting once the product has " +
     "been used on an order or invoice, which keeps the audit trail intact — the response says " +
-    "which happened.",
+    "which happened.\n\n" +
+    "Unlike customers and suppliers, there is NO unarchive endpoint for products, so through the " +
+    "API this is one-way. It can presumably be undone in the ReAI web UI, but not from here.",
   risk: "reversible",
   apiPaths: [["DELETE", "/api/products/{id}"]],
   destructive: true,
@@ -421,7 +432,14 @@ const createProduct = defineTool({
     title: z.string().describe("Product name."),
     description: z.string().optional().describe("Product description."),
     stockItem: z.boolean().optional().describe("Track this product in inventory."),
-    vatCode: z.string().optional().describe("VAT code from reai_list_vat_codes."),
+    vatCode: z
+      .string()
+      .optional()
+      .describe(
+        "Default VAT code for this product, from reai_list_vat_codes. The unfiltered list returns " +
+          "EVERY code ReAI supports rather than the ones THIS tenant may use, and a wrong default " +
+          "here propagates onto every order and invoice line that picks the product up.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -893,7 +911,9 @@ const createInvoiceFromOrder = defineTool({
     "It also STARTS DELIVERY TO THE CUSTOMER asynchronously — ReAI tries eFaktura for eligible " +
     "Norwegian private customers, then EHF if the order has sendEhf and the customer can receive " +
     "it, then the invoice PDF by email. So this is not a books-only operation: assume the customer " +
-    "will receive it. Requires REAI_WRITE_MODE=full.",
+    "will receive it. Requires REAI_WRITE_MODE=full AND REAI_ALLOW_EXTERNAL_SEND — both, because " +
+    "the write mode governs what can be undone in the books and external send governs what reaches " +
+    "someone else, and this does both.",
   risk: "irreversible",
   // Issuing an invoice starts delivery to the customer, so it is gated by
   // REAI_ALLOW_EXTERNAL_SEND as well as by the write mode.
@@ -1035,7 +1055,12 @@ const registerInvoicePayment = defineTool({
     registerRestAsBankFee: z
       .boolean()
       .optional()
-      .describe("Book any shortfall as a bank fee rather than leaving it outstanding."),
+      .describe(
+        "Book any shortfall as a bank fee rather than leaving it outstanding. When this is true, " +
+          "receivedAmount must be the NET amount that reached the account after the fee — not the " +
+          "invoice total. Sending the gross figure leaves nothing for the fee and the shortfall " +
+          "silently disappears.",
+      ),
     paidPrivately: z
       .boolean()
       .optional()
