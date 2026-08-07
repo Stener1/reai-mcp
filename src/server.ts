@@ -6,6 +6,12 @@ import type { ServerConfig } from "./config.js";
 import { getSpecIndex } from "./reai/spec.js";
 import type { SessionState, ToolContext, ToolDef, ToolResult } from "./tools/registry.js";
 import { metaTools } from "./tools/meta.js";
+import { uiTools } from "./tools/ui.js";
+import {
+  RECONCILE_TEMPLATE_MIME,
+  RECONCILE_TEMPLATE_URI,
+  renderTemplate,
+} from "./ui/reconciliation.js";
 import { discoveryTools } from "./tools/discovery.js";
 import { bookkeepingTools } from "./tools/bookkeeping.js";
 import { salesTools } from "./tools/sales.js";
@@ -33,6 +39,17 @@ export const allTools: ToolDef[] = [
   ...alwaysOnTools,
   ...Object.values(TOOL_GROUPS).flat(),
 ];
+
+/**
+ * Every tool this server can ever register, including the independently gated ones.
+ *
+ * `allTools` is the DEFAULT surface, which is what the toolset arithmetic and the README
+ * tool count are about. The repo-wide invariants — above all "no curated tool is more
+ * permissive than the escape hatch would be" — have to iterate everything that can reach
+ * a client, or a tool gated by its own flag is exempt from the guard this codebase treats
+ * as its most important.
+ */
+export const registeredTools: ToolDef[] = [...allTools, ...uiTools];
 
 /** The tools enabled by a given toolset selection. An empty selection means all. */
 export function selectTools(toolsets: readonly string[]): ToolDef[] {
@@ -93,7 +110,10 @@ export function buildServer(opts: BuildServerOptions): McpServer {
 
   const ctx: ToolContext = { client, config, session };
 
-  const selected = selectTools(config.toolsets);
+  // The pairing view is opt-in. A client that does not render HTML resources would get
+  // kilobytes of markup where it expected an answer, so it is off unless asked for.
+  const byToolset = selectTools(config.toolsets);
+  const selected = [...byToolset, ...(config.enableUi ? uiTools : [])];
   const allowedByWriteMode = selected.filter((t) => isAllowed(t.risk, config.writeMode));
   // A transmitting tool is hidden unless external send is explicitly enabled,
   // even in full mode: a posting can be reversed, a sent invoice cannot.
@@ -101,7 +121,10 @@ export function buildServer(opts: BuildServerOptions): McpServer {
     (t) => config.allowExternalSend || t.transmits !== true,
   );
   const hiddenByPolicy = selected.length - visible.length;
-  const hiddenByToolset = allTools.length - selected.length;
+  // Counted against the TOOLSET selection, not against `selected`. Adding the UI tool to
+  // `selected` while measuring the shortfall from `allTools` — which never contains it —
+  // reported one fewer hidden tool than exists, in the instructions the model reads.
+  const hiddenByToolset = allTools.length - byToolset.length;
 
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -115,6 +138,7 @@ export function buildServer(opts: BuildServerOptions): McpServer {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema,
+        ...(tool.meta ? { _meta: tool.meta } : {}),
         annotations: {
           title: tool.title,
           readOnlyHint: tool.risk === "read" && !tool.destructive,
@@ -157,6 +181,33 @@ export function buildServer(opts: BuildServerOptions): McpServer {
           return toolError(err, tool.name);
         }
       }) as never,
+    );
+  }
+
+  // The view is a RESOURCE, not something embedded in a tool result. An MCP Apps host
+  // fetches it once from the `ui://` URI named in the tool's `_meta.ui.resourceUri`, and
+  // then feeds each call's data to it as a notification. Embedding the HTML in the result
+  // instead — which is what this did first — means a conforming host never launches it.
+  if (visible.some((t) => t.meta?.ui !== undefined)) {
+    server.registerResource(
+      "reai-reconciliation-view",
+      RECONCILE_TEMPLATE_URI,
+      {
+        title: "Bank reconciliation pairing view",
+        description:
+          "Interactive two-column view for pairing unmatched bank transactions with unmatched " +
+          "ledger postings. Static template; the data arrives per tool call.",
+        mimeType: RECONCILE_TEMPLATE_MIME,
+      },
+      () => ({
+        contents: [
+          {
+            uri: RECONCILE_TEMPLATE_URI,
+            mimeType: RECONCILE_TEMPLATE_MIME,
+            text: renderTemplate(),
+          },
+        ],
+      }),
     );
   }
 

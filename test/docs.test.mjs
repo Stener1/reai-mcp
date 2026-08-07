@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { allTools, alwaysOnTools, selectTools, TOOL_GROUPS, SERVER_VERSION } from "../dist/server.js";
+import { allTools, alwaysOnTools, registeredTools, selectTools, TOOL_GROUPS, SERVER_VERSION } from "../dist/server.js";
 import { QUIRKS } from "../dist/reai/quirks.js";
 import { getSpecIndex } from "../dist/reai/spec.js";
 import { TOOLSETS } from "../dist/config.js";
@@ -83,14 +83,14 @@ test("the README's quirk count matches the registry", () => {
 
 test("every curated tool appears in a README table", () => {
   // This is what would have caught 32 tools shipping undocumented.
-  const missing = allTools.filter((t) => !README.includes(`\`${t.name}\``)).map((t) => t.name);
+  const missing = registeredTools.filter((t) => !README.includes(`\`${t.name}\``)).map((t) => t.name);
   assert.deepEqual(missing, [], `tools absent from the README: ${missing.join(", ")}`);
 });
 
 test("no README table calls an irreversible tool reversible", () => {
   // A risk column kept saying "reversible" after reconciliation rules were
   // escalated, so anyone following the documented default found them missing.
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     if (tool.risk !== "irreversible") continue;
     for (const line of README.split("\n")) {
       if (!line.includes(`\`${tool.name}\``)) continue;

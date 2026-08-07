@@ -225,6 +225,26 @@ The MCP endpoint enforces two ceilings, both well above any real tool call:
 
 `GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. No client capability is lost: the server runs with `enableJsonResponse`, so a POST is answered with a single JSON response rather than an event stream, and there is nothing a standalone stream would have carried.
 
+### The one UI surface
+
+`reai_reconcile_ui` returns the unmatched bank transactions and unmatched ledger postings for a month side by side, so a person can pick which ones pair. It is off unless `REAI_ENABLE_UI=1`.
+
+It is the only view here, and the bar it clears is narrow: **the user has to make a selection the agent cannot make for them, over items that are painful to name in prose.** "Match the 1,234.50 on the 3rd against the Europris posting" is worse than two columns and a click, and `reai_match_bank_transactions` already takes `transactionIds[]` and `postingIds[]` — the tool signature *is* a multi-select.
+
+It is also the one payload that does not fit comfortably in text. A pending transaction serialises to roughly 750 characters, so a busy month runs into the result cap — and the way a truncated reconciliation failed is instructive: it showed unmatched transactions and zero unmatched postings, from which an agent would conclude there was nothing to match against and reach for the *booking* tool, which posts, instead of the matching one. (Result truncation itself is fixed — `ok()` now trims each list and names what it trimmed — but the shape of that failure is what this view is built not to repeat.)
+
+Nothing else in this API clears that bar. A revenue chart, a voucher list, a dashboard — the answers are computable and belong in a sentence, which is the whole reason the API is worth wrapping in tools rather than screens.
+
+It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape: the view is a **resource** at `ui://reai/reconciliation` with MIME type `text/html;profile=mcp-app`, the tool points at it through `_meta.ui.resourceUri`, and each call's figures arrive separately as `structuredContent`. So the HTML is static and data-free, and the view renders the numbers itself. A host that does not support MCP Apps still gets the whole answer as text — the counts and totals *are* the answer; the rows are what the view is for.
+
+Three things it holds deliberately:
+
+- **It does not write.** Selecting is inert. Pressing *Match these* asks the host to call `reai_match_bank_transactions`, which the server re-checks under the same write policy — classified irreversible, so refused unless `REAI_WRITE_MODE=full`. It will not offer a call the tool would reject (both id lists are required), and it will not invent an account to book a difference to.
+- **Counterparty text can never become markup.** Descriptions and payment references come from EHF documents and bank feeds, which is to say a supplier writes them. Every value reaches the page through `textContent`, and the test runs the view's own script against a DOM whose `innerHTML` throws.
+- **No external request of any kind** — no CDN, font or image. Hosts render this under a strict CSP, and an accounting view should not phone anywhere.
+
+One limit, stated rather than papered over: for a bank account whose currency differs from the books', postings carry two amounts and the OpenAPI document documents neither, so which is the bank figure could not be established against any reachable tenant. The view shows both and **declines to compute a difference** instead of guessing one — a wrong difference at that moment would prompt a fabricated discrepancy posting.
+
 ### Verify a deployment
 
 ```bash
@@ -242,6 +262,7 @@ This walks the entire OAuth flow the way a real client does — discovery, regis
 | `REAI_ENCRYPTION_KEY` | random per boot | **Set in production.** 32 bytes, base64 or hex. Seals access tokens |
 | `REAI_ALLOWED_HOSTS` | — | Comma-separated hostnames to accept; enables DNS-rebinding protection and pins the advertised OAuth issuer |
 | `REAI_ALLOWED_REDIRECT_HOSTS` | any https host | Comma-separated hosts allowed as OAuth redirect targets. **Recommended on a public deployment** — see below. Loopback is always permitted |
+| `REAI_ENABLE_UI` | off | Expose the bank-reconciliation pairing view as an MCP Apps resource. Only useful for a host that supports them; see [The one UI surface](#the-one-ui-surface) |
 | `REAI_ALLOW_TOKEN_PASSTHROUGH` | off | Accept a raw ReAI token in the `Authorization` header, skipping OAuth. Convenient behind Tailscale or IAP; **anyone who reaches the URL acts as whoever's token they present**, so never enable it on a public deployment |
 
 ## Verify it works

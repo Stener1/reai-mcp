@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveOperation, missingRequired, findOperation, getSpecIndex, describeOperation } from "../dist/reai/spec.js";
-import { allTools } from "../dist/server.js";
+import { allTools, registeredTools } from "../dist/server.js";
 import { ok } from "../dist/tools/registry.js";
 
 /**
@@ -259,7 +259,7 @@ test("every curated tool's declared apiPaths still resolve", () => {
   // policy test compares tools against classifyRequest, but nothing checked that
   // the paths are real.
   const unresolved = [];
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     for (const [method, path] of tool.apiPaths ?? []) {
       if (!method || !path) continue;
       // Templated paths come from the tool definitions, so compare via findOperation.
@@ -543,7 +543,6 @@ test("no read tool accepts an input it never sends", async () => {
   // dropped, which is worse than not offering it: the tool promised to exclude
   // system-only accounts and did not. This sweeps for the same class across every
   // read tool, so the next one fails here instead of shipping.
-  const { allTools } = await import("../dist/server.js");
 
   // A value the field will actually accept, so the handler behaves normally.
   const sentinelFor = (name, schema) => {
@@ -556,7 +555,7 @@ test("no read tool accepts an input it never sends", async () => {
   };
 
   const dropped = [];
-  for (const tool of allTools) {
+  for (const tool of registeredTools) {
     if (tool.risk !== "read") continue;
     if (tool.name === "reai_request") continue; // its inputs map to method/path/binary, not a query
     const fields = Object.keys(tool.inputSchema ?? {}).filter((f) => f !== "tenantId");

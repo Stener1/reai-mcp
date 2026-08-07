@@ -15,8 +15,18 @@ export type ToolContext = {
   session: SessionState;
 };
 
+/**
+ * Text is what every tool returns.
+ *
+ * The UI surface adds `structuredContent` alongside it rather than a second content block:
+ * under MCP Apps the view is a registered resource the host fetches once, so a tool result
+ * never carries markup. An embedded-resource arm existed here for the first version of that
+ * view and is gone with it.
+ */
+export type ToolContentBlock = { type: "text"; text: string };
+
 export type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContentBlock[];
   isError?: boolean;
   structuredContent?: Record<string, unknown>;
 };
@@ -46,6 +56,14 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
   transmits?: boolean;
   /** True when repeated identical calls have no additional effect. */
   idempotent?: boolean;
+  /**
+   * Passed through as the tool's `_meta`.
+   *
+   * Used for the MCP Apps `ui.resourceUri` pointer, which is how a host finds the view a
+   * tool renders into. Kept as a passthrough rather than a typed field because `_meta` is
+   * an extension point: what belongs in it is decided by the extension, not by us.
+   */
+  meta?: Record<string, unknown>;
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 };
 
