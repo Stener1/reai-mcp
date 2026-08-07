@@ -72,13 +72,26 @@ export type BuildServerOptions = {
 };
 
 /**
+ * Values the probe below tries for each argument.
+ *
+ * A single string was not enough. The probe used `"probe"` for every field, and the gate
+ * escalates `sendEhf` and `automaticBillingGeneration` only on a value that binds to TRUE
+ * — so both were invisible to the annotation while fully live in the gate, which is the
+ * exact drift the probe exists to prevent. A boolean field needs a boolean.
+ */
+export const ESCALATION_PROBES: readonly unknown[] = ["probe", true, "create_invoice"];
+
+/**
  * Whether any argument this tool accepts can escalate a call to irreversible. Probed
  * through the real classifier rather than a second list, so the annotation cannot
- * drift from the gate that enforces it.
+ * drift from the gate that enforces it — which only works if the probe values are ones
+ * the gate actually reacts to.
  */
 function hasEscalatingFields(tool: ToolDef): boolean {
-  return Object.keys(tool.inputSchema ?? {}).some(
-    (field) => curatedArgsEscalate(tool.apiPaths ?? [], { [field]: "probe" }) !== undefined,
+  return Object.keys(tool.inputSchema ?? {}).some((field) =>
+    ESCALATION_PROBES.some(
+      (value) => curatedArgsEscalate(tool.apiPaths ?? [], { [field]: value }) !== undefined,
+    ),
   );
 }
 
