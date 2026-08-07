@@ -42,7 +42,13 @@ The default is deliberately the middle setting, not the permissive one.
 
 ### Changing where money goes is treated as irreversible
 
-A few fields are ordinary master data as *records* and permanent as *consequences*: a supplier's `iban`, `bankAccountNumber` or `swiftCode`, a company bank's `bban`, and a customer's `invoiceEmail`. Undoing the edit is trivial. Undoing what follows is not — whoever pays that supplier next, quite possibly a person clicking through the ReAI web UI weeks later, sends money to whatever account is on file, and every future invoice for that customer goes to whatever address is on file.
+A few fields are ordinary master data as *records* and permanent as *consequences*. Undoing the edit is trivial; undoing what follows is not, because it happens later and through someone acting perfectly normally.
+
+| Fields | Where | What happens later |
+|---|---|---|
+| `iban`, `bankAccountNumber`, `swiftCode` | suppliers, customers, creditors | Whoever pays that counterparty next — quite possibly a person clicking through the ReAI web UI weeks afterwards — sends money to whatever account is on file |
+| `bban`, `swiftCode` | company banks, **editing** one | Repoints where your own customers pay. Invoices already issued name that account. Adding a new company bank stays ordinary work |
+| `invoiceEmail` | customers, orders, subscriptions | Every future invoice is delivered to that address. Not a payment — a disclosure — so the refusal says so, and tells you to confirm the address through a channel you already trust rather than to check bank details |
 
 So a call carrying one of those fields is classified **irreversible** and refused in the default mode, on the curated tools and through `reai_request` alike, even though the endpoint itself is otherwise reversible. Every other field on the same tool is unaffected: renaming a supplier still works in `reversible`. Adding a new company bank stays ordinary work; repointing an existing one does not.
 

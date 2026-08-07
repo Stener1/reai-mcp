@@ -874,3 +874,62 @@ test("voucher amounts finer than øre are refused, as are all-zero vouchers", as
   assert.equal(unbalanced.sent, 0);
   assert.match(unbalanced.text, /not balanced/);
 });
+
+// invoiceEmail redirects where every future invoice is delivered: reversible as a
+// record, permanent as a disclosure, and realised later when someone issues an
+// invoice normally. It is NOT a payment field, and reporting it as one told the agent
+// the wrong consequence and the wrong thing to verify — so it is classified
+// separately, and scoped more widely: CreateOrderReq, UpdateOrderReq and
+// SubscriptionWriteReq all accept it, so an address set on an order or a subscription
+// reaches the same disclosure through a different door.
+test("redirecting invoice delivery is irreversible wherever the field is accepted", async () => {
+  const { classifyInvoiceDelivery } = await import("../dist/policy.js");
+  const evil = { invoiceEmail: "attacker@evil.example" };
+  for (const path of [
+    "/api/customers/5",
+    "/api/orders",
+    "/api/orders/9",
+    "/api/subscriptions",
+    "/api/subscriptions/3",
+  ]) {
+    assert.equal(
+      classifyInvoiceDelivery("reversible", path, evil),
+      "irreversible",
+      `${path} should escalate on invoiceEmail`,
+    );
+  }
+  // Unrelated paths and unrelated fields are untouched.
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/orders", { customerId: 1 }), "reversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/vouchers", evil), "reversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/customers/5", { invoiceEmail: "  " }), "reversible");
+});
+
+test("payment routing and invoice delivery give different reasons", async () => {
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const pay = curatedArgsEscalate([["PATCH", "/api/suppliers/{id}"]], { id: 1, iban: "NO93" });
+  const mail = curatedArgsEscalate([["PATCH", "/api/customers/{id}"]], { id: 1, invoiceEmail: "a@b.c" });
+  assert.match(pay.consequence, /where money is sent/);
+  assert.match(pay.verify, /bank details/);
+  assert.match(mail.consequence, /where invoices are delivered/);
+  assert.ok(!/money/.test(mail.consequence), `an email address is not a payment: ${mail.consequence}`);
+  assert.match(mail.verify, /channel you already trust/);
+});
+
+// Annotations are per tool and cannot vary per invocation, so a tool that is ordinary
+// for most fields and irreversible for a few must be annotated for the worst call it
+// can make. In `full` mode the call is permitted, and a client's confirmation prompt
+// is then the only thing left protecting it.
+test("a tool with escalating fields is annotated destructive", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  let mixed = 0;
+  for (const tool of allTools) {
+    const escalates = Object.keys(tool.inputSchema ?? {}).some(
+      (f) => curatedArgsEscalate(tool.apiPaths ?? [], { [f]: "probe" }) !== undefined,
+    );
+    if (!escalates) continue;
+    mixed += 1;
+    assert.equal(tool.risk, "reversible", `${tool.name}: expected a mixed-risk tool`);
+  }
+  assert.ok(mixed >= 2, `expected mixed-risk tools, found ${mixed}`);
+});

@@ -50,6 +50,17 @@ export type BuildServerOptions = {
   session?: SessionState;
 };
 
+/**
+ * Whether any argument this tool accepts can escalate a call to irreversible. Probed
+ * through the real classifier rather than a second list, so the annotation cannot
+ * drift from the gate that enforces it.
+ */
+function hasEscalatingFields(tool: ToolDef): boolean {
+  return Object.keys(tool.inputSchema ?? {}).some(
+    (field) => curatedArgsEscalate(tool.apiPaths ?? [], { [field]: "probe" }) !== undefined,
+  );
+}
+
 export function buildServer(opts: BuildServerOptions): McpServer {
   const { config } = opts;
   const token = opts.token ?? config.token;
@@ -107,7 +118,14 @@ export function buildServer(opts: BuildServerOptions): McpServer {
         annotations: {
           title: tool.title,
           readOnlyHint: tool.risk === "read" && !tool.destructive,
-          destructiveHint: tool.destructive === true || tool.risk === "irreversible",
+          // Annotations are per TOOL and cannot vary per invocation, so a tool that
+          // is ordinary for most of its fields and irreversible for a few has to be
+          // annotated for the worst call it can make. Otherwise a client that asks
+          // for confirmation before destructive tools would present "repoint this
+          // supplier's bank account" as an ordinary edit — in `full` mode, where the
+          // call is permitted, that annotation is the only thing left protecting it.
+          destructiveHint:
+            tool.destructive === true || tool.risk === "irreversible" || hasEscalatingFields(tool),
           idempotentHint: tool.idempotent === true,
           openWorldHint: true,
         },
@@ -129,12 +147,9 @@ export function buildServer(opts: BuildServerOptions): McpServer {
               risk: escalated.risk,
               mode: config.writeMode,
               what:
-                `${tool.name} called with ${escalated.fields.join(", ")} — changing where money ` +
-                `is sent. The record is reversible; the payment is not: whoever pays this ` +
-                `counterparty next, quite possibly a person in the ReAI UI long afterwards, ` +
-                `sends to whatever account is on file. Every other field on this tool is ` +
-                `unaffected, so the same call without those fields will work. Confirm new bank ` +
-                `details against something outside this conversation before changing them`,
+                `${tool.name} called with ${escalated.fields.join(", ")} — ${escalated.consequence}. ` +
+                `Every other field on this tool is unaffected, so the same call without those ` +
+                `fields will work. Before changing them, ${escalated.verify}`,
             });
           }
           return await tool.handler(args ?? {}, ctx);
