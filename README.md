@@ -84,12 +84,12 @@ Requires Node.js 20 or newer, and a ReAI API token (app.reai.no → settings →
 | | tenant-scoped token | user-scoped token |
 |---|---|---|
 | `GET /api/me` lists | exactly one company | every company the user can open |
-| `X-Tenant-Id` | **ignored** — any value, even a nonexistent id, returns that one company's data | required on every tenant-scoped call, and honoured |
+| `X-Tenant-Id` | **ignored** when the token reaches one company — any value, even a nonexistent id, returns that company's data | required on every tenant-scoped call, and honoured |
 | `reai_use_tenant` | nothing to switch to | selects which company you are working in |
 
-A user-scoped token is what makes this worth running for an accountant: one connection reaching every client company, with `reai_whoami` listing them and `reai_use_tenant` moving between them. `reai_whoami` tells you which kind you have, and warns when the companies do not share a currency — amounts are always in the company's own.
+A user-scoped token is what makes this worth running for an accountant: one connection reaching every client company, with `reai_whoami` listing them and `reai_use_tenant` moving between them. `reai_whoami` reports what it can actually tell — that the token reaches one company or several — without guessing which kind it is, because `GET /api/me` has no field that distinguishes a tenant-scoped token from a user-scoped one belonging to a user with a single company. It also warns when the companies do not share a currency, and says to read the currency on each record rather than assume the company's: an invoice total is in the *invoice's* currency, which can differ again.
 
-The safety consequence cuts the other way, which is why a remote connector binds one company at authorization time: a token that reaches thirty client companies should not hand an agent all thirty because it was asked about one.
+The safety consequence cuts the other way, which is why a remote connector binds one company at authorization time: a token that reaches thirty client companies should not hand an agent all thirty because it was asked about one. That applies to what is *disclosed* as well as what can be addressed — on a bound connection `reai_whoami` lists only the bound company, and says the others exist without naming them.
 
 ### Claude Code
 
