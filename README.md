@@ -434,8 +434,10 @@ The delete is worth reading the response of: a warehouse holding 2 units was **a
 |---|---|---|
 | `reai_list_agreements` · `reai_get_agreement` | Leases, employment contracts, purchase and service agreements, with signing status. The terms are **nested** under a sub-object named for the template | read |
 | `reai_list_agreement_signers` | Who was asked to sign and what happened since. Reading sends nothing; asking does | read |
-| `reai_update_agreement` | Change terms **without destroying the rest** — see below | reversible |
+| `reai_update_agreement` | Change terms **without destroying the rest** — see below | **irreversible** |
 | `reai_delete_agreement` | Remove an agreement and its document. Answers `204`, no outcome field, no archive branch | reversible |
+
+`reai_update_agreement` needs `REAI_WRITE_MODE=full`, and the reason is worth stating: not because this tool is dangerous — it is the safe way to do the job — but because the underlying `PUT` replaces the record, so the raw call is classified irreversible and a curated tool may not be the soft route around a gate the escape hatch is subject to. The same argument this repo already made for reconciliation rules.
 
 `reai_update_agreement` exists because the underlying call does the opposite. `PUT` on an agreement is a **full replacement**: measured on a live lease, a `PUT` carrying only the landlord's name left `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the house rules all null — and `GET /pdf` still returned `200`, producing a document that looks like a contract with nothing in it. The tool reads the agreement, merges your changes over the existing terms and writes the whole thing back; that the round-trip is lossless was verified rather than assumed, by writing a 78-key sub-object back verbatim and confirming no field changed.
 

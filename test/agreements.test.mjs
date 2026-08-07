@@ -278,6 +278,21 @@ test("every agreement tool is inside the sweeps and none transmits", () => {
   assert.equal(tool("reai_delete_agreement").destructive, true);
 });
 
+test("changing terms is irreversible, in step with the raw PUT it wraps", async () => {
+  // Not because this tool is dangerous — it is the safe way to do the job — but because the
+  // underlying PUT replaces the record, and a curated tool must not be a softer route to an
+  // operation the escape hatch is gated on. Both halves are asserted, since the whole point is
+  // that they agree.
+  assert.equal(tool("reai_update_agreement").risk, "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/agreements/rent-agreement/7"), "irreversible");
+  const { isAllowed } = await import("../dist/policy.js");
+  assert.equal(isAllowed("irreversible", "reversible"), false);
+  // Creating one stays reversible: it is additive and DELETE answers 204, verified live.
+  assert.equal(classifyRequest("POST", "/api/agreements/rent-agreement"), "reversible");
+  // And the id-shaped sub-resources must not be swept up by the template-segment rule.
+  assert.equal(classifyRequest("PUT", "/api/agreements/290"), "reversible");
+});
+
 test("no signing endpoint is curated, because every one of them sends", () => {
   // Reading who was asked is fine; asking is not. If a future tool declares one of these
   // paths, it must also declare transmits, and that is what this pins.

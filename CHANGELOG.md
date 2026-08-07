@@ -87,6 +87,30 @@ All notable changes to `reai-mcp`. Format loosely follows
   phone call. The derived half alone would have been the mistake this repo keeps
   making: it takes its own subject from the policy, so deleting a transmitting
   pattern shrinks the set and stays green.
+- **A raw agreement PUT is now classified irreversible.** Codex's point was the
+  decisive one: a quirk only reaches a `reai_request` caller when the request
+  FAILS, and a partial PUT answers 200 — so the default mode still permitted
+  silently clearing every term of a contract, which is the exact failure the
+  curated tool exists to prevent. Gating the tool while the escape hatch allowed
+  the identical call is the theatre this repo already rejected for reconciliation
+  rules. Method-specific, following the `/api/attachments/{id}` precedent:
+  creating an agreement stays reversible because it is additive and cleanly
+  deletable (DELETE answers 204, verified). `reai_update_agreement` moves to
+  irreversible in step — not because it is dangerous, it is the safe way to do the
+  job, but because a curated tool must not be the soft route around a gate. The
+  live suites now demonstrate the destruction rather than asserting it: the
+  full-write run performs a raw partial PUT on a throwaway lease and confirms the
+  other terms come back null.
+- **The destructive annotation could not see inside an object-valued argument.**
+  `hasEscalatingFields` probed each tool argument with scalars, so everything
+  nested inside `changes` was invisible to it — `rentAccountNumber` and
+  `depositAccountNumber` were live in the runtime gate while the tool advertised
+  `destructiveHint: false`, and a client that confirms destructive calls would
+  have shown redirecting a tenant's deposit account as an ordinary edit. The probe
+  now also tries each escalating field name nested one level down, using a union
+  exported from the policy rather than a copy, so a new escalating field cannot be
+  added without becoming probeable. The invariant test calls the real probe rather
+  than reimplementing it.
 - **Four agreement quirks** carrying the traps above to a reai_request caller,
   since the five create endpoints and the signing flow are reached that way.
 - **Six quirks** for the same measurements, so a `reai_request` caller gets the

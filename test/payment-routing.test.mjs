@@ -467,9 +467,26 @@ test("a lease's rent and deposit accounts are payment destinations", async () =>
       `${field} redirects money the tenant pays in`,
     );
   }
-  // Editing the terms is ordinary work.
-  assert.equal(routed("PUT", "/api/agreements/rent-agreement/7", { monthlyRent: 12000 }), "reversible");
-  assert.equal(routed("PUT", "/api/agreements/rent-agreement/7", { petsAllowed: true }), "reversible");
+  // Editing ordinary terms adds nothing on the ROUTING axis — asked with pathRisk forced to
+  // "reversible", the way the test above does, and for the reason this file already records:
+  // a lease PUT is now irreversible by path (it replaces the record), so asking through
+  // classifyRequest would stop exercising the routing layer at all and this would pass on the
+  // path classification instead of on the thing it is about.
+  for (const ordinary of [{ monthlyRent: 12000 }, { petsAllowed: true }]) {
+    assert.equal(
+      classifyPaymentRouting("reversible", "/api/agreements/rent-agreement/7", ordinary, "PUT"),
+      "reversible",
+      `${JSON.stringify(ordinary)} redirects nothing`,
+    );
+  }
+  // And the path itself is irreversible now, independently of any routing field: the PUT
+  // replaces the agreement, so a partial body clears every term it omits.
+  assert.equal(classifyRequest("PUT", "/api/agreements/rent-agreement/7"), "irreversible");
+  assert.equal(
+    classifyRequest("POST", "/api/agreements/rent-agreement"),
+    "reversible",
+    "creating one is additive and cleanly deletable, so it must not be swept up",
+  );
   // And creating a lease is, on the same reasoning as adding a company bank: nothing is
   // diverted, and a human signs it before anyone pays.
   assert.ok(

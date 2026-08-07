@@ -308,6 +308,25 @@ function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
     return "irreversible";
   }
 
+  // The same shape one domain over, and for the same reason. PUT on an agreement template
+  // REPLACES the agreement: a body carrying one field clears every other term, measured on a
+  // live lease — rent, tenant, deposit amount and the deposit ACCOUNT NUMBER all set to null,
+  // answered 200, with the PDF still rendering afterwards. There is no archive, no version
+  // history and no undo, so "reversible master data that can be cleanly deleted again" is not
+  // what this is.
+  //
+  // Creating one IS additive and cleanly deletable (DELETE answers 204, verified), so a prefix
+  // would be too blunt — POST stays reversible. The template segment is letters and hyphens,
+  // which is what keeps this off /api/agreements/{numeric id}/... sub-resources.
+  //
+  // reai_update_agreement is classified irreversible in step with this. It is the SAFE way to
+  // perform the operation — it reads, merges and writes the whole record back — but gating the
+  // curated tool while reai_request still permitted the identical call would be theatre, and
+  // that is the argument this repo already made for reconciliation rules.
+  if (method === "PUT" && /^\/api\/agreements\/[a-z-]+\/[^/]+$/i.test(normalized)) {
+    return "irreversible";
+  }
+
   if (matchesPrefix(normalized, IRREVERSIBLE_PREFIXES)) return "irreversible";
 
   if (matchesPrefix(normalized, REVERSIBLE_PREFIXES)) {
@@ -757,6 +776,20 @@ export const paymentRoutingFieldNames: ReadonlySet<string> = PAYMENT_ROUTING_FIE
  * order or a subscription reaches the same disclosure by a different door.
  */
 const INVOICE_DELIVERY_FIELDS = new Set(["invoiceemail"]);
+
+/**
+ * Every field name that can escalate a call, for the destructive-annotation probe.
+ *
+ * Exported because that probe has to build an argument that TRIPS the gate, and a hand-written
+ * list of names would be the mirror-of-the-thing-it-guards shape this repo keeps getting caught
+ * by — a field added to one of the sets above and not to the copy would silently stop being
+ * annotated.
+ */
+export const escalatingFieldNames: readonly string[] = [
+  ...PAYMENT_ROUTING_FIELDS,
+  ...INVOICE_DELIVERY_FIELDS,
+  ...Object.keys(ESCALATING_BODY_FIELDS),
+];
 
 const INVOICE_DELIVERY_PATHS: readonly RegExp[] = [
   /^\/api\/customers(\/|$)/,

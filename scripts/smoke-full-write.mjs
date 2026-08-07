@@ -191,6 +191,7 @@ async function main() {
   console.log(`Stamp: ${STAMP}\n`);
 
   const created = {
+    agreementId: undefined,
     warehouseId: undefined,
     productId: undefined,
     variantId: undefined,
@@ -327,6 +328,88 @@ async function main() {
       !bankRes.isError && Number.isInteger(created.bankId),
       created.bankId ? `id=${created.bankId}` : textOf(bankRes).slice(0, 200),
     );
+
+    // --- 4z. Agreement terms, on real data -----------------------------------
+    //
+    // The PUT behind this REPLACES the agreement, which is why the tool reads and merges and
+    // why it sits at this tier. Verified here on live data rather than only against a fake
+    // client: the whole value of the tool is that the terms it was not asked about survive.
+    console.log("\n  Agreement terms (the underlying PUT replaces the record):");
+    const agMade = await client.callTool({
+      name: "reai_request",
+      arguments: {
+        method: "POST",
+        path: "/api/agreements/rent-agreement",
+        body: {
+          landlordName: `${STAMP} utleier`,
+          tenantName: `${STAMP} leietaker`,
+          propertyAddress: "Prøvegata 1",
+          monthlyRent: 12000,
+          rentDueDayOfMonth: 1,
+          leaseDurationType: "indefinite",
+          depositType: "deposit",
+          depositAmount: 36000,
+          otherTerms: `${STAMP} original terms`,
+        },
+      },
+    });
+    const agreement = agMade.isError ? undefined : jsonOf(agMade);
+    if (Number.isInteger(agreement?.agreementId)) created.agreementId = agreement.agreementId;
+    report(
+      "a lease exists to edit",
+      Number.isInteger(created.agreementId),
+      created.agreementId ? `agreementId=${created.agreementId}` : textOf(agMade).slice(0, 180),
+    );
+
+    if (created.agreementId) {
+      const updRes = await client.callTool({
+        name: "reai_update_agreement",
+        arguments: { id: created.agreementId, changes: { monthlyRent: 13500 } },
+      });
+      report("reai_update_agreement changes one term", !updRes.isError, firstLineOf(textOf(updRes)));
+
+      const afterRes = await client.callTool({
+        name: "reai_get_agreement",
+        arguments: { id: created.agreementId },
+      });
+      const after = afterRes.isError ? undefined : jsonOf(afterRes)?.rentAgreement;
+      const kept =
+        after?.monthlyRent === 13500 &&
+        after?.tenantName === `${STAMP} leietaker` &&
+        after?.depositAmount === 36000 &&
+        after?.otherTerms === `${STAMP} original terms`;
+      report(
+        "every term it was not asked to change survived",
+        kept,
+        kept
+          ? "rent changed; tenant, deposit and terms intact"
+          : `TERMS LOST — rent=${after?.monthlyRent} tenant=${JSON.stringify(after?.tenantName)} ` +
+            `deposit=${after?.depositAmount} terms=${JSON.stringify(after?.otherTerms)}`,
+      );
+
+      // And the raw partial PUT, which is what the tool exists to avoid. Run deliberately to
+      // confirm the destruction is real rather than inferred — on a throwaway lease, in full
+      // mode, where the write ladder permits it.
+      const rawRes = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/agreements/rent-agreement/${created.agreementId}`,
+          body: { landlordName: `${STAMP} utleier` },
+        },
+      });
+      const wiped = await client.callTool({
+        name: "reai_get_agreement",
+        arguments: { id: created.agreementId },
+      });
+      const gone = wiped.isError ? undefined : jsonOf(wiped)?.rentAgreement;
+      report(
+        "a raw partial PUT really does clear the other terms",
+        !rawRes.isError && gone?.monthlyRent === null && gone?.tenantName === null,
+        `rent=${JSON.stringify(gone?.monthlyRent)} tenant=${JSON.stringify(gone?.tenantName)} ` +
+          `deposit=${JSON.stringify(gone?.depositAmount)} — this is the behaviour the tool prevents`,
+      );
+    }
 
     // --- 4a. The stock adjustment --------------------------------------------
     //
@@ -642,6 +725,13 @@ async function main() {
       }
     };
 
+    if (created.agreementId) {
+      await attempt(
+        "test lease deleted",
+        () => client.callTool({ name: "reai_delete_agreement", arguments: { id: created.agreementId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
     // The product before the warehouse: deleting a record whose dependents are still
     // around answers 500 "Referenced record is not accessible", which is how a previous
     // run stranded four orders. Dependency order, cheapest first.

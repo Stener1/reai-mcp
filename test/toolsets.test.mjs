@@ -552,6 +552,62 @@ test("the destructiveHint probe sees every field the gate reacts to", async () =
   );
 });
 
+/**
+ * The same drift one level down: a tool argument that takes an OBJECT.
+ *
+ * The gate walks nested bodies, so it caught these at runtime — but the annotation probed with
+ * scalars only, so everything inside such an argument was invisible to it. reai_update_agreement
+ * was exactly that: `changes` carries a whole lease, so rentAccountNumber and
+ * depositAccountNumber were live in the gate while the tool advertised destructiveHint: false,
+ * and a client that asks before destructive calls would have shown redirecting a tenant's
+ * deposit account as an ordinary edit.
+ */
+test("the probe sees escalating fields nested inside an object-valued argument", async () => {
+  const { curatedArgsEscalate, escalatingFieldNames } = await import("../dist/policy.js");
+  const { ESCALATION_PROBES: probes, registeredTools } = await import("../dist/server.js");
+
+  // The union is derived from the real sets, so a new escalating field cannot be added to the
+  // policy without becoming probeable here.
+  assert.ok(escalatingFieldNames.length >= 12, `expected the real field union; got ${escalatingFieldNames.length}`);
+  for (const name of ["depositaccountnumber", "rentaccountnumber", "iban", "sendehf"]) {
+    assert.ok(escalatingFieldNames.includes(name), `${name} must be in the probeable union`);
+  }
+
+  // The concrete case, stated as the two halves that disagreed.
+  const paths = [["PUT", "/api/agreements/rent-agreement/{id}"]];
+  const scalarOnly = probes.some((v) => curatedArgsEscalate(paths, { changes: v }) !== undefined);
+  const nested = probes.some((v) =>
+    escalatingFieldNames.some((n) => curatedArgsEscalate(paths, { changes: { [n]: v } }) !== undefined),
+  );
+  assert.equal(scalarOnly, false, "if a scalar probe now reaches this, the premise has changed");
+  assert.equal(nested, true, "a routing field inside `changes` must be discoverable by probing");
+
+  // The REAL probe, imported rather than reimplemented — the assertions above describe the
+  // mechanism, and this one is the thing the server actually publishes as destructiveHint.
+  const { hasEscalatingFields } = await import("../dist/server.js");
+  const tool = registeredTools.find((x) => x.name === "reai_update_agreement");
+  assert.ok(tool, "reai_update_agreement must exist for this to mean anything");
+  assert.equal(
+    hasEscalatingFields(tool),
+    true,
+    "reai_update_agreement can redirect a tenant's deposit account, so it must be annotated destructive",
+  );
+
+  // Every tool taking an object-valued argument that could carry one, for the same reason.
+  const byObjectArg = registeredTools.filter((t) =>
+    escalatingFieldNames.some((n) =>
+      probes.some((v) =>
+        Object.keys(t.inputSchema ?? {}).some(
+          (f) => curatedArgsEscalate(t.apiPaths ?? [], { [f]: { [n]: v } }) !== undefined,
+        ),
+      ),
+    ),
+  );
+  for (const t of byObjectArg) {
+    assert.equal(hasEscalatingFields(t), true, `${t.name} hides an escalating field in an object arg`);
+  }
+});
+
 // REAI_WRITE_MODE answers "can this be undone in the books". REAI_ALLOW_EXTERNAL_SEND
 // answers "does this reach someone else", and `full` deliberately does not lift it.
 // Escalating the write risk alone collapsed the two into one for exactly the fields that

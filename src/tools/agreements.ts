@@ -202,8 +202,13 @@ const updateAgreement = defineTool({
     "names the allowed set in its 400, e.g. leaseDurationType is " +
     "indefinite | fixed_standard | fixed_special_reason and depositType is deposit | guarantee.\n\n" +
     "Setting `rentAccountNumber` or `depositAccountNumber` on a lease changes where a tenant's " +
-    "money goes, which needs REAI_WRITE_MODE=full like any other payment destination.",
-  risk: "reversible",
+    "money goes, which is a payment destination like any other.\n\n" +
+    "Needs REAI_WRITE_MODE=full, and the reason is worth stating: not because THIS tool is " +
+    "dangerous — it is the safe way to do it — but because the underlying PUT replaces the " +
+    "record, and the write ladder classifies the operation rather than the care taken over it. " +
+    "Leaving the curated tool a tier below would have made it the soft route around a gate the " +
+    "raw call is subject to.",
+  risk: "irreversible",
   apiPaths: [
     ["GET", "/api/agreements/{id}"],
     ["PUT", "/api/agreements/rent-agreement/{id}"],
