@@ -14,6 +14,9 @@ import {
   transmittingBodyFields,
   assertTransmitAllowed,
   ExternalSendBlockedError,
+  classifyPaymentRouting,
+  classifyInvoiceDelivery,
+  paymentRoutingFields,
 } from "../dist/policy.js";
 import { ReaiClient } from "../dist/reai/client.js";
 
@@ -302,10 +305,63 @@ test("escalation is case-insensitive on the field name", () => {
   assert.equal(classifyWithBody("reversible", { sendEHF: true }), "irreversible");
 });
 
-test("a non-object body is passed through untouched", () => {
-  for (const body of [undefined, null, "string", 42, [{ sendEhf: true }]]) {
+test("a body with no inspectable object is passed through untouched", () => {
+  // [{ sendEhf: true }] used to be in this list, asserting that an array root was
+  // ignored. That was the bail-out written down as intent: all three inspectors
+  // returned early on an array, so wrapping an escalating field in one defeated them.
+  // No operation takes an array root today, but reai_request forwards whatever body it
+  // is given, so it would have become live the day ReAI added a bulk endpoint.
+  for (const body of [undefined, null, "string", 42, [], [1, 2, 3], [null], [[{ sendEhf: true }]]]) {
     assert.equal(classifyWithBody("reversible", body), "reversible", JSON.stringify(body) ?? "undefined");
   }
+});
+
+test("an array body is inspected element by element", () => {
+  assert.equal(classifyWithBody("reversible", [{ sendEhf: true }]), "irreversible");
+  // Including when only a later element carries it.
+  assert.equal(classifyWithBody("reversible", [{ id: 1 }, { sendEhf: "true" }]), "irreversible");
+  assert.equal(classifyTransmission("POST", "/api/orders", [{ sendEhf: true }]), "external");
+  assert.equal(
+    classifyPaymentRouting("reversible", "/api/suppliers/5", [{ iban: "NO9386011117947" }], "PATCH"),
+    "irreversible",
+  );
+  assert.equal(
+    classifyInvoiceDelivery("reversible", "/api/orders", [{ invoiceEmail: "a@evil.example" }]),
+    "irreversible",
+  );
+  // And the error messages still name the fields, deduplicated across elements.
+  assert.deepEqual(escalatingBodyFields([{ sendEhf: true }, { sendEhf: true }]), ["sendEhf=true"]);
+  assert.deepEqual(paymentRoutingFields([{ iban: "NO93" }, { swiftCode: "DNBANOKK" }]), [
+    "iban",
+    "swiftCode",
+  ]);
+});
+
+// Shapes a router discards but a string comparison does not. None is currently
+// exploitable — the upstream's StrictHttpFirewall rejects the matrix parameter and the
+// doubled slash with 400, and the trailing dot 404s, all verified live — but a
+// guarantee that depends on another server rejecting malformed input is borrowed, not
+// held: relax that firewall, or put a normalizing proxy in front, and it vanishes with
+// nothing here to notice.
+test("the classifier does not rely on the upstream rejecting odd path shapes", () => {
+  for (const path of [
+    "/api/subscriptions/1/generate;a=b",
+    "/api/subscriptions/1/generate.",
+    "/api/subscriptions/1/generate;jsessionid=x",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+    assert.equal(classifyTransmission("POST", path), "external", path);
+  }
+  assert.equal(classifyRequest("POST", "/api/agreements/7/sign-request;x"), "irreversible");
+  // The attachment-overwrite rule ran on the RAW path with a strict [^/]+, so a doubled
+  // slash fell through to the reversible /api/attachments prefix — two matchers
+  // disagreeing about one path, which is the shape of every bypass in this file.
+  assert.equal(classifyRequest("PUT", "/api/attachments//9"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/attachments/9;x=1"), "irreversible");
+  // Uploading stays additive, and an interior dot in a filename is left alone.
+  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
+  assert.equal(classifyRequest("GET", "/api/attachments/9/view/invoice.pdf"), "read");
+  assert.equal(classifyRequest("POST", "/api/customers"), "reversible");
 });
 
 test("escalation never downgrades an already-irreversible call", () => {
