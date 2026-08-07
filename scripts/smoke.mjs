@@ -262,6 +262,13 @@ async function main() {
         (t) => /employee\(s\), summarised/.test(t) || /No employees are registered/.test(t),
       ],
       ["reai_employee_ledger", { tenantId }, (t) => /Employee ledger \d{4}-\d{2}-\d{2} to/.test(t)],
+      // Fixed assets. Empty is the common case, and the assertion is on the sentence that
+      // keeps "nothing capitalised" apart from "the company owns nothing".
+      [
+        "reai_list_assets",
+        { tenantId },
+        (t) => /fixed asset\(s\)\.$/m.test(t) || /register is empty/.test(t),
+      ],
       [
         "reai_employee_ledger",
         { tenantId, isOpenPosting: true },

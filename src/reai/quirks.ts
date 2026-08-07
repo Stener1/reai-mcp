@@ -405,6 +405,47 @@ export const QUIRKS: readonly Quirk[] = [
   },
 
   {
+    id: "asset-register-posts-nothing",
+    paths: ["/api/assets", "/api/assets/{id}/depreciation", "/api/assets/{id}/write-off"],
+    methods: ["POST", "PUT"],
+    kind: "gotcha",
+    note:
+      "Registering an asset, changing its depreciation schedule and writing it off all post NO " +
+      "voucher on an asset with no accounting history — measured on a live tenant with a voucher " +
+      "list that fails loudly on a non-200. The register entry and the acquisition booking are " +
+      "separate: capitalising something already booked will not double-book it, and creating the " +
+      "register entry will not book it for you. usefulLifeInMonths and depreciationMethod are " +
+      "OPTIONAL despite the tooling that suggests otherwise — omit both for land and other " +
+      "non-depreciable assets (1150 Tomter, 1292 Andre ikke avskrivbare eiendeler).",
+  },
+  {
+    id: "asset-delete-refused-when-referenced",
+    paths: ["/api/assets/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    note:
+      "The endpoint description says a linked acquisition voucher is \"deleted when possible or " +
+      "reversed when accounting history must be retained\". Neither happens: with a posted voucher " +
+      "referencing the asset the call answers 409 \"Asset with id N is used in existing vouchers " +
+      "and cannot be deleted\" and changes nothing. Verified by booking a voucher against an asset " +
+      "and deleting it. Delete the vouchers first, or write the asset off instead. This is the " +
+      "safer behaviour than the document promises — nothing here reverses a posting silently.",
+  },
+  {
+    id: "manual-voucher-needs-manual-asset",
+    paths: ["/api/vouchers", "/api/vouchers/{id}"],
+    methods: ["POST", "PUT"],
+    kind: "gotcha",
+    note:
+      "A posting line carrying assetId is refused with 409 \"Manuelle bilag kan bare posteres på " +
+      "eiendeler med manuell avskrivningsmetode\" unless that asset's depreciationMethod is " +
+      "'manual'. An asset on 'linear' is driven by its schedule and will not accept manual " +
+      "postings, so book the acquisition before setting the asset to linear, or create it as " +
+      "manual. Also observed on the same endpoint: a bank account such as 1920 must be posted " +
+      "with a companyBankId (\"Konto 1920 må posteres med bankkonto\"), and every posting line " +
+      "needs its own postingDate and currency even though the voucher carries a date.",
+  },
+  {
     id: "employee-list-is-a-projection",
     paths: ["/api/employees"],
     methods: ["GET"],

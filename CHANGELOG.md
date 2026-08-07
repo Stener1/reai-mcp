@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**71 tools**: 64 across five accounting domains, plus 7 always-on.
+**77 tools**: 70 across six accounting domains, plus 7 always-on.
 
 ### Added
 
@@ -29,6 +29,18 @@ All notable changes to `reai-mcp`. Format loosely follows
     `{"outcome":"deleted"}`.
   - No project tools. The Project module is disabled on every reachable tenant,
     so `GET /api/projects` answers 403 and the success path is unverifiable.
+
+- **Fixed-asset toolset** (6 tools) — the register, its depreciation schedules,
+  write-off and delete. What each write actually does was measured on the test
+  tenant rather than read off the spec, and the spec implies more than happens:
+  create, set-depreciation and write-off post **no voucher** on an asset with no
+  accounting history. They stay irreversible because `/api/assets` has always
+  been classified that way and because write-off on an asset carrying value
+  could not be produced — not because of any depreciation-posting mechanism,
+  since no operation in this API posts depreciation.
+  - Deleting an asset that a voucher references is **refused with 409**, not
+    reversed as the endpoint's own description claims. Verified by booking a
+    voucher against an asset and deleting it.
 
 ### Fixed
 
