@@ -272,24 +272,27 @@ export function hasAmbiguousSegments(path: string): boolean {
 export function classifyRequest(method: HttpMethod, path: string): Risk {
   if (method === "GET") return "read";
 
+  // Canonicalize first: classifying a raw string that resolves to a different path is
+  // how a reversible-looking call reaches the ledger. A path we cannot resolve is
+  // treated as the most dangerous case.
+  const canonical = canonicalizeApiPath(path);
+  if (!canonical) return "irreversible";
+
+  // Every form this request could be matched as, strictest answer wins.
+  let worst: Risk = "read";
+  for (const normalized of pathForms(canonical.pathname)) {
+    worst = strictestRisk(worst, classifyNormalizedPath(method, normalized));
+  }
+  return worst;
+}
+
+function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
   // Method-specific, because the same path differs sharply by verb. Replacing an
   // attachment's bytes "updates the bytes for every owner that references this
   // attachment id" — the spec's own words — so overwriting the file on a posted
   // voucher destroys the accounting documentation of every voucher pointing at it,
   // and no DELETE exists under /api/attachments to undo it. UPLOADING a new
   // attachment is additive and stays reversible, so a prefix would be too blunt.
-  // Canonicalize first: classifying a raw string that resolves to a different
-  // path is how a reversible-looking call reaches the ledger. A path we cannot
-  // resolve is treated as the most dangerous case.
-  const canonical = canonicalizeApiPath(path);
-  if (!canonical) return "irreversible";
-  const normalized = normalize(canonical.pathname);
-
-  // Checked on the NORMALIZED path, not the raw one. This ran first, against the raw
-  // string, with a strict `[^/]+` — so "/api/attachments//9" failed the pattern and
-  // fell through to the reversible /api/attachments prefix, while the loose prefix
-  // match one line later contradicted it. Two matchers disagreeing about the same
-  // path is the shape of every bypass in this file's history.
   if ((method === "PATCH" || method === "PUT") && /^\/api\/attachments\/[^/]+$/i.test(normalized)) {
     return "irreversible";
   }
@@ -443,39 +446,68 @@ export function escalatingBodyFields(body: unknown): string[] {
 
 /** Strip the query string and trailing slash; lowercase for prefix comparison. */
 /**
- * The form every matcher in this file compares against.
- *
- * Beyond lowercasing and trimming, it strips three shapes that a router discards but
- * a plain string comparison does not, so that "the same route" is one string here:
- *
- *   /api/subscriptions/1/generate;a=b   matrix parameters
- *   /api/subscriptions/1/generate.      a trailing dot
- *   /api/attachments//9                 a doubled slash
- *
- * All three lost the escalating-segment match and read as ordinary reversible writes.
- * They are not currently exploitable — the upstream's StrictHttpFirewall rejects the
- * first and third with 400, and the second 404s, verified live — but a guarantee that
- * depends on another server rejecting malformed input is borrowed, not held. If ReAI
- * ever relaxes that firewall, or a proxy normalizes before forwarding, the guard
- * disappears silently and nothing here would notice.
- *
- * Stripping can only ever make a path match a pattern it otherwise missed, never the
- * reverse, so the direction of error is toward classifying MORE severely.
+ * Strip the query string and trailing slash; lowercase for prefix comparison.
  */
 function normalize(path: string): string {
   const withoutQuery = path.split("?")[0] ?? path;
+  const trimmed = withoutQuery.replace(/\/+$/, "") || "/";
+  return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
+}
+
+/**
+ * The path as a ROUTER would match it: matrix parameters gone, duplicate slashes
+ * collapsed, a trailing dot dropped.
+ *
+ *   /api/subscriptions/1/generate;a=b   ->  /api/subscriptions/1/generate
+ *   /api/attachments//9                 ->  /api/attachments/9
+ *   /api/subscriptions/1/generate.      ->  /api/subscriptions/1/generate
+ *
+ * This is NOT a replacement for `normalize` — it is a second reading of the same
+ * request, and every guard takes the STRICTER of the two, exactly as it already does
+ * for the raw and percent-decoded forms.
+ *
+ * Substituting it outright was wrong, and wrong in the dangerous direction. The premise
+ * "stripping can only make a path match a pattern it otherwise missed" does not hold:
+ * `/api/suppliers;foo/5` matched no prefix and therefore failed CLOSED as irreversible,
+ * and stripping made it match the reversible `/api/suppliers` prefix. Three shapes came
+ * out weaker than before. A dot-only segment is left intact for the same reason —
+ * emptying `...` shortens the path and can drop a pattern match entirely
+ * (`/api/invoices/.../email` lost its transmission match).
+ */
+function routedForm(path: string): string {
+  const withoutQuery = path.split("?")[0] ?? path;
   const routed = withoutQuery
     .split("/")
-    // A matrix parameter is not part of the path a router matches on.
     .map((segment) => segment.split(";")[0] ?? segment)
-    // A trailing dot is discarded too. Interior dots are left alone: a filename
-    // parameter legitimately contains them.
-    .map((segment) => segment.replace(/\.+$/, ""))
+    // Only a trailing dot on a segment that has other content. Never empty a segment
+    // that was not already empty.
+    .map((segment) => {
+      const stripped = segment.replace(/\.+$/, "");
+      return stripped === "" ? segment : stripped;
+    })
     .filter((segment, index) => segment !== "" || index === 0)
     .join("/");
   const trimmed = routed.replace(/\/+$/, "") || "/";
   return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
 }
+
+/**
+ * Every string form one request may be matched as. A guard that checks all of them and
+ * takes the strictest answer cannot be weakened by a shape it did not anticipate.
+ */
+function pathForms(path: string): string[] {
+  const plain = normalize(path);
+  const routed = routedForm(path);
+  return routed === plain ? [plain] : [plain, routed];
+}
+
+const RISK_SEVERITY: Record<Risk, number> = { read: 0, reversible: 1, irreversible: 2 };
+
+/** The more severe of two readings of the same request. */
+export function strictestRisk(a: Risk, b: Risk): Risk {
+  return RISK_SEVERITY[a] >= RISK_SEVERITY[b] ? a : b;
+}
+
 
 /**
  * Whether a call sends something to a third party.
@@ -617,8 +649,7 @@ export function invoiceDeliveryFields(body: unknown): string[] {
 /** Escalate a call that redirects where invoices are delivered. */
 export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
   if (pathRisk === "irreversible") return pathRisk;
-  const normalized = path.toLowerCase().replace(/\/+$/, "");
-  if (!INVOICE_DELIVERY_PATHS.some((re) => re.test(normalized))) return pathRisk;
+  if (!pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)))) return pathRisk;
   return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
 }
 
@@ -658,15 +689,19 @@ export function classifyPaymentRouting(
   method?: string,
 ): Risk {
   if (pathRisk === "irreversible") return pathRisk;
-  const normalized = path.toLowerCase().replace(/\/+$/, "");
-  const inScope =
-    PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
+  // Both readings of the path, or a matrix parameter would put the request outside the
+  // scope of this guard while classifyRequest read it as an ordinary reversible write.
+  const forms = pathForms(path);
+  const inScope = forms.some(
+    (normalized) =>
+      PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
     // Editing an EXISTING company bank repoints where this company's own customers
     // pay — the money flows inward rather than outward, but it is redirected just as
     // permanently, and invoices already issued name that account. Adding one (POST)
     // stays ordinary work, which is why the original exemption was written; it just
     // never distinguished adding from repointing.
-    (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST");
+      (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST"),
+  );
   if (!inScope) return pathRisk;
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
 }
@@ -758,7 +793,9 @@ export function classifyTransmission(
   body?: unknown,
 ): Transmission {
   const canonical = canonicalizeApiPath(path);
-  const normalized = normalize(canonical?.pathname ?? path);
+  // Every reading of the path: a transmitting pattern that matches ANY of them counts,
+  // so a matrix parameter or a doubled slash cannot hide an EHF send behind a shape.
+  const forms = pathForms(canonical?.pathname ?? path);
 
   // GET is normally a read, and treating it as such is right for the whole API bar
   // two endpoints that reach a third party despite the verb. `read-only` is the mode
@@ -771,10 +808,10 @@ export function classifyTransmission(
   // direction when the alternative is an unannounced AS4 ping onto the Peppol network
   // or a sync with Altinn.
   if (method === "GET") {
-    return TRANSMITTING_GETS.some((re) => re.test(normalized)) ? "external" : "none";
+    return forms.some((n) => TRANSMITTING_GETS.some((re) => re.test(n))) ? "external" : "none";
   }
 
-  if (TRANSMITTING_PATTERNS.some((re) => re.test(normalized))) return "external";
+  if (forms.some((n) => TRANSMITTING_PATTERNS.some((re) => re.test(n)))) return "external";
 
   for (const candidate of inspectableObjects(body)) {
     for (const [key, value] of Object.entries(candidate)) {

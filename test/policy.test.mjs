@@ -1014,3 +1014,91 @@ test("a tool with escalating fields is annotated destructive", async () => {
   }
   assert.ok(mixed >= 2, `expected mixed-risk tools, found ${mixed}`);
 });
+
+// Reading the path as a router would must never produce a WEAKER answer than reading it
+// literally. The first attempt at this fix substituted the routed form outright, on the
+// premise that stripping can only make a path match a pattern it otherwise missed. That
+// premise is false: a path matching no prefix fails CLOSED as irreversible, and
+// stripping can make it match a reversible one. Three shapes came out weaker than
+// before, which is why every guard now takes the stricter of both readings.
+test("normalizing a path never lowers its risk", () => {
+  for (const [method, path] of [
+    // Fell through to fail-closed unrecognised; stripping made it match /api/suppliers.
+    ["PATCH", "/api/suppliers;foo/5"],
+    ["PUT", "/api/accountant-clients;foo/999/business-description"],
+    // A dot-only segment emptied by an over-eager strip shortens the path and can drop a
+    // pattern match: /api/invoices/.../email lost its transmission match entirely.
+    ["POST", "/api/invoices/.../email"],
+    ["PATCH", "/api/attachments/..."],
+    ["POST", "/api/subscriptions/.../generate"],
+  ]) {
+    assert.equal(
+      classifyRequest(method, path),
+      "irreversible",
+      `${method} ${path} must not be weakened by normalization`,
+    );
+  }
+  assert.equal(classifyTransmission("POST", "/api/invoices/.../email"), "external");
+
+  // The guards that take the path separately must agree, or a shape lands in the gap
+  // between them: classifyRequest saying "reversible" while payment routing does not
+  // recognise the path is exactly how an iban would slip through.
+  assert.equal(
+    classifyPaymentRouting("reversible", "/api/suppliers;foo/5", { iban: "NO9386011117947" }, "PATCH"),
+    "irreversible",
+  );
+  assert.equal(
+    classifyInvoiceDelivery("reversible", "/api/orders;x", { invoiceEmail: "a@evil.example" }),
+    "irreversible",
+  );
+});
+
+// Shapes a router discards but a string comparison does not. None is currently
+// exploitable — the upstream's StrictHttpFirewall rejects the matrix parameter and the
+// doubled slash with 400, and the trailing dot 404s, all verified live — but a guarantee
+// that depends on another server rejecting malformed input is borrowed, not held.
+test("the classifier does not rely on the upstream rejecting odd path shapes", () => {
+  for (const path of [
+    "/api/subscriptions/1/generate;a=b",
+    "/api/subscriptions/1/generate.",
+    "/api/subscriptions/1/generate;jsessionid=x",
+  ]) {
+    assert.equal(classifyRequest("POST", path), "irreversible", path);
+    assert.equal(classifyTransmission("POST", path), "external", path);
+  }
+  assert.equal(classifyRequest("POST", "/api/agreements/7/sign-request;x"), "irreversible");
+  // The attachment-overwrite rule ran on the RAW path with a strict [^/]+, so a doubled
+  // slash fell through to the reversible /api/attachments prefix.
+  assert.equal(classifyRequest("PUT", "/api/attachments//9"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/attachments/9;x=1"), "irreversible");
+  // Uploading stays additive, and an interior dot in a filename is left alone.
+  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
+  assert.equal(classifyRequest("GET", "/api/attachments/9/view/invoice.pdf"), "read");
+  assert.equal(classifyRequest("POST", "/api/customers"), "reversible");
+});
+
+test("an array body is inspected element by element", () => {
+  // [{ sendEhf: true }] was previously asserted to stay reversible — the bail-out
+  // written down as intent. All three inspectors returned early on an array, so
+  // wrapping an escalating field in one defeated them. No operation takes an array root
+  // today, but reai_request forwards whatever body it is given.
+  assert.equal(classifyWithBody("reversible", [{ sendEhf: true }]), "irreversible");
+  assert.equal(classifyWithBody("reversible", [{ id: 1 }, { sendEhf: "true" }]), "irreversible");
+  assert.equal(classifyTransmission("POST", "/api/orders", [{ sendEhf: true }]), "external");
+  assert.equal(
+    classifyPaymentRouting("reversible", "/api/suppliers/5", [{ iban: "NO9386011117947" }], "PATCH"),
+    "irreversible",
+  );
+  assert.equal(
+    classifyInvoiceDelivery("reversible", "/api/orders", [{ invoiceEmail: "a@evil.example" }]),
+    "irreversible",
+  );
+  // Error messages still name the fields, deduplicated across elements.
+  assert.deepEqual(escalatingBodyFields([{ sendEhf: true }, { sendEhf: true }]), ["sendEhf=true"]);
+  assert.deepEqual(paymentRoutingFields([{ iban: "NO93" }, { swiftCode: "DNBANOKK" }]), ["iban", "swiftCode"]);
+
+  // And bodies with nothing inspectable are still passed through.
+  for (const body of [undefined, null, "string", 42, [], [1, 2, 3], [null], [[{ sendEhf: true }]]]) {
+    assert.equal(classifyWithBody("reversible", body), "reversible", JSON.stringify(body) ?? "undefined");
+  }
+});
