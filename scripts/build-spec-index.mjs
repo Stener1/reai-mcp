@@ -7,7 +7,7 @@
  * (method, path, tag, summary, param names). Full parameter and body schemas are
  * resolved on demand from the raw spec by src/reai/spec.ts.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -84,6 +84,25 @@ function typeName(schema) {
   return t;
 }
 
+// An enum is a closed set, and a partial one is worse than none: an agent reading
+// eight of sixteen voucher types concludes VAT_RETURN is not a legal filter and
+// reports the API cannot do it. Truncation is therefore both generous and, when it
+// happens, explicit — "+N more" tells the reader to call reai_describe_endpoint
+// rather than trusting the list. Array-valued parameters carry their enum on
+// `items`, not on the schema, so read both: three live parameters (bank-reconciliation
+// `include`, `directPermissionCodes` on the user endpoints) rendered as a bare
+// `string[]` with their legal values published nowhere.
+const ENUM_LIMIT = 24;
+
+function enumType(schema, fallback) {
+  const values = (schema?.enum ?? deref(schema?.items)?.enum)?.filter((e) => e !== null);
+  if (!values?.length) return fallback;
+  const shown = values.slice(0, ENUM_LIMIT).join("|");
+  const suffix = values.length > ENUM_LIMIT ? `|+${values.length - ENUM_LIMIT} more` : "";
+  const array = String(fallback ?? "").includes("[]") || schema?.type === "array";
+  return `enum(${shown}${suffix})${array ? "[]" : ""}`;
+}
+
 function trim(text, max) {
   if (!text) return undefined;
   const flat = String(text).replace(/\s+/g, " ").trim();
@@ -114,7 +133,7 @@ function bodyShape(op) {
       const item = deref(p.items);
       t = `${typeName(item) ?? "object"}[]${t.endsWith("?") ? "?" : ""}`;
     }
-    if (p.enum) t = `enum(${p.enum.filter((e) => e !== null).slice(0, 8).join("|")})`;
+    t = enumType(p, t);
     if (p.format && (t === "string" || t === "string?")) t = `${t.replace("?", "")}(${p.format})${t.endsWith("?") ? "?" : ""}`;
     fields[name] = t;
   }
@@ -139,7 +158,7 @@ function paramShape(op, pathLevelParams) {
     const s = deref(p.schema) ?? {};
     let type = typeName(s) ?? "string";
     if (type.startsWith("array")) type = `${typeName(deref(s.items)) ?? "string"}[]`;
-    if (s.enum) type = `enum(${s.enum.filter((e) => e !== null).slice(0, 8).join("|")})`;
+    type = enumType(s, type);
     out.push({
       name: p.name,
       in: p.in,
@@ -176,7 +195,12 @@ for (const [path, item] of Object.entries(spec.paths ?? {})) {
   }
 }
 
-operations.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+// Codepoint order, not localeCompare: the default collation is locale-dependent, and
+// under LANG=nb_NO Node sorts "aa" as "å" (after z). One Norwegian-named path would
+// then make the artifact differ between machines, which defeats the reproducibility
+// this file is otherwise careful about.
+const byCodepoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+operations.sort((a, b) => byCodepoint(a.path, b.path) || byCodepoint(a.method, b.method));
 
 const tagCounts = {};
 for (const o of operations) {
@@ -197,11 +221,44 @@ const index = {
     public: operations.filter((o) => !o.internal).length,
     internal: operations.filter((o) => o.internal).length,
   },
-  tags: Object.fromEntries(Object.entries(tagCounts).sort(([a], [b]) => a.localeCompare(b))),
+  tags: Object.fromEntries(Object.entries(tagCounts).sort(([a], [b]) => byCodepoint(a, b))),
   operations,
 };
 
-writeFileSync(OUT, JSON.stringify(index) + "\n");
+// Everything the server knows about the API comes from this file, so a degraded
+// build is invisible at runtime and confidently wrong — an agent is told an
+// endpoint does not exist rather than that the index is broken. The builder used
+// to have no assertions at all: an upstream spec with its `tags` dropped produced
+// "430 operations, 0 public", exit 0, and a server with an empty discovery surface.
+// test/spec.test.mjs does catch that, but neither `npm run build` nor the Dockerfile
+// runs tests, so a Cloud Run deploy could ship it. These are floors, not exact
+// counts, so ordinary API growth does not trip them.
+const MIN_TOTAL = 350;
+const MIN_PUBLIC = 250;
+const problems = [];
+if (index.counts.total < MIN_TOTAL) {
+  problems.push(`only ${index.counts.total} operations (expected at least ${MIN_TOTAL})`);
+}
+if (index.counts.public < MIN_PUBLIC) {
+  problems.push(`only ${index.counts.public} public operations (expected at least ${MIN_PUBLIC})`);
+}
+if (Object.keys(index.tags).length < 20) {
+  problems.push(`only ${Object.keys(index.tags).length} public tags — is the spec still tagged?`);
+}
+const untyped = operations.filter((o) => !o.method || !o.path);
+if (untyped.length) problems.push(`${untyped.length} operations missing a method or path`);
+if (problems.length) {
+  console.error("spec index build FAILED — the result would be silently wrong:");
+  for (const p of problems) console.error(`  - ${p}`);
+  console.error(`Source: ${SRC}. Refusing to write ${OUT}.`);
+  process.exit(1);
+}
+
+// Write via a temp file in the same directory: an interrupted build previously left
+// a truncated index.json that every later run failed to parse.
+const TMP = `${OUT}.tmp`;
+writeFileSync(TMP, JSON.stringify(index) + "\n");
+renameSync(TMP, OUT);
 
 const kb = (n) => `${Math.round(n / 1024)} KB`;
 console.error(

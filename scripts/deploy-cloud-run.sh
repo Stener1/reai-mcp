@@ -17,7 +17,14 @@
 #   --allow-external-send       Permit EHF/Peppol, invoice email, reminders and
 #                               invoice issuance. Off by default. Enable this for
 #                               a real business doing its own invoicing
-#   --env KEY=VALUE             Extra env var; repeatable
+#   --public-url URL            Only for a custom domain in front of Cloud Run.
+#                               Defaults to the URL Cloud Run reports
+#   --allowed-hosts H           Comma-separated hostnames the server answers to.
+#                               Defaults to every hostname Cloud Run reports, which
+#                               is what you want unless a proxy adds one
+#   --env KEY=VALUE             Extra env var; repeatable. Keys this script manages
+#                               are refused -- use the flag above instead, so the
+#                               safety gates and the closing summary stay honest
 #
 # Prerequisites:
 #   gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
@@ -49,6 +56,10 @@ ALLOWED_REDIRECT_HOSTS="claude.ai"
 SECRET_NAME="reai-mcp-encryption-key"
 SERVICE_ACCOUNT=""
 ALLOW_EXTERNAL_SEND="false"
+# Set only for a custom domain. Empty means "use the URL and hostnames Cloud Run
+# reports", which is right for every default deployment.
+CUSTOM_PUBLIC_URL=""
+CUSTOM_ALLOWED_HOSTS=""
 EXTRA_ENV=()
 
 usage() {
@@ -75,6 +86,8 @@ while [[ $# -gt 0 ]]; do
     --service-account) need_value "$1" $#; SERVICE_ACCOUNT="$2"; shift 2 ;;
     --secret-name) need_value "$1" $#; SECRET_NAME="$2"; shift 2 ;;
     --allow-external-send) ALLOW_EXTERNAL_SEND="true"; shift ;;
+    --public-url) need_value "$1" $#; CUSTOM_PUBLIC_URL="$2"; shift 2 ;;
+    --allowed-hosts) need_value "$1" $#; CUSTOM_ALLOWED_HOSTS="$2"; shift 2 ;;
     --env) need_value "$1" $#; EXTRA_ENV+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1  (try --help)" >&2; exit 2 ;;
@@ -87,6 +100,39 @@ case "$WRITE_MODE" in
   read-only|reversible|full) ;;
   *) echo "--write-mode must be read-only, reversible or full (got '$WRITE_MODE')." >&2; exit 2 ;;
 esac
+
+# --env pairs are appended last, and gcloud's ArgDict keeps the LAST occurrence of
+# a key. So --env REAI_WRITE_MODE=full quietly overrode the write mode while the
+# confirmation gate below (which only reads $WRITE_MODE) never fired and the final
+# summary still printed "reversible". Same for --env REAI_ALLOW_EXTERNAL_SEND=1,
+# which is the one that matters: an EHF/Peppol send cannot be recalled. Managed
+# keys have dedicated flags; --env is for everything else.
+#
+# The ";" is also the delimiter for the whole argument, so a single unvalidated
+# --env 'FOO=bar;REAI_ALLOW_EXTERNAL_SEND=1' injected a second pair.
+MANAGED_ENV_KEYS=(
+  REAI_WRITE_MODE:--write-mode
+  REAI_ALLOW_EXTERNAL_SEND:--allow-external-send
+  REAI_ALLOWED_REDIRECT_HOSTS:--allowed-redirect-hosts
+  REAI_ALLOWED_HOSTS:--allowed-hosts
+  PUBLIC_URL:--public-url
+)
+for kv in ${EXTRA_ENV+"${EXTRA_ENV[@]}"}; do
+  [[ "$kv" == *=* ]] || { echo "--env expects KEY=VALUE (got '$kv')." >&2; exit 2; }
+  if [[ "$kv" == *";"* ]]; then
+    echo "--env values may not contain ';' — it separates variables, so this would" >&2
+    echo "set more than one (got '$kv')." >&2
+    exit 2
+  fi
+  for managed in "${MANAGED_ENV_KEYS[@]}"; do
+    if [[ "${kv%%=*}" == "${managed%%:*}" ]]; then
+      echo "--env ${managed%%:*} is not allowed: it would silently override the value" >&2
+      echo "this script manages, and the summary would still report the safe one." >&2
+      echo "Use ${managed##*:} instead." >&2
+      exit 2
+    fi
+  done
+done
 
 for tool in gcloud node curl; do
   command -v "$tool" >/dev/null 2>&1 || { echo "$tool is required but not on PATH." >&2; exit 2; }
@@ -221,6 +267,17 @@ build_env_arg() {
   if [[ -n "${2:-}" ]]; then pairs="${pairs};REAI_ALLOWED_HOSTS=${2}"; fi
   local kv
   for kv in ${EXTRA_ENV+"${EXTRA_ENV[@]}"}; do pairs="${pairs};${kv}"; done
+  # Passthrough is reset on EVERY deploy for the same reason external send is: it is
+  # preserved by --update-env-vars, so a deployment first made privately with
+  # REAI_ALLOW_TOKEN_PASSTHROUGH=1 kept it after a plain redeploy — onto a service
+  # this script always publishes with --allow-unauthenticated. That is the one
+  # combination the README says never to create: anyone who reaches the URL acts as
+  # whoever's token they present, with OAuth skipped, and nothing said so.
+  # Re-enable it deliberately with --env on each deploy if you really want it.
+  case ";${pairs};" in
+    *";REAI_ALLOW_TOKEN_PASSTHROUGH="*) ;;
+    *) pairs="${pairs};REAI_ALLOW_TOKEN_PASSTHROUGH=" ;;
+  esac
   printf '^;^%s' "$pairs"
 }
 
@@ -261,13 +318,43 @@ ALL_HOSTS="$(gcloud run services describe "$SERVICE" \
   | tr -d '[]"' | tr ',' '\n' | sed 's|https://||' | grep -v '^$' | paste -sd, -)"
 [[ -n "$ALL_HOSTS" ]] || ALL_HOSTS="${URL#https://}"
 
+# A custom domain in front of Cloud Run serves on a hostname the API does not
+# report, so the issuer and the allowlist both have to come from the operator. The
+# run.app hostnames stay in the allowlist: the OAuth flow can legitimately complete
+# on either, and dropping them is the "authorizes fine, then every call fails" bug.
+if [[ -n "$CUSTOM_PUBLIC_URL" ]]; then
+  URL="${CUSTOM_PUBLIC_URL%/}"
+  ALL_HOSTS="${URL#https://},${ALL_HOSTS}"
+fi
+if [[ -n "$CUSTOM_ALLOWED_HOSTS" ]]; then
+  ALL_HOSTS="$CUSTOM_ALLOWED_HOSTS"
+fi
+
+if [[ -z "$URL" ]]; then
+  echo "Could not read the service URL back from Cloud Run. Refusing to continue: without" >&2
+  echo "it, PUBLIC_URL and REAI_ALLOWED_HOSTS would both be left unset on a public service." >&2
+  exit 1
+fi
+
 echo "==> Pinning PUBLIC_URL=$URL"
 echo "    accepted hosts: $ALL_HOSTS"
-gcloud run services update "$SERVICE" \
+# Step 3 has already moved traffic to a revision with no host allowlist. If this
+# update fails, `set -e` would exit and leave it that way with no explanation, so
+# name the exposure rather than dying quietly.
+if ! gcloud run services update "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
   --update-env-vars="$(build_env_arg "$URL" "$ALL_HOSTS")" \
-  --quiet >/dev/null
+  --quiet >/dev/null; then
+  echo >&2
+  echo "FAILED to pin PUBLIC_URL and REAI_ALLOWED_HOSTS." >&2
+  echo "The service at ${URL} is LIVE and publicly reachable with no host allowlist, so" >&2
+  echo "DNS-rebinding protection is off and a spoofed Host header decides the OAuth issuer" >&2
+  echo "it advertises. Re-run this script, or set them by hand:" >&2
+  echo "  gcloud run services update ${SERVICE} --project=${PROJECT} --region=${REGION} \\" >&2
+  echo "    --update-env-vars='^;^PUBLIC_URL=${URL};REAI_ALLOWED_HOSTS=${ALL_HOSTS}'" >&2
+  exit 1
+fi
 
 # --- 5. Verify -------------------------------------------------------------
 # Failures here exit non-zero. A deploy can "succeed" while the service is
@@ -299,6 +386,80 @@ else
   fail=1
 fi
 
+# The summary below used to report the write mode and external-send from LOCAL shell
+# variables, under a heading that claimed verification -- so it stated the safe value
+# whatever the service was actually running. Read the deployed revision back instead.
+deployed_env() {
+  gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
+    --format="value(spec.template.spec.containers[0].env.filter(\"name:$1\").extract(value))" 2>/dev/null
+}
+
+EFFECTIVE_WRITE_MODE="$(deployed_env REAI_WRITE_MODE)"
+EFFECTIVE_EXTERNAL_SEND="$(deployed_env REAI_ALLOW_EXTERNAL_SEND)"
+EFFECTIVE_PASSTHROUGH="$(deployed_env REAI_ALLOW_TOKEN_PASSTHROUGH)"
+EFFECTIVE_HOSTS="$(deployed_env REAI_ALLOWED_HOSTS)"
+
+if [[ "$EFFECTIVE_WRITE_MODE" == "$WRITE_MODE" ]]; then
+  echo "    write mode on the deployed revision: $EFFECTIVE_WRITE_MODE"
+else
+  echo "    write mode on the deployed revision is '${EFFECTIVE_WRITE_MODE}', not '${WRITE_MODE}'" >&2
+  fail=1
+fi
+
+expected_send=0; [[ "$ALLOW_EXTERNAL_SEND" == "true" ]] && expected_send=1
+if [[ "${EFFECTIVE_EXTERNAL_SEND:-0}" == "$expected_send" ]]; then
+  echo "    external send: $([[ "$expected_send" == "1" ]] && echo ENABLED || echo off)"
+else
+  echo "    external send is '${EFFECTIVE_EXTERNAL_SEND}' on the deployed revision," >&2
+  echo "    expected '${expected_send}'. EHF/Peppol sends cannot be recalled -- fix this first." >&2
+  fail=1
+fi
+
+if [[ -n "$EFFECTIVE_PASSTHROUGH" && "$EFFECTIVE_PASSTHROUGH" != "0" ]]; then
+  echo "    WARNING: REAI_ALLOW_TOKEN_PASSTHROUGH=${EFFECTIVE_PASSTHROUGH} on a service deployed" >&2
+  echo "    with --allow-unauthenticated. Anyone who reaches this URL acts as whoever's token" >&2
+  echo "    they present, with no OAuth. Only acceptable behind Tailscale or IAP." >&2
+fi
+
+if [[ -n "$EFFECTIVE_HOSTS" ]]; then
+  # Presence is not enough. The /mcp probe below cannot answer this: authentication
+  # runs before the transport that enforces allowedHosts is even constructed, so an
+  # unauthenticated request returns 401 whatever the allowlist says -- including an
+  # allowlist that omits the very hostname this script is about to print as the
+  # endpoint. That is precisely the "authorizes fine, then every call fails" failure
+  # the pinning step exists to prevent, so check the hostname directly.
+  canonical_host="${URL#https://}"
+  canonical_host="${canonical_host%%/*}"
+  if [[ ",${EFFECTIVE_HOSTS}," == *",${canonical_host},"* ]]; then
+    echo "    host allowlist includes ${canonical_host}: $EFFECTIVE_HOSTS"
+  else
+    echo "    REAI_ALLOWED_HOSTS is '${EFFECTIVE_HOSTS}', which does not include" >&2
+    echo "    '${canonical_host}' -- the hostname clients will use. The OAuth flow would" >&2
+    echo "    succeed and then every MCP call would fail with 'Invalid Host header'." >&2
+    fail=1
+  fi
+else
+  echo "    REAI_ALLOWED_HOSTS is not set on the deployed revision, so DNS-rebinding" >&2
+  echo "    protection is off and a spoofed Host decides the advertised issuer." >&2
+  fail=1
+fi
+
+# The alias failure this whole step exists for is "authorizes fine, then every call
+# fails" -- which only shows up on /mcp, which was never called. An unauthenticated
+# initialize must be REJECTED (401), not accepted: reaching the auth check proves the
+# transport is routing and the Host was accepted.
+mcp_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+  -X POST "${URL}/mcp" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-verify","version":"0"}}}' 2>/dev/null)"
+if [[ "$mcp_status" == "401" ]]; then
+  echo "    /mcp reachable and requires authorization (401)"
+else
+  echo "    /mcp returned HTTP ${mcp_status}, expected 401 (reachable but unauthorized)." >&2
+  echo "    404 means the route is absent -- an old image, or traffic on the wrong revision." >&2
+  fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo >&2
   echo "Deployment is NOT verified. Fix the above before adding it as a connector." >&2
@@ -310,8 +471,8 @@ cat <<EOF
 Deployed and verified.
 
   MCP endpoint:  ${URL}/mcp
-  Write mode:    ${WRITE_MODE}
-  External send: ${ALLOW_EXTERNAL_SEND} (EHF/Peppol, invoice email, reminders, invoice issuance)
+  Write mode:    ${EFFECTIVE_WRITE_MODE}
+  External send: ${EFFECTIVE_EXTERNAL_SEND} (0 = off; EHF/Peppol, invoice email, reminders, issuance)
   Runs as:       ${SERVICE_ACCOUNT}
   Callbacks:     ${ALLOWED_REDIRECT_HOSTS} (plus loopback, for local clients)
 

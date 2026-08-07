@@ -17,8 +17,12 @@
 # Usage:
 #   ./scripts/ci-local.sh                # current working tree
 #   ./scripts/ci-local.sh main           # a specific ref (checked out, then restored)
+#   ./scripts/ci-local.sh --allow-skips  # tolerate missing Node versions
 #
-# Exits non-zero if anything the workflow checks would fail.
+# Exits non-zero if anything the workflow checks would fail, AND if any matrix
+# entry could not be checked at all. A skipped Node version is not a pass: the
+# exit code is what a wrapper or an `&&` chain reads, and it has to mean "every
+# matrix entry was checked and passed" or it means nothing.
 
 set -uo pipefail
 
@@ -38,7 +42,15 @@ REQUIRED_IN_PACKAGE=(
   README.md
 )
 
-TARGET_REF="${1:-}"
+ALLOW_SKIPS=0
+TARGET_REF=""
+for arg in "$@"; do
+  case "$arg" in
+    --allow-skips) ALLOW_SKIPS=1 ;;
+    -*) echo "Unknown option: $arg" >&2; exit 2 ;;
+    *) TARGET_REF="$arg" ;;
+  esac
+done
 ORIGINAL_REF=""
 restore() {
   if [[ -n "$ORIGINAL_REF" ]]; then
@@ -87,7 +99,7 @@ skipped=()
 for major in "${NODE_MAJORS[@]}"; do
   bin="$(resolve_node_bin "$major")" || {
     echo "  Node $major: NOT INSTALLED — skipping (CI still covers it)"
-    skipped+=("$major")
+    skipped+=("Node $major")
     continue
   }
   version="$(PATH="$bin:$PATH" node --version)"
@@ -152,14 +164,16 @@ echo
 pack_bin="$(resolve_node_bin 22 || true)"
 if [[ -z "$pack_bin" ]]; then
   echo "  package: Node 22 not installed — skipping (CI still covers it)"
-  skipped+=("22/package")
+  skipped+=("package check (needs Node 22)")
   pack_log=""
 else
 pack_log="$(mktemp)"
 if PATH="$pack_bin:$PATH" npm pack --dry-run >"$pack_log" 2>&1; then
   missing=0
   for required in "${REQUIRED_IN_PACKAGE[@]}"; do
-    grep -q "$required" "$pack_log" || { echo "  package: MISSING $required"; missing=1; }
+    # Anchored: an unanchored match let dist/index.js be "found" on the line for
+    # dist/index.js.map, so a genuinely absent entrypoint would have passed.
+    grep -qE "[[:space:]]${required}\$" "$pack_log" || { echo "  package: MISSING $required"; missing=1; }
   done
   if [[ "$missing" -eq 0 ]]; then
     echo "  package contents: all $((${#REQUIRED_IN_PACKAGE[@]})) required paths present"
@@ -176,8 +190,15 @@ fi
 
 echo
 if [[ ${#skipped[@]} -gt 0 ]]; then
-  echo "  NOTE: Node ${skipped[*]} not installed locally, so ${#skipped[@]} of ${#NODE_MAJORS[@]} matrix"
-  echo "        entries were not checked. Do not report this run as equivalent to CI."
+  echo "  NOT CHECKED: ${skipped[*]}"
+  echo "  Those entries were skipped, so this run does not cover the matrix."
+  if [[ "$ALLOW_SKIPS" -eq 0 ]]; then
+    echo
+    echo "ci-local: INCOMPLETE — install the missing Node versions (nvm install <major>)"
+    echo "          or pass --allow-skips to accept partial coverage."
+    exit 1
+  fi
+  echo "  (--allow-skips given, continuing.)"
 fi
 
 if [[ "$failures" -eq 0 ]]; then
