@@ -20,6 +20,17 @@ const VOUCHER_TYPES = [
   "PAYMENT",
   "EXPENSE",
   "SALARY",
+  // The spec declares sixteen; eight were listed, so "show me the VAT settlement
+  // voucher" or "which depreciation was booked" got a zod rejection from this server
+  // rather than an answer, while the filter read as exhaustive.
+  "CUSTOMS_DECLARATION",
+  "ASSET",
+  "ASSET_DEPRECIATION",
+  "SHAREHOLDER_REGISTER_DIVIDEND",
+  "VAT_RETURN",
+  "LOAN",
+  "CREDIT_NOTE_ASSIGNMENT",
+  "CUSTOMER_INVOICE_ADJUSTMENT",
 ] as const;
 
 const listAccounts = defineTool({
@@ -40,7 +51,24 @@ const listAccounts = defineTool({
       .string()
       .optional()
       .describe('Restrict to a leading digit range, e.g. "19" for bank accounts or "3" for revenue.'),
-    limit: z.number().int().min(1).max(500).optional().describe("Maximum accounts to return."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe(
+        "Maximum accounts to return. The API caps this at 100 and does so SILENTLY, so a larger " +
+          "number used to look like it worked while quietly truncating the chart of accounts. " +
+          "Narrow with accountNumberPrefix or query instead of asking for more.",
+      ),
+    filterRestricted: z
+      .boolean()
+      .optional()
+      .describe(
+        "Exclude accounts reserved for system use, which cannot be posted to directly. Worth " +
+          "setting when you are choosing an account to book against.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -51,6 +79,7 @@ const listAccounts = defineTool({
         query: args.query,
         accountNumberPrefix: args.accountNumberPrefix,
         limit: args.limit,
+        filterRestricted: args.filterRestricted,
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
@@ -549,10 +578,14 @@ const generalLedger = defineTool({
   name: "reai_general_ledger",
   title: "General ledger (hovedbok)",
   description:
-    "Read the general ledger for a period: every account with its opening balance, postings and " +
-    "closing balance. This is the report to use for questions like 'what did we spend on X' or " +
-    "'what is the balance of account 1920'. Narrow with accountNumber or an account range, since " +
-    "a full-year ledger for an active tenant can be large.",
+    "Read the general ledger for a period: opening balance, postings and closing balance per " +
+    "account. Good for 'what did we spend on X'. Narrow with accountNumber or an account range, " +
+    "since a full-year ledger for an active tenant can be large.\n\n" +
+    "Note what it does NOT cover: the API returns only accounts WITH ACTIVITY in the requested " +
+    "period. An account carrying a balance forward but untouched in the window is simply absent, " +
+    "so an empty result means 'no movement', not 'no balance'. To answer 'what is the balance of " +
+    "account 1920' reliably, widen the period to include the last posting on it rather than " +
+    "reporting zero.",
   risk: "read",
   apiPaths: [["GET", "/api/ledger/general"]],
   inputSchema: {

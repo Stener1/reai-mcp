@@ -493,3 +493,104 @@ test("a bound tenant cannot be overridden via the path or query", async () => {
   await tool.handler({ method: "GET", path: "/api/accountant-clients/200" }, ctx(undefined));
   assert.equal(sent.length, 1);
 });
+
+test("every voucher type the API declares is accepted by the filter", async () => {
+  // Eight of sixteen were listed while the filter read as exhaustive, so "show me the
+  // VAT settlement voucher" or "which depreciation was booked" got a validation
+  // rejection from this server rather than an answer.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const raw = readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8");
+
+  const match = /"enum"\s*:\s*\[([^\]]{0,900})\]/g;
+  let declared = null;
+  for (const m of raw.matchAll(match)) {
+    if (m[1].includes("OPENING_BALANCE") && m[1].includes("MANUAL")) {
+      declared = m[1].split(",").map((v) => v.trim().replace(/^"|"$/g, ""));
+      break;
+    }
+  }
+  assert.ok(declared && declared.length > 0, "the spec should declare voucher types");
+
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_list_vouchers");
+  const accepted = tool.inputSchema.voucherType?._def?.innerType?._def?.values
+    ?? tool.inputSchema.voucherType?._def?.values
+    ?? [];
+  const missing = declared.filter((v) => !accepted.includes(v));
+  assert.deepEqual(missing, [], `voucher types the API declares but this tool rejects: ${missing.join(", ")}`);
+});
+
+test("the account limit does not exceed the API's silent cap", async () => {
+  // The API caps limit at 100 and does so without saying so, which made a larger
+  // number look like it worked while truncating the chart of accounts — under a tool
+  // that tells the agent every posting must reference an account from this list.
+  const { allTools } = await import("../dist/server.js");
+  const tool = allTools.find((t) => t.name === "reai_list_accounts");
+  const checks = tool.inputSchema.limit?._def?.innerType?._def?.checks
+    ?? tool.inputSchema.limit?._def?.checks
+    ?? [];
+  const max = checks.find((c) => c.kind === "max");
+  assert.ok(max, "limit should declare a maximum");
+  assert.ok(max.value <= 100, `limit allows ${max.value}, but the API caps at 100`);
+});
+
+test("no read tool accepts an input it never sends", async () => {
+  // Codex found `filterRestricted` declared on reai_list_accounts and silently
+  // dropped, which is worse than not offering it: the tool promised to exclude
+  // system-only accounts and did not. This sweeps for the same class across every
+  // read tool, so the next one fails here instead of shipping.
+  const { allTools } = await import("../dist/server.js");
+
+  // A value the field will actually accept, so the handler behaves normally.
+  const sentinelFor = (name, schema) => {
+    const def = schema?._def?.innerType?._def ?? schema?._def ?? {};
+    if (Array.isArray(def.values) && def.values.length > 0) return def.values[0];
+    if (def.typeName === "ZodBoolean") return true;
+    if (def.typeName === "ZodNumber") return 4242;
+    if (/date/i.test(name)) return "2026-03-04";
+    return `SENTINEL_${name}`;
+  };
+
+  const dropped = [];
+  for (const tool of allTools) {
+    if (tool.risk !== "read") continue;
+    if (tool.name === "reai_request") continue; // its inputs map to method/path/binary, not a query
+    const fields = Object.keys(tool.inputSchema ?? {}).filter((f) => f !== "tenantId");
+    if (fields.length === 0) continue;
+
+    const args = {};
+    for (const f of fields) args[f] = sentinelFor(f, tool.inputSchema[f]);
+
+    const calls = [];
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 1, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: {
+        request: async (opts) => {
+          calls.push(opts);
+          return { status: 200, data: [] };
+        },
+        deepLink: () => "https://app.reai.no/",
+      },
+    };
+
+    try {
+      await tool.handler(args, ctx);
+    } catch {
+      continue; // a tool that refuses this combination locally is not the target here
+    }
+    if (calls.length === 0) continue;
+
+    // A field counts as used if its VALUE or its NAME shows up anywhere in any request
+    // the handler made — query, path or body. Some fields legitimately choose an
+    // endpoint rather than being forwarded.
+    const seen = JSON.stringify(calls);
+    const missing = fields.filter((f) => !seen.includes(String(args[f])) && !seen.includes(f));
+    if (missing.length > 0) dropped.push(`${tool.name}: ${missing.join(", ")}`);
+  }
+
+  assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
+});
