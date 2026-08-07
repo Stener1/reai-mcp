@@ -78,6 +78,9 @@ So `REAI_ALLOW_EXTERNAL_SEND` gates everything that leaves the tenant, independe
 - EHF/Peppol transmission, and any order carrying `sendEhf: true`
 - Invoice email, payment reminders, agreement signing requests
 - **Issuing a customer invoice** — `POST /api/invoices` starts delivery asynchronously (eFaktura, then EHF, then PDF by email), so it is not a books-only operation
+- Government filings: the tax return, and completing a payroll run (the a-melding)
+- **Granting a user access** — `POST /api/users` creates a `pending_invitation` with an `invitationId` and an expiry, which reaches the invitee by email. What it sends is not data but privilege: `roleCode` accepts `ROLE_TENANT_ADMIN`, to an address the caller chooses
+- **A bank-integrated supplier payment** — `manualPayment: false` can return an `approvalUrl` that starts a real BankID transfer. `manualPayment: true` records a payment that has already left the bank and needs nothing
 
 It is **off by default**, and `REAI_WRITE_MODE=full` does not lift it. A posting can be reversed; an invoice that has gone over Peppol cannot be recalled.
 
@@ -511,7 +514,7 @@ A test asserts every quirk still matches a real operation in the spec, so they c
 | `REAI_USER_API_TOKEN` | — | **Required.** ReAI user API token. `REAI_TOKEN` is accepted as an alias |
 | `REAI_TENANT_ID` | — | Default tenant, so `tenantId` can be omitted |
 | `REAI_WRITE_MODE` | `reversible` | `read-only`, `reversible` or `full` — see [Safety](#safety-this-writes-to-real-accounting-books) |
-| `REAI_ALLOW_EXTERNAL_SEND` | off | Permit sending to third parties: EHF/Peppol, invoice email, reminders, signing requests, and issuing an invoice. **Enable this for a business doing its own invoicing** — see [below](#sending-things-to-other-people-is-a-separate-switch) |
+| `REAI_ALLOW_EXTERNAL_SEND` | off | Permit anything that reaches a third party: EHF/Peppol, invoice email, reminders, signing requests, issuing an invoice, government filings, a user invitation, and a bank-integrated supplier payment. **Enable this for a business doing its own invoicing** — see [below](#sending-things-to-other-people-is-a-separate-switch) |
 | `REAI_BASE_URL` | `https://app.reai.no` | Override for a staging environment |
 | `REAI_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `REAI_MAX_RETRIES` | `2` | Retries on 429/502/503/504, with exponential backoff and jitter |
