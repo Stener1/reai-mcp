@@ -119,10 +119,16 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       const { value, trims } = trimNestedArrays(data)!;
       body = stringify(value);
       const trimmed = trims.filter((t) => t.shown < t.total);
+      const named = trimmed
+        .slice(0, TRUNCATION_NOTE_MAX_FIELDS)
+        .map((t) => `${t.field} shows ${t.shown} of ${t.total}`)
+        .join(", ");
+      const rest = trimmed.length - TRUNCATION_NOTE_MAX_FIELDS;
       parts.push(
         `NOTE: response truncated to fit ${MAX_RESULT_CHARS} characters. It is still valid JSON ` +
           `and every value in it is complete — the long lists were shortened, not cut mid-item: ` +
-          trimmed.map((t) => `${t.field} shows ${t.shown} of ${t.total}`).join(", ") +
+          named +
+          (rest > 0 ? `, and ${rest} further list(s) shortened` : "") +
           `. Every other field is present and whole. Do not read a shortened list as exhaustive; ` +
           `the count fields in the response give the real totals.`,
       );
@@ -169,6 +175,12 @@ export function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
+/** Space held back for the truncation note, which is part of what the caller sees. */
+const TRUNCATION_NOTE_RESERVE = 1200;
+
+/** How many trimmed fields the note names before summarising the rest. */
+const TRUNCATION_NOTE_MAX_FIELDS = 6;
+
 /**
  * Shorten the array-valued properties of an object until the whole thing fits.
  *
@@ -179,61 +191,71 @@ export function fail(message: string): ToolResult {
  * Arrays are grown round-robin from empty rather than one at a time, so a single huge
  * list cannot consume the whole budget and leave the others showing nothing. Seeing
  * that a list exists but is empty is the specific wrong answer worth avoiding here.
+ *
+ * Per-item costs are measured EXACTLY, once, rather than sampled. A sampled average
+ * was wrong in both directions: a list of five short strings followed by 1 KB strings
+ * admitted thousands of items that then had to be removed one at a time, which is
+ * quadratic — about 1972 full serialisations, some 23 seconds, blocking the event loop
+ * — and in the other direction an average inflated by a few large entries could reject
+ * a field whose FIRST item would have fitted, reproducing the empty-list outcome this
+ * function exists to prevent. One pass of `stringify` per item costs the same as
+ * serialising the payload once.
  */
 function trimNestedArrays(
   data: unknown,
 ): { value: Record<string, unknown>; trims: Array<{ field: string; shown: number; total: number }> } | undefined {
   if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
   const entries = Object.entries(data as Record<string, unknown>);
-  const arrayFields = entries.filter(([, v]) => Array.isArray(v) && (v as unknown[]).length > 0);
+  const arrayFields = entries.filter(([, v]) => Array.isArray(v) && (v as unknown[]).length > 0) as Array<
+    [string, unknown[]]
+  >;
   if (arrayFields.length === 0) return undefined;
 
-  const build = (counts: Map<string, number>): Record<string, unknown> =>
+  const counts = new Map(arrayFields.map(([k]) => [k, 0]));
+  const build = (): Record<string, unknown> =>
     Object.fromEntries(
-      entries.map(([k, v]) =>
-        Array.isArray(v) && counts.has(k) ? [k, v.slice(0, counts.get(k))] : [k, v],
-      ),
+      entries.map(([k, v]) => (Array.isArray(v) && counts.has(k) ? [k, v.slice(0, counts.get(k))] : [k, v])),
     );
 
-  const counts = new Map(arrayFields.map(([k]) => [k, 0]));
-  if (stringify(build(counts)).length > MAX_RESULT_CHARS) return undefined;
+  // The note counts against the cap too: it names every trimmed field, so an object
+  // with a thousand short arrays produced a 23.9 KB body under an 18.7 KB note — a
+  // "capped" response of 42.6 KB, still crowding out the conversation.
+  const budget = MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE;
+  const base = stringify(build()).length;
+  if (base > budget) return undefined;
 
-  // Per-item cost is estimated once — serialising the whole object per item would be
-  // O(n²) on a 4000-row response — then the result is verified and shrunk if the
-  // estimate ran optimistic.
-  const cost = new Map(
-    arrayFields.map(([k, v]) => {
-      const items = v as unknown[];
-      const sample = items.slice(0, 5).map((i) => stringify(i).length + 6);
-      return [k, Math.max(1, Math.ceil(sample.reduce((a, b) => a + b, 0) / Math.max(1, sample.length)))];
-    }),
+  const itemCost = new Map(
+    arrayFields.map(([k, items]) => [k, items.map((item) => stringify(item).length + 8)]),
   );
 
-  let used = stringify(build(counts)).length;
+  let used = base;
   let grew = true;
   while (grew) {
     grew = false;
-    for (const [field, items] of arrayFields as Array<[string, unknown[]]>) {
+    for (const [field, items] of arrayFields) {
       const at = counts.get(field) ?? 0;
       if (at >= items.length) continue;
-      const next = used + (cost.get(field) ?? 1);
-      if (next > MAX_RESULT_CHARS) continue;
+      // The cost of the NEXT item specifically, not an average over the list.
+      const next = used + (itemCost.get(field)?.[at] ?? 1);
+      if (next > budget) continue;
       counts.set(field, at + 1);
       used = next;
       grew = true;
     }
   }
 
-  // Verify against the real serialisation, shrinking the longest list first.
-  while (stringify(build(counts)).length > MAX_RESULT_CHARS) {
-    const longest = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-    if (!longest || longest[1] === 0) return undefined;
-    counts.set(longest[0], longest[1] - 1);
+  // Verify against the real serialisation. Exact costs make this a formality, but the
+  // separator arithmetic is still an approximation, so halve rather than decrement:
+  // that bounds the work at O(log n) serialisations however wrong the estimate was.
+  while (stringify(build()).length > budget) {
+    const largest = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (!largest || largest[1] === 0) return undefined;
+    counts.set(largest[0], Math.floor(largest[1] / 2));
   }
 
   return {
-    value: build(counts),
-    trims: (arrayFields as Array<[string, unknown[]]>).map(([field, items]) => ({
+    value: build(),
+    trims: arrayFields.map(([field, items]) => ({
       field,
       shown: counts.get(field) ?? 0,
       total: items.length,

@@ -858,3 +858,33 @@ test("truncation falls back cleanly when shortening lists cannot help", () => {
   // Under the cap, untouched.
   assert.equal(ok({ id: 1, name: "ok" }).content[0].text, '{\n  "id": 1,\n  "name": "ok"\n}');
 });
+
+// The first version of this helper sampled five items to estimate per-item cost. That
+// was wrong in both directions, and Codex found all three consequences on the PR.
+test("nested truncation is fast, fair, and counts its own note", () => {
+  // A list of five tiny entries followed by 1 KB strings: the sample admitted thousands
+  // of items that then had to be removed ONE AT A TIME, re-serialising the whole payload
+  // each pass — quadratic, measured at roughly 23 seconds, blocking the event loop.
+  const heterogeneous = [...Array(5).fill(""), ...Array.from({ length: 1995 }, () => "x".repeat(1000))];
+  const started = Date.now();
+  const out = ok({ rows: heterogeneous }).content[0].text;
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `truncation took ${elapsed}ms — it must not be quadratic`);
+  assert.ok(out.length <= 24_000, `produced ${out.length} characters`);
+
+  // An average inflated by one huge entry could reject a field whose FIRST item fitted,
+  // recreating the empty-list outcome the helper exists to prevent.
+  const mixed = ok({
+    small: ["a"],
+    huge: [...Array(3).fill("b"), "z".repeat(20_000)],
+    pad: "y".repeat(10_000),
+  }).content[0].text;
+  const parsed = JSON.parse(mixed.slice(mixed.indexOf("{")));
+  assert.deepEqual(parsed.small, ["a"], "a list whose first item fits must not be emptied");
+
+  // The note names every trimmed field, so 1000 short arrays produced a 23.9 KB body
+  // under an 18.7 KB note — a "capped" response of 42.6 KB.
+  const many = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`field${i}`, ["v".repeat(20)]]));
+  const wide = ok(many).content[0].text;
+  assert.ok(wide.length <= 24_000, `note plus body came to ${wide.length} characters`);
+});
