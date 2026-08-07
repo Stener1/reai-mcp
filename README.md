@@ -211,6 +211,17 @@ For a *tenant-scoped* token none of the first two applies: the header is ignored
 
 So the binding is exactly as strong as this process, which is the right architecture — the token is the user's own, and they were never prevented from calling ReAI directly — but do not read it as the API sandboxing them.
 
+### Request limits
+
+The MCP endpoint enforces two ceilings, both well above any real tool call:
+
+| Limit | Value | Why |
+|---|---|---|
+| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413`, and the connection is closed |
+| JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
+
+`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. Responses stream on the POST itself, so no client capability is lost.
+
 ### Verify a deployment
 
 ```bash

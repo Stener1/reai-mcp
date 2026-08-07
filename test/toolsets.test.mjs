@@ -303,3 +303,31 @@ test("a bound connection discloses only the company it is bound to", async () =>
   assert.ok(!/load-bearing/.test(note), "selection guidance contradicts the binding");
   assert.match(note, /deliberately not listed/i, "say that others exist without naming them");
 });
+
+// A README section documenting an enforced limit went missing in an unrelated edit —
+// a text slice that reached past its intended end took the whole "Request limits"
+// section with it, and the limits stayed in force undocumented. Operators find out
+// about a 413 or a 405 from the README or not at all, so the numbers are pinned to the
+// constants that produce them.
+test("the README documents the transport limits the code enforces", async () => {
+  const { readFileSync } = await import("node:fs");
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const http = readFileSync(new URL("../src/http.ts", import.meta.url), "utf8");
+
+  const bodyBytes = /MAX_MCP_BODY_BYTES = (\d+) \* 1024 \* 1024/.exec(http)?.[1];
+  const batch = /MAX_MCP_BATCH = (\d+)/.exec(http)?.[1];
+  assert.ok(bodyBytes, "could not read the body limit from src/http.ts");
+  assert.ok(batch, "could not read the batch limit from src/http.ts");
+
+  assert.match(readme, /### Request limits/, "the Request limits section is missing");
+  assert.ok(
+    readme.includes(`${bodyBytes} MB`),
+    `the README does not mention the ${bodyBytes} MB body limit the code enforces`,
+  );
+  assert.ok(
+    readme.includes(`${batch} messages`),
+    `the README does not mention the ${batch}-message batch limit the code enforces`,
+  );
+  // And the 405, which looks like a defect to anyone who has not read why.
+  assert.match(readme, /GET \/mcp` answers \*\*405\*\*/);
+});
