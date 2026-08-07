@@ -832,7 +832,8 @@ test("changing a counterparty's bank details escalates; changing its name does n
   // the ReAI UI — entirely outside anything this policy observes. So a prompt-injected
   // agent in the DEFAULT configuration could repoint a supplier's account.
   const { classifyRequest, classifyPaymentRouting, paymentRoutingFields } = await import("../dist/policy.js");
-  const risk = (method, path, body) => classifyPaymentRouting(classifyRequest(method, path), path, body);
+  const risk = (method, path, body, forwarded) =>
+    classifyPaymentRouting(classifyRequest(method, path), path, body, forwarded);
 
   assert.equal(risk("PATCH", "/api/suppliers/1", { name: "New name" }), "reversible");
   assert.equal(risk("PATCH", "/api/suppliers/1", { bankAccountNumber: "15039012345" }), "irreversible");
@@ -846,7 +847,23 @@ test("changing a counterparty's bank details escalates; changing its name does n
 
   // Registering the company's OWN bank account carries a swiftCode and is ordinary
   // work in the default mode — this must stay path-scoped, not field-only.
-  assert.equal(risk("POST", "/api/company-banks", { swiftCode: "DNBANOKK", bban: "15201353103" }), "reversible");
+  //
+  // The METHOD has to be passed for that exemption to apply, and this assertion used to
+  // omit it and pass anyway: the exemption was written as a condition for entering scope,
+  // so an unknown method left the path out of scope entirely and fell through to
+  // "reversible". That is failing OPEN on a payment-routing path, which is the opposite of
+  // this classifier's stated default. Company banks are now in scope like every other
+  // inward-facing path, with POST exempted, so an unknown method fails closed instead.
+  // Every real caller passes the method — the escape hatch and curatedArgsEscalate both do.
+  assert.equal(
+    risk("POST", "/api/company-banks", { swiftCode: "DNBANOKK", bban: "15201353103" }, "POST"),
+    "reversible",
+  );
+  assert.equal(
+    risk("POST", "/api/company-banks", { bban: "15201353103" }),
+    "irreversible",
+    "with no method to check the exemption against, the strict reading is the safe one",
+  );
 
   assert.deepEqual(paymentRoutingFields({ name: "x", iban: "NO93" }), ["iban"]);
   assert.deepEqual(paymentRoutingFields({ name: "x" }), []);

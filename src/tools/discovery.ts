@@ -17,6 +17,7 @@ import {
   classifyTransmission,
   classifyWithBody,
   classifyPaymentRouting,
+  inPaymentRoutingScope,
   classifyInvoiceDelivery,
   invoiceDeliveryFields,
   escalatingBodyFields,
@@ -473,7 +474,15 @@ const request = defineTool({
     // consequence: reversible as a record, permanent as a disclosure. Kept apart so
     // the refusal names the right thing to go and check.
     const risk = classifyInvoiceDelivery(routingRisk, decoded, args.body);
-    const routing = routingRisk !== bodyRisk ? paymentRoutingFields(args.body) : [];
+    // Named whenever the call actually repoints a destination, not only when doing so is
+    // what escalated it. On a path that is ALREADY irreversible — creating a supplier
+    // invoice, say — classifyPaymentRouting returns before it looks at the body, so
+    // `routingRisk === bodyRisk` and the refusal used to read as an ordinary ledger write
+    // while quietly carrying `paymentDetails.iban`. In `full` mode that call is permitted,
+    // and the operator reading the log deserves to know which of the two things it did.
+    const routing = paymentRoutingFields(args.body).length > 0 && inPaymentRoutingScope(decoded, args.method)
+      ? paymentRoutingFields(args.body)
+      : [];
     const delivery = risk !== routingRisk ? invoiceDeliveryFields(args.body) : [];
     const escalated =
       routing.length > 0

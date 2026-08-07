@@ -622,22 +622,94 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
  * is an ordinary thing to do in the default mode. Only a counterparty's destination
  * escalates.
  */
-const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
+export const PAYMENT_ROUTING_PATHS: readonly RegExp[] = [
   /^\/api\/suppliers(\/|$)/,
   /^\/api\/creditors(\/|$)/,
   /^\/api\/customers(\/|$)/,
-  /^\/api\/supplier-invoices\/[^/]+\/payment-details(\/|$)/,
+  // An EMPLOYEE's account is where their salary lands, which makes this the sharpest
+  // member of the class rather than an afterthought: salary is paid on a schedule, by
+  // machinery nobody re-examines each month, and the person who notices is the employee
+  // whose pay did not arrive. It was missing, so PATCH /api/employees/{id} carrying
+  // accountNumber was ordinary reversible master data in the default mode.
+  /^\/api\/employees(\/|$)/,
+  // The supplier-invoice PAYMENT DETAILS, at every path that writes them. The nested
+  // /payment-details sub-resource was covered and the parent was not — yet
+  // POST /api/supplier-invoices and PATCH /api/supplier-invoices/{id} accept the same
+  // paymentDetails object, and that account is what an outgoing payment actually uses.
+  /^\/api\/supplier-invoices(\/|$)/,
+  // Same object again, reached from the receiving side: turning a received EHF document
+  // into a supplier invoice carries the beneficiary's bank details with it.
+  /^\/api\/invoice-reception-documents\/[^/]+\/supplier-invoice(\/|$)/,
+  // A lease carries the rent and deposit accounts the tenant pays into. Editing an
+  // existing one redirects money inward, exactly as repointing a company bank does.
+  /^\/api\/agreements\/rent-agreement(\/|$)/,
+  // The company's OWN account, which its customers pay into. Previously reached through a
+  // bespoke branch below rather than this list; folding it in is what let the lease reuse
+  // the same add-versus-repoint rule instead of growing a second special case. Removing
+  // the branch without adding it here dropped the protection outright, and the invariant
+  // test caught that within a minute — which is the argument for having the test.
+  /^\/api\/company-banks(\/|$)/,
 ];
 
-// `bban` is the company-bank schema's account-number field. It was absent, so even
-// once /api/company-banks was in scope the account number itself went undetected.
+/**
+ * Paths where the money flows INWARD and creating the record is ordinary work.
+ *
+ * Repointing an existing company bank or lease redirects a stream someone is already
+ * paying into — and for a lease, a signed contract in the tenant's hands names the old
+ * account. Creating one establishes a new arrangement instead of diverting an existing
+ * one, and a human signs it before anybody pays, so `POST` stays out of scope.
+ */
+const ADDING_IS_ORDINARY: readonly RegExp[] = [
+  /^\/api\/company-banks(\/|$)/,
+  /^\/api\/agreements\/rent-agreement(\/|$)/,
+];
+
+/**
+ * Field names that NAME A DESTINATION for money.
+ *
+ * Two were missing because the set was written against the supplier and company-bank
+ * schemas and never checked against the others: the supplier-invoice payment details call
+ * the same concepts `swiftBic` ("The beneficiary bank SWIFT/BIC") and `routingNumber`
+ * ("The bank routing number"). `test/payment-routing.test.mjs` now reads the OpenAPI
+ * document and fails if any routing-shaped field is neither in this set nor explicitly
+ * exempted, so the next rename does not slip through the same gap.
+ *
+ * Deliberately NOT here:
+ *
+ * - `bankAccountCategory`, `localClearingSystem`, `routingType` — they change the rails a
+ *   payment travels on, not the account it arrives in. A destination is always written
+ *   alongside them by one of the fields above, so the call is caught anyway.
+ * - `bankCountryCode` — on its own it does not name an account, and it is settable on
+ *   ordinary employee edits.
+ * - Every `*AccountNumber` that is a CHART-OF-ACCOUNTS code: `accrualAccountNumber`,
+ *   `principalAccountNumber`, `interestExpenseAccountNumber` and the rest carry
+ *   `$ref: AccountNumber`, and `POST /api/assets` pins its own to `pattern: 1\d{3}`.
+ *   Escalating those would refuse a booking with "this changes where a payment will go",
+ *   which is false — a misleading refusal teaches an operator to distrust the real ones.
+ */
 const PAYMENT_ROUTING_FIELDS = new Set([
   "iban",
   "bankaccountnumber",
-  "swiftcode",
-  "accountnumber",
+  // `bban` is the company-bank schema's account-number field. It was absent, so even
+  // once /api/company-banks was in scope the account number itself went undetected.
   "bban",
+  "accountnumber",
+  "swiftcode",
+  "swiftbic",
+  "routingnumber",
+  // A Norwegian lease names the accounts the tenant pays into: rent monthly, and the
+  // deposit into a dedicated escrow account (depositumskonto), which the law requires to
+  // be separate. Both were nearly dismissed as chart-of-accounts codes because they are
+  // bare strings — but that is the evidence FOR them, not against: `AccountNumber` is
+  // documented as "Base chart of accounts number" and every genuine ledger field in the
+  // document $refs it. These do not, and they sit among `monthlyRent`,
+  // `rentDueDayOfMonth`, `depositAmount`, `depositType` and `guaranteeIssuer`.
+  "rentaccountnumber",
+  "depositaccountnumber",
 ]);
+
+/** Exported for the spec-driven invariant test, which has to see the real set. */
+export const paymentRoutingFieldNames: ReadonlySet<string> = PAYMENT_ROUTING_FIELDS;
 
 /**
  * Redirecting invoice DELIVERY. The same shape of harm as payment routing — trivially
@@ -661,7 +733,7 @@ const INVOICE_DELIVERY_PATHS: readonly RegExp[] = [
 
 /** Invoice-delivery fields present in a body, for use in error messages. */
 export function invoiceDeliveryFields(body: unknown): string[] {
-  return presentFields(body, INVOICE_DELIVERY_FIELDS);
+  return presentFields(inspectableObjects(body), INVOICE_DELIVERY_FIELDS);
 }
 
 /** Escalate a call that redirects where invoices are delivered. */
@@ -677,10 +749,13 @@ export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unkn
   return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
 }
 
-function presentFields(body: unknown, names: ReadonlySet<string>): string[] {
+function presentFields(
+  candidates: Array<Record<string, unknown>>,
+  names: ReadonlySet<string>,
+): string[] {
   return [
     ...new Set(
-      inspectableObjects(body).flatMap((candidate) =>
+      candidates.flatMap((candidate) =>
         Object.entries(candidate)
           .filter(
             ([key, value]) =>
@@ -695,9 +770,35 @@ function presentFields(body: unknown, names: ReadonlySet<string>): string[] {
   ];
 }
 
-/** Payment-routing fields present in a body, for use in error messages. */
+/**
+ * Payment-routing fields present in a body, for use in error messages.
+ *
+ * NESTED, unlike the other inspectors. The supplier invoice carries its destination one
+ * object down — `{ paymentDetails: { iban } }`, described in the spec as "The beneficiary
+ * IBAN" — so a top-level-only scan saw nothing and this whole guard did not apply to the
+ * one payload most obviously about where a payment goes.
+ *
+ * The reason the other inspectors stay top-level is that recursing would flag fields which
+ * merely RECORD whether something was sent. That does not apply here, and it is checked
+ * rather than assumed: within payment-routing scope, every in-set field name appears
+ * either at the top level or under `paymentDetails`, and no nested object in scope carries
+ * one of these names meaning a chart-of-accounts code (the cost lines use
+ * `accrualAccountNumber`, which is deliberately not in the set). So recursion cannot
+ * produce the false claim "this changes where a payment will go".
+ */
 export function paymentRoutingFields(body: unknown): string[] {
-  return presentFields(body, PAYMENT_ROUTING_FIELDS);
+  return presentFields(nestedObjects(body), PAYMENT_ROUTING_FIELDS);
+}
+
+/** Depth bound. `paymentDetails.beneficiaryAddress` is the deepest real nesting. */
+const MAX_BODY_DEPTH = 4;
+
+/** Every object reachable through objects and arrays, bounded. */
+function nestedObjects(body: unknown, depth = 0): Array<Record<string, unknown>> {
+  if (depth > MAX_BODY_DEPTH || !body || typeof body !== "object") return [];
+  if (Array.isArray(body)) return body.flatMap((element) => nestedObjects(element, depth + 1));
+  const self = body as Record<string, unknown>;
+  return [self, ...Object.values(self).flatMap((value) => nestedObjects(value, depth + 1))];
 }
 
 /**
@@ -706,6 +807,26 @@ export function paymentRoutingFields(body: unknown): string[] {
  * Reversible as a RECORD and irreversible as a PAYMENT: the loss happens later, when
  * a human pays the invoice in the ReAI UI to whatever account is on file.
  */
+/**
+ * Whether writing a destination on this path redirects money.
+ *
+ * Exported so the refusal MESSAGE can ask the same question as the verdict. The verdict
+ * short-circuits on an already-irreversible path and never inspects the body, which left
+ * the message describing a supplier-invoice write as an ordinary ledger post while it was
+ * repointing the beneficiary's account.
+ */
+export function inPaymentRoutingScope(path: string, method?: string): boolean {
+  const adding = method !== undefined && method.toUpperCase() === "POST";
+  return pathForms(path).some((normalized) => {
+    if (!PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized))) return false;
+    // Creating an inward-facing record is ordinary work; repointing one is not. The
+    // original exemption was written for company banks and never distinguished adding
+    // from repointing — this keeps that distinction and applies it to leases too.
+    if (adding && ADDING_IS_ORDINARY.some((re) => re.test(normalized))) return false;
+    return true;
+  });
+}
+
 export function classifyPaymentRouting(
   pathRisk: Risk,
   path: string,
@@ -721,22 +842,10 @@ export function classifyPaymentRouting(
   if (pathRisk !== "reversible") return pathRisk;
   // Both readings of the path, or a matrix parameter would put the request outside the
   // scope of this guard while classifyRequest read it as an ordinary reversible write.
-  const forms = pathForms(path);
-  const inScope = forms.some(
-    (normalized) =>
-      PAYMENT_ROUTING_PATHS.some((re) => re.test(normalized)) ||
-    // Editing an EXISTING company bank repoints where this company's own customers
-    // pay — the money flows inward rather than outward, but it is redirected just as
-    // permanently, and invoices already issued name that account. Adding one (POST)
-    // stays ordinary work, which is why the original exemption was written; it just
-    // never distinguished adding from repointing.
-      (COMPANY_BANK_PATH.test(normalized) && method !== undefined && method.toUpperCase() !== "POST"),
-  );
-  if (!inScope) return pathRisk;
+  if (!inPaymentRoutingScope(path, method)) return pathRisk;
   return paymentRoutingFields(body).length > 0 ? "irreversible" : pathRisk;
 }
 
-const COMPANY_BANK_PATH = /^\/api\/company-banks(\/|$)/;
 
 /**
  * Whether a CURATED tool's arguments escalate its declared risk.
@@ -763,6 +872,15 @@ export function curatedArgsEscalate(
 ): { risk: Risk; fields: string[]; consequence: string; verify: string } | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   for (const [method, path] of apiPaths) {
+    // A tool's READ operations cannot redirect anything, and a tool commonly declares both:
+    // the supplier-invoice tools list `GET /api/supplier-invoices` alongside their writes.
+    // Since this forces `pathRisk` to "reversible" to ask the question, a curated read whose
+    // arguments happened to include an `iban` filter came back irreversible and was refused.
+    // That is the same false positive `classifyPaymentRouting` documents fixing on the
+    // escape-hatch side, and it arrived here the moment supplier-invoices entered routing
+    // scope. Unreachable today — no curated read takes such an argument — but the next one
+    // to do so would be blocked in read-only mode, the mode people point at a live business.
+    if (method.toUpperCase() === "GET") continue;
     if (classifyPaymentRouting("reversible", path, args, method) === "irreversible") {
       return {
         risk: "irreversible",
