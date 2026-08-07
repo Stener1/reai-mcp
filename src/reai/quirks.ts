@@ -474,6 +474,19 @@ export const QUIRKS: readonly Quirk[] = [
       "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
   },
   {
+    id: "swift-code-is-normalised",
+    paths: ["/api/company-banks", "/api/company-banks/{id}"],
+    methods: ["POST", "PUT"],
+    kind: "gotcha",
+    note:
+      'A SWIFT/BIC is stored NORMALISED: the 11-character form ending in the "XXX" ' +
+      'primary-branch suffix comes back as the 8-character form, so sending "DNBANOKKXXX" reads ' +
+      'back as "DNBANOKK". Measured on a live tenant at create time. That is the API doing its ' +
+      "job, not a failed write — but a caller that compares what it sent with what is stored, in " +
+      "order to check the write took effect, will see a difference and should not treat it as one. " +
+      "Echoing the stored value back on a later replacement is unaffected.",
+  },
+  {
     id: "full-replacement-clears-a-payment-destination",
     paths: ["/api/company-banks/{id}", "/api/creditors/{id}"],
     methods: ["PUT"],
@@ -505,10 +518,10 @@ export const QUIRKS: readonly Quirk[] = [
       "body carrying those three is accepted and empties the rest. Measured: postalCode " +
       '"0150" → null, province "Oslo" → null, addressPart2 "Oppgang B" → null, on a 200. An ' +
       "invoice addressed without a postcode is the visible consequence.\n\n" +
-      "reai_set_customer_address reads the current address and merges, so the two customer paths " +
-      "have a safe route. /api/suppliers/{id}/address has NO curated tool, so a raw call is the " +
-      "only way to change a supplier address — read it back from GET /api/suppliers/{id} and send " +
-      "every part you want kept.",
+      "reai_set_customer_address and reai_set_supplier_address both read the current address and " +
+      "merge, so every one of these three paths has a safe route — prefer them. A raw call has to " +
+      "read the record back itself (GET /api/customers/{id} or /api/suppliers/{id}) and send every " +
+      "part it wants kept.",
   },
   // --- Agreements -----------------------------------------------------------
   {

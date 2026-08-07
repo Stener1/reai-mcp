@@ -246,7 +246,9 @@ const setCustomerAddress = defineTool({
     "and countryCode — so a body carrying those three is accepted and empties everything else. " +
     "Measured on a live tenant: postalCode \"0150\" became null, province \"Oslo\" became null and " +
     "the second address line was emptied, on a 200. So this tool reads the current address first " +
-    "and merges your changes into it. Pass null for a part you mean to clear.\n\n" +
+    "and merges your changes into it. Pass null to clear one of the OPTIONAL parts — addressPart2, " +
+    "postalCode or province. The other three are required by the endpoint, so there is no way to " +
+    "clear them and null is refused.\n\n" +
     "Between that read and the write there is a lost-update window: an address edited in the " +
     "ReAI UI in between is silently reverted. There is no ETag or version field to prevent it.",
   risk: "reversible",
@@ -266,9 +268,12 @@ const setCustomerAddress = defineTool({
     // Every part is optional now that the current address is merged in: requiring the three the
     // API requires would have made "change the street" mean "and retype the city", which is the
     // shape that lost postcodes in the first place. Null clears a part deliberately.
-    addressPart1: z.string().nullable().optional().describe("Street address."),
-    city: z.string().nullable().optional().describe("City."),
-    countryCode: COUNTRY_CODE.nullable().optional().describe('ISO country code, e.g. "NO".'),
+    // These three are REQUIRED by the endpoint and non-nullable in the document, so a null is not
+    // something a caller can mean: there is no way to clear a required field. They were nullable
+    // by reflex, alongside the optional three below where the document does allow it.
+    addressPart1: z.string().optional().describe("Street address."),
+    city: z.string().optional().describe("City."),
+    countryCode: COUNTRY_CODE.optional().describe('ISO country code, e.g. "NO".'),
     addressPart2: z.string().nullable().optional().describe("Second address line."),
     postalCode: z.string().nullable().optional().describe("Postal code."),
     province: z.string().nullable().optional().describe("Province or region."),

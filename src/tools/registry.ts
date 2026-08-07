@@ -563,3 +563,123 @@ export function startOfYear(): string {
   // previous year, so "what have we spent this year" would answer for last year.
   return `${norwegianDate(new Date()).slice(0, 4)}-01-01`;
 }
+
+/**
+ * Merge a caller's changes into a record that must be written back WHOLE.
+ *
+ * Several endpoints here replace rather than patch, so a body carrying one field clears every
+ * other one it omits — measured on agreements (every lease term), company banks and creditors
+ * (the account number), and the address sub-resources (the postcode). The safe shape is always
+ * the same: read the record, overlay the changes, send back everything settable.
+ *
+ * Five tools now do that, and THREE use this: reai_update_company_bank, reai_update_creditor and
+ * reai_set_supplier_address. reai_set_customer_address and reai_update_agreement still hand-roll
+ * it — the first predates this helper and keeps its own parts list, the second dispatches on a
+ * template and merges into a sub-object of a wrapper, which is a different enough shape that
+ * folding it in would complicate both. Worth saying rather than claiming the de-duplication is
+ * finished: it is half done, deliberately for the agreement tool and only by inertia for the
+ * customer one.
+ *
+ * `settable` matters as much as the merge: a response usually carries more than its request
+ * accepts — CompanyBankRes has 18 properties against CompanyBankReq's six — so echoing a GET
+ * verbatim sends fields the endpoint has no place for.
+ *
+ * A `null` in `changes` is kept, because clearing a field deliberately is a legitimate edit; an
+ * `undefined` is dropped, because that is what "I did not mention this" looks like after Zod
+ * has parsed absent optional arguments.
+ */
+export function mergeForReplacement(opts: {
+  existing: Record<string, unknown>;
+  changes: Record<string, unknown>;
+  settable: readonly string[];
+  required?: readonly string[];
+}): {
+  merged: Record<string, unknown>;
+  /** Fields carried over from the record because the caller did not mention them. */
+  kept: string[];
+  /** Change keys the record does not already have — a new value, or a misspelling. */
+  unknown: string[];
+  /** Required fields that neither the change nor the record supplies. */
+  missing: string[];
+  /** Change keys the caller actually supplied. */
+  given: string[];
+} {
+  const given = Object.entries(opts.changes).filter(([, v]) => v !== undefined);
+  const base: Record<string, unknown> = {};
+  for (const key of opts.settable) {
+    const value = opts.existing[key];
+    if (value !== undefined && value !== null) base[key] = value;
+  }
+  // The CHANGES half is filtered too. The base was, and this was not — so a key outside
+  // `settable` was sent when supplied and dropped when carried over, which is the one asymmetry
+  // this helper advertises against. No caller can hit it today (every tool's arguments are in its
+  // list), but adding an argument and forgetting the list is exactly how that stops being true.
+  const settableGiven = given.filter(([k]) => opts.settable.includes(k));
+  const merged = { ...base, ...Object.fromEntries(settableGiven) };
+  const givenKeys = settableGiven.map(([k]) => k);
+  return {
+    merged,
+    kept: Object.keys(base).filter((k) => !givenKeys.includes(k)),
+    // Own properties only: `in` walks the prototype chain, so a change named `toString` looked
+    // like an existing field and skipped the warning this exists to give.
+    unknown: givenKeys.filter((k) => !Object.hasOwn(opts.existing, k)),
+    missing: (opts.required ?? []).filter((k) => {
+      const value = merged[k];
+      return value === undefined || value === null || value === "";
+    }),
+    given: givenKeys,
+  };
+}
+
+/**
+ * The record a merge will write into, or a refusal.
+ *
+ * `?? {}` was the first shape of this, and it collapsed "no record yet" into "I could not read
+ * the response" — so a body that came back as text, or with the key renamed, produced an empty
+ * base, and the write then sent the caller's fields alone. That is the destruction the merge
+ * exists to prevent, with the caller believing they made a small edit.
+ */
+export function readableRecord(
+  data: unknown,
+  field?: string,
+  /**
+   * Keys the record is expected to carry, for the WHOLE-record case.
+   *
+   * Without this, any object passed: a response envelope, a body with renamed keys, or `{}` all
+   * became a valid base, and the write then sent the caller's fields alone. That is the exact
+   * destruction the merge exists to prevent — and for a creditor, whose only required field is
+   * `name`, a rename supplies everything the API needs, so nothing downstream refuses either.
+   * Verified: a GET returning `{"data": {...}}` produced `PUT {"name": "Renamed AS"}` and the
+   * account number was gone, while the note said the other fields were "written back unchanged".
+   *
+   * A record that shares no expected key is therefore treated as unreadable rather than empty.
+   */
+  expect?: readonly string[],
+): { record?: Record<string, unknown>; problem?: string } {
+  const isObject = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(data)) {
+    return { problem: "the response was not a record object" };
+  }
+  if (field === undefined) {
+    if (expect !== undefined) {
+      const recognised = expect.filter((key) => Object.hasOwn(data, key));
+      if (recognised.length === 0) {
+        return {
+          problem:
+            Object.keys(data).length === 0
+              ? "the response was an empty object, which is not a record of this kind"
+              : `the response carried none of the fields this record should have ` +
+                `(${expect.slice(0, 4).join(", ")}${expect.length > 4 ? ", …" : ""}) — its keys were ` +
+                `${Object.keys(data).slice(0, 6).join(", ")}`,
+        };
+      }
+    }
+    return { record: data };
+  }
+  const nested = data[field];
+  // Absent or null genuinely means "not set yet", which is a legitimate starting point.
+  if (nested === undefined || nested === null) return { record: {} };
+  if (!isObject(nested)) return { problem: `\`${field}\` was not an object` };
+  return { record: nested };
+}

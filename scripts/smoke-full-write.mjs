@@ -202,6 +202,7 @@ async function main() {
 
   const created = {
     agreementId: undefined,
+    creditorId: undefined,
     doomedBankId: undefined,
     warehouseId: undefined,
     productId: undefined,
@@ -344,6 +345,67 @@ async function main() {
     // and the payment-routing guard cannot see an omission, which is why the path is classified
     // irreversible outright. Demonstrated here on the throwaway bank above rather than asserted,
     // because the whole claim is that a 200 hides it.
+    // The merge tools, on real records. Each wraps a PUT that replaces, so the property under
+    // test is always the same: the fields nobody asked about must survive.
+    if (created.bankId) {
+      const renamed = await client.callTool({
+        name: "reai_update_company_bank",
+        arguments: { id: created.bankId, name: `${STAMP} renamed safely` },
+      });
+      const readBack = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "GET", path: `/api/company-banks/${created.bankId}` },
+      });
+      const bank = readBack.isError ? undefined : jsonOf(readBack);
+      report(
+        "reai_update_company_bank renames without emptying the account",
+        !renamed.isError && bank?.bban === "15201353103",
+        renamed.isError ? firstLineOf(textOf(renamed)) : `bban=${JSON.stringify(bank?.bban)}`,
+      );
+      // And it refuses to clear the number even when asked — through the SCHEMA and handler
+      // together, which is the path a client actually takes.
+      const refused = await client.callTool({
+        name: "reai_update_company_bank",
+        arguments: { id: created.bankId, bban: null },
+      });
+      report(
+        "clearing the account number is refused with a reason",
+        refused.isError === true && /cannot be used for payments/.test(textOf(refused)),
+        firstLineOf(textOf(refused)),
+      );
+    }
+
+    const credRes = await client.callTool({
+      name: "reai_request",
+      arguments: {
+        method: "POST",
+        path: "/api/creditors",
+        body: { name: `${STAMP} creditor`, bankAccountNumber: "15201353103" },
+      },
+    });
+    if (!credRes.isError && Number.isInteger(jsonOf(credRes)?.id)) created.creditorId = jsonOf(credRes).id;
+    report(
+      "a creditor exists to rename",
+      Number.isInteger(created.creditorId),
+      created.creditorId ? `id=${created.creditorId}` : textOf(credRes).slice(0, 160),
+    );
+    if (created.creditorId) {
+      const renamed = await client.callTool({
+        name: "reai_update_creditor",
+        arguments: { id: created.creditorId, name: `${STAMP} creditor renamed` },
+      });
+      const readBack = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "GET", path: `/api/creditors/${created.creditorId}` },
+      });
+      const creditor = readBack.isError ? undefined : jsonOf(readBack);
+      report(
+        "reai_update_creditor renames without dropping the repayment account",
+        !renamed.isError && creditor?.bankAccountNumber === "15201353103",
+        renamed.isError ? firstLineOf(textOf(renamed)) : `account=${JSON.stringify(creditor?.bankAccountNumber)}`,
+      );
+    }
+
     // A SECOND, throwaway bank. The first one is used as the payment source further down, and an
     // account with an emptied bban "cannot be used for payments or reconciliation" — this repo's
     // own quirk. Demonstrating the wipe on it would have sabotaged the payment step and pinned
@@ -907,6 +969,17 @@ async function main() {
         "supplier deleted or archived",
         () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
         (r) => textOf(r).slice(0, 90),
+      );
+    }
+    if (created.creditorId) {
+      await attempt(
+        "test creditor deleted",
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: { method: "DELETE", path: `/api/creditors/${created.creditorId}` },
+          }),
+        (r) => textOf(r).slice(0, 60),
       );
     }
     if (created.doomedBankId) {

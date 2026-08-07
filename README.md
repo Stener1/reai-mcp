@@ -448,6 +448,17 @@ The delete is worth reading the response of: a warehouse holding 2 units was **a
 | `reai_update_agreement` | Change terms **without destroying the rest** — see below | **irreversible** |
 | `reai_delete_agreement` | Remove an agreement and its document. Answers `204`, no outcome field, no archive branch | reversible |
 
+### Renaming something must not erase where money goes
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_update_company_bank` | Change a company account — label, currency, SWIFT, or the number itself — **without emptying `bban`** | **irreversible** |
+| `reai_list_creditors` · `reai_update_creditor` | Loan counterparties the company owes, and the account repayments go to | read / **irreversible** |
+| `reai_set_supplier_address` | Change part of a supplier's address without dropping the postcode | reversible |
+
+Each of these wraps a PUT that replaces rather than patches, on a record carrying a payment destination that the schema does not require — so the body a rename produces is accepted and empties the account. Measured: `PUT /api/company-banks/{id} {name, countryCode, currency}` → `200`, `bban` emptied; `PUT /api/creditors/{id} {name}` → `200`, `bankAccountNumber` null. All three read the record first and merge. For the company bank the question that matters is not whether the six settable fields survive being written back — they are what is sent — but whether omitting the other twelve resets them. Measured: after a rename, `manual`, `active`, `providerType`, `eligibleForPaymentCreation` and the rest came back unchanged, and only the derived `displayName` moved. `defaultForOutgoingPayment` was false throughout and no endpoint sets it, so that one is unverified.
+
+The two account-carrying ones need `REAI_WRITE_MODE=full`, because the raw PUT can destroy a destination and a curated tool must not be a softer route to it. `reai_update_company_bank` additionally **refuses** to clear `bban` even when asked — an account with no number cannot be used for payments or reconciliation, so deleting the account is the honest way to retire it.
+
 `reai_update_agreement` needs `REAI_WRITE_MODE=full`, and the reason is worth stating: not because this tool is dangerous — it is the safe way to do the job — but because the underlying `PUT` replaces the record, so the raw call is classified irreversible and a curated tool may not be the soft route around a gate the escape hatch is subject to. The same argument this repo already made for reconciliation rules.
 
 `reai_update_agreement` exists because the underlying call does the opposite. `PUT` on an agreement is a **full replacement**: measured on a live lease, a `PUT` carrying only the landlord's name left `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the house rules all null — and `GET /pdf` still returned `200`, producing a document that looks like a contract with nothing in it. The tool reads the agreement, merges your changes over the existing terms and writes the whole thing back; that the round-trip is lossless was verified rather than assumed, by writing a 78-key sub-object back verbatim and confirming no field changed.
@@ -460,18 +471,18 @@ What the API does **not** check: Norwegian tenancy law caps a deposit at six mon
 
 Anything not listed — leads, projects, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 98 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 102 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 37 tools
-REAI_TOOLSETS=purchase             # 20 tools
+REAI_TOOLSETS=purchase             # 23 tools
 REAI_TOOLSETS=organisation         # 15 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
-(unset)                            # all 98
+(unset)                            # all 102
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses` and `agreements`; listing all nine is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -482,7 +493,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **72 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **73 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
