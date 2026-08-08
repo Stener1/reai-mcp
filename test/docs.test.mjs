@@ -132,20 +132,64 @@ test("the documentation file list is real, so the haystack cannot shrink by a re
   assert.deepEqual(onDisk, listed, "a docs/ page is not in DOC_FILES, so nothing above searches it");
 });
 
-test("no README table calls an irreversible tool reversible", () => {
+test("no documentation table calls an irreversible tool reversible", () => {
   // A risk column kept saying "reversible" after reconciliation rules were
   // escalated, so anyone following the documented default found them missing.
+  //
+  // Searches every documentation page, not just the README. It read `README` alone, which made it
+  // one file move away from being VACUOUS: the loop `continue`s when a tool is not named, so
+  // relocating the tool tables into `docs/` — which #88 considered and a later pass may still do —
+  // would have left it passing while checking nothing. The same trap #90 found in three other
+  // assertions here. The rows are counted below, so emptiness fails instead of passing quietly.
+  let rowsChecked = 0;
   for (const tool of registeredTools) {
     if (tool.risk !== "irreversible") continue;
-    for (const line of README.split("\n")) {
-      if (!line.includes(`\`${tool.name}\``)) continue;
-      if (!line.trimStart().startsWith("|")) continue;
-      assert.ok(
-        !/\|\s*reversible\s*\|/.test(line) && !/\|\s*read\s*\|/.test(line),
-        `${tool.name} is irreversible but its README row says otherwise:\n  ${line.trim()}`,
-      );
+    for (const { file, text } of DOCS) {
+      for (const line of text.split("\n")) {
+        if (!line.includes(`\`${tool.name}\``)) continue;
+        if (!line.trimStart().startsWith("|")) continue;
+        rowsChecked++;
+        assert.ok(
+          !/\|\s*reversible\s*\|/.test(line) && !/\|\s*read\s*\|/.test(line),
+          `${tool.name} is irreversible but its row in ${file} says otherwise:\n  ${line.trim()}`,
+        );
+      }
     }
   }
+  // A floor, not a fixture: it exists so that moving or reshaping the tables fails here rather than
+  // quietly reducing this test to a no-op. Measured at 34 rows when written.
+  assert.ok(
+    rowsChecked > 20,
+    `only ${rowsChecked} documented rows named an irreversible tool — the tables have moved or ` +
+      `changed shape, and this assertion is now checking almost nothing`,
+  );
+});
+
+/**
+ * The number of operations no curated tool covers, which is what `reai_request` exists for.
+ *
+ * Asserted because it was WRONG in two test comments — both said "the ~250 uncovered operations"
+ * while the real figure is 170 — and a number nothing computes is a claim with no owner. 250
+ * overstated the case by 47%, in the comments explaining why discovery matters, which is the one
+ * place an inflated figure flatters the work it justifies.
+ *
+ * A band rather than an equality: the point is that the gap stays large enough to need discovery, and
+ * that a curated-tool spree cannot silently make the prose wrong again. Adding curated tools moves it
+ * down and that is progress, not a failure — until it leaves the band, at which point the prose needs
+ * rewriting anyway.
+ */
+test("the uncovered-operation count is what the docs and comments say", () => {
+  const publicOps = getSpecIndex().counts.public;
+  const covered = new Set();
+  for (const tool of allTools) for (const [method, path] of tool.apiPaths ?? []) covered.add(`${method} ${path}`);
+  const uncovered = publicOps - covered.size;
+
+  assert.equal(publicOps, 321, "the README says 321 public operations in four places");
+  assert.ok(
+    uncovered >= 150 && uncovered <= 190,
+    `${uncovered} operations are uncovered (${publicOps} public - ${covered.size} declared), which is ` +
+      `outside the band the comments in test/discovery-*.test.mjs describe as 170`,
+  );
 });
 
 test("every documented toolset group exists", () => {

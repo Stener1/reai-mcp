@@ -30,6 +30,19 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Two test comments overstated the case for discovery by 47%.** Both said "the ~250 uncovered
+  operations"; the real figure is **170** — 321 public operations minus the 151 distinct
+  `(method, path)` pairs curated tools declare. An inflated number in the comments that explain why
+  discovery matters is the one place it flatters the work it justifies. Corrected, and now *computed*:
+  a test derives it from the spec index and the registry, as a band rather than an equality, because
+  adding curated tools should move it down and that is progress rather than a failure.
+- **The risk-column assertion was one file move from being vacuous.** It read `README.md` alone, and
+  its loop skips a tool that is not named — so relocating the tool tables into `docs/` would have left
+  it green while checking nothing, the same trap found in three sibling assertions earlier. It now
+  searches the whole documentation corpus and counts the rows it checked (34 today), so emptiness
+  fails instead of passing quietly. Mutation-verified: removing the README from the corpus it searches
+  reports *"only 0 documented rows named an irreversible tool"* rather than passing.
+
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
   `REAI_WRITE_MODE` is whatever the deployment runs now. `src/http.ts` takes the **narrower** of the
