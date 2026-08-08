@@ -209,7 +209,14 @@ async function patchAndRead(field, value) {
   if (made.problem) return { problem: made.problem };
   const patched = await call("PATCH", `/api/customers/${made.id}`, { [field]: value });
   if (patched.status >= 300) {
-    return { problem: `PATCH ${field} answered ${patched.status}: ${patched.body?.detail ?? ""}` };
+    // NOT a probe problem. Creating the customer is fixture setup; the PATCH is the behaviour under
+    // test, and every claim here says this value is ACCEPTED. A refusal therefore makes the claim false
+    // and has to be reported as drift — Codex's finding on PR #115, where this returned `problem` and
+    // the run exited 0 while PHONE_RULE had become wrong.
+    return {
+      rejected: `PATCH ${field}=${JSON.stringify(value)} was REFUSED with HTTP ${patched.status}: ` +
+        `${patched.body?.detail ?? ""}`,
+    };
   }
   const back = await readBack(made.id);
   if (back.problem) return { problem: back.problem };
@@ -223,7 +230,7 @@ const CASES = [
     marker: "canonicalised to E.164",
     // The value the claim predicts, which the text must contain: a phrase can survive a rewrite that
     // reverses its meaning (the review of PR #115 did exactly that), a predicted value cannot.
-    mustPredict: "+47",
+    mustPredict: "sent bare or 0047-prefixed becomes +47",
     run: async () => {
       const made = await patchAndRead("phone", "90123456");
       if (made.problem) return { problem: made.problem };
@@ -445,6 +452,43 @@ const CASES = [
       return { got: back.record.phone === null ? "discarded" : `stored ${back.record.phone}`, want: "discarded" };
     },
   },
+  {
+    claim: "the same phone rule holds on a CONTACT PERSON, not only the customer's own field",
+    source: "PHONE_RULE",
+    marker: "canonicalised to E.164",
+    mustPredict: "+46701234567",
+    // PHONE_RULE ships on five fields — customer, supplier, lead and both contact-person tools — and the
+    // audit measured one. Codex's finding on PR #115. This is also the field whose quirk claimed foreign
+    // numbers are "stored EXACTLY as sent" until this PR measured otherwise, so it is the field most
+    // worth watching.
+    run: async () => {
+      serial += 1;
+      const key = `customer${serial}`;
+      const made = await call("POST", "/api/customers", {
+        name: `Zz Storage Contact ${serial} As`,
+        organizationNumber: "812345672",
+        skipRegistryLookup: true,
+      });
+      if (made.status >= 300 || !made.body?.id) {
+        return { problem: `POST /api/customers answered ${made.status}: ${made.body?.detail ?? ""}` };
+      }
+      created[key] = made.body.id;
+      const contact = await call("POST", `/api/customers/${made.body.id}/contact-persons`, {
+        name: "Zz Storage Contact Phone",
+        phone: "+46 70 123 45 67",
+      });
+      if (contact.status >= 300) {
+        return {
+          rejected: `POST contact-persons with a spaced foreign number was REFUSED with HTTP ` +
+            `${contact.status}: ${contact.body?.detail ?? ""}`,
+        };
+      }
+      const back = await call("GET", `/api/customers/${made.body.id}/contact-persons`);
+      if (back.status !== 200) return { problem: `GET contact-persons → ${back.status}` };
+      const row = (back.body ?? [])[0];
+      return { got: row?.phone, want: "+46701234567" };
+    },
+  },
 ];
 
 let ok = 0;
@@ -462,6 +506,15 @@ async function main() {
       } catch (err) {
         inconclusive += 1;
         console.log(`INCONCLUSIVE  ${probe.claim}\n              the probe threw: ${err.message}`);
+        continue;
+      }
+      if (result.rejected) {
+        drift += 1;
+        console.log(
+          `DRIFT         ${probe.claim}\n` +
+            `              ${probe.source} says this value is accepted. It is not.\n` +
+            `              ${result.rejected}`,
+        );
         continue;
       }
       if (result.problem) {

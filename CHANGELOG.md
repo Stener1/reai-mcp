@@ -13,8 +13,8 @@ All notable changes to `reai-mcp`. Format loosely follows
   checks the wording of refusals, and its own contract admits every case is a request built to fail, so
   nothing there observes what the API *accepts, normalises or stores*. Two of the five false claims that
   motivated it live in exactly that gap: `skipRegistryLookup` drifts on a `201`, and the phone rule was
-  wrong three separate times about what gets **stored**. Eleven claims now checked against the live API;
-  first run **11 of 11 verified**, including the evidence that the `skipRegistryLookup` override comes from
+  wrong three separate times about what gets **stored**. Twelve claims now checked against the live API;
+  first run **12 of 12 verified**, including the evidence that the `skipRegistryLookup` override comes from
   a stale internal directory rather than the registry (`971648198` stores as "Statens Innkrevingssentral",
   a superseded name).
   - It writes, which is the whole difference. Only customers — reversible, and they delete cleanly.
@@ -47,7 +47,7 @@ All notable changes to `reai-mcp`. Format loosely follows
   - **The completeness bound was a cop-out and is now a number.** The first version said the population
     "cannot be measured mechanically" because a storage claim is prose. The review enumerated it anyway,
     from the two places it lives. `npm run audit:census` now prints it: **129 agent-facing literals assert
-    something about what is stored, 11 probed.** Printed rather than asserted, since a keyword sweep is a
+    something about what is stored, 12 probed.** Printed rather than asserted, since a keyword sweep is a
     lower bound — but hiding the ratio made 11-of-many read as coverage. The cheap unprobed ones are named,
     including `reai_create_customer`'s flagship "the name you send is then DISCARDED" on the DEFAULT path.
   - `test/smoke-cleanup.test.mjs` learned a second cleanup shape for it: fixtures recorded under

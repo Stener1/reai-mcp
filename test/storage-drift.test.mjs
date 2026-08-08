@@ -96,8 +96,8 @@ test("every storage probe names a real source, and the source still PREDICTS wha
   // is the count itself. A case removed on purpose is a one-character edit here, which is the point.
   assert.equal(
     cases.length,
-    11,
-    `expected 11 storage cases, extracted ${cases.length} — either a case was added without updating ` +
+    12,
+    `expected 12 storage cases, extracted ${cases.length} — either a case was added without updating ` +
       `this number, or the extraction has stopped matching`,
   );
 
