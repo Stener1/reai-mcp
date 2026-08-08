@@ -161,6 +161,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     disclosure the boundary exists to prevent.
   - Also deleted a doc comment the code it described had left behind, above `tenantIdsInRequest`.
 
+- **A gitlink nearly reached main, the same way the `node_modules` symlink did.** An agent working in
+  its own git worktree under `.claude/worktrees/` was staged by `git add -A` as mode 160000 — a
+  submodule pointing at a commit that exists in no remote, so a clone cannot initialise it and CI
+  does not care. Caught before merge this time, by the tracked-file audit written after the symlink.
+  `.gitignore` now covers the path, and there is a guard on the mode: this repository has no
+  submodules, so any gitlink is an accident, and the test also asserts the `.gitignore` rule still
+  exists rather than waiting for the next `git add -A` to find out.
+
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
   `REAI_WRITE_MODE` is whatever the deployment runs now. `src/http.ts` takes the **narrower** of the
