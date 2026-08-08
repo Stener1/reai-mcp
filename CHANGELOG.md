@@ -24,14 +24,34 @@ All notable changes to `reai-mcp`. Format loosely follows
     API's own `AnnualAccountsSubmissionRes.year`. Echoing the string argument would have made
     a consumer's field change type with the outcome — the same cross-branch inconsistency
     `submissionExists` was fixed for.
+  - A shared **`fiscalYear`** schema in `registry.ts` is what makes the three agree, rather
+    than three copies compared by a test after the fact. It requires **1000 or later**, not
+    merely "greater than zero": four digits alone admitted `"0000"`, which every one of these
+    parameters rules out with `exclusiveMinimum: 0`, and a bare positive check still admitted
+    `"0999"` — which this tool converts with `Number()` and would have reported as year **999**
+    for a request to `/api/annual-accounts/0999`, losing the round-trip the conversion exists
+    to preserve. The sweep no longer skips year parameters outright, which is exactly why that
+    escaped it: a year argument must now refuse a leading-zero year and accept a real one.
   - Both directions are swept: no tool refuses a path value the API accepts, and no tool
     accepts an id below the spec's floor. Mutation-tested — reverting the year to a number
     names the disagreeing tool, and dropping `.positive()` from any path id names it with the
     values it wrongly accepts.
+  - **A renamed placeholder is no longer a blind spot.** Skipping every path parameter whose
+    tool argument has a different name left 11 of 109 unswept, and seven tools could lose
+    `.positive()` on `assetId`, `departmentId` or `warehouseId` with the whole suite green.
+    Eight of the eleven resolve structurally — one path parameter, one `…Id` argument, nothing
+    else it could be — and the remaining three are listed by name so the blind spot cannot grow
+    in silence. The floors sit near the measured values now (100 of 107 operations, 90 of 98
+    arguments) rather than at half of them: last iteration's lesson was that slack is where
+    coverage disappears.
   - Two things are deliberately **not** enforced, each pinned as a test so the absence is a
-    decision on the record and not a gap nobody noticed. **int32 ceilings**: 67 id arguments
-    accept 2147483648, and adding `.max(2147483647)` to each would be 67 edits for a value no
-    caller reaches by accident, against a clear upstream `400`. Membership of the int32 range
+    decision on the record and not a gap nobody noticed. **int32 ceilings**: 231 path
+    parameters declare `format: int32` (167 distinct path+name pairs) and **67 distinct tool
+    arguments** accept 2147483648; adding `.max(2147483647)` to each would be 67 edits for a
+    value no caller reaches by accident, against a clear upstream `400`. The test counts
+    distinct arguments rather than occurrences — counting occurrences meant one tool
+    contributed six of 84, so ceilings could have been added to 59 of the 67 while the failure
+    message still claimed none had been. Membership of the int32 range
     is the API's to judge — the same division of labour `reai_list_countries` documents for
     country codes. **The letter of `exclusiveMinimum: 0` on a string-typed year**, which would
     admit `"1"` and `"40000"`; four digits is narrower than the spec and different in kind
