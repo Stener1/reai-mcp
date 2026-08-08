@@ -1298,6 +1298,79 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   aksjer: ["share-investments"],
   apningsbalanse: ["opening-balances"],
   arsregnskap: ["annual-accounts"],
+  // The older double-a transliteration. foldDiacritics maps å to a rather than aa, so "årsregnskap"
+  // arrives as `arsregnskap` and is matched — but someone typing the aa convention directly was not, and
+  // reached /api/ledger/general instead.
+  aarsregnskap: ["annual-accounts"],
+  // `arsoppgjor` is the same thing in the language accountants actually use — the year-end process — and
+  // it returned NOTHING at all, as did `aarsoppgjor` and `arsavslutning`. `arsregnskap` was mapped and
+  // its synonym was not, which is the shape of gap a synonym table accumulates: the word someone thought
+  // of, not the word someone types. Measured before adding: `mva` reached /api/vat-codes while the formal
+  // `merverdiavgift` reached nothing, and /api/annual-accounts exists.
+  //
+  // Mapped to the hyphenated path token only, NOT to "accounts": that token is in chart-of-accounts,
+  // general-sub-accounts and company bank accounts, so "årsoppgjør" would have dragged the whole
+  // account surface up with it.
+  arsoppgjor: ["annual-accounts"],
+  aarsoppgjor: ["annual-accounts"],
+  arsavslutning: ["annual-accounts"],
+  // The formal name of MVA. `mva` was mapped and this was not, so a query written the way a tax form
+  // writes it returned nothing.
+  // No "mva" in the value list: the string appears in ZERO of the 430 operations' path, tag, summary,
+  // description or id, and synonym expansion is not recursive — so it can never match, while it inflates
+  // `resourceCount` and shrinks the coverage multiplier. Measured by the review of PR #118:
+  // "merverdiavgift pa faktura" scored /api/vat-codes at 18.9 with it and 19.18 without. No flip today,
+  // a self-inflicted penalty regardless.
+  //
+  // And no `merverdiavgiften` entry: `definite("en")` in lookupForms already derives it, so the entry was
+  // dead. The first version of this change claimed every synonym here was "verified load-bearing by
+  // removing it and watching the test fail"; two were not, and this is one.
+  merverdiavgift: ["vat"],
+  // `postering`/`posteringer` — a posting, the core unit of double-entry bookkeeping — reached
+  // /api/invoice-reception-documents and /api/attachments, while /api/postings carries nine operations
+  // that no curated tool covers, so the escape hatch is the only route to them. Low collision risk: this
+  // API has no other "posting" family, and the English "posting group" query already ranks first.
+  // A REACHABILITY compromise, and the first version of this comment got the reason wrong. It claimed the
+  // destination was "a judgement about Norwegian practice" that the API had no opinion on. The API has an
+  // opinion: `accrualEnabled`, `accrualPeriod`, `accrualPeriodCount` and `accrualAccountNumber` are
+  // first-class fields on supplier-invoice cost lines and order lines — periodisering is a flag on a line,
+  // not a manual voucher. The review of PR #118 found that by grepping for the word, which I had not done.
+  //
+  // It still maps to `voucher`, for a reason that has to be stated rather than dressed up: `fieldNamesOf`
+  // deliberately excludes request-BODY fields from the searchable text, so `["accrual"]` would match
+  // nothing at all and the query would go back to returning the VAT-return endpoints. Voucher is the best
+  // REACHABLE answer, not the correct one. If body fields ever become searchable, this should point at
+  // /api/supplier-invoices and /api/orders instead.
+  //
+  // A KNOWN LIMIT, measured rather than waved away. Codex pointed out on PR #118 that an unconditional
+  // `voucher` can swamp a more specific resource in a mixed query, and it does for one shape:
+  // "periodisering av mva-melding" returns ten voucher operations and no /api/vat-returns, while
+  // "mva-melding" alone ranks POST /api/vat-returns first. It does NOT happen for the realistic query —
+  // "periodisering av leverandorfaktura" ranks /api/supplier-invoices first, which is exactly right, and
+  // that is the phrase an accountant actually types. The mapping is kept because it turns a wrong bare
+  // answer (VAT returns) into a defensible one, and the damage is confined to a hyphenated abbreviation in
+  // a combination that is not a real accounting operation. Recorded so the next person weighing it has the
+  // measurement rather than the argument.
+  periodisering: ["voucher"],
+  // The same concept in English, which was left empty while the Norwegian was fixed — the same gap class
+  // the change was about, one language over.
+  accrual: ["voucher"],
+  accruals: ["voucher"],
+  periodisation: ["voucher"],
+  // "posting" only. Adding the plural put GET /api/postings/groups above GET /api/postings — and
+  // /api/postings is the one operation in the family a curated tool already wraps (reai_list_postings), so
+  // the plural demoted the answer most likely to be wanted. Measured by the review of PR #118: with
+  // ["posting"] alone the collection wins 18 to 17. `posteringer` needs no entry of its own — the `-er`
+  // rule in lookupForms reaches this one, which is the second entry the "verified load-bearing" claim
+  // covered and should not have.
+  // "voucher" as well as "posting", because a posting is CREATED by posting a voucher — this API has no
+  // POST /api/postings. Without it, "opprett postering" ranked the six
+  // /api/postings/{customer,employee,supplier}/{close,open} period commands first and the operation that
+  // actually creates a posting nowhere: a write verb pointed at unrelated mutations, which is the failure
+  // the rest of this table is written to avoid. Codex caught it on PR #118. Measured: the bare `postering`
+  // still ranks GET /api/postings first, and "opprett postering" now ranks POST /api/vouchers first.
+  postering: ["posting", "voucher"],
+  posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],
   balanse: ["balance"],
   regnskap: ["accounting", "ledger"],

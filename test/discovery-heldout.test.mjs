@@ -16,8 +16,10 @@ import { searchOperations, getSpecIndex } from "../dist/reai/spec.js";
  * /api/accounting-periods, and the /api/peppol paths are internal), so those were dropped rather
  * than "fixed": asserting a target the API does not have is a mistake this repo has made before.
  *
- * After adding the missing vocabulary and the Norwegian verbs: 36 of 41 in the top 3, 38 in the
- * top 10.
+ * After adding the missing vocabulary and the Norwegian verbs this read 36 of 41 in the top 3 and 38
+ * in the top 10. Re-measured 2026-08-09 by the review of PR #118: it is now 39 in the top 3 and all
+ * 41 in the top 10, so those numbers described an earlier ranker. The floors below are deliberately
+ * lower than the measurement, which is why the drift went unnoticed.
  *
  * And then a caveat that matters more than the number: this corpus is NOT held out any more. Review
  * pointed out that the same change which measured it also read its failures, added synonyms for its
