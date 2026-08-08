@@ -597,6 +597,51 @@ export const PHONE_RULE =
   "+14155552671, +447911123456 all verified. An unparseable value is refused with 400, worded in " +
   "Norwegian whatever the number's country, which is not evidence that a Norwegian one was expected.";
 
+/**
+ * What `skipRegistryLookup` does, in one place, because two tools carry the flag and both described it
+ * wrongly — and because the honest account needs more room than an argument description.
+ *
+ * Measured on 29 organisation numbers against POST /api/customers and POST /api/suppliers (tenant
+ * 2783, 2026-08-08), each record read back and deleted:
+ *
+ *  - Without the flag, a Norwegian company is looked up and the registry's name replaces the one you
+ *    sent, for every number tested. That part was already documented and holds.
+ *  - With the flag, an ORDINARY company keeps the name AND the address you sent: Equinor 923609016,
+ *    Symfoni 915772137, VN Norge 821083052, Telenor ASA 982463718, two sole proprietorships, a
+ *    sub-unit, NAV 889640782, Politidirektoratet, Digdir, Lånekassen — all respected it.
+ *  - But roughly half of the well-known BILLING counterparties ignore the flag entirely: banks,
+ *    insurers, telecoms, power, post, fuel and the fee-collecting agencies. Sixteen of the
+ *    twenty-nine, including Skatteetaten, Brønnøysundregistrene, Statens vegvesen, Kartverket,
+ *    Husbanken, DNB, Nordea, SpareBank 1, Telia, Telenor Norge, Elvia, Posten Bring, If, Gjensidige
+ *    and Circle K. Their name overwrites yours and so does their address, even one you supplied in the
+ *    same request. Deterministic on re-run.
+ *
+ * **The override does not come from Brønnøysundregistrene**, which the first version of this note got
+ * wrong. Three results rule the registry out:
+ *
+ *   971648198  Brreg: "INNKREVINGSMYNDIGHETEN"     ReAI: "Statens Innkrevingssentral"  (a former name)
+ *   920058817  Brreg: "NORDEA BANK ABP NUF"        ReAI: "First Card (nor)"            (a card brand)
+ *   976967631  Brreg: Postboks 800, 1331 Fornebu   ReAI: Postboks 800, 7900 Rørvik     (wrong postcode)
+ *
+ * So the source is a ReAI-maintained directory of standard counterparties, and it is STALE. That is a
+ * worse hazard than "the registry wins": a customer can be created carrying a superseded name or an
+ * address that is simply wrong, with a 201 and no warning. The Telenor pair is the cleanest test —
+ * the holding company respects the flag, the billing entity does not.
+ *
+ * The flag also has one load-bearing use nothing documented: **an organisation number that is mod-11
+ * valid but not registered can only be created WITH it.** Without, the lookup fails and the API answers
+ * 500 `{"detail":"404 : [no body]"}`; with, the same request is a 201.
+ */
+export const SKIP_REGISTRY_LOOKUP_RULE =
+  "Skips the Brønnøysund lookup, so an ordinary company keeps the name and address you send — and it " +
+  "is the only way to create one whose organisation number is not registered (without it that request " +
+  "fails with a 500 wrapping a 404). It is NOT a guarantee. Roughly half of the well-known Norwegian " +
+  "billing counterparties — banks, insurers, telecoms, power, post, fuel, and the fee-collecting " +
+  "public agencies — overwrite both name and address regardless of the flag, from a ReAI-maintained " +
+  "directory rather than from the registry. That directory is stale: 971648198 comes back under a " +
+  "superseded name and 976967631 with the wrong postcode. So read the created record back whenever the " +
+  "name or address matters.";
+
 export const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be ISO format yyyy-MM-dd, e.g. 2026-03-31");

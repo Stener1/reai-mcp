@@ -91,6 +91,122 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`skipRegistryLookup` promised "use exactly the details supplied" on both tools that carry it, and
+  the first correction was wrong twice over.** Measured on **29** organisation numbers rather than the
+  five the first attempt used: sixteen ignore the flag and overwrite both name and address, including an
+  address supplied in the same request. They are the standard billing counterparties — Skatteetaten,
+  Brønnøysundregistrene, Statens vegvesen, Kartverket, Husbanken, Innkrevingsmyndigheten, DNB, Nordea,
+  SpareBank 1, Telia, Telenor Norge, Elvia, Posten Bring, If, Gjensidige, Circle K. Ordinary companies,
+  sole proprietorships, sub-units, unregistered numbers, and agencies that do not invoice small
+  companies respect it. Telenor is the clean pair: holding company `982463718` respects the flag, billing
+  entity `976967631` does not.
+  - **The override does not come from Brønnøysundregistrene**, which both earlier versions asserted.
+    `971648198` comes back as "Statens Innkrevingssentral" (a superseded name), `920058817` as
+    "First Card (nor)" (not a registry name), and `976967631` with postcode 7900 Rørvik where the
+    registry says 1331 Fornebu. The source is a stale ReAI-maintained directory — a materially worse
+    hazard, because a record can be created with an address that is simply **wrong**, at `201` and with
+    no warning. That is what justifies "read the created record back".
+  - **The flag has one load-bearing use nothing documented**: an organisation number that is mod-11
+    valid but not registered can only be created WITH it. Without, the lookup fails and the API answers
+    `500 {"detail":"404 : [no body]"}`.
+  - The correction now lives once, in `SKIP_REGISTRY_LOOKUP_RULE`, and **`reai_create_supplier` uses it
+    too** — the first pass corrected the customer tool and left the identical false string on the
+    supplier tool, whose endpoint behaves the same way. A quirk that told agents "pass
+    skipRegistryLookup to use exactly what you sent" was still attached to the same operation as its own
+    correction, so `reai_describe_endpoint` answered with both at once; fixed, and a test now asserts no
+    quirk on that operation promises exactness.
+  - The first test pinned `974761076` as *the* counterexample, "or the warning is unusable" — locking in
+    the claim the wider measurement refuted, so correcting the description required editing the test.
+    It now pins the **shape** of an honest warning (a class of counterparty, the real source, the
+    load-bearing use) rather than any sentence, matches case-insensitively, and lives in its own file
+    instead of the contact-persons one.
+  - Two measurement bugs of my own are worth recording. A probe sent a nested `address` object, which
+    `CreateCustomerReq` does not declare — the fields are flat — so it was silently ignored and I
+    concluded a supplied address was dropped. And an earlier helper compared names case-sensitively,
+    reporting a kept name as overridden, because ReAI title-cases what it stores.
+
+- **One phone rule, measured, replacing three accounts of it — one of which was false and told agents
+  to strip a correct prefix.** This started as a wording fix and turned into a real defect: a quirk
+  asserted "two phone fields, opposite rules — the ENTITY phone rejects a `+47` prefix", and
+  `reai_update_customer` and `reai_update_supplier` repeated it. Measured 2026-08-08: `PATCH
+  /api/customers/{id}` and `PATCH /api/suppliers/{id}` both answer **200** to `+4722334455` and store it
+  unchanged. There is one rule, not two, and the old guidance removed a prefix that was right.
+  - The rule now lives once, in `PHONE_RULE` in `src/tools/registry.ts`, and every phone-bearing
+    argument points at it — customer, supplier, lead and contact person. Measured across all of them:
+    the value is parsed with **Norway as the default region** and stored **canonicalised to E.164**.
+    Nothing is stored as sent — `+46 70 123 45 67` comes back `+46701234567`, `(40) 12 34 56` comes back
+    `+4740123456`, and `tel:40123456` parses. A leading `+CC`, `00CC` or a bare `47` picks the country;
+    anything else is read as Norwegian and must be valid as such or the write is refused with 400.
+  - The trap is those last two together, and three consecutive PRs described it wrongly in three
+    different ways. A bare number that is *also* valid in Norway is stored under `+47` **with no
+    warning**: the Danish mobile `40123456` becomes `+4740123456`. `20123456` is refused — and **not**
+    because it is Danish, which an earlier version of this changelog implied: `20` is unallocated in
+    Norway, while `21123456` and `22334455` are both accepted. So the failure to fear is a foreign
+    number saved quietly as the wrong one, not a rejection.
+  - The error translation no longer claims to know which country was resolved. The same 400 answers a
+    bare number read as Norwegian and a number sent *with* a country code that is merely malformed, so
+    the previous "refused, as here" attributed the refusal to a cause it could not observe.
+  - Guarded structurally rather than by phrase, because phrase guards did not stop any of this: a test
+    asserts every phone argument in the registry carries `PHONE_RULE` and that the constant itself does
+    not contain the three superseded claims. A contradiction now requires editing the one place the
+    measurements live. The `employee` phone remains the documented exception — it stores an unparseable
+    value as `null` with a 200 instead of refusing it.
+
+### Added
+
+- **Contact persons on a customer** — `reai_list_customer_contacts`, `reai_get_customer_contact`,
+  `reai_create_customer_contact`, `reai_update_customer_contact`, `reai_delete_customer_contact`. The named
+  humans, as opposed to the customer record's own email and phone, which belong to the company. **172 tools**:
+  165 across thirteen accounting domains, plus 7 always-on.
+  - Measured against the live API on tenant 2783, every probe record deleted afterwards, and most of it is
+    not in the spec. **Contacts can only be added to COMPANY customers** — a private one is refused with 400
+    "Contact persons can only be added to company customers", which is exactly what an agent hits after
+    creating a private customer and trying to name someone on it; the tool says so in those words and points
+    at `reai_update_customer`. **Phone numbers are normalised, not merely validated**: `90123456` and
+    `004790123456` both come back `+4790123456`, so the spec's "E.164 format" describes the stored value, not
+    the input, and the tool reports the renormalisation rather than letting it look like a silent edit. An
+    unparseable number is refused in Norwegian whatever the number's country, translated here. (That
+    bullet described the behaviour as Norwegian-only; see the phone-rule entry above for the measured
+    account, which supersedes it.)
+  - On the update, `null` and omitting leave a field unchanged while `""` clears it — which the spec does say,
+    and which is easy to verify wrongly: clear a field first and `null` then reports "unchanged" whichever the
+    API does. Each case was run from a freshly populated contact. A blank name is refused rather than treated
+    as a clear.
+  - **The independent review found the descriptions were confidently wrong in four places, one of them
+    dangerous.** The 404 translation matched `/Customer with id=/i` case-insensitively — and the
+    contact-not-found sentence is "Contact person with id=22 not found **for customer with id=6022**",
+    which contains it. So the commonest 404 on these endpoints was reported as "Customer N does not
+    exist in this tenant" about a customer that was fine, sending the agent off to re-check or
+    re-create it. Same shape as the reconciliation finding Codex caught: a phrase-gated translation
+    turning one failure into a confident verdict about a different one.
+  - Measuring the wording then ruled out the obvious fix. A genuinely deleted contact answers the
+    **same sentence** as a wrong-parent one, word for word, so the two cannot be separated. Both are
+    reported as ambiguous with the way to settle them. That also fixed the delete, which returned a
+    flat success for any 404 — including a typo'd `customerId`, where the contact demonstrably
+    survives — telling the agent its goal was met when it might not be.
+  - Three descriptions promised `null` for "leave unchanged" while the schema was
+    `z.string().optional()`, which zod refuses; an agent copying the wording out of the spec got
+    "Invalid arguments for tool". Now `.nullable()`, with nulls stripped so null and omitting share one
+    path. `reai_get_customer_contact` had the 404 backwards (it is about the contact, not the customer).
+    The header comment claimed "nothing in the schema hints at" the company-only rule — the spec does
+    say it, on `CreateCustomerReq.contactPersons`. And the two read tools overlap `reai_get_customer`,
+    which already returns `contactPersons`; the descriptions now say so instead of implying otherwise.
+  - Four **quirks** for the escape-hatch path, which had none: the company-only rule, the phone
+    normalisation, the blank-vs-null semantics and the ambiguous 404. Plus a fifth found while
+    re-verifying: `POST /api/customers` reports a duplicate **organizationNumber** as
+    "En kunde med navnet <NAME> finnes allerede." — quoting the EXISTING customer's name, which appears
+    nowhere in the request. Isolated on the live API. 121 quirks.
+  - The suite's own guards caught two things on the way in, both worth more than the tools. The
+    path-placeholder sweep could not attribute `{id}` in `/api/customers/{id}/contact-persons/...` to a
+    `customerId` argument, so `resolveArg` now resolves a placeholder against the **owning path segment** —
+    structure, not domain knowledge, and it generalises to every nested resource in this API. That also
+    attributed two placeholders previously listed as unattributable, `reai_create_offer {id}` and
+    `reai_create_order {id}`, whose bounds had never been swept and now are; one entry is left on that list.
+
+## Unreleased
+
+### Fixed
+
 - **`skipRegistryLookup` promised "use exactly the details supplied", and that is not safe.** Flagged
   by the review of PR #112 and measured properly here, on five real organisation numbers with the flag
   set: four were respected (Equinor, Symfoni, VN Norge, NAV — name kept, address left empty) and

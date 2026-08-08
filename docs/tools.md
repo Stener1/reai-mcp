@@ -265,20 +265,27 @@ That ambiguity is also why the delete does not simply report a 404 as "already g
 
 ## What `skipRegistryLookup` actually does
 
-`reai_create_customer` looks a Norwegian company up in Brønnøysundregistrene from its `organizationNumber` and fills in the address, and the name you send is discarded in favour of the registry's. `skipRegistryLookup: true` is the documented way out, and its description promised "use exactly the details supplied".
+Two tools carry the flag — `reai_create_customer` and `reai_create_supplier` — and both described it as "skip the Brønnøysund lookup and use exactly the details supplied". Measured on **29 organisation numbers**, each record read back and deleted, that is not safe.
 
-That promise is not safe. Measured on five real organisation numbers, **with the flag set**:
+**With the flag set, an ordinary company keeps the name AND the address you send.** Equinor, Symfoni, VN Norge, Telenor ASA, two sole proprietorships, a sub-unit, and the agencies that do not invoice small companies (NAV, Politidirektoratet, Digdir, Lånekassen) all respected it — a supplied address came back byte-identical.
 
-| organisation number | company | name kept? | address |
-|---|---|---|---|
-| `923609016` | Equinor ASA | yes | empty |
-| `915772137` | Symfoni AS | yes | empty |
-| `821083052` | VN Norge AS | yes | empty |
-| `889640782` | NAV | yes | empty |
-| `974761076` | **Skatteetaten** | **no** — stored as `Skatteetaten` | **filled from the registry** |
+**Sixteen of the twenty-nine ignored it**, overwriting both name and address, including an address supplied in the same request: Skatteetaten, Brønnøysundregistrene, Statens vegvesen, Kartverket, Husbanken, Innkrevingsmyndigheten, DNB, Nordea, SpareBank 1, Telia, Telenor Norge, Elvia, Posten Bring, If, Gjensidige, Circle K. They are the standard billing counterparties — banks, insurers, telecoms, power, post, fuel and the fee-collecting public agencies. Deterministic on re-run.
 
-And on Skatteetaten the flag also **overwrote an address supplied in the same request**. Without the flag, all five came back with the registry's name, title-cased on top (`Symfoni AS` is stored `Symfoni As`).
+Telenor is the cleanest demonstration: the **holding** company `982463718` respects the flag, the **billing** entity `976967631` does not.
 
-**Why that one number behaves differently is not established.** The likely explanation is that ReAI carries a built-in company record for the tax authority, since every Norwegian tenant needs it as a counterparty — but nothing in this API exposes those records, so it stays a hypothesis. NAV is also a public agency and *did* respect the flag, so "public bodies are special" is not the rule either.
+### The override is not the registry, and that is the real hazard
 
-What follows regardless: **read the created customer back** if the name or address matters. A flag that works four times in five is worse than one that never works, because the caller stops checking.
+An earlier version of this page said these came back with "the registry's name and address". Three measurements rule that out:
+
+| org number | Brønnøysundregistrene says | ReAI stored |
+|---|---|---|
+| `971648198` | INNKREVINGSMYNDIGHETEN | **Statens Innkrevingssentral** — a superseded name |
+| `920058817` | NORDEA BANK ABP NUF | **First Card (nor)** — not a registry name at all |
+| `976967631` | Postboks 800, **1331 Fornebu** | Postboks 800, **7900 Rørvik** — wrong postcode |
+
+So the source is a ReAI-maintained directory of standard counterparties, and it is **stale**. That is worse than "the registry wins": a customer or supplier can be created carrying a superseded name or an address that is simply wrong, with a `201` and no warning. Which is why the rule ends with *read the created record back*.
+
+### The one thing the flag is required for
+
+Nothing documented this, and it is the flag's genuine purpose. An organisation number that is mod-11 valid but **not registered** cannot be created without it — the lookup fails and the API answers `500 {"detail":"404 : [no body]"}`. With the flag, the same request is a `201`.
+

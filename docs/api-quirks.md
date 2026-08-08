@@ -19,7 +19,7 @@ Browse them from an agent with `reai_api_notes`, or read the highlights below.
 - `startDate`/`endDate` are required on vouchers, postings and ledgers even where not marked so.
 - **Offer lines are stricter than order lines** — `itemName` and `vatCode` are both required on an offer.
 - **Order** and subscription lines accept only VAT codes from `?usage=customer-invoice`; **offer** lines are not checked against it, so an offer can be accepted carrying a code that fails once the work becomes an order or invoice.
-- A **`+47` prefix on a Norwegian phone number is rejected**.
+- A phone number is parsed with Norway as the default region and stored canonicalised to E.164 — a `+47` prefix is **accepted**, and a bare number that is valid in Norway is stored under `+47` whatever was meant. This list previously said a `+47` prefix was rejected; measured false.
 - `POST /api/customers` silently discards `invoiceEmail`, `phone` and `daysUntilDue` — those live on the `PATCH`.
 - **`GET /api/timesheets` is unusable without the Project module** — `projectId` is a *required* query parameter, and supplying it returns `400 "projectId cannot be used when the Project module is disabled"`. Required and rejected at once, so no request succeeds.
 

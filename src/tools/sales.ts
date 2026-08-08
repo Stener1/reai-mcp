@@ -16,6 +16,7 @@ import {
   requiredName,
   okText,
   PHONE_RULE,
+  SKIP_REGISTRY_LOOKUP_RULE,
 } from "./registry.js";
 import { ReaiApiError } from "../reai/errors.js";
 
@@ -177,14 +178,7 @@ const createCustomer = defineTool({
     skipRegistryLookup: z
       .boolean()
       .optional()
-      .describe(
-        "Skip the Brønnøysund lookup, so the name and address you supply are usually kept — but " +
-          "this is NOT a guarantee. Measured on five real organisation numbers with the flag set: " +
-          "four were respected (Equinor, Symfoni, VN Norge, NAV — name kept, address left empty) " +
-          "and 974761076 (Skatteetaten) was not, coming back with the registry's name AND address, " +
-          "and overwriting an address supplied in the same request. Read the created record back if " +
-          "the name or address matters.",
-      ),
+      .describe(SKIP_REGISTRY_LOOKUP_RULE),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
