@@ -30,6 +30,37 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The full-write suite was leaving records in a real company on every run, because its cleanup only
+  worked on the happy path.** Found by running it against tenant 2783: nine failures, which looked
+  like leftover contamination from an interrupted run — an employee, an expense and a voucher that
+  "were not created by this run". They were not contamination. Re-running with the tenant emptied
+  reproduced all nine with **fresh** ids, so the suite was creating the mess it then failed on, one
+  set per run. Four such records were removed by hand; the run that found them created a fifth.
+  - The root cause is **upstream and new**: `DELETE /api/expenses/{id}/voucher` now answers 409
+    `application/problem+json` whose detail is a raw Java type —
+    `org.hibernate.TransientPropertyValueException: Persistent instance of 'no.reai.ex.mdl.Expense'
+    references an unsaved transient instance of 'no.reai.ldgr.mdl.Voucher'`. A persistence bug on
+    ReAI's side, not a validation error, so no body fixes it. It worked when the tool was written —
+    the description records the measured `{"outcome":"deleted"}`.
+  - Because unbooking is impossible, everything downstream is blocked with it: unapprove refuses a
+    booked expense, reverse will not take it, and `DELETE /api/expenses/{id}` answers the same 409.
+    An expense booked today cannot be unwound through its own endpoints at all.
+  - **The one route that works cascades, and that is why the tool will not take it.**
+    `DELETE /api/vouchers/{voucherId}` answers `{"outcome":"deleted"}` — and destroys the expense as
+    well (measured twice: expense 2241 answered 404 immediately after voucher 30980, and 2242 after
+    30984). Silently turning "unlink the voucher, keep the expense" into "delete both" would destroy
+    the record the caller asked to preserve, so the tool catches the 409 by name, explains that the
+    defect is upstream, names the route and states its cost — and leaves the decision with the caller.
+    Caught by name because the API's own message is a Java stack type: a caller cannot tell a ReAI bug
+    from a body it got wrong, and will keep trying variations.
+  - The suite now recognises that 409 as a known upstream defect instead of nine cascading failures —
+    asserted *positively*, so the day ReAI fixes it the line fails and says to delete the branch — and
+    its cleanup checks whether the expense is still booked **first**, then removes it through the
+    cascade. Verified live: every check passes and tenant 2783 is left with 0 employees and 0 expenses,
+    where the same run previously left one of each plus a voucher.
+  - New quirk, `expense-voucher-unlink-is-broken-upstream`, so `reai_describe_endpoint` says all of
+    this before an agent tries it. 106 quirks.
+
 - **Two test comments overstated the case for discovery by 47%.** Both said "the ~250 uncovered
   operations"; the real figure is **170** — 321 public operations minus the 151 distinct
   `(method, path)` pairs curated tools declare. An inflated number in the comments that explain why
