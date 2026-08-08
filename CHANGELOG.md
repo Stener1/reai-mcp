@@ -11,6 +11,38 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 **145 tools**: 138 across eleven accounting domains, plus 7 always-on.
 
+### Added
+
+- **Norwegian action vocabulary, enumerated from the API's own action segments.** The synonym
+  table was all nouns. The API has **65 segments hanging off a resource instance** —
+  `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close`, `/{id}/unarchive` and
+  so on — and not one had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses`
+  first and `/api/expenses/{id}/approve` fifth. Both the imperative and the verbal noun are
+  covered, since a Norwegian query uses either (*"godkjenn reiseregningen"*, *"til
+  godkjenning"*).
+  - Enumerated from the spec's action segments rather than from any benchmark's phrasings —
+    the difference between covering a category and fitting a score. The tuned corpus did not
+    move; the second corpus went 23 → 25.
+  - **And that spent the second corpus as a measurement**, which is said plainly where it
+    used to claim otherwise: I read its failures before doing this work, so it is a regression
+    floor now, exactly like the tuned one, and its floor moved to 25 to match.
+
+- **A third corpus, written afterwards and measured once.** Different angle again: questions a
+  business owner asks their bookkeeper, and instructions a bookkeeper gives the system — half
+  naming an action, half plain reads, so the score says something about both.
+  - **16 of 28 in the top 3** first measurement, 21 in the top 10. After fixing only the two
+    queries that returned *nothing at all*: **18 of 28, 23 in the top 10.** Those two were
+    `land` — the plainest way to ask which countries the API accepts, whose vocabulary was
+    never added when the country list became a tool — and `skylder` (owes), for *"hvem skylder
+    oss penger"*, which is the customer ledger.
+  - Same rule as before, and it is the whole discipline: an empty result strands an agent and
+    is worth fixing; a right answer at rank five is not worth tuning for.
+  - Five of the thirty targets I wrote named endpoints that **do not exist** — no
+    `/api/offers/{id}/convert`, no `/api/vat-returns/{id}/submit`, no
+    `/api/warehouses/{id}/name`, no `/api/invoices/{id}/register-payment`, and validation only
+    on tax returns. Three were repointed, two dropped. That is the fourth time in this work a
+    "ranking failure" turned out to be my own wrong assumption about the API.
+
 ### Fixed
 
 - **The bounds sweep gained its third leg — PATH parameters — and the first thing it found
