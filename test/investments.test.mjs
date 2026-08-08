@@ -423,3 +423,52 @@ test("the update path cannot express an opening balance, even when handed one", 
     assert.ok(!(field in put.body), `${field} must not reach the API through the update path`);
   }
 });
+
+test("reclassifying a position will not leave it booked where the old type belonged", async () => {
+  // Codex raised this as documentation; measuring it made it behaviour. A LISTED_SHARE position on 1810
+  // was changed to BOND, FUND, UNLISTED_SHARE and OTHER in turn — every PUT answered 200 and the account
+  // stayed 1810 — while fresh positions of those types derive 1830, 1810, 1350 and 1820. The merge doing
+  // its job is what carries the wrong account across, exactly as on a loan reclassification.
+  const { ctx, sent } = ctxFor([{ status: 200, data: { ...POSITION } }]);
+  const res = await tool("reai_update_share_investment").handler({ id: 19, instrumentType: "BOND" }, ctx);
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /1830/, "the refusal must name what a fresh BOND derives");
+  assert.match(textOf(res), /1810/, "and where the position would otherwise stay");
+  assert.equal(sent.length, 1, "nothing may be written");
+
+  // Naming an account is the caller taking the decision.
+  const ok = ctxFor([
+    { status: 200, data: { ...POSITION } },
+    { status: 200, data: { ...POSITION, instrumentType: "BOND", assetAccountNumber: "1830" } },
+  ]);
+  const second = await tool("reai_update_share_investment").handler(
+    { id: 19, instrumentType: "BOND", assetAccountNumber: "1830" },
+    ok.ctx,
+  );
+  assert.notEqual(second.isError, true, textOf(second));
+  assert.equal(ok.sent[1].body.assetAccountNumber, "1830");
+
+  // Restating the type it already has is not a change, so it must not be refused.
+  const same = ctxFor([
+    { status: 200, data: { ...POSITION } },
+    { status: 200, data: { ...POSITION, name: "Renamed" } },
+  ]);
+  const third = await tool("reai_update_share_investment").handler(
+    { id: 19, instrumentType: "LISTED_SHARE", name: "Renamed" },
+    same.ctx,
+  );
+  assert.notEqual(third.isError, true, textOf(third));
+  assert.equal(same.sent.length, 2, "an idempotent restatement should still write");
+});
+
+test("every instrument type has a measured asset account, or the refusal cannot help", async () => {
+  // The refusal is only useful because it can name the right number. If a type is missing from the table
+  // the message degrades to "pass it explicitly", which is the state this test exists to notice.
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/tools/investments.ts", import.meta.url), "utf8");
+  const table = /DERIVED_ASSET_ACCOUNTS[\s\S]*?\};/.exec(source)?.[0] ?? "";
+  assert.ok(table, "the measured table must exist");
+  for (const type of ["LISTED_SHARE", "UNLISTED_SHARE", "FUND", "BOND", "OTHER"]) {
+    assert.match(table, new RegExp(`${type}:\\s*"\\d{4}"`), `${type} needs a measured account`);
+  }
+});

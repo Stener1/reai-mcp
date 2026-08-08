@@ -185,7 +185,19 @@ Seven operations, measured before any of them was curated, because the document 
 
 **An opening position IS an event.** `openingQuantity`, `openingCostAmount` and `openingDate` look like fields on a record and silently create a `PURCHASE` event — measured, quantity 100 with `pricePerUnit` derived as 500 from 50000/100. Because a position with any event cannot be deleted (`400 "Aksjeposten har registrerte transaksjoner og kan ikke slettes."`) and nothing removes an event, a position created with an opening balance is permanent from birth, and the create response says none of it. Clearing the fields afterwards does not help: the `PUT` answered 200 and the event stayed. `reai_create_share_investment` therefore refuses an opening balance unless `acceptPermanentPosition: true` is passed — the only argument on this server that exists purely to make someone stop and think, and it is there because one position on the write test tenant is unremovable for exactly this reason.
 
-The smaller undocumented things: `assetAccountNumber` is derived at creation (**1810** for a listed share) and never re-derived; an event needs `companyBankId` and asks for it in Norwegian (`400 "Velg verdipapirkontoen transaksjonen ble gjort opp mot."`) on a body the document marks as requiring nothing; and `PUT` requires `instrumentType` although `required` lists only `name`, while replacing everything omitted — `ticker` went from `"ZZ"` to null, and `quantity`/`costPrice`/`assetAccountNumber` survived only because they are derived rather than settable, so checking one of those and concluding the record is intact would be wrong.
+**Reclassifying a position leaves it on the old type's account, so the update tool refuses to do it silently.** The account is derived at creation and the API does not move it. Measured: a `LISTED_SHARE` position on 1810 was changed to `BOND`, `FUND`, `UNLISTED_SHARE` and `OTHER` in turn — every `PUT` answered `200` and the account stayed **1810** — while fresh positions of those types derive:
+
+| `instrumentType` | account a fresh position gets |
+|---|---|
+| `LISTED_SHARE` | 1810 |
+| `FUND` | 1810 |
+| `UNLISTED_SHARE` | 1350 |
+| `BOND` | 1830 |
+| `OTHER` | 1820 |
+
+So correcting a mislabelled holding from `LISTED_SHARE` to `BOND` would leave it booked on 1810 where 1830 belongs, and nothing in the response would say the balance sheet now disagrees with the label. `reai_update_share_investment` refuses a type change that does not name an `assetAccountNumber`, and quotes the number a fresh position of the new type would get — the same shape as the loan reclassification guard, for the same reason: the merge cannot tell a derived number from a deliberate one.
+
+The smaller undocumented things: `assetAccountNumber` is derived at creation and never re-derived; an event needs `companyBankId` and asks for it in Norwegian (`400 "Velg verdipapirkontoen transaksjonen ble gjort opp mot."`) on a body the document marks as requiring nothing; and `PUT` requires `instrumentType` although `required` lists only `name`, while replacing everything omitted — `ticker` went from `"ZZ"` to null, and `quantity`/`costPrice`/`assetAccountNumber` survived only because they are derived rather than settable, so checking one of those and concluding the record is intact would be wrong.
 
 `withinExemptionMethod` is fritaksmetoden. Whether a holding qualifies has real tax consequences and is not something this server can determine, so the flag is stored as given and the tool says so rather than defaulting.
 

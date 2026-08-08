@@ -428,7 +428,7 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 | `reai_get_share_investment` | One position | read |
 | `reai_list_share_investment_events` | Purchases, sales, dividends, capital repayments and write-downs, with the `voucherId` each one booked | read |
 | `reai_create_share_investment` | Record a position. Posts **nothing** — measured, the voucher count did not move | irreversible |
-| `reai_update_share_investment` | Change the descriptive fields. Reads and merges, because the `PUT` replaces and also requires `instrumentType`, which the spec does not list as required | irreversible |
+| `reai_update_share_investment` | Change the descriptive fields. Reads and merges, because the `PUT` replaces and also requires `instrumentType`; refuses a type change that does not name an `assetAccountNumber`, since the account does not follow the type | irreversible |
 | `reai_add_share_investment_event` | **Posts to the ledger** — its own `SH` voucher series | irreversible |
 | `reai_delete_share_investment` | Remove a position that has no events. With any event, the refusal is final | irreversible |
 
