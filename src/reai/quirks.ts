@@ -82,6 +82,75 @@ const EMPLOYEE_ACCOUNT_SPLIT_NOTE =
   "still — id, name and email only.";
 
 export const QUIRKS: readonly Quirk[] = [
+  {
+    id: "customer-duplicate-org-number-reported-as-name",
+    paths: ["/api/customers"],
+    methods: ["POST"],
+    statuses: [400],
+    kind: "gotcha",
+    note:
+      "A customer that collides with an existing one is refused with " +
+      "\"En kunde med navnet <NAME> finnes allerede.\" — and that is the EXISTING customer's name, " +
+      "not the one you sent. Isolated on the live API: sending a duplicate organizationNumber under a " +
+      "brand-new name produces exactly the same sentence as sending a duplicate name, quoting a name " +
+      "that appears nowhere in the request. So do not read it as \"pick another name\": search by " +
+      "organizationNumber first, because that is the field that is more likely to be the real clash.",
+  },
+  // --- Customer contact persons --------------------------------------------
+  // Curated as reai_*_customer_contact, but these reach an agent that has narrowed REAI_TOOLSETS
+  // away from `sales` and is going through reai_request, which is exactly when it has no tool
+  // description to read. Measured on tenant 2783 on 2026-08-08.
+  {
+    id: "contact-persons-company-customers-only",
+    paths: ["/api/customers/{id}/contact-persons"],
+    methods: ["POST"],
+    statuses: [400],
+    kind: "gotcha",
+    note:
+      "Contact persons can only be added to COMPANY customers. A customer created with " +
+      "privateContact=true answers 400 \"Contact persons can only be added to company customers\". " +
+      "The rule is in the spec, but on CreateCustomerReq.contactPersons rather than here, so it is " +
+      "easy to miss from this endpoint. A private customer's own email and phone live on the " +
+      "customer record instead — PATCH /api/customers/{id}.",
+  },
+  {
+    id: "contact-person-phone-normalised-to-e164",
+    paths: ["/api/customers/{id}/contact-persons", "/api/customers/{id}/contact-persons/{contactPersonId}"],
+    methods: ["POST", "PATCH"],
+    kind: "gotcha",
+    note:
+      "The phone number is NORMALISED, not merely validated: 90123456, 004790123456 and " +
+      "+4790123456 are all stored as +4790123456, so the value does not come back as it was sent. " +
+      "The schema's \"international E.164 format\" describes the stored form, not what has to go " +
+      "in. An invalid Norwegian number is refused in Norwegian: \"Skriv inn et gyldig " +
+      "telefonnummer. Norske nummer kan skrives uten +47.\"",
+  },
+  {
+    id: "contact-person-patch-blank-clears-null-keeps",
+    paths: ["/api/customers/{id}/contact-persons/{contactPersonId}"],
+    methods: ["PATCH"],
+    kind: "gotcha",
+    note:
+      "Omitting a field or sending null leaves it UNCHANGED; sending \"\" CLEARS it. Verify this " +
+      "the right way round if you test it: clearing a field first and then sending null reports " +
+      "\"unchanged\" whichever the API does, so each case has to start from a populated record. " +
+      "`name` is the exception — it cannot be cleared, and a blank or whitespace-only one is " +
+      "refused with 400 \"Validation failed\" and a fieldErrors list.",
+  },
+  {
+    id: "contact-person-404-ambiguous",
+    paths: ["/api/customers/{id}/contact-persons/{contactPersonId}"],
+    statuses: [404],
+    kind: "gotcha",
+    note:
+      "AMBIGUOUS. \"Contact person with id=N not found for customer with id=C\" is the answer both " +
+      "when the contact never existed or was already deleted AND when the id is real but belongs to " +
+      "a DIFFERENT customer — measured, the same sentence word for word, because ids are scoped to " +
+      "the tenant rather than to the customer. Do not read it as either one. Settle it with GET " +
+      "/api/customers/{id}/contact-persons on the customer you meant. A missing CUSTOMER is a " +
+      "different message, \"Customer with id=C not found.\", and matching the two loosely is how " +
+      "the curated tool once reported a healthy customer as nonexistent.",
+  },
   // --- Cross-cutting -------------------------------------------------------
   // Note: quirks true of the whole API (tenant scoping, deep links needing
   // ?tenantId) deliberately live in the server instructions instead. Attached

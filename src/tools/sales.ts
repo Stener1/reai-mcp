@@ -14,7 +14,9 @@ import {
   type ToolContext,
   isWholeOre,
   requiredName,
+  okText,
 } from "./registry.js";
+import { ReaiApiError } from "../reai/errors.js";
 
 /**
  * The sales side: customers, products, orders, invoices, offers.
@@ -129,7 +131,12 @@ const createCustomer = defineTool({
     "registry to win if you do not.\n\n" +
     "Note that ReAI normalizes the stored name to title case, so it may not come back exactly as sent.\n\n" +
     "Creation accepts only the fields listed here. Invoice email, phone and payment terms are not " +
-    "among them — set those with reai_update_customer afterwards.",
+    "among them — set those with reai_update_customer afterwards.\n\n" +
+    "One refusal is worth knowing because it names the wrong field: a duplicate is reported as " +
+    "\"En kunde med navnet <NAME> finnes allerede.\", and that NAME is the existing customer's, not " +
+    "the one you sent. Isolated on the live API — a duplicate organizationNumber under a brand-new " +
+    "name gives the same sentence, quoting a name that is nowhere in the request. Check the org " +
+    "number before renaming anything.",
   risk: "reversible",
   apiPaths: [["POST", "/api/customers"]],
   inputSchema: {
@@ -1353,6 +1360,366 @@ const unarchiveCustomer = defineTool({
   },
 });
 
+
+/**
+ * Contact persons on a customer: the named humans, as distinct from the customer record's own
+ * `email` and `phone`, which are the company's.
+ *
+ * Everything asserted below was measured against the live API on tenant 2783 on 2026-08-08, with
+ * every probe record deleted afterwards. Most of it is not in the spec, or is in a place an agent
+ * working on this endpoint would not read:
+ *
+ *   - **Company customers only.** Adding one to a private customer (`privateContact: true`) is
+ *     refused with 400 "Contact persons can only be added to company customers". The spec does say so,
+ *     but in a different place than an agent adding a contact would look: it is a sentence on
+ *     `CreateCustomerReq.contactPersons`, the nested array used when CREATING a customer, not on this
+ *     endpoint. An earlier version of this comment claimed "nothing in the schema hints at this",
+ *     which was wrong.
+ *   - **The phone number is normalised, not just validated.** `90123456` and `004790123456` are both
+ *     stored as `+4790123456`. So the spec's "international E.164 format" describes what comes back,
+ *     not what has to go in. An invalid Norwegian number is refused in Norwegian:
+ *     "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47."
+ *   - **`null` and `""` differ on the update.** `null` (or omitting) leaves a field unchanged; `""`
+ *     clears it. That is what the spec says, and it is easy to verify wrongly: clearing a field and
+ *     then testing `null` on the already-empty field shows "unchanged" either way. Each case here
+ *     was run from a freshly populated contact.
+ *   - **A blank name is refused**, on the update as well as the create, with 400 "Validation failed"
+ *     and a `fieldErrors` list. Duplicate names are allowed.
+ *   - **Deleting the customer takes its contacts with it** — the list 404s afterwards rather than
+ *     returning an empty array, which is why every tool here reports the customer 404 distinctly.
+ */
+/**
+ * The API's own words for the refusals an agent will actually hit, translated once.
+ *
+ * Matched over detail AND the raw body, as bankvat.ts and investments.ts do: ReAI puts a validation
+ * message in `fieldErrors` rather than `detail` often enough that detail-only translation fails open
+ * on the commonest 400.
+ */
+function translateContactError(err: unknown, customerId: number, contactPersonId?: number): unknown {
+  if (!(err instanceof ReaiApiError)) return err;
+  const detail = err.problem?.detail ?? "";
+  const haystack = `${detail} ${err.rawBody ?? ""} ${err.message}`;
+  if (err.status === 400 && /only be added to company customers/i.test(haystack)) {
+    return new Error(
+      `Customer ${customerId} is a private individual, and ReAI only allows contact persons on ` +
+        `company customers. Its own email and phone are on the customer record — set those with ` +
+        `reai_update_customer instead.`,
+    );
+  }
+  if (err.status === 400 && /gyldig telefonnummer/i.test(haystack)) {
+    return new Error(
+      `The phone number was refused as not a valid Norwegian number. Norwegian numbers may be sent ` +
+        `bare (90123456), with 0047, or in E.164 (+4790123456) — all three are accepted and stored ` +
+        `as E.164 — but the digits themselves have to form a real number: a Norwegian one starts ` +
+        `with 4 or 9. The API's own message: ${detail}`,
+    );
+  }
+  // The order of these two matters, and getting it wrong is how this shipped saying something false.
+  //
+  // ReAI distinguishes the cases perfectly — "Customer with id=999999 not found." for a missing
+  // customer, "Contact person with id=22 not found for customer with id=6022" for a contact that
+  // exists but under someone else. The first version matched /Customer with id=/i, CASE-INSENSITIVELY,
+  // which the SECOND message also contains ("...not found for customer with id=6022"). So the most
+  // common 404 on these endpoints was translated into "Customer N does not exist in this tenant" —
+  // about a customer that is fine, sending the agent off to re-check or re-create it. Found by the
+  // independent review of PR #110; it is the same shape as the reconciliation finding Codex caught,
+  // a phrase-gated translation turning one failure into a confident verdict about a different one.
+  if (err.status === 404 && /Contact person with id=/i.test(haystack)) {
+    return new Error(
+      `Contact person ${contactPersonId ?? "(unknown)"} is not on customer ${customerId}. ` +
+        `AMBIGUOUS, and the API does not say which: the contact may never have existed or been ` +
+        `deleted already, or the id may be real but belong to a DIFFERENT customer — ids are scoped ` +
+        `to the tenant, not to the customer, so the pair has to match. Measured: both cases answer ` +
+        `this same sentence, word for word. Settle it with reai_list_customer_contacts on the ` +
+        `customer you meant. The API's own message: ${detail}`,
+    );
+  }
+  if (err.status === 404 && /^Customer with id=/.test(detail)) {
+    return new Error(
+      `Customer ${customerId} does not exist in this tenant. Note that a deleted customer takes its ` +
+        `contact persons out of reach with it, so a contact id that worked before may now answer this.`,
+    );
+  }
+  return err;
+}
+
+const listCustomerContacts = defineTool({
+  name: "reai_list_customer_contacts",
+  title: "List a customer's contact persons",
+  description:
+    "List the named contact persons on a customer. These are people; the customer record's own " +
+    "`email` and `phone` belong to the company.\n\n" +
+    "Worth knowing before reaching for this: reai_get_customer ALREADY returns the same array as " +
+    "`contactPersons`, so if you are fetching the customer anyway you have them. What it does not " +
+    "come from is the customer LIST, which omits the array — that is the gap this fills, along with " +
+    "not having to know the contacts are nested inside a customer payload.\n\n" +
+    "A company customer with no contacts answers with an empty list. A customer that does not " +
+    "exist answers 404, and so does one that has been deleted — deleting a customer deletes its " +
+    "contacts too.",
+  risk: "read",
+  apiPaths: [["GET", "/api/customers/{id}/contact-persons"]],
+  inputSchema: {
+    customerId: z.number().int().positive().describe("Customer id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    try {
+      const res = await ctx.client.request({
+        method: "GET",
+        path: `/api/customers/${args.customerId}/contact-persons`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      return okList(res.data, {
+        noun: "contact person",
+        empty: `Customer ${args.customerId} has no contact persons recorded.`,
+      });
+    } catch (err) {
+      throw translateContactError(err, args.customerId);
+    }
+  },
+});
+
+const getCustomerContact = defineTool({
+  name: "reai_get_customer_contact",
+  title: "Get one contact person",
+  description:
+    "Read one contact person by id. The id is scoped to the tenant, not to the customer, so the pair " +
+    "has to match: naming a contact that exists under a DIFFERENT customer answers 404 about the " +
+    "CONTACT — \"Contact person with id=22 not found for customer with id=6022\". An earlier version " +
+    "of this description had that backwards, and the code made the same mistake: the 404 translation " +
+    "matched the customer sentence case-insensitively, which that message also contains, so the " +
+    "commonest failure here was reported as \"the customer does not exist\".\n\n" +
+    "Note that reai_get_customer already returns the whole `contactPersons` array, so this tool is " +
+    "for fetching ONE contact without the customer payload around it. The customer LIST omits them, " +
+    "which is the gap reai_list_customer_contacts fills.",
+  risk: "read",
+  apiPaths: [["GET", "/api/customers/{id}/contact-persons/{contactPersonId}"]],
+  inputSchema: {
+    customerId: z.number().int().positive().describe("Customer id."),
+    contactPersonId: z.number().int().positive().describe("Contact person id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    try {
+      const res = await ctx.client.request({
+        method: "GET",
+        path: `/api/customers/${args.customerId}/contact-persons/${args.contactPersonId}`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      return ok(res.data);
+    } catch (err) {
+      throw translateContactError(err, args.customerId, args.contactPersonId);
+    }
+  },
+});
+
+const createCustomerContact = defineTool({
+  name: "reai_create_customer_contact",
+  title: "Add a contact person to a customer",
+  description:
+    "Add a named contact person to a COMPANY customer. A private customer cannot have contacts — " +
+    "ReAI refuses with \"Contact persons can only be added to company customers\", and this tool " +
+    "says so in those terms and points at reai_update_customer instead.\n\n" +
+    "Only `name` is required, and a blank or whitespace-only one is refused. Duplicate names are " +
+    "allowed, so adding the same person twice creates two records.\n\n" +
+    "The phone number may be sent bare (90123456), with 0047, or in E.164 (+4790123456); all three " +
+    "are stored as E.164, so it will not come back exactly as sent. The digits still have to form a " +
+    "real Norwegian number.\n\n" +
+    "Reversible: remove it again with reai_delete_customer_contact.",
+  risk: "reversible",
+  apiPaths: [["POST", "/api/customers/{id}/contact-persons"]],
+  inputSchema: {
+    customerId: z.number().int().positive().describe("Customer id. Must be a company, not a private individual."),
+    name: requiredName(75).describe(
+      "Contact person's name, at most 75 characters. Whitespace alone is refused with " +
+        '"Validation failed".',
+    ),
+    email: z
+      .string()
+      // `""` is allowed through deliberately: the API accepts it and stores null, and it is the
+      // documented way to clear the field on the update. Refusing it here made create and update
+      // disagree about the same value, which the review of PR #110 called out.
+      .refine((v) => v === "" || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v), {
+        message: 'Must be an email address, or "" to leave it empty. The API answers 400 otherwise.',
+      })
+      .optional()
+      .describe('Email address. Optional; "" is accepted and stores nothing.'),
+    // No maxLength: neither CreateCustomerContactPersonReq.phone nor its update counterpart declares
+    // one. The first version invented `.max(30)`, which is the sort of guessed bound this repo's
+    // spec-bounds test exists to catch on the other side.
+    phone: z
+      .string()
+      .optional()
+      .describe(
+        "Phone number. Bare, 0047-prefixed and E.164 forms are all accepted and stored as E.164.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const body: Record<string, unknown> = { name: args.name };
+    if (args.email !== undefined) body.email = args.email;
+    if (args.phone !== undefined) body.phone = args.phone;
+    try {
+      const res = await ctx.client.request({
+        method: "POST",
+        path: `/api/customers/${args.customerId}/contact-persons`,
+        body,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      const stored = res.data as { phone?: string | null } | undefined;
+      const renormalised =
+        args.phone !== undefined && stored?.phone && stored.phone !== args.phone
+          ? ` The phone was stored as ${stored.phone}, normalised from ${args.phone}.`
+          : "";
+      return ok(res.data, {
+        note: `Added a contact person to customer ${args.customerId}.${renormalised}`,
+      });
+    } catch (err) {
+      throw translateContactError(err, args.customerId);
+    }
+  },
+});
+
+const updateCustomerContact = defineTool({
+  name: "reai_update_customer_contact",
+  title: "Update a contact person",
+  description:
+    "Change a contact person's name, email or phone. This is a PATCH, so only what you pass is " +
+    "touched — but the two ways of passing nothing differ, and the difference is the whole reason " +
+    "to read this description:\n" +
+    "  - Omitting a field, or passing null, leaves it UNCHANGED.\n" +
+    "  - Passing an empty string CLEARS it.\n\n" +
+    "Measured from a freshly populated contact for each case, because the obvious way to test it — " +
+    "clear a field, then pass null — reports \"unchanged\" whichever the API does.\n\n" +
+    "A blank name is refused rather than treated as a clear: `name` is the one field that cannot be " +
+    "emptied. Phone normalisation applies here as on create, and is reported the same way — which it " +
+    "was not in the first version, though this sentence already promised it. That matters more on an " +
+    "update than on a create, because here a previous value was overwritten.",
+  risk: "reversible",
+  apiPaths: [["PATCH", "/api/customers/{id}/contact-persons/{contactPersonId}"]],
+  inputSchema: {
+    customerId: z.number().int().positive().describe("Customer id."),
+    contactPersonId: z.number().int().positive().describe("Contact person id."),
+    // `.nullable()`, because the description promises null and the API accepts it. The first version
+    // was `z.string().optional()`, which zod REFUSES null on — so three descriptions documented an
+    // input the tool answered "Invalid arguments for tool" to, and an agent copying the wording out of
+    // the spec ("Omit or null to leave unchanged") hit it. Found by the independent review of PR #110.
+    // A null is stripped from the body below rather than forwarded, since omitting is what the API
+    // already treats as unchanged and it keeps one code path for the two spellings.
+    name: requiredName(75)
+      .nullable()
+      .optional()
+      .describe("New name. Omit or pass null to leave unchanged; it cannot be cleared."),
+    email: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('New email. Omit or null to leave unchanged, "" to clear. Validated when non-empty.'),
+    phone: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('New phone. Omit or null to leave unchanged, "" to clear.'),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    // null and undefined both mean "leave alone", so neither reaches the body. "" is NOT the same
+    // thing — it is the API's clear — which is why this cannot be a truthiness check.
+    const body: Record<string, unknown> = {};
+    if (args.name !== undefined && args.name !== null) body.name = args.name;
+    if (args.email !== undefined && args.email !== null) body.email = args.email;
+    if (args.phone !== undefined && args.phone !== null) body.phone = args.phone;
+    if (Object.keys(body).length === 0) {
+      return fail(
+        "Nothing to change. Pass name, email or phone. An empty update is accepted by the API and " +
+          'changes nothing, so it is refused here instead — and note that "" CLEARS a field while ' +
+          "omitting it leaves it alone.",
+      );
+    }
+    try {
+      const res = await ctx.client.request({
+        method: "PATCH",
+        path: `/api/customers/${args.customerId}/contact-persons/${args.contactPersonId}`,
+        body,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      const cleared = Object.entries(body)
+        .filter(([, v]) => v === "")
+        .map(([k]) => k);
+      const stored = res.data as { phone?: string | null } | undefined;
+      const renormalised =
+        typeof args.phone === "string" && args.phone !== "" && stored?.phone && stored.phone !== args.phone
+          ? ` The phone was stored as ${stored.phone}, normalised from ${args.phone}.`
+          : "";
+      return ok(res.data, {
+        note:
+          `Updated contact person ${args.contactPersonId}.` +
+          (cleared.length > 0 ? ` Cleared: ${cleared.join(", ")}.` : "") +
+          renormalised,
+      });
+    } catch (err) {
+      throw translateContactError(err, args.customerId, args.contactPersonId);
+    }
+  },
+});
+
+const deleteCustomerContact = defineTool({
+  name: "reai_delete_customer_contact",
+  title: "Remove a contact person",
+  description:
+    "Remove a contact person from a customer. Answers 204 the first time and 404 the second, so a " +
+    "404 here means it is already gone rather than that something failed.\n\n" +
+    "This removes the contact only. The customer is untouched.",
+  risk: "reversible",
+  apiPaths: [["DELETE", "/api/customers/{id}/contact-persons/{contactPersonId}"]],
+  destructive: true,
+  inputSchema: {
+    customerId: z.number().int().positive().describe("Customer id."),
+    contactPersonId: z.number().int().positive().describe("Contact person id."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    try {
+      await ctx.client.request({
+        method: "DELETE",
+        path: `/api/customers/${args.customerId}/contact-persons/${args.contactPersonId}`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      return okText(
+        `Removed contact person ${args.contactPersonId} from customer ${args.customerId}. Re-add it with ` +
+          `reai_create_customer_contact — the id will be a new one.`,
+      );
+    } catch (err) {
+      // A 404 here does NOT simply mean "already gone", and the first version reporting it as a plain
+      // success told the agent its goal was met when it might not be. Measured by the independent
+      // review of PR #110: with contact 22 owned by customer 6021,
+      // DELETE /api/customers/6022/contact-persons/22 answers 404 and the contact SURVIVES. A typo in
+      // customerId did the same.
+      //
+      // Then measuring the wording settled it the other way from the obvious fix: a genuinely-deleted
+      // contact answers "Contact person with id=40 not found for customer with id=6025" — the SAME
+      // sentence as the wrong-parent case, word for word. So the two readings cannot be separated, and
+      // narrowing the match to one of them would have been a second guess dressed as a fix. It is
+      // reported as ambiguous instead, with the way to settle it, and a nonexistent CUSTOMER still
+      // reaches the translator rather than being absorbed here.
+      const body = `${err instanceof ReaiApiError ? (err.problem?.detail ?? "") : ""} ${
+        err instanceof ReaiApiError ? (err.rawBody ?? "") : ""
+      }`;
+      if (err instanceof ReaiApiError && err.status === 404 && /Contact person with id=/i.test(body)) {
+        return okText(
+          `Nothing was changed: contact person ${args.contactPersonId} is not on customer ` +
+            `${args.customerId}. AMBIGUOUS — either it was already removed (or never existed), or the ` +
+            `id belongs to a DIFFERENT customer, since ids are scoped to the tenant rather than to the ` +
+            `customer. Both cases answer with the same sentence, so this tool cannot tell you which. ` +
+            `If you meant to remove it, confirm with reai_list_customer_contacts: absent there means ` +
+            `the job is done, present there means the customerId was wrong.`,
+        );
+      }
+      throw translateContactError(err, args.customerId, args.contactPersonId);
+    }
+  },
+});
+
 export const salesTools: ToolDef[] = [
   listCustomers,
   getCustomer,
@@ -1377,4 +1744,9 @@ export const salesTools: ToolDef[] = [
   createInvoiceFromOrder,
   creditInvoice,
   registerInvoicePayment,
+  listCustomerContacts,
+  getCustomerContact,
+  createCustomerContact,
+  updateCustomerContact,
+  deleteCustomerContact,
 ] as ToolDef[];

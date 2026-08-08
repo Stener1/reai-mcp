@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **167 tools**: 160 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **172 tools**: 165 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **116 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -246,6 +246,8 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
 | `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data. The delete **archives** instead when the customer has transactions, and reports which of the two happened | reversible |
 | `reai_unarchive_customer` | Bring an archived customer back. An archived one is invisible to the list unless you pass `archived: true` | reversible |
+| `reai_list_customer_contacts` · `reai_get_customer_contact` | Named contact people on a customer, as distinct from the company's own email and phone | read |
+| `reai_create_customer_contact` · `reai_update_customer_contact` · `reai_delete_customer_contact` | Contact-person master data. **Company customers only** — a private customer is refused. Phone numbers are normalised to E.164, and on the update `""` clears a field while omitting it leaves it alone | reversible |
 | `reai_search_leads` | Prospecting: search the Norwegian company register (Brønnøysund) with this tenant's lead state on top — filter by legal form, industry, city, registration date, whether Brreg lists an accountant, whether an email or phone is on file | read |
 | `reai_get_lead` | One company by **organisation number**, with its lead state if any | read |
 | `reai_save_lead` | Start tracking a register company as a lead, with no state on it yet | reversible |
@@ -457,11 +459,11 @@ It sits outside the default surface rather than inside it — every count in thi
 
 Anything not listed — projects, timesheets, share investments, documents — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 167 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 172 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
-REAI_TOOLSETS=bookkeeping,sales    # 49 tools
+REAI_TOOLSETS=bookkeeping,sales    # 54 tools
 REAI_TOOLSETS=purchase             # 31 tools
 REAI_TOOLSETS=bank                 # 25 tools
 REAI_TOOLSETS=organisation         # 25 tools
@@ -501,9 +503,9 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **116 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **121 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
-148 public operations no curated tool covers. A test asserts every quirk still matches a real
+143 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
 
 Four to give the flavour: an invoice is created from an *order*, not from line items; there is no
