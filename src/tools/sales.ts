@@ -15,6 +15,7 @@ import {
   isWholeOre,
   requiredName,
   okText,
+  PHONE_RULE,
 } from "./registry.js";
 import { ReaiApiError } from "../reai/errors.js";
 
@@ -221,7 +222,9 @@ const updateCustomer = defineTool({
     phone: z
       .string()
       .optional()
-      .describe('Phone number. A "+47" prefix on a Norwegian number is rejected — write it plain, e.g. "22334455".'),
+      // Was: 'a "+47" prefix on a Norwegian number is rejected — write it plain'. Measured false.
+      // PATCH /api/customers/{id} answers 200 to +4722334455 and stores it. See PHONE_RULE.
+      .describe(`Phone number. ${PHONE_RULE}`),
     nationalIdentityNumber: z
       .string()
       .regex(/^\d{11}$/, "nationalIdentityNumber must be exactly 11 digits, and digits only")
@@ -1375,10 +1378,12 @@ const unarchiveCustomer = defineTool({
  *     `CreateCustomerReq.contactPersons`, the nested array used when CREATING a customer, not on this
  *     endpoint. An earlier version of this comment claimed "nothing in the schema hints at this",
  *     which was wrong.
- *   - **The phone number is normalised, not just validated.** `90123456` and `004790123456` are both
- *     stored as `+4790123456`. So the spec's "international E.164 format" describes what comes back,
- *     not what has to go in. An invalid Norwegian number is refused in Norwegian:
- *     "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47."
+ *   - **The phone number is parsed and canonicalised, not merely validated** — and the rule is not
+ *     local to contacts. It is the same one on `customer.phone` and `supplier.phone`, and it lives in
+ *     `PHONE_RULE` in registry.ts with the measurements behind it, because three places in this
+ *     repository described this behaviour three different ways and one of them was false. Short
+ *     version: default region NO, stored as E.164, and a bare number that is valid in Norway is
+ *     stored under +47 whatever the caller meant.
  *   - **`null` and `""` differ on the update.** `null` (or omitting) leaves a field unchanged; `""`
  *     clears it. That is what the spec says, and it is easy to verify wrongly: clearing a field and
  *     then testing `null` on the already-empty field shows "unchanged" either way. Each case here
@@ -1408,16 +1413,11 @@ function translateContactError(err: unknown, customerId: number, contactPersonId
   }
   if (err.status === 400 && /gyldig telefonnummer/i.test(haystack)) {
     return new Error(
-      `The phone number was refused as not a valid number. This field is INTERNATIONAL — measured, ` +
-        `+46701234567, +14155552671, +447911123456 and +4915112345678 are all accepted and stored ` +
-        `exactly as sent — so do not "fix" a foreign number by changing its country code.\n` +
-        `ALWAYS send a non-Norwegian number with its country code. Bare digits are interpreted as ` +
-        `NORWEGIAN, and the outcome is one of two things, neither of them what a foreign caller ` +
-        `wants: refused, as here, or SILENTLY STORED UNDER +47 if the digits happen to be valid ` +
-        `Norwegian. Measured: the Danish mobile 40123456 was stored as +4740123456 without complaint, ` +
-        `while 20123456 was refused. A wrong number saved quietly is worse than this error.\n` +
-        `Note that this refusal is worded in Norwegian whatever the number's country, so the message ` +
-        `is not evidence that a Norwegian number was expected. The API's own words: ${detail}`,
+      `The phone number could not be parsed as a valid number for its country, so nothing was ` +
+        `written. This error does NOT tell you which country was resolved: the same 400 answers a ` +
+        `bare number read as Norwegian AND a number sent with a country code that is simply ` +
+        `malformed, so do not "fix" a foreign number by changing its country code on the strength ` +
+        `of it.\n${PHONE_RULE}\nThe API's own words: ${detail}`,
     );
   }
   // The order of these two matters, and getting it wrong is how this shipped saying something false.
@@ -1528,15 +1528,7 @@ const createCustomerContact = defineTool({
     "says so in those terms and points at reai_update_customer instead.\n\n" +
     "Only `name` is required, and a blank or whitespace-only one is refused. Duplicate names are " +
     "allowed, so adding the same person twice creates two records.\n\n" +
-    "The phone field is international: a foreign E.164 number is accepted and stored as sent " +
-    "(+46701234567, +14155552671 and +447911123456 all verified).\n" +
-    "**Always include the country code for a non-Norwegian number.** Bare digits are interpreted as " +
-    "NORWEGIAN, and if they happen to be valid Norwegian they are stored under +47 with no warning — " +
-    "measured, the Danish mobile 40123456 became +4740123456, while 20123456 was refused. So the risk " +
-    "is not only rejection; it is a foreign number saved silently as the wrong one. Norwegian numbers " +
-    "may be sent bare or 0047-prefixed and normalise to +47 as expected. A rejection is worded in " +
-    "Norwegian regardless of the number's country, which is not evidence that a Norwegian one was " +
-    "expected.\n\n" +
+    `The phone field: ${PHONE_RULE}\n\n` +
     "Reversible: remove it again with reai_delete_customer_contact.",
   risk: "reversible",
   apiPaths: [["POST", "/api/customers/{id}/contact-persons"]],
@@ -1562,11 +1554,7 @@ const createCustomerContact = defineTool({
     phone: z
       .string()
       .optional()
-      .describe(
-        "Phone number. Any country's E.164 form is accepted and stored as sent. Send the country " +
-          "code unless the number is Norwegian: bare digits are read as Norwegian and, if valid as " +
-          "such, stored under +47 without warning.",
-      ),
+      .describe(`Phone number. ${PHONE_RULE}`),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -1606,9 +1594,11 @@ const updateCustomerContact = defineTool({
     "Measured from a freshly populated contact for each case, because the obvious way to test it — " +
     "clear a field, then pass null — reports \"unchanged\" whichever the API does.\n\n" +
     "A blank name is refused rather than treated as a clear: `name` is the one field that cannot be " +
-    "emptied. Phone normalisation applies here as on create, and is reported the same way — which it " +
-    "was not in the first version, though this sentence already promised it. That matters more on an " +
-    "update than on a create, because here a previous value was overwritten.",
+    "emptied.\n\n" +
+    `The phone rule applies here exactly as on create, and matters MORE, because an update overwrites a ` +
+    `number that may have been right: ${PHONE_RULE}\n\n` +
+    "The renormalisation is reported in the note, so a value that changed on the way in is visible " +
+    "rather than silent.",
   risk: "reversible",
   apiPaths: [["PATCH", "/api/customers/{id}/contact-persons/{contactPersonId}"]],
   inputSchema: {
@@ -1633,7 +1623,7 @@ const updateCustomerContact = defineTool({
       .string()
       .nullable()
       .optional()
-      .describe('New phone. Omit or null to leave unchanged, "" to clear.'),
+      .describe(`New phone. Omit or null to leave unchanged, "" to clear. ${PHONE_RULE}`),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

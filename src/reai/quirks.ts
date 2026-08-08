@@ -546,19 +546,37 @@ export const QUIRKS: readonly Quirk[] = [
       'with what you sent ("acme as" comes back "Acme As").',
   },
   {
-    id: "phone-no-plus47",
-    paths: ["/api/customers", "/api/customers/{id}", "/api/suppliers", "/api/suppliers/{id}"],
+    id: "phone-one-rule-parsed-as-norwegian",
+    paths: [
+      "/api/customers",
+      "/api/customers/{id}",
+      "/api/suppliers",
+      "/api/suppliers/{id}",
+      "/api/customers/{id}/contact-persons",
+      "/api/customers/{id}/contact-persons/{contactPersonId}",
+    ],
     methods: ["POST", "PATCH"],
-    kind: "validation",
-    statuses: [400, 422],
+    kind: "gotcha",
     note:
-      "Two phone fields, opposite rules — check which one you are filling.\n" +
-      'The ENTITY phone (customer.phone, supplier.phone) rejects a "+47" prefix on a Norwegian ' +
-      'number: 400 "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +". Send ' +
-      '"22334455". Observed live.\n' +
-      "A CONTACT PERSON's phone is the reverse: the spec documents contactPersons[].phone as " +
-      '"Phone number in international E.164 format", example +4799999999, so stripping the prefix ' +
-      "there is wrong. Same request body, two conventions.",
+      "ONE rule for every phone field here — customer.phone, supplier.phone and " +
+      "contactPersons[].phone all behave identically, and a \"+47\" prefix is ACCEPTED on all three.\n" +
+      "The rule, measured across customer.phone, supplier.phone and contactPersons[].phone, which " +
+      "behave identically: the value is parsed with NORWAY as the default region and stored " +
+      "canonicalised to E.164 — nothing is stored as sent, so \"+46 70 123 45 67\" comes back " +
+      "\"+46701234567\" and \"(40) 12 34 56\" comes back \"+4740123456\". A leading +CC, 00CC or a " +
+      "bare 47 selects the country; anything else is read as Norwegian, and the digits must be valid " +
+      "for whichever country that resolved to or the write is refused with 400.\n" +
+      "The trap is those last two together: a bare number that is also valid in Norway is stored " +
+      "under +47 with no warning, whatever was meant. The Danish mobile 40123456 becomes " +
+      "+4740123456; 20123456 is refused, and NOT because it is Danish — 20 is unallocated in Norway, " +
+      "while 21123456 and 22334455 are both accepted. Always send a non-Norwegian number with a + and " +
+      "its country code. A bare 47 counts as one, a bare 45 does not.\n" +
+      "The employee phone is the one exception in the API: it stores an unparseable value as NULL " +
+      "with a 200 rather than refusing it, so a write there has to be read back.\n" +
+      "History, because the correction matters: until 2026-08-08 this note claimed \"two phone " +
+      "fields, opposite rules\" and that the entity phone REJECTED a +47 prefix. Measured false — " +
+      "PATCH /api/customers/{id} and /api/suppliers/{id} both answer 200 to \"+4722334455\" and store " +
+      "it. Two tool descriptions built on it told agents to strip a prefix that was correct.",
   },
   {
     id: "brreg-lookup",

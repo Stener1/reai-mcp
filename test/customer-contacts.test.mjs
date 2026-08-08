@@ -90,8 +90,8 @@ test("the phone refusal does not tell an agent to rewrite a foreign country code
       // Must not assert the number is Norwegian, or that it starts with 4 or 9.
       assert.doesNotMatch(err.message, /not a valid Norwegian number/);
       assert.doesNotMatch(err.message, /starts with 4 or 9/);
-      // Must say the field is international, and say so with evidence.
-      assert.match(err.message, /INTERNATIONAL/);
+      // Foreign numbers work, with the evidence — which now travels in PHONE_RULE rather than being
+      // paraphrased here, so the message and the constant cannot drift apart.
       assert.match(err.message, /\+46701234567/);
       assert.match(err.message, /do not "fix" a foreign number by changing its country code/);
       // Must explain that the Norwegian wording is not a signal about the number's country.
@@ -124,10 +124,10 @@ test("the bare-digits advice names the silent outcome, not just the refusal", as
     (err) => {
       // The categorical claim must be gone.
       assert.doesNotMatch(err.message, /a bare foreign number is refused/);
-      // Both outcomes named, with the silent one called out as such.
-      assert.match(err.message, /SILENTLY STORED UNDER \+47/);
-      assert.match(err.message, /40123456 was stored as \+4740123456/);
-      assert.match(err.message, /ALWAYS send a non-Norwegian number with its country code/);
+      // Both outcomes named, with the silent one called out as such. The wording lives in PHONE_RULE.
+      assert.match(err.message, /with no warning/);
+      assert.match(err.message, /40123456 became \+4740123456/);
+      assert.match(err.message, /ALWAYS include the country code/);
       return true;
     },
   );
@@ -390,4 +390,78 @@ test("every contact tool declares the customer id as a positive integer", () => 
     assert.throws(() => schema.parse({ customerId: 0, contactPersonId: 1, name: "x", tenantId: 2783 }));
     assert.throws(() => schema.parse({ customerId: -1, contactPersonId: 1, name: "x", tenantId: 2783 }));
   }
+});
+
+/**
+ * The phone rule, pinned structurally rather than by phrase.
+ *
+ * Three consecutive PRs got this text wrong in a new way each time — asserting Norwegian-only on an
+ * international field, then that a bare foreign number is "refused" when the dangerous outcome is
+ * silent acceptance, then that foreign numbers are "stored exactly as sent" when everything is
+ * canonicalised. The reviews also showed why phrase assertions did not stop it: a `doesNotMatch` on
+ * one sentence is satisfied by appending a contradicting one, and the earlier tests stubbed the error
+ * so the input phone pinned nothing at all.
+ *
+ * So the guard is now that there is ONE source of truth and every phone-bearing argument uses it. A
+ * contradiction then requires editing `PHONE_RULE` itself, where the measurements sit.
+ */
+test("every phone argument in the repo carries the one shared rule", async () => {
+  const { PHONE_RULE } = await import("../dist/tools/registry.js");
+  const { registeredTools } = await import("../dist/server.js");
+
+  // The rule has to say the three things each wrong version got wrong.
+  assert.match(PHONE_RULE, /canonicalised to E\.164/, "must not imply values are stored as sent");
+  assert.match(PHONE_RULE, /ALWAYS include the country code/);
+  assert.match(PHONE_RULE, /with no warning/, "the silent outcome is the one worth naming");
+  assert.doesNotMatch(PHONE_RULE, /stored (exactly )?as sent/);
+  assert.doesNotMatch(PHONE_RULE, /bare foreign number is refused/);
+
+  const offenders = [];
+  let checked = 0;
+  for (const tool of registeredTools) {
+    for (const [name, schema] of Object.entries(tool.inputSchema ?? {})) {
+      // Only the fields that actually carry a phone NUMBER. `requirePhone` on the lead search is a
+      // boolean filter, and `hasPhone` likewise — they say nothing about formatting.
+      if (!/^(phone|mobile|phoneNumber)$/i.test(name)) continue;
+      checked += 1;
+      const description = schema?.description ?? "";
+      if (!description.includes("canonicalised to E.164") && !description.includes("E.164")) {
+        offenders.push(`${tool.name}.${name}`);
+      }
+    }
+  }
+  // A floor on the work, since a rename of the argument would otherwise empty this sweep silently.
+  assert.ok(checked >= 4, `only ${checked} phone arguments found — the name filter has stopped matching`);
+  assert.deepEqual(
+    offenders,
+    [],
+    "these phone arguments describe the format in their own words instead of using PHONE_RULE",
+  );
+});
+
+test("the phone refusal does not claim to know which country was resolved", async () => {
+  // The previous version said the number was "refused, as here" because bare digits are read as
+  // Norwegian — but the same 400 answers a number sent WITH a country code that is merely malformed,
+  // which is the entire reason the international fix existed. Asserting the negative alone was not
+  // enough (a contradicting sentence could be appended), so this also pins the positive claim.
+  await assert.rejects(
+    () =>
+      run(
+        "reai_create_customer_contact",
+        { customerId: 1, name: "Ada", phone: "+46123" },
+        {
+          error: apiError(
+            400,
+            "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47.",
+          ),
+        },
+      ),
+    (err) => {
+      assert.match(err.message, /does NOT tell you which country was resolved/);
+      assert.doesNotMatch(err.message, /refused, as here/);
+      // And the shared rule travels with it, so the advice cannot drift from the constant.
+      assert.match(err.message, /ALWAYS include the country code/);
+      return true;
+    },
+  );
 });

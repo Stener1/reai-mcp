@@ -17,6 +17,7 @@ import {
   requiredName,
   mergeForReplacement,
   readableRecord,
+  PHONE_RULE,
 } from "./registry.js";
 
 /**
@@ -175,7 +176,9 @@ const updateSupplier = defineTool({
     phone: z
       .string()
       .optional()
-      .describe('Phone number. A "+47" prefix on a Norwegian number is rejected — write it plain.'),
+      // Was: 'a "+47" prefix on a Norwegian number is rejected'. Measured false on
+      // PATCH /api/suppliers/{id} — 200, stored as sent. Same rule as every other phone field.
+      .describe(`Phone number. ${PHONE_RULE}`),
     iban: z.string().optional().describe("IBAN, for foreign payments."),
     bankAccountNumber: z.string().optional().describe("Norwegian bank account number."),
     swiftCode: z.string().optional().describe("SWIFT/BIC code."),

@@ -237,22 +237,25 @@ Measured on tenant 2783 on 2026-08-08, every probe record deleted afterwards.
 
 **Company customers only.** A customer created with `privateContact: true` refuses a contact with `400 "Contact persons can only be added to company customers"`. The rule *is* in the spec, but as a sentence on `CreateCustomerReq.contactPersons` — the nested array used when creating a customer — not on this endpoint, so it is easy to miss from here. A private customer's own email and phone go on the customer record instead.
 
-**The phone number is normalised, and the field is international — those are two separate facts, and conflating them produced bad advice.** A Norwegian number may be sent bare (`90123456`) or `0047`-prefixed, and both are stored as `+4790123456`, so a Norwegian value does not come back as it was sent. The tools report that renormalisation, on the update as well as the create — more important there, since a previous value was overwritten.
+**The phone rule is not local to contacts, and it is written down once** — `PHONE_RULE` in `src/tools/registry.ts`, with the measurements behind it. Three places in this repository described this behaviour three different ways and one of them was false, so the tools now all point at the same sentence rather than paraphrasing it.
 
-But foreign numbers are accepted and stored **exactly as sent**: `+46701234567`, `+14155552671`, `+447911123456` and `+4915112345678` all verified.
+The rule, measured on `customer.phone`, `supplier.phone` and `contactPersons[].phone`, which behave **identically**: the value is parsed with **Norway as the default region** and stored **canonicalised to E.164**. Nothing is stored as sent — `+46 70 123 45 67` comes back `+46701234567`, `(40) 12 34 56` comes back `+4740123456`, and even `tel:40123456` parses. A leading `+CC`, `00CC` or a bare `47` selects the country; anything else is read as Norwegian, and the digits must be valid for whatever country that resolved to or the write is refused with 400.
 
-**Always send a non-Norwegian number with its country code**, and the reason is sharper than "otherwise it is refused" — which is what an earlier version of this page said, and it was wrong in the direction that costs something. Bare digits are interpreted as *Norwegian*, and that has two outcomes:
+The trap is those last two together:
 
 | sent bare | stored | why |
 |---|---|---|
-| `90123456` | `+4790123456` | valid Norwegian, and meant as such |
-| `40123456` | **`+4740123456`** | a real **Danish** mobile, also valid Norwegian — accepted silently as `+47` |
-| `20123456` | *refused* | Danish landline prefix, not valid Norwegian |
-| `701234567` | *refused* | Swedish, nine digits |
+| `90123456` | `+4790123456` | valid Norwegian, meant as such |
+| `40123456` | **`+4740123456`** | a real **Danish** mobile, also valid Norwegian — stored as `+47` with no warning |
+| `21123456`, `22334455` | `+4721…`, `+4722…` | accepted — Norwegian fixed-line ranges |
+| `20123456` | *refused* | **not** because it is Danish: `20` is unallocated **in Norway** |
+| `701234567`, `401234567`, `612345678` | *refused* | Swedish, Finnish, Dutch — nine digits, invalid as Norwegian |
 
-So the failure mode to fear is not a rejection but a foreign number **saved quietly as the wrong one** — someone then calls the wrong person. Codex caught the categorical claim on PR #111.
+So the failure to fear is not a rejection but a foreign number **saved quietly as the wrong one** — someone then calls the wrong person. Always send a non-Norwegian number with a `+` and its country code. A bare `47` counts as a country code; a bare `45` does not (`4540123456` is refused, `004540123456` is not).
 
-The refusal is `"Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47."`, **and it says that for a malformed Swedish or American number too.** The first version of the translation read that as "the number must be Norwegian and start with 4 or 9", which for a foreign contact points the agent at the one part of the number that was correct. Codex caught it on PR #110. The message is not evidence about the number's country.
+**What this replaced, because the correction is the point.** A quirk asserted "two phone fields, opposite rules — the ENTITY phone rejects a `+47` prefix", and `reai_update_customer` and `reai_update_supplier` told agents to strip it. Measured false: `PATCH /api/customers/{id}` and `PATCH /api/suppliers/{id}` both answer 200 to `+4722334455` and store it unchanged. There is one rule, not two, and the old guidance removed a correct prefix.
+
+The one genuine exception in the API is the **employee** phone, which stores an unparseable value as `null` with a 200 instead of refusing it — `organisation.ts` documents that separately and reads the write back.
 
 **On the update, `null` and `""` are not the same.** Omitting a field or sending `null` leaves it unchanged; `""` clears it. Worth stating how that was established, because the obvious test cannot tell them apart: clear a field first and then send `null`, and an already-empty field reports "unchanged" whichever the API does. Each case was run from a freshly populated contact. `name` is the exception — it cannot be cleared, and a blank or whitespace-only one is refused with `400 "Validation failed"`.
 

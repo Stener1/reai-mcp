@@ -9,24 +9,32 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
-- **"A bare foreign number is refused" was categorical, and wrong in the direction that costs
-  something.** Codex's follow-up on the fix below. Bare digits are interpreted as *Norwegian*, and if
-  they happen to be valid Norwegian they are stored under `+47` **with no warning** — measured, the
-  Danish mobile `40123456` became `+4740123456`, while `20123456` was refused. So the outcome to warn
-  about is not a rejection but a foreign number saved quietly as the wrong one, which is how someone
-  ends up calling the wrong person. The guidance now leads with "always send the country code" and names
-  both outcomes; the test asserts the categorical claim is gone rather than only that the new text is
-  present.
-
-- **The contact-phone refusal told an agent the number had to be Norwegian, on a field that is
-  international.** Codex caught it on PR #110 and the measurement is decisive: `+46701234567`,
-  `+14155552671`, `+447911123456` and `+4915112345678` are all accepted and stored **exactly as sent**.
-  Only the shorthand is Norwegian — bare digits are read as `+47`, which is why a bare foreign number is
-  refused — and the rejection is worded in Norwegian *whatever the number's country*, including for a
-  malformed Swedish or American one. The old translation read that wording as evidence about the number
-  and advised that "a Norwegian one starts with 4 or 9", which for a foreign contact points at the one
-  part that was correct. It now says the field is international, shows the accepted foreign forms, and
-  says plainly that the Norwegian wording is not a signal.
+- **One phone rule, measured, replacing three accounts of it — one of which was false and told agents
+  to strip a correct prefix.** This started as a wording fix and turned into a real defect: a quirk
+  asserted "two phone fields, opposite rules — the ENTITY phone rejects a `+47` prefix", and
+  `reai_update_customer` and `reai_update_supplier` repeated it. Measured 2026-08-08: `PATCH
+  /api/customers/{id}` and `PATCH /api/suppliers/{id}` both answer **200** to `+4722334455` and store it
+  unchanged. There is one rule, not two, and the old guidance removed a prefix that was right.
+  - The rule now lives once, in `PHONE_RULE` in `src/tools/registry.ts`, and every phone-bearing
+    argument points at it — customer, supplier, lead and contact person. Measured across all of them:
+    the value is parsed with **Norway as the default region** and stored **canonicalised to E.164**.
+    Nothing is stored as sent — `+46 70 123 45 67` comes back `+46701234567`, `(40) 12 34 56` comes back
+    `+4740123456`, and `tel:40123456` parses. A leading `+CC`, `00CC` or a bare `47` picks the country;
+    anything else is read as Norwegian and must be valid as such or the write is refused with 400.
+  - The trap is those last two together, and three consecutive PRs described it wrongly in three
+    different ways. A bare number that is *also* valid in Norway is stored under `+47` **with no
+    warning**: the Danish mobile `40123456` becomes `+4740123456`. `20123456` is refused — and **not**
+    because it is Danish, which an earlier version of this changelog implied: `20` is unallocated in
+    Norway, while `21123456` and `22334455` are both accepted. So the failure to fear is a foreign
+    number saved quietly as the wrong one, not a rejection.
+  - The error translation no longer claims to know which country was resolved. The same 400 answers a
+    bare number read as Norwegian and a number sent *with* a country code that is merely malformed, so
+    the previous "refused, as here" attributed the refusal to a cause it could not observe.
+  - Guarded structurally rather than by phrase, because phrase guards did not stop any of this: a test
+    asserts every phone argument in the registry carries `PHONE_RULE` and that the constant itself does
+    not contain the three superseded claims. A contradiction now requires editing the one place the
+    measurements live. The `employee` phone remains the documented exception — it stores an unparseable
+    value as `null` with a 200 instead of refusing it.
 
 ### Added
 
@@ -41,7 +49,9 @@ All notable changes to `reai-mcp`. Format loosely follows
     at `reai_update_customer`. **Phone numbers are normalised, not merely validated**: `90123456` and
     `004790123456` both come back `+4790123456`, so the spec's "E.164 format" describes the stored value, not
     the input, and the tool reports the renormalisation rather than letting it look like a silent edit. An
-    invalid Norwegian number is refused in Norwegian, translated here.
+    unparseable number is refused in Norwegian whatever the number's country, translated here. (That
+    bullet described the behaviour as Norwegian-only; see the phone-rule entry above for the measured
+    account, which supersedes it.)
   - On the update, `null` and omitting leave a field unchanged while `""` clears it — which the spec does say,
     and which is easy to verify wrongly: clear a field first and `null` then reports "unchanged" whichever the
     API does. Each case was run from a freshly populated contact. A blank name is refused rather than treated
