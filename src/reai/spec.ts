@@ -1474,6 +1474,19 @@ function lookupForms(token: string): string[] {
       // "kunde", not "kund", and only the former is a synonym key.
       add(base.slice(0, -1));
     } else if (base.endsWith("e") && base.length > 4) add(base.slice(0, -1));
+    // The Norwegian DEFINITE article is a suffix, and it is how people actually speak: "send
+    // fakturaen", "slett bilaget", "endre kunden". Most of those already resolved by accident,
+    // because the compound-stem rule finds `faktura` inside `fakturaen` — but it requires at least
+    // two characters left over, and the commonest Norwegian noun class ends in -e and takes a single
+    // -n. So `kunden`, `ordren`, `leieavtalen`, `husleien` and every other definite -e noun resolved
+    // to NOTHING, a quarter of the keys in the table below. Measured: "endre kunden" and "vis ordren"
+    // returned no endpoint at all while their indefinite forms ranked correctly.
+    //
+    // Both the singular -n and the plural -ne, on a stem long enough that stripping cannot make a
+    // short word disappear: `lan` (loan) is 3 characters and must survive, and the guard is what
+    // keeps it.
+    if (base.endsWith("ne") && base.length > 5) add(base.slice(0, -2));
+    if (base.endsWith("n") && base.length > 4) add(base.slice(0, -1));
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];
