@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **163 tools**: 156 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **167 tools**: 160 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **116 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -287,6 +287,9 @@ Expense claims are the other half of payroll — a salary run arrives pre-popula
 |---|---|---|
 | `reai_list_company_banks` | The company's own accounts; the `id` is the `companyBankId` others need | read |
 | `reai_get_bank_reconciliation` | Reconciliation state for one account and month — **the only way to see bank transactions** | read |
+| `reai_get_manual_reconciliation` | The same for an account with **no feed**: opening balance, closing balance per the books, the statement figure you entered, the difference, and the API's own `canClose`/`canReopen` | read |
+| `reai_set_bank_statement_balance` | Record what the statement says the account held at month end — the figure the books are compared against. Posts nothing | irreversible |
+| `reai_close_manual_reconciliation` · `reai_reopen_manual_reconciliation` | Lock a month once the two agree, and unlock it again. Posts nothing, and closing is reversible by the same caller | irreversible |
 | `reai_get_bank_transaction` | One transaction by id | read |
 | `reai_list_reconciliation_rules` | Automatic booking rules | read |
 | `reai_get_tax_return` | Skattemelding for a year, with submission status | read |
@@ -380,6 +383,8 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 
 **Completing a run is deliberately not a tool.** `POST /api/salary-payments/{id}/complete` posts the voucher, creates the payslips, creates one employee payment per payable employee, and starts the **A-melding submission to Skatteetaten** — all in one call. It is classified irreversible *and* external, so it needs both switches, and it stays on `reai_request` for the same reason `subscriptions/generate-due` does: it is what an agent reaches for to "finish payroll", and it is where a mistake is widest. Three things measured on a live run — including half the gross being withheld when there is no tax card — are in [docs/tools.md](docs/tools.md#payroll).
 
+**A manual account is not an oversight — it is what this API gives you.** A company bank created through `POST /api/company-banks` comes back `manual: true`, so anything an agent creates reconciles this way; tenant 2634's three accounts are all `providerType: ztl` and belong to the synced tool. Measured state machine: entering the statement balance makes `canClose` true **only when the difference is zero**, closing sets `reconciliationLocked` and `canReopen: true`, and reopening returns it. Nothing in the flow posts — the voucher and posting counts did not move — so this is a period lock rather than a booking. Both refusals are Norwegian states rather than mistakes: closing without a balance, and reopening a month that is not locked. Details: [docs/tools.md](docs/tools.md#manual-bank-reconciliation).
+
 ### Reference data and company state
 | Tool | Purpose | Risk |
 |---|---|---|
@@ -448,17 +453,17 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count in this README is the default 163, and `REAI_ENABLE_UI=1` registers a 164th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
+It sits outside the default surface rather than inside it — every count in this README is the default 167, and `REAI_ENABLE_UI=1` registers a 168th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
 Anything not listed — projects, timesheets, share investments, documents — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 163 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 167 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
 REAI_TOOLSETS=bookkeeping,sales    # 49 tools
 REAI_TOOLSETS=purchase             # 31 tools
-REAI_TOOLSETS=bank                 # 21 tools
+REAI_TOOLSETS=bank                 # 25 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
@@ -468,7 +473,7 @@ REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
 REAI_TOOLSETS=loans                # 20 tools
 REAI_TOOLSETS=investments          # 14 tools
-(unset)                            # all 163
+(unset)                            # all 167
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference`, `loans` and `investments`; listing all thirteen is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -498,7 +503,7 @@ Most of what this server knows about ReAI was learned from a rejected request ra
 reading the spec. Rather than leave that in commit messages, it lives in
 [`src/reai/quirks.ts`](src/reai/quirks.ts) as **116 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
-152 public operations no curated tool covers. A test asserts every quirk still matches a real
+148 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
 
 Four to give the flavour: an invoice is created from an *order*, not from line items; there is no

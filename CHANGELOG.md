@@ -39,6 +39,33 @@ All notable changes to `reai-mcp`. Format loosely follows
     green, while counting operation occurrences rather than distinct locations made it easier still, since a
     create and an update sharing an argument both counted. The complete set of **39** comparisons is pinned,
     so losing one fails and gaining one fails with a nudge to record it.
+- **Manual bank reconciliation: four curated tools for the accounts ReAI does not sync.** The roadmap had
+  this blocked on "no data", and the blocker turned out to be a misreading — **a company bank created
+  through this API is manual**, measured (`manual: true`, `displayName` ending "[Manual]"), so the domain
+  was always testable. Tenant 2634's three accounts are all `providerType: ztl` and belong to the existing
+  synced tool. 167 tools.
+  - The state machine measured end to end: entering the statement balance makes `canClose` true **only when
+    the difference is zero**, closing sets `reconciliationLocked` and `canReopen: true`, and reopening
+    returns it. `difference` is the statement minus the books, and the API reports `canClose`/`canReopen`
+    itself — so the read tool passes those on as the API's answers rather than inferring them.
+  - **Nothing in the flow posts.** Across setting the balance, closing and reopening, the voucher count
+    stayed at 0 and the posting count did not move: this is a period lock, not a booking, and closing is
+    reversible by the same caller, unlike a VAT period. The three writes are still `irreversible` to match
+    the policy tier for `/api/manual-reconciliations` — recorded rather than relaxed, as with loans.
+  - **Four Norwegian refusals translated, one of them found by driving the tools live.** The close handed
+    back `409 "Angi sluttsaldoen før du lukker avstemmingen."` raw, which is precisely the gap two reviews
+    have caught elsewhere: documenting a refusal and then forwarding it untranslated. Closed before a third
+    review had to say it.
+  - The most useful of the four was not in the original measurement at all. Closing the **current** month
+    answers `409 "Godkjenning er kun tilgjengelig for 2026-07."` — the refusal *names the month the API will
+    accept* — and a future month answers the same while an earlier one falls through to the balance check.
+    So reconciliation runs in order, a month that has not ended cannot be closed, and the answer was sitting
+    inside a sentence the caller could not read. The tool now reads the nominated month out of it.
+  - The ambiguous `404 "Bankkonto ikke funnet"` is translated too: it is what a missing id says *and* what a
+    perfectly good synced account says, so the refusal names `reai_list_company_banks` as the way to tell
+    them apart and points at the synced tool.
+  - Verified live on 2783 in three passes, each cleaning up: the full state machine, then every refusal in
+    English, then the nominated-month path through to a successful close.
 
 ### Fixed
 
@@ -411,7 +438,7 @@ All notable changes to `reai-mcp`. Format loosely follows
     required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
     omission gate, which named all ten omitted fields.
 
-**163 tools**: 156 across thirteen accounting domains, plus 7 always-on.
+**167 tools**: 160 across thirteen accounting domains, plus 7 always-on.
 ### Fixed
 
 - **A whole domain was almost unnameable, and one of its commonest words pointed at the wrong thing.**
