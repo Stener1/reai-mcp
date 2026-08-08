@@ -106,8 +106,15 @@ test("every tool declares a risk the policy knows", () => {
 // is one-way. The annotation is the only thing left protecting a call the write mode allows,
 // so the sweep is mechanical rather than per-tool.
 test("every tool that deletes is annotated destructive", () => {
-  const undeclared = registeredTools
-    .filter((t) => t.name.startsWith("reai_delete_") || (t.apiPaths ?? []).some(([m]) => m === "DELETE"))
+  const deleting = registeredTools.filter(
+    (t) => t.name.startsWith("reai_delete_") || (t.apiPaths ?? []).some(([m]) => m === "DELETE"),
+  );
+  // The population first. This sweep asserts a property of the deleting tools, and a filter keyed on a
+  // NAME PREFIX is exactly the kind that stops matching after a rename — at which point the assertion
+  // below is about the empty set and passes for the wrong reason. Established by emptying the tool
+  // corpus and finding thirty sweeps in this repository that stayed green; this is one of them.
+  assert.ok(deleting.length >= 15, `only ${deleting.length} deleting tools found — the filter has stopped matching`);
+  const undeclared = deleting
     .filter((t) => t.destructive !== true && t.risk !== "irreversible")
     .map((t) => t.name);
   assert.deepEqual(
@@ -319,7 +326,11 @@ test("every ledger-booking tool that takes a vatCode carries the tenant-specific
 // Issuing an invoice needs BOTH switches, and saying only "requires full" invites an
 // operator to set full and wonder why the tool is still missing.
 test("a transmitting tool names both switches it needs", async () => {
-  for (const tool of registeredTools.filter((t) => t.transmits === true)) {
+  const transmitting = registeredTools.filter((t) => t.transmits === true);
+  // The class first. This is the most consequential group on the server and the filter is a single flag:
+  // rename it, or drop it from a tool, and this sweep quietly covers nothing.
+  assert.ok(transmitting.length >= 3, `only ${transmitting.length} transmitting tools found — the filter has stopped matching`);
+  for (const tool of transmitting) {
     assert.match(
       tool.description,
       /REAI_ALLOW_EXTERNAL_SEND/,
@@ -534,8 +545,10 @@ test("every explicit-id exception is a real tool", () => {
 
 test("a getter that takes one record id calls it `id`", () => {
   const wrong = [];
+  let examined = 0;
   for (const tool of registeredTools) {
     if (tool.risk !== "read" || !tool.name.startsWith("reai_get_")) continue;
+    examined++;
     if (tool.name in KEEPS_AN_EXPLICIT_ID) continue;
     const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
     // Any spelling of an id-shaped name, so fooId and foo_id are both caught.
@@ -543,6 +556,9 @@ test("a getter that takes one record id calls it `id`", () => {
     if (ids.length === 0) continue;
     wrong.push(`${tool.name}: ${ids.join(", ")}`);
   }
+  // The population, not just the offenders. This filter is a name prefix AND a risk tier, so either
+  // changing stops it matching and leaves the assertion below about the empty set.
+  assert.ok(examined >= 8, `only ${examined} reai_get_* read tools were examined — the filter has stopped matching`);
   assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
 });
 

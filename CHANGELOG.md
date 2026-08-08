@@ -9,6 +9,30 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Fixed
+
+- **Swept the test suite for the failure it has produced three times in one day, instead of waiting for a
+  fourth.** A documentation check that read one file, a count check whose band admitted the wrong number,
+  and an enum check that skipped everything nested in an array — all three were found by review, and all
+  three were the same shape: an assertion over a filtered collection with nothing asserting the filter
+  still matched anything.
+  - That class is mechanically detectable, so it was measured rather than reasoned about: empty the
+    corpora at the `dist/` boundary — `allTools`, `registeredTools`, `TOOL_GROUPS`, `QUIRKS` — and see
+    which tests still pass. **Thirty sweeps stayed green with nothing to examine.**
+  - Five had filters that could realistically stop matching, and now carry a floor: the destructive-tool
+    sweep (a `reai_delete_` prefix), the getter-id convention (a prefix *and* a risk tier), the
+    transmitting-tool check (a single boolean flag), and two **absence** claims — no salary tool completes
+    a payroll run, no access tool writes to `/api/users`. For an absence claim the floor is not a count of
+    offenders but of the population being constrained: "no salary tool completes a run" is satisfied by
+    there being no salary tools at all, which is what it would read the day that toolset failed to
+    register.
+  - The other twenty-five were left alone deliberately, and `test/README.md` says why: they iterate the
+    whole registry with no narrowing filter, so emptying them means emptying the registry, which fails
+    dozens of tests first. A floor there would be ritual rather than protection.
+  - Verified the way the problem was found: with the corpora emptied, 604 tests passed before this change
+    and 599 after — exactly the five, and no others disturbed. `test/README.md` records the method so the
+    next person repeats it rather than rediscovering it.
+
 ### Added
 
 - **A guard for the other direction of spec drift: a tool enum that has fallen behind the document.**
