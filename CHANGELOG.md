@@ -9,6 +9,25 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Fixed
+
+- **A number that has now been wrong three times is computed instead of maintained.** How many operations
+  no curated tool covers was stated as "~256" when the registry was small, then corrected to 170 in two
+  test comments that had said "~250" — and by the time loans, counterparties and share investments had
+  shipped, the truth was **152** while **seven** places still said 170 or ~256, including the README and
+  `docs/api-quirks.md`. Every one of those corrections was accurate the day it was written.
+  - The previous guard was a band (150–190) and it was the wrong instrument: 152 sits inside it, so the
+    test stayed green while the README's figure was 18 too high. A band watches the world; what rots is
+    the prose.
+  - It now **reads the claims**. Any "N operations no curated tool cover(s)" or "N uncovered operations"
+    in the README, in `docs/`, or in any test file must equal the computed figure, and there must be at
+    least four such sentences — so deleting them is not a way to pass. Adding a curated toolset now fails
+    here with every stale file named, which is the only sort of reminder that survives contact with a
+    later iteration.
+  - Mutation-verified in both directions: putting 170 back in the README fails with
+    *"README.md: says 170"*, and stripping the sentences fails with *"only 0 statements of the uncovered
+    count were found"*.
+
 ### Added
 
 - **The live write suite now covers loans and their counterparties**, which had none — the domain with the

@@ -175,29 +175,61 @@ test("no documentation table calls an irreversible tool reversible", () => {
 });
 
 /**
- * The number of operations no curated tool covers, which is what `reai_request` exists for.
+ * Every sentence that states how many operations no curated tool covers, checked against the number.
  *
- * Asserted because it was WRONG in two test comments — both said "the ~250 uncovered operations"
- * while the real figure is 170 — and a number nothing computes is a claim with no owner. 250
- * overstated the case by 47%, in the comments explaining why discovery matters, which is the one
- * place an inflated figure flatters the work it justifies.
+ * This is the third time that figure has been wrong. It was "~256" when the registry was small, then
+ * "~250" in two test comments while the truth was 170 — corrected once — and by the time three more
+ * toolsets had shipped the truth was 152 while **seven** places still said 170 or ~256. Each correction
+ * was accurate on the day it was written and rotted the moment curated coverage grew, which is what a
+ * hand-maintained number does.
  *
- * A band rather than an equality: the point is that the gap stays large enough to need discovery, and
- * that a curated-tool spree cannot silently make the prose wrong again. Adding curated tools moves it
- * down and that is progress, not a failure — until it leaves the band, at which point the prose needs
- * rewriting anyway.
+ * A band was the previous attempt and it was the wrong instrument: 152 sits inside 150–190, so the test
+ * stayed green while the README's stated figure was 18 too high. The band watched the WORLD when the
+ * thing that rots is the PROSE.
+ *
+ * So this reads the claims. Any "N operations no curated tool cover(s)" or "N uncovered operations" in
+ * the README, in `docs/`, or in a test file has to equal the computed figure — and there must be at
+ * least one, so deleting the sentences is not a way to pass. Adding curated tools now fails here, in a
+ * message naming every file to update, which is the only kind of reminder that survives.
  */
-test("the uncovered-operation count is what the docs and comments say", () => {
+test("every stated uncovered-operation count matches the registry", async () => {
+  const { readdirSync } = await import("node:fs");
   const publicOps = getSpecIndex().counts.public;
   const covered = new Set();
   for (const tool of allTools) for (const [method, path] of tool.apiPaths ?? []) covered.add(`${method} ${path}`);
   const uncovered = publicOps - covered.size;
 
   assert.equal(publicOps, 321, "the README says 321 public operations in four places");
+
+  // Both phrasings in use, and `~` allowed so an approximate claim is caught rather than excused.
+  const CLAIM = /~?(\d+)\s+(?:public\s+)?(?:operations?\s+no curated tool covers?|uncovered operations?)/g;
+  const files = [
+    ...DOC_FILES,
+    ...readdirSync(join(repo, "test"))
+      .filter((f) => f.endsWith(".mjs"))
+      .map((f) => `test/${f}`),
+  ];
+
+  const wrong = [];
+  let found = 0;
+  for (const file of files) {
+    const text = readFileSync(join(repo, file), "utf8");
+    for (const m of text.matchAll(CLAIM)) {
+      found++;
+      if (Number(m[1]) !== uncovered) wrong.push(`${file}: says ${m[1]}`);
+    }
+  }
+
   assert.ok(
-    uncovered >= 150 && uncovered <= 190,
-    `${uncovered} operations are uncovered (${publicOps} public - ${covered.size} declared), which is ` +
-      `outside the band the comments in test/discovery-*.test.mjs describe as 170`,
+    found >= 4,
+    `only ${found} statements of the uncovered count were found — if the sentences were removed rather ` +
+      `than corrected, this test has nothing left to guard`,
+  );
+  assert.deepEqual(
+    wrong,
+    [],
+    `${uncovered} operations are uncovered (${publicOps} public − ${covered.size} declared by curated ` +
+      `tools). These say otherwise:\n  ${wrong.join("\n  ")}`,
   );
 });
 
