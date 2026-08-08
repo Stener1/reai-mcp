@@ -13,6 +13,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Norwegian definite forms resolve.** The definite article is a suffix, and it is how people
+  actually speak: *"send fakturaen"*, *"endre kunden"*, *"si opp leieavtalen"* — nobody says
+  *"send faktura"*. Most definite forms already worked by accident, because the compound-stem
+  rule finds `faktura` inside `fakturaen`. But it requires two characters left over, and the
+  commonest Norwegian noun class ends in `-e` and takes a single `-n`: so `kunden`, `ordren`,
+  `leieavtalen` and `husleien` returned **nothing at all**, which is a quarter of the keys in
+  the synonym table.
+  - `-n` and `-ne` suffix rules cover that class. *"endre kunden"* now ranks
+    `PATCH /api/customers/{id}` first where it previously found no endpoint; the three corpora
+    are unchanged at 39/41 and 26/28, with the third gaining a case within the top ten (23 → 24).
+  - Asserted as a **property**, the way word-order independence already is: inflection must not
+    change the answer. Both rules are mutation-tested, and the `-ne` rule's test case was chosen
+    by measurement — `kundene`, `leverandørene` and `fakturaene` all resolve by other paths, so a
+    test built from those would have passed with the rule deleted. `avtalene` is the one that
+    needs it.
+  - The rules fire **only when the stripped stem is a synonym key**, which review made necessary
+    and is better than the precaution it looks like. Blind stripping also turned
+    `documentation` into `documentatio`, and `matchStrength` matched both forms against the same
+    endpoint token — so one word counted twice and *"product documentation"* ranked the
+    document-reception endpoints above every product endpoint, **worse than not having the rule
+    at all**. A derived form that is not a key buys nothing and can only distort. Pinned by a
+    test that fails with the gate removed.
+  - Two limits are stated rather than hidden. A **stem-changing** definite is out of reach
+    (`anleggsmiddel` → `anleggsmidlet` drops a vowel), so that case is written into the test as
+    an exclusion with the reason. And the length guard that stops `lån` being stripped to `lå`
+    is **precautionary**: relaxing it breaks no query I can find, so the test says it does not
+    prove the guard — the same mistake a review caught here before, where a comment claimed both
+    halves of a check were load-bearing when one could not be reached.
+
 - **Norwegian action vocabulary, enumerated from the API's own action segments.** The synonym
   table was all nouns. The API has **65 segments hanging off a resource instance** —
   `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close`, `/{id}/unarchive` and

@@ -161,3 +161,100 @@ test("a Norwegian compound is decomposed", () => {
     "a Norwegian filler word must not change the answer",
   );
 });
+
+/**
+ * The definite article is a SUFFIX in Norwegian, and inflection must not change the answer.
+ *
+ * This is the same class of bug as the word-order test above: it hides, because the phrasing a
+ * developer writes in a test is the indefinite one and the phrasing a person speaks is usually the
+ * definite one. "Send fakturaen", "endre kunden", "si opp leieavtalen" — nobody says "send faktura".
+ *
+ * Most definite forms already resolved by accident: the compound-stem rule finds `faktura` inside
+ * `fakturaen`. But it needs at least two characters left over, and the commonest Norwegian noun class
+ * ends in -e and takes a single -n — so `kunden`, `ordren`, `leieavtalen` and `husleien` resolved to
+ * NOTHING, which is a quarter of the synonym keys. Measured before the fix: "endre kunden" and "vis
+ * ordren" returned no endpoint at all while "opprett kunde" and "vis ordre" ranked correctly.
+ *
+ * Asserted as a PROPERTY rather than a score, for the reason the word-order test gives: both
+ * phrasings have to give the same answer, or the ranking depends on which grammatical form someone
+ * happens to use.
+ */
+test("the definite article does not change the answer", () => {
+  for (const [indefinite, definite, want] of [
+    // The -e noun class, which is where the gap was: a single -n leaves nothing for the compound rule.
+    ["endre kunde", "endre kunden", "PATCH /api/customers/{id}"],
+    ["vis ordre", "vis ordren", "GET /api/orders"],
+    ["si opp leieavtale", "si opp leieavtalen", "POST /api/agreements/rent-agreement"],
+    // And forms that already worked, so the test would notice the rule breaking them.
+    ["slett bilag", "slett bilaget", "DELETE /api/vouchers/{id}"],
+    ["godkjenn reiseregning", "godkjenn reiseregningen", "POST /api/expenses/{id}/approve"],
+    // `anleggsmidlet` is deliberately NOT here. Its definite form drops a vowel from the stem —
+    // anleggsmiddel becomes anleggsmidlet — and no suffix rule reaches a stem change. That is a real
+    // limit of this approach, stated rather than hidden: the -n and -ne rules cover the -e noun class,
+    // the compound-stem rule covers -et and -en where two characters remain, and stem-changing
+    // definites are not covered at all.
+    ["opprett anleggsmiddel", "opprett anleggsmidler", "POST /api/assets"],
+  ]) {
+    const bare = rankOf(indefinite, want);
+    const suffixed = rankOf(definite, want);
+    assert.ok(bare >= 0, `"${indefinite}" should find ${want}`);
+    assert.ok(
+      suffixed >= 0,
+      `"${definite}" found nothing for ${want} — the definite form is how this is actually said`,
+    );
+    // Not equality: adding a suffix legitimately shifts a rank by one or two as other terms
+    // re-weight. What must not happen is the definite form dropping out of reach.
+    assert.ok(
+      suffixed < 5,
+      `"${definite}" ranks ${want} at ${suffixed + 1} while "${indefinite}" ranks it at ${bare + 1}`,
+    );
+  }
+});
+
+test("the definite plural resolves too", () => {
+  // -ene on an -e stem: kunde -> kundene. The same one-character problem as the singular.
+  for (const [query, want] of [
+    ["hvilke kunder", "GET /api/customers"],
+    ["hvilke kundene skylder oss", "GET /api/ledger/customer"],
+    ["leverandørene våre", "GET /api/suppliers"],
+    // This is the one that actually needs the -ne rule, and it is here because the others do not:
+    // measured, `kundene`, `leverandørene` and `fakturaene` all resolve by other paths, so a test
+    // built from them would have passed with the rule deleted. `avtalene` returns nothing without it.
+    ["avtalene", "GET /api/agreements"],
+  ]) {
+    assert.ok(rankOf(query, want) >= 0, `"${query}" should find ${want}`);
+  }
+});
+
+test("a short word ending in -n survives, though nothing currently distinguishes the guard", () => {
+  // `lån` is three characters and ends in -n, so the length guard on the rule exists to stop it being
+  // stripped to two. Said plainly: relaxing that guard breaks NO query I can find, because `lån` still
+  // matches as itself and the junk form `lå` matches nothing — so the guard is precautionary and this
+  // test does not prove it. That is worth stating rather than implying otherwise, which is a mistake
+  // review caught in this repo before: a comment claiming both halves of a check were load-bearing
+  // when one of them could not be reached.
+  for (const [query, want] of [
+    ["saldo på lån", "GET /api/loans"],
+    ["lån", "GET /api/loans"],
+  ]) {
+    assert.ok(rankOf(query, want) >= 0, `"${query}" should still find ${want}`);
+  }
+});
+
+test("a suffix rule only fires on a stem the table knows", () => {
+  // Review's finding, and the reason the -n rule is gated. Stripping a trailing -n from anything long
+  // enough also turns `documentation` into `documentatio`, and matchStrength then matches both forms
+  // against the same endpoint token — so a two-word English query was skewed by one word counting
+  // twice. Measured against main: "product documentation" ranked /api/products first before the rule
+  // and the document-reception endpoints first after it. Worse than not having the rule at all.
+  //
+  // A derived form that is not a synonym key buys nothing and can only distort, which makes the gate
+  // the mechanism rather than a safeguard.
+  for (const [query, want] of [
+    ["product documentation", "GET /api/products"],
+    ["subscription", "GET /api/subscriptions"],
+  ]) {
+    const at = rankOf(query, want);
+    assert.ok(at >= 0 && at < 3, `"${query}" should rank ${want} in the top 3, got ${at + 1}`);
+  }
+});
