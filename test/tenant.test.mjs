@@ -188,3 +188,60 @@ test("the narrow key vocabulary does not refuse an ordinary write", async () => 
   assert.doesNotMatch(text, /bound to tenant/, "an innocent body was refused");
   assert.equal(sent.length, 1, "the request should have been sent");
 });
+
+/**
+ * The spellings that got through the first version. Every one was demonstrated end to end — the
+ * request reached `client.request` — before it was fixed, and all four classes came from Codex's
+ * review of #93 rather than from this file's imagination.
+ *
+ * The unifying mistake was reading the request the way JavaScript reads it instead of the way the
+ * upstream Java reads it. `/^\d+$/` is not "is this a number", the query schema permits arrays that
+ * `buildUrl` comma-joins back into exactly the scalar it was avoiding, and a depth limit on a
+ * boundary check is an instruction to add one more wrapper.
+ */
+test("a tenant id is caught however it is spelled", async () => {
+  const deep = (() => {
+    let node = { tenantId: 5002 };
+    for (let i = 0; i < 10; i++) node = { nest: node };
+    return node;
+  })();
+
+  const cases = [
+    // buildUrl comma-joins a query array, so [5002] is transmitted as exactly tenantId=5002.
+    ["single-element query array", { method: "GET", path: "/api/vouchers", query: { tenantId: [5002] } }],
+    ["array in the body", { method: "POST", path: "/api/departments", body: { tenantId: [5002] } }],
+    // Java's Integer.parseInt accepts a leading plus, and a container trims.
+    ["a leading plus", { method: "GET", path: "/api/vouchers", query: { tenantId: "+5002" } }],
+    ["surrounding whitespace", { method: "GET", path: "/api/vouchers", query: { tenantId: " 5002 " } }],
+    // Arabic-Indic digits. parseInt accepts any Unicode decimal digit; rather than reimplement that,
+    // an all-decimal-digit string that is not ASCII is refused whatever it turns out to mean.
+    ["non-ASCII decimal digits", { method: "GET", path: "/api/vouchers", query: { tenantId: "\u0665\u0660\u0660\u0662" } }],
+    // Ten levels down, where the old ceiling of eight stopped looking.
+    ["deeper than the old depth limit", { method: "POST", path: "/api/departments", body: deep }],
+    // A matrix parameter, which the rest of the handler already normalises through routedPathForms.
+    ["a matrix-parameter path form", { method: "GET", path: "/api/accountant-clients;v=1/5002" }],
+  ];
+
+  for (const [label, args] of cases) {
+    const { text, sent } = await requestWithBound(args);
+    assert.match(text, /bound to tenant 4711/, `not refused: ${label}`);
+    assert.deepEqual(sent, [], `sent anyway: ${label}`);
+  }
+});
+
+test("the spelling rules do not refuse an ordinary value", async () => {
+  // The mirror of the test above: each of these could be mistaken for a tenant id by a looser rule.
+  // A negative or zero id addresses no company, a decimal is not an integer the API would accept, and
+  // the bound tenant echoed back in any spelling is not a violation.
+  for (const query of [
+    { startDate: "2026-01-01", endDate: "2026-08-08", tenantId: -5002 },
+    { startDate: "2026-01-01", endDate: "2026-08-08", tenantId: 0 },
+    { startDate: "2026-01-01", endDate: "2026-08-08", tenantId: "+4711" },
+    { startDate: "2026-01-01", endDate: "2026-08-08", tenantId: [4711] },
+    { startDate: "2026-01-01", endDate: "2026-08-08", tenantId: "not-a-number" },
+  ]) {
+    const { text, sent } = await requestWithBound({ method: "GET", path: "/api/vouchers", query });
+    assert.doesNotMatch(text, /bound to tenant 4711, and this request names/, `refused: ${JSON.stringify(query)}`);
+    assert.equal(sent.length, 1, `not sent: ${JSON.stringify(query)}`);
+  }
+});

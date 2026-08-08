@@ -268,12 +268,41 @@ function tenantIdsInRequest(
   path: string,
   query: Record<string, unknown> | undefined,
   body?: unknown,
-): number[] {
-  const found: number[] = [];
-  /** A tenant id is a positive integer. Anything else cannot address a company. */
+): Array<number | string> {
+  // `string` members are values that LOOK like a tenant id and cannot be canonicalised into one --
+  // see `push`. They can never equal the bound tenant, which is what makes carrying them safe.
+  const found: Array<number | string> = [];
+  /**
+   * A tenant id is a positive integer. What counts as "written as one" is upstream's business, not
+   * JavaScript's, and three spellings got through the first version -- all found by Codex on #93 and
+   * each demonstrated end to end before being fixed:
+   *
+   *   - `{ tenantId: [5002] }`. The query schema permits arrays and `ReaiClient.buildUrl` comma-joins
+   *     them, so a single-element array is transmitted as exactly `tenantId=5002` while `push` saw an
+   *     array and ignored it. Arrays are walked now, at any nesting.
+   *   - `"+5002"` and `" 5002 "`. Java's Integer.parseInt accepts a leading `+`, and a container
+   *     trims, so both address the same company while failing `/^\d+$/`.
+   *   - `"\u0665\u0660\u0660\u0662"` -- Arabic-Indic digits. Java's parseInt accepts any Unicode
+   *     decimal digit. Rather than reimplement that (and get it subtly wrong), anything made only of
+   *     decimal digits that is not ASCII is kept as its raw string: it cannot equal the bound tenant,
+   *     so it is always refused. Failing closed on a spelling nobody legitimate uses costs nothing.
+   */
   const push = (raw: unknown) => {
-    if (typeof raw === "number" && Number.isInteger(raw)) found.push(raw);
-    else if (typeof raw === "string" && /^\d+$/.test(raw)) found.push(Number(raw));
+    if (Array.isArray(raw)) {
+      for (const item of raw) push(item);
+      return;
+    }
+    if (typeof raw === "number") {
+      if (Number.isInteger(raw) && raw > 0) found.push(raw);
+      return;
+    }
+    if (typeof raw !== "string") return;
+    const trimmed = raw.trim().replace(/^\+/, "");
+    if (/^\d+$/.test(trimmed)) {
+      found.push(Number(trimmed));
+      return;
+    }
+    if (trimmed.length > 0 && /^\p{Nd}+$/u.test(trimmed)) found.push(trimmed);
   };
   /**
    * Keys that name the ACTING tenant. Deliberately narrow, and the narrowness is
@@ -291,13 +320,20 @@ function tenantIdsInRequest(
    */
   const namesATenant = (key: string) => /^(client_?)?tenant_?id$/i.test(key) || /^tenant$/i.test(key);
 
-  // Path parameters still need the spec, because only the spec says which segment is the
-  // parameter. A path that resolves to nothing contributes nothing here -- and that is
-  // exactly why the query and body scans below do not consult it.
-  const op = resolveOperation(method, path);
-  if (op) {
+  // Path parameters still need the spec, because only the spec says WHICH segment is the parameter.
+  // Every form the upstream router might normalise the path into, not just the literal one: Codex
+  // pointed out that this half consulted `resolveOperation` on the decoded path alone while the rest
+  // of the handler already reasons about `routedPathForms`, so `/api/accountant-clients;v=1/5002`
+  // resolved to no operation and its tenant segment went unread. Matrix parameters are exactly the
+  // trick the percent-encoding quirk above was fixed for, in a different alphabet.
+  //
+  // A path that resolves to nothing still contributes nothing HERE -- which is precisely why the
+  // query and body scans below do not consult the spec at all.
+  for (const form of routedPathForms(path, path)) {
+    const op = resolveRoutedOperation(method, form);
+    if (!op) continue;
     const specSegments = op.path.split("/").filter(Boolean);
-    const actualSegments = path.split("/").filter(Boolean);
+    const actualSegments = form.split("/").filter(Boolean);
     for (const param of op.params ?? []) {
       if (param.in !== "path" || !namesATenant(param.name)) continue;
       const index = specSegments.indexOf(`{${param.name}}`);
@@ -311,15 +347,21 @@ function tenantIdsInRequest(
     if (namesATenant(key)) push(value);
   }
 
-  // The body, at any depth: a tenant id nested under a wrapper object is the same
-  // request. Cycles are possible in a hand-built argument object, so nodes are tracked.
+  // The body at ANY depth, with no ceiling. The first version stopped at eight levels, which Codex
+  // correctly called a bypass rather than a safeguard: `{"a":{...{"tenantId":5002}}}` ten deep was
+  // sent unexamined, and a depth limit on a boundary check is an invitation to add one more wrapper.
+  // The traversal is a stack rather than recursion so that removing the limit cannot trade a bypass
+  // for a stack overflow on a deliberately deep body, and `seen` is what terminates a cycle -- which
+  // is the job the depth counter was doing badly.
   const seen = new Set<unknown>();
-  const walk = (node: unknown, depth: number) => {
-    if (node === null || typeof node !== "object" || depth > 8 || seen.has(node)) return;
+  const stack: unknown[] = [body];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== "object" || seen.has(node)) continue;
     seen.add(node);
     if (Array.isArray(node)) {
-      for (const item of node) walk(item, depth + 1);
-      return;
+      for (const item of node) stack.push(item);
+      continue;
     }
     for (const [key, value] of Object.entries(node)) {
       if (namesATenant(key)) push(value);
@@ -329,10 +371,9 @@ function tenantIdsInRequest(
       if (/^tenant$/i.test(key) && value !== null && typeof value === "object" && !Array.isArray(value)) {
         push((value as Record<string, unknown>).id);
       }
-      walk(value, depth + 1);
+      stack.push(value);
     }
-  };
-  walk(body, 0);
+  }
 
   return found;
 }
