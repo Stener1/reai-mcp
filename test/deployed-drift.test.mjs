@@ -15,8 +15,9 @@ import { AGENT_FACING, classify } from "../scripts/check-deployed.mjs";
  *
  * What the check exists for: PR #115 corrected two quirks that had been measured FALSE — agents were told
  * a `+47` prefix is rejected on a supplier phone, and that foreign numbers are stored exactly as sent.
- * The commits merged and the deployment was not updated for two days, so the live connector went on
- * serving both. Nothing could have noticed: the deploy recorded no commit.
+ * The commits merged and the deployment kept serving both for 31 minutes — measured, after the review of
+ * PR #117 caught the first version of this comment claiming "two days", which the repository was not even
+ * old enough for. It was 31 minutes because someone looked, not because anything checked.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -47,15 +48,18 @@ test("one agent-facing file in a mixed commit makes the whole commit agent-facin
 });
 
 test("a change no client can read is INERT, so the check does not cry wolf", () => {
-  // This matters as much as the positive case. Six of the last seven merges here were tests and scripts
-  // only; if those reported "stale deployment" the reader would learn to ignore the check, and then miss
-  // the one that mattered.
+  // This matters as much as the positive case, though not for the reason first claimed here: "six of the
+  // last seven merges were tests and scripts only" was asserted without measuring, and running the
+  // exported classify() over them gives FIVE agent-facing and two inert. The split earns its place by
+  // naming which commits matter, not by being quiet most of the time.
+  // `package.json` is deliberately NOT here: a dep bump or a changed script changes what runs in the
+  // image, so it is agent-facing. Having it in this fixture was the mistake the widened classifier caught.
   const verdict = classify([
     "test/storage-drift.test.mjs",
     "scripts/audit-storage.mjs",
     "docs/development.md",
     "CHANGELOG.md",
-    "package.json",
+    "README.md",
   ]);
   assert.equal(verdict.kind, "inert");
   assert.deepEqual(verdict.agentFacing, []);
@@ -80,9 +84,16 @@ test("every agent-facing directory that exists is actually matched", () => {
 });
 
 test("the deploy script stamps the commit it built from", () => {
-  // Without this the check has nothing to read, which was the state that allowed two days of false
-  // guidance to be served with no way to detect it.
-  const deploy = readFileSync(path.join(ROOT, "scripts/deploy-cloud-run.sh"), "utf8");
+  // Without this the check has nothing to read, which was the state that let false guidance be served
+  // with no way to detect it.
+  // Comment lines stripped. The review of PR #117 deleted the --labels line, commented out the COMMIT
+  // assignment and turned the dirty check into `if false`, and all of these still passed — because the
+  // explanatory comment block above them mentions the same phrases. A guard satisfied by prose about the
+  // thing it checks is the exact failure this repository has now hit four times.
+  const deploy = readFileSync(path.join(ROOT, "scripts/deploy-cloud-run.sh"), "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("#"))
+    .join("\n");
   assert.match(deploy, /--labels="commit=/);
   assert.match(deploy, /rev-parse --short HEAD/);
   // A dirty tree must not be stamped as though the commit described what was built.
@@ -94,7 +105,47 @@ test("the check reports what it cannot know", () => {
   // It compares a label against git log. It says nothing about whether the deployment WORKS, and claiming
   // otherwise would make a green run mean less than it says — the failure mode two audits in this
   // repository were corrected for.
+  // These two DO read prose, deliberately and with the limit acknowledged: the claim being guarded IS a
+  // sentence in the header, so there is nothing else to assert against. It is a reminder, not a proof.
   const src = readFileSync(path.join(ROOT, "scripts/check-deployed.mjs"), "utf8");
   assert.match(src, /What it cannot tell you/);
   assert.match(src, /smoke-http/, "it should point at the thing that does answer that");
+});
+
+test("agent-facing content OUTSIDE src/ is classified as such", () => {
+  // The hole the review of PR #117 found: a PR that only regenerates `spec/index.json` changes exactly the
+  // text reai_describe_endpoint serves, and the first classifier called it INERT — "no deploy is required
+  // for correctness". `spec.ts` reads that file at runtime and the Dockerfile copies it into the image.
+  for (const file of [
+    "spec/index.json",
+    "spec/reai-openapi.json",
+    "scripts/build-spec-index.mjs",
+    "src/reai/errors.ts",
+    "src/reai/spec.ts",
+    "Dockerfile",
+    "package.json",
+    "package-lock.json",
+  ]) {
+    assert.equal(classify([file]).kind, "agent-facing", `${file} should count as agent-facing`);
+  }
+});
+
+test("the main-module guard compares URLs, not a basename suffix", () => {
+  // `import.meta.url.endsWith(basename)` failed three ways: it ran main() when any script whose name is a
+  // tail of this one imported it, it silently did nothing through a symlink or rename (no output, exit 0 —
+  // indistinguishable from "no drift"), and an argv[1] ending in "/" gave an empty basename that
+  // endsWith("") accepts. Asserted on the source because the alternative is spawning processes.
+  const src = readFileSync(path.join(ROOT, "scripts/check-deployed.mjs"), "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+    .join("\n");
+  assert.match(src, /import\.meta\.url === pathToFileURL\(process\.argv\[1\]\)\.href/);
+  assert.doesNotMatch(src, /import\.meta\.url\.endsWith/);
+});
+
+test("importing this module does not shell out", async () => {
+  // The positive form of the guard: if it fired on import, this test process would have run gcloud.
+  const mod = await import("../scripts/check-deployed.mjs");
+  assert.equal(typeof mod.classify, "function");
+  assert.ok(mod.AGENT_FACING instanceof RegExp);
 });

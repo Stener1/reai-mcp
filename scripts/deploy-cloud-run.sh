@@ -289,9 +289,10 @@ build_env_arg() {
 echo "==> Deploying"
 # What is actually running, recorded where a later run can read it back.
 #
-# Nothing did this before, and it cost something concrete: revisions 00135 through 00136 served two
-# agent-facing quirks that had already been measured false and corrected in git -- for two days, because
-# the only way to tell what was deployed was to compare timestamps, and a timestamp cannot distinguish
+# Nothing did this before, and it cost something concrete: revision 00135 served two agent-facing quirks
+# that had already been measured false and corrected in git. Measured, because the first version of this
+# comment said "for two days" and invented it: 31 minutes, and only that short because someone looked. The
+# only way to tell what was deployed was to compare timestamps, and a timestamp cannot distinguish
 # "committed before the deploy" from "merged after it". scripts/check-deployed.mjs reads this label.
 #
 # A dirty tree is stamped as such rather than pretending the commit describes what was built.

@@ -2,16 +2,21 @@
 /**
  * Is what agents are talking to the same thing that is in git?
  *
- * This exists because of a specific failure, not a hypothetical. PR #115 measured two quirks false and
- * corrected them — one told agents a `+47` prefix is REJECTED on a supplier phone, which it is not, and
- * one said foreign numbers are stored "EXACTLY as sent", which they are not. Both are agent-facing: they
- * reach a client through `reai_describe_endpoint`, `reai_api_notes` and a failed `reai_request`. The
- * commits merged; the deployment was not updated for two days; the live connector went on serving the
- * false guidance to anything that asked.
+ * This exists because of a specific failure. PR #115 measured two quirks false and corrected them — one
+ * told agents a `+47` prefix is REJECTED on a supplier phone, which it is not, and one said foreign
+ * numbers are stored "EXACTLY as sent", which they are not. Both are agent-facing: they reach a client
+ * through `reai_describe_endpoint`, `reai_api_notes` and a failed `reai_request`. The commits merged and
+ * the deployment kept serving the old text.
  *
- * Nothing noticed, and nothing could have: the deploy recorded no commit, so "is the deployment current"
- * could only be answered by comparing a revision timestamp against `git log` — which cannot distinguish a
- * commit made before the deploy from one merged after it.
+ * MEASURED, because the first version of this comment said "for two days" and that was invented: the
+ * corrections were committed at 22:29Z and the next deploy was 23:00Z. **31 minutes.** The repository was
+ * 2.5 days old at the time, so two days was not even arithmetically possible. The window was short
+ * because someone happened to look, not because anything would have noticed — which is the actual
+ * argument for this script, and it does not need an exaggerated number.
+ *
+ * Nothing could have noticed: the deploy recorded no commit, so "is the deployment current" could only be
+ * answered by comparing a revision timestamp against `git log` — which cannot distinguish a commit made
+ * before the deploy from one merged after it.
  *
  * So the deploy stamps `commit=<sha>` as a Cloud Run label, and this reads it back.
  *
@@ -24,9 +29,13 @@
  *   BEHAVIOURAL    other src/ changes — probably deploy
  *   INERT          tests, scripts, docs — no deploy needed
  *
- * Agent-facing drift exits non-zero, because that is the case that has already caused harm. Calling a
- * test-only change "stale deployment" would train the reader to ignore this check, which is how a real
- * one gets missed.
+ * Agent-facing drift exits non-zero; the other two are reported and pass.
+ *
+ * The first version justified that split by claiming "six of the last seven merges touched only tests and
+ * scripts". Measured with the exported `classify()` below, it is the other way round: FIVE of the last
+ * seven were agent-facing, two inert. So this will exit 1 on most merges, and the split is not a
+ * cry-wolf defence — it earns its place by saying WHICH commits matter and why, so a reader deciding
+ * whether to deploy has the reason in front of them rather than a bare "stale".
  *
  * ## What it cannot tell you
  *
@@ -37,15 +46,27 @@
  *   node scripts/check-deployed.mjs --project sales-moitoring --region europe-north1 --service reai-mcp
  */
 import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 /**
  * Paths whose contents reach a client.
  *
- * `quirks.ts` and the tool files are what `reai_describe_endpoint` and the tool list surface; `server.ts`
- * holds the instructions every session receives; `policy.ts` decides what is refused, and its refusal
- * messages are read by the agent that hit them.
+ * The first version listed four paths under `src/` and stopped there, which left a hole the review of
+ * PR #117 walked straight through: agent-facing content that does not live in `src/` at all.
+ *
+ *   spec/index.json                spec.ts reads it at RUNTIME — it IS reai_describe_endpoint's content
+ *   spec/reai-openapi.json         the same, and both are COPYed into the image
+ *   scripts/build-spec-index.mjs   the Dockerfile runs the build, so this GENERATES the above in-image
+ *   src/reai/errors.ts             ERROR_HINTS is verbatim prose appended to every failure an agent sees,
+ *                                  and it names the tool to call next
+ *   src/reai/spec.ts               shapes and labels the describe_endpoint payload
+ *   Dockerfile, package*.json      decide what actually runs; a dep bump is not "no deploy needed"
+ *
+ * A false INERT is the failure mode that matters here — a PR that only regenerates `spec/index.json`
+ * changes precisely the kind of text this script was written about, and was reported as needing no deploy.
  */
-export const AGENT_FACING = /^src\/(reai\/quirks\.ts|tools\/|server\.ts|policy\.ts)/;
+export const AGENT_FACING =
+  /^(src\/(reai\/(quirks|errors|spec)\.ts|tools\/|server\.ts|policy\.ts)|spec\/|scripts\/build-spec-index\.mjs|Dockerfile|package(-lock)?\.json)/;
 
 /**
  * Exported so `test/deployed-drift.test.mjs` exercises the real classification rather than grepping this
@@ -62,9 +83,19 @@ export function classify(files) {
 
 function main() {
   const args = process.argv.slice(2);
+  // Both `--flag value` and `--flag=value`. The first version only did the former, so
+  // `--project=other` was silently ignored and the script reported confidently on a service nobody
+  // asked about.
   const arg = (name, fallback) => {
+    const equals = args.find((a) => a.startsWith(`--${name}=`));
+    if (equals) return equals.slice(`--${name}=`.length);
     const i = args.indexOf(`--${name}`);
-    return i >= 0 ? args[i + 1] : fallback;
+    const value = i >= 0 ? args[i + 1] : undefined;
+    if (i >= 0 && (value === undefined || value.startsWith("--"))) {
+      console.error(`--${name} needs a value.`);
+      process.exit(2);
+    }
+    return value ?? fallback;
   };
   const project = arg("project", "sales-moitoring");
   const region = arg("region", "europe-north1");
@@ -72,9 +103,16 @@ function main() {
 
   const git = (...a) => execFileSync("git", a, { encoding: "utf8" }).trim();
 
-  let deployed;
+  // From the revision(s) RECEIVING TRAFFIC, not from the service's own labels.
+  //
+  // The service label records the last deploy ATTEMPT. `gcloud run deploy` applies labels and image in
+  // one replace, so if the new revision never becomes ready, traffic stays on the old one while the
+  // service label already claims the new SHA — and this script would print "the deployment is current"
+  // while agents read the old text. That is this script's own failure mode, inverted and made invisible.
+  // A rollback or `update-traffic` does the same. Found by the review of PR #117.
+  let serving;
   try {
-    deployed = execFileSync(
+    const raw = execFileSync(
       "gcloud",
       [
         "run",
@@ -83,14 +121,53 @@ function main() {
         service,
         `--project=${project}`,
         `--region=${region}`,
-        "--format=value(metadata.labels.commit)",
+        "--format=json",
       ],
       { encoding: "utf8" },
-    ).trim();
+    );
+    const described = JSON.parse(raw);
+    const traffic = (described.status?.traffic ?? []).filter((t) => (t.percent ?? 0) > 0);
+    if (traffic.length === 0) {
+      console.error("The service reports no revision receiving traffic.");
+      process.exit(2);
+    }
+    serving = [];
+    for (const t of traffic) {
+      const label = execFileSync(
+        "gcloud",
+        [
+          "run",
+          "revisions",
+          "describe",
+          t.revisionName,
+          `--project=${project}`,
+          `--region=${region}`,
+          "--format=value(metadata.labels.commit)",
+        ],
+        { encoding: "utf8" },
+      ).trim();
+      serving.push({ revision: t.revisionName, percent: t.percent, label });
+    }
   } catch (err) {
-    console.error(`Could not read the deployed service's commit label: ${err.message}`);
+    console.error(`Could not read the serving revision's commit label: ${err.message}`);
     process.exit(2);
   }
+
+  if (serving.length > 1) {
+    console.log(
+      `Traffic is split across ${serving.length} revisions:\n` +
+        serving.map((r) => `  ${r.percent}%  ${r.revision}  ${r.label || "(no commit label)"}`).join("\n"),
+    );
+    const distinct = new Set(serving.map((r) => r.label));
+    if (distinct.size > 1) {
+      console.error(
+        `\nThose revisions were built from different commits, so "what is deployed" has no single answer.` +
+          `\nSend all traffic to one revision before asking this question.`,
+      );
+      process.exit(1);
+    }
+  }
+  const deployed = serving[0].label;
 
   if (!deployed) {
     console.error(
@@ -115,16 +192,38 @@ function main() {
     process.exit(0);
   }
 
-  let range;
+  // Ancestry ASKED, not inferred from a throw. `git log A..HEAD` succeeds for any commit the object store
+  // knows — it only throws on an unknown revision — so the previous version's "not an ancestor" branch was
+  // unreachable in the case that matters. The review of PR #117 built a diverged branch whose tip changed
+  // quirks.ts, pointed the label at it, and got "no deploy is required for correctness" while the running
+  // revision contained agent-facing code that is not in HEAD at all. This repository squash-merges and
+  // deploys from the feature branch, so a stamped SHA routinely stops being an ancestor of main.
+  let isAncestor = true;
   try {
-    range = git("log", "--oneline", `${deployedSha}..HEAD`);
+    execFileSync("git", ["merge-base", "--is-ancestor", deployedSha, "HEAD"], { stdio: "ignore" });
   } catch {
+    isAncestor = false;
+  }
+  if (!isAncestor) {
+    let onlyDeployed = "";
+    try {
+      onlyDeployed = git("log", "--oneline", `HEAD..${deployedSha}`);
+    } catch {
+      console.error(
+        `\n${deployedSha} is not a commit this checkout contains at all. Fetch, or deploy from the\n` +
+          `branch that is actually live.`,
+      );
+      process.exit(1);
+    }
     console.error(
-      `\n${deployedSha} is not an ancestor of HEAD — the deployment was built from a commit this\n` +
-        `checkout does not contain. Fetch, or deploy from the branch that is actually live.`,
+      `\n${deployedSha} is NOT an ancestor of HEAD: the running service contains commits that are not\n` +
+        `in this branch, so "what is missing from the deployment" is not the whole story.\n\n` +
+        `Only in the DEPLOYMENT:\n  ${onlyDeployed.split("\n").join("\n  ")}`,
     );
     process.exit(1);
   }
+
+  const range = git("log", "--oneline", `${deployedSha}..HEAD`);
 
   if (!range) {
     console.log(
@@ -163,12 +262,24 @@ function main() {
     }
   }
 
+  // A `-dirty` deployment is running code that is no commit and may contain uncommitted agent-facing
+  // edits, so it cannot be "current" whatever the commit list says. The first version honoured the flag
+  // only when the commit range was empty and dropped it here.
+  if (dirty) {
+    console.error(
+      `\nThe running service was built from a DIRTY tree, so what is deployed is not any commit and the\n` +
+        `list above cannot be complete. Re-deploy from a clean checkout.`,
+    );
+    process.exit(1);
+  }
+
   if (groups["agent-facing"].length > 0) {
     console.error(
       `\n${groups["agent-facing"].length} commit(s) changed text or behaviour an agent reads, and the\n` +
-        `deployment does not have them. That is the exact state revisions 00135–00136 were in while\n` +
-        `serving two quirks already measured false: agents were told a "+47" prefix is rejected on a\n` +
-        `supplier phone, and that foreign numbers are stored exactly as sent. Neither is true.\n\n` +
+        `deployment does not have them. Revision 00135 was in that state for 31 minutes while serving two\n` +
+        `quirks already measured false — agents were told a "+47" prefix is rejected on a supplier phone,\n` +
+        `and that foreign numbers are stored exactly as sent. Neither is true. It was 31 minutes because\n` +
+        `someone looked, not because anything checked.\n\n` +
         `  bash scripts/deploy-cloud-run.sh --project ${project} --region ${region} \\\n` +
         `    --service ${service} --write-mode reversible`,
     );
@@ -180,6 +291,12 @@ function main() {
 }
 
 // Guarded, so importing this module for its classifier does not shell out to gcloud.
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop())) {
+//
+// The first version compared `import.meta.url.endsWith(basename)`, which the review of PR #117 broke three
+// ways: it fired on ANY entry script whose basename is a tail of this one (`d.mjs` importing this ran
+// main()), it silently did NOTHING when invoked through a symlink or a rename — printing no output and
+// exiting 0, indistinguishable from "no drift" in a CI step — and an argv[1] ending in "/" gave an empty
+// basename, which `endsWith("")` accepts. A URL comparison has none of those failure modes.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

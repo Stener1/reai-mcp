@@ -194,10 +194,12 @@ npm run check:deployed
 which commits the running service does not have. It exists because of a specific failure rather than a
 hypothetical: PR #115 corrected two quirks that had been **measured false** — agents were told a `+47`
 prefix is rejected on a supplier phone, and that foreign numbers are stored "exactly as sent". The commits
-merged, the deployment was not updated for two days, and the live connector went on serving both to
-anything that called `reai_describe_endpoint`. Nothing noticed, and nothing could have: the deploy recorded
-no commit, so "is this current" could only be answered by comparing a revision timestamp against
-`git log` — which cannot distinguish a commit made *before* the deploy from one merged *after* it.
+merged and the live connector went on serving both to anything that called `reai_describe_endpoint`, for
+**31 minutes** — measured after the review of #117 caught the first version of this paragraph claiming "two
+days", which the repository was not old enough for. It was 31 minutes because someone looked, not because
+anything checked: the deploy recorded no commit, so "is this current" could only be answered by comparing a
+revision timestamp against `git log` — which cannot distinguish a commit made *before* the deploy from one
+merged *after* it.
 
 Drift is split by whether a client can read it, and only the first is an error:
 
@@ -207,8 +209,10 @@ Drift is split by whether a client can read it, and only the first is an error:
 | `BEHAVIOURAL` | other `src/` | reported, exit 0 — probably deploy |
 | `INERT` | tests, scripts, docs | reported, exit 0 — no deploy needed |
 
-That distinction is the point. Six of the last seven merges here touched only tests and scripts; if those
-reported "stale deployment" the reader would learn to ignore the check and then miss the one that mattered.
+That distinction is the point, though not for the reason first given here. "Six of the last seven merges
+touched only tests and scripts" was asserted without measuring; running the exported `classify()` over them
+gives **five agent-facing and two inert**. So this exits 1 on most merges, and its value is not being quiet
+— it is naming *which* commits a client can read, so the decision to deploy has a reason attached.
 
 **It cannot tell you the deployment works** — it compares a label against `git log`, nothing more. A
 revision can carry the right commit and still be broken; `scripts/smoke-http.mjs` is what answers that.
