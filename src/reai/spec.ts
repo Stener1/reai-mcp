@@ -1051,6 +1051,54 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   ansettelsesavtale: ["employee-contract", "agreement", "employment"],
   arbeidsavtale: ["employee-contract", "agreement", "employment"],
   arbeidskontrakt: ["employee-contract", "agreement", "employment"],
+  // Loans and the words around them. `/api/loans` was reachable by `lån` and `loan` and by almost
+  // nothing else: measured before this, `gjeld`, `avdrag`, `aksjonærlån` and `borrowing` returned
+  // NOTHING at all, and `banklån` and `ansattlån` — ordinary compounds — went to company-banks and the
+  // employee ledger instead.
+  //
+  // `renter` is the one that was actively wrong rather than merely missing. It is Norwegian for
+  // INTEREST, and it ranked /api/agreements/rent-agreement first, because the -er rule strips it to
+  // `rent` and that matches the path segment. Norwegian rent is `leie`; the collision is with English.
+  // Same shape as the `levere`/`aktiver` homographs already recorded above, so it is fixed the same
+  // way: an explicit entry, which wins over a derived stem.
+  //
+  // Every entry here carries ONE or two tokens, and that restraint is the whole lesson of the first
+  // version, which carried three or four each. Review measured the result: `gjeld til leverandør`
+  // pushed the supplier ledger from first to FOURTH, `nedbetaling av faktura` and `avdrag på faktura`
+  // moved off the invoice payments, `motpart på banktransaksjon` filled all four top places with
+  // creditors and debtors, and the English `renter agreement` — a person who rents — lost the rent
+  // agreement. A broad word carrying several strong tokens drowns the specific resource a query names,
+  // which is a worse failure than the word missing, because the caller named the thing they wanted.
+  //
+  // `nedbetaling` and `motpart` are GONE rather than weakened, because they are genuinely ambiguous and
+  // choosing a side is itself the bug: an invoice is paid down too (it reaches the invoice payments,
+  // which is the better default), and a counterparty belongs to anything, not only a loan.
+  gjeld: ["loan"],
+  gjeldsbrev: ["loans", "loan"],
+  laan: ["loans", "loan"],
+  // Deliberately NOT carrying "bank" as well: with it, `banklån` ranked /api/loans fifth behind the
+  // company-bank endpoints, because the extra term pulls the whole bank family up. A compound names
+  // one thing.
+  banklan: ["loans", "loan"],
+  ansattlan: ["loans", "loan", "employee"],
+  aksjonaerlan: ["loans", "loan", "owner"],
+  eierlan: ["loans", "loan", "owner"],
+  konsernlan: ["loans", "loan", "intercompany"],
+  rente: ["interest", "loan"],
+  renter: ["interest", "loan"],
+  rentesats: ["interest", "loan"],
+  rentefot: ["interest", "loan"],
+  avdrag: ["loan"],
+  hovedstol: ["loans", "loan", "principal"],
+  laneperspektiv: ["loans", "loan"],
+  borrowing: ["loans", "loan"],
+  // The counterparty ledgers, which a loan needs and which answered to their ENGLISH names only:
+  // `creditor` found /api/creditors while `kreditor` found nothing, and `debitor` ranked a
+  // supplier-invoice cost-line above /api/debtors.
+  kreditor: ["creditors", "creditor"],
+  kreditorer: ["creditors", "creditor"],
+  debitor: ["debtors", "debtor"],
+  debitorer: ["debtors", "debtor"],
   leiekontrakt: ["rent-agreement", "agreement", "rent"],
   husleie: ["rent-agreement", "rent"],
   leieavtale: ["rent-agreement", "agreement", "rent"],

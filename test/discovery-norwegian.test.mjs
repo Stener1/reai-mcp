@@ -401,3 +401,103 @@ test("intent can come from a phrase, not only from a word", () => {
     assert.equal(top.method, "POST", `"${query}" is an upload but ranked ${top.method} ${top.path} first`);
   }
 });
+
+/**
+ * Loans and the words around them, which were almost entirely unreachable.
+ *
+ * `/api/loans` answered to `lån` and `loan` and to very little else. Measured before this: `gjeld`,
+ * `avdrag`, `aksjonærlån`, `hovedstol` and `borrowing` returned NOTHING at all, and `banklån` and
+ * `ansattlån` — ordinary Norwegian compounds — ranked company-banks and the employee ledger instead.
+ * A domain nobody can name is a domain nobody can use, whatever tools it has.
+ *
+ * `renter` is the one that was actively WRONG rather than missing, and it is the reason this test
+ * exists as a named case rather than a list. It is Norwegian for interest, and it ranked
+ * `/api/agreements/rent-agreement` first: the -er rule strips it to `rent`, which matches that path
+ * segment. Norwegian for rent is `leie`, so the collision is with English, and a user asking about the
+ * interest on a loan was pointed at rent agreements — a confident wrong answer, which this repository
+ * has repeatedly found to be worse than no answer.
+ */
+test("the loan vocabulary reaches the loan endpoints", () => {
+  for (const query of [
+    "gjeld",
+    "avdrag",
+    "hovedstol",
+    "borrowing",
+    "banklån",
+    "ansattlån",
+    "aksjonærlån",
+    "renter",
+    "rentesats",
+  ]) {
+    const at = rankOf(query, "GET /api/loans");
+    assert.ok(at >= 0 && at < 3, `"${query}" should reach GET /api/loans in the top 3, got ${at + 1}`);
+  }
+});
+
+/**
+ * The other half of adding vocabulary, and the half the first version of this work got wrong: a word
+ * broad enough to mean several things must not outrank the resource a query NAMES.
+ *
+ * Review measured four cases where the new entries did exactly that — `gjeld til leverandør` pushed the
+ * supplier ledger from first to fourth, `nedbetaling av faktura` and `avdrag på faktura` moved off the
+ * invoice payments, `motpart på banktransaksjon` filled all four top places with creditors and debtors,
+ * and the English `renter agreement` (a person who rents) lost the rent agreement. Every one was a
+ * generic term carrying several strong tokens and drowning a specific one.
+ *
+ * Two of the terms were dropped rather than weakened, because they are genuinely ambiguous and picking
+ * a side is the bug: `nedbetaling` (an invoice gets paid down too — it reaches the invoice payments,
+ * which is the better default) and `motpart` (the counterparty of anything, not only a loan). The rest
+ * carry ONE token now.
+ */
+test("a broad loan word does not outrank the resource a query names", () => {
+  for (const [query, want] of [
+    ["gjeld til leverandør", "GET /api/ledger/supplier"],
+    ["nedbetaling av faktura", "GET /api/invoices/{id}/payments"],
+  ]) {
+    assert.equal(rankOf(query, want), 0, `"${query}" should rank ${want} first`);
+  }
+
+  // English: a `renter` is a person who rents, so the -er rule reaching `rent` is CORRECT here and the
+  // rent agreement has to win. Asserted on the RESOURCE rather than the verb — it ranks the POST first,
+  // which is a question about intent and not about this fix.
+  const top = searchOperations({ query: "renter agreement", limit: 1 }).map((h) => h.path)[0];
+  assert.match(String(top), /rent-agreement/, `"renter agreement" should still rank the rent agreement first, got ${top}`);
+
+  // `avdrag på faktura` is the one case left imperfect, and it is stated rather than hidden: the
+  // invoice payments rank third behind the two loan reads. Accepted because `avdrag` is specifically a
+  // loan principal instalment in Norwegian accounting — an invoice is paid in `delbetaling` — so the
+  // phrase is unusual and the term is worth keeping. If it ever needs fixing, the fix is a
+  // narrower-scope mechanism, not a heavier synonym.
+  const at = rankOf("avdrag på faktura", "GET /api/invoices/{id}/payments");
+  assert.ok(at >= 0 && at < 4, `the invoice payments should still be reachable, got ${at + 1}`);
+});
+
+test("the counterparty ledgers answer to their Norwegian names", () => {
+  // A loan's counterparty is a creditor or a debtor depending on its perspective, so these are the
+  // endpoints a caller needs next. They answered to the English words only: `creditor` found
+  // /api/creditors while `kreditor` found nothing, and `debitor` ranked a supplier-invoice cost-line.
+  for (const [query, want] of [
+    ["kreditor", "GET /api/creditors"],
+    ["kreditorer", "GET /api/creditors"],
+    ["debitor", "GET /api/debtors"],
+    ["debitorer", "GET /api/debtors"],
+  ]) {
+    const at = rankOf(query, want);
+    assert.ok(at >= 0 && at < 3, `"${query}" should reach ${want} in the top 3, got ${at + 1}`);
+  }
+});
+
+test("teaching it interest did not cost it rent", () => {
+  // The other half of a homograph fix. `renter` now means interest, and `leie` still has to mean rent
+  // — otherwise this trades one confident wrong answer for another.
+  for (const query of ["husleie", "leiekontrakt", "leieavtalen", "si opp leieavtale"]) {
+    const hits = searchOperations({ query, limit: 3 }).map((h) => `${h.method} ${h.path}`);
+    assert.ok(
+      hits.some((h) => /\/api\/agreements/.test(h)),
+      `"${query}" should still reach the agreements: ${hits.join(", ")}`,
+    );
+  }
+  // And interest must not reach the rent agreement FIRST, which is the state this fixed.
+  const first = searchOperations({ query: "renter", limit: 1 }).map((h) => h.path)[0];
+  assert.doesNotMatch(String(first), /rent-agreement/, "renter is interest, not rent");
+});

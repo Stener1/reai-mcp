@@ -112,6 +112,48 @@ All notable changes to `reai-mcp`. Format loosely follows
     omission gate, which named all ten omitted fields.
 
 **150 tools**: 143 across twelve accounting domains, plus 7 always-on.
+### Fixed
+
+- **A whole domain was almost unnameable, and one of its commonest words pointed at the wrong thing.**
+  `/api/loans` answered to `lån` and `loan` and to very little else. Measured before this: `gjeld`,
+  `avdrag`, `nedbetaling`, `hovedstol`, `aksjonærlån` and `borrowing` returned **nothing at all**, and
+  `banklån` and `ansattlån` — ordinary Norwegian compounds — ranked company-banks and the employee
+  ledger instead. Tools do not help with a domain nobody can name.
+  - **`renter` was actively wrong rather than missing.** It is Norwegian for *interest*, and it ranked
+    `/api/agreements/rent-agreement` **first**: the `-er` rule strips it to `rent`, which matches that
+    path segment. Norwegian for rent is `leie`, so the collision is with English — the same shape as
+    the `levere` (file a return) and `aktiver` (assets) homographs already recorded in this table, and
+    fixed the same way, with an explicit entry that beats a derived stem. A user asking about the
+    interest on a loan was being sent to rent agreements.
+  - **The counterparty ledgers answered only to English.** `creditor` found `/api/creditors` while
+    `kreditor` found nothing, and `debitor` ranked a supplier-invoice cost-line above `/api/debtors` —
+    for endpoints named, in Norwegian, exactly those words. They matter because a loan's counterparty
+    is a creditor or a debtor depending on its perspective, so they are the next call a caller makes.
+  - 22 keys added, 176 → 198. All ten loan terms and all four ledger terms now rank their endpoint in
+    the top 3, every held-out corpus holds its floor, and there is a test asserting the fix did not
+    trade one confident wrong answer for another: `husleie`, `leiekontrakt` and `leieavtalen` still
+    reach the agreements, and `renter` no longer reaches the rent agreement at all.
+  - `banklån` is deliberately mapped to the loan terms only. Carrying `bank` as well ranked
+    `/api/loans` fifth, behind the company-bank family, because the extra term pulls a whole domain up
+    — a compound names one thing.
+  - **The first version of this was too strong, and review measured how.** Every entry carried three or
+    four tokens, so a broad word drowned the specific resource a query named: `gjeld til leverandør`
+    pushed the supplier ledger from first to **fourth**, `nedbetaling av faktura` and `avdrag på faktura`
+    moved off the invoice payments, `motpart på banktransaksjon` filled all four top places with
+    creditors and debtors, and the English `renter agreement` — a person who rents — lost the rent
+    agreement. That is a worse failure than the word missing, because the caller named the thing they
+    wanted. Every entry carries one or two tokens now.
+  - `nedbetaling` and `motpart` are **dropped rather than weakened**: they are genuinely ambiguous, and
+    picking a side is the bug. An invoice is paid down too, and `nedbetaling` reaching the invoice
+    payments is the better default; a counterparty belongs to anything, not only a loan.
+  - One case is left imperfect and stated rather than hidden: `avdrag på faktura` ranks the invoice
+    payments third, behind the invoice list and its e-invoice status. Accepted because `avdrag` is
+    specifically a loan principal instalment in Norwegian accounting — an invoice is paid in
+    `delbetaling` — so the phrase is unusual and the term is worth keeping. The fix, if it is ever
+    needed, is a narrower-scope mechanism rather than a heavier synonym.
+  - Mutation-verified: removing the new entries fails all three new tests.
+
+**145 tools**: 138 across eleven accounting domains, plus 7 always-on.
 
 ### Added
 
