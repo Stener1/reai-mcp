@@ -30,6 +30,28 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Three documentation assertions pinned the docs architecture to one file.** They exist to
+  guarantee that something is *documented* — that all 146 tools are listed where a reader will
+  find them, that the enforced transport limits are written down, that the payment-routing table
+  matches the classifier. Reading only `README.md` quietly made them assertions about layout as
+  well: when the README was split into a front door plus `docs/`, those three sections could not
+  move and had to stay on the front page. They now search the README **and** every page under
+  `docs/`, from an explicit file list with a test that the list matches what is on disk — so a
+  renamed page fails loudly instead of silently shrinking the haystack.
+
+- **The visibility pipeline had no unit test at all.** Four filters decide which tools an agent can
+  even see — the toolset selection, the opt-in UI surface, the write ceiling, the external-send
+  switch — and they were inline in `buildServer`, exercised only by the live smoke suites, one
+  configuration each and needing a real token. Extracted as `visibleTools(config)` with the same
+  four steps in the same order, and tested as a matrix: read-only exposes no writer, the default
+  mode exposes nothing irreversible, and a transmitting tool stays hidden in `full` mode until
+  external send is switched on — asserted in both directions, so the switch is proven to do
+  something rather than merely to be consulted. Each of the three filters is mutation-tested
+  individually.
+  - This came from the README pass noticing that `registeredTools` is 146 while `allTools` is 145
+    and reading it as a possible defect. It is not — that list is deliberately every tool the
+    server can ever register — but the gate that makes it harmless had nothing asserting it.
+
 - **Two more fixtures were pinning wrong answers**, both caught by Codex on the follow-up and both
   the same class as the review finding above:
   - *"Hva står i leieavtalen"* — what does the lease say — was asserted against

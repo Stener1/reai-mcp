@@ -767,3 +767,69 @@ test("a pathological scalar cannot blow the payload budget", async () => {
   assert.ok(structured.bankAccountName.length <= 120);
   assert.ok(structured.bankAccountName.endsWith("…"), "and it says it was cut");
 });
+
+test("the UI tool reaches a client only when the operator enabled it", async () => {
+  // `registeredTools` deliberately includes it — that list is every tool this server can ever
+  // register, which is what the repo-wide invariants sweep. What decides whether a client SEES it is
+  // the visibility pipeline, and nothing asserted that. A README-engineering pass noticed the count
+  // discrepancy (146 registered against 145 in the toolset arithmetic) and read it as a possible
+  // defect; it is not, but the gate that makes it not-a-defect had no test.
+  const { visibleTools } = await import("../dist/server.js");
+  const base = { toolsets: [], writeMode: "full", allowExternalSend: true };
+  const off = visibleTools({ ...base, enableUi: false }).visible.map((t) => t.name);
+  const on = visibleTools({ ...base, enableUi: true }).visible.map((t) => t.name);
+  assert.ok(!off.includes("reai_reconcile_ui"), "the UI tool must not appear by default");
+  assert.ok(on.includes("reai_reconcile_ui"), "REAI_ENABLE_UI must actually enable it");
+  assert.deepEqual(
+    on.filter((n) => n !== "reai_reconcile_ui"),
+    off,
+    "enabling the UI changed the rest of the tool list",
+  );
+});
+
+test("the visibility pipeline withholds by write mode and by external send", async () => {
+  // The whole safety surface in one matrix. It was inline in buildServer, so the only thing exercising
+  // it was the live smoke suites — one configuration each, and needing a real token to run at all.
+  const { visibleTools } = await import("../dist/server.js");
+  const at = (writeMode, allowExternalSend) =>
+    visibleTools({ toolsets: [], enableUi: false, writeMode, allowExternalSend }).visible;
+
+  const readOnly = at("read-only", false);
+  assert.ok(readOnly.length > 0, "read-only must still expose the reads");
+  assert.deepEqual(
+    readOnly.filter((t) => t.risk !== "read").map((t) => t.name),
+    [],
+    "read-only exposed a tool that writes",
+  );
+
+  const reversible = at("reversible", false);
+  assert.deepEqual(
+    reversible.filter((t) => t.risk === "irreversible").map((t) => t.name),
+    [],
+    "the default mode exposed an irreversible tool",
+  );
+  assert.ok(reversible.length > readOnly.length, "reversible must add the reversible writes");
+
+  // A transmitting tool stays hidden even in full mode: the two axes are independent, and this is the
+  // one that cannot be undone. Asserted in both directions so the switch is proven to do something.
+  const fullNoSend = at("full", false);
+  assert.deepEqual(
+    fullNoSend.filter((t) => t.transmits === true).map((t) => t.name),
+    [],
+    "full mode leaked a transmitting tool with external send off",
+  );
+  const fullWithSend = at("full", true);
+  const transmitting = fullWithSend.filter((t) => t.transmits === true).map((t) => t.name);
+  assert.ok(transmitting.length > 0, "enabling external send must actually expose the senders");
+  assert.deepEqual(
+    fullWithSend.filter((t) => t.transmits !== true).map((t) => t.name),
+    fullNoSend.map((t) => t.name),
+    "enabling external send changed something other than the transmitting tools",
+  );
+
+  // And the count reported to the model is measured against the toolset selection, not against the
+  // selection plus the opt-in UI tool — the arithmetic a comment in server.ts warns about.
+  const withUi = visibleTools({ toolsets: [], enableUi: true, writeMode: "full", allowExternalSend: true });
+  const withoutUi = visibleTools({ toolsets: [], enableUi: false, writeMode: "full", allowExternalSend: true });
+  assert.equal(withUi.byToolset.length, withoutUi.byToolset.length, "the UI tool must not enter the toolset count");
+});

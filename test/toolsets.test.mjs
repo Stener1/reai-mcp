@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { allTools, alwaysOnTools, registeredTools, selectTools, TOOL_GROUPS } from "../dist/server.js";
 import { loadConfig, TOOLSETS } from "../dist/config.js";
 import { classifyRequest } from "../dist/policy.js";
@@ -10,6 +13,18 @@ import { findOperation } from "../dist/reai/spec.js";
  * the curated set grows the same pressure applies to it, so an operator can
  * narrow it — without ever losing reach, since discovery stays on.
  */
+
+/**
+ * Every documentation file as one string: the README and each page under `docs/`.
+ *
+ * These two tests assert that a rule the CODE enforces is written down. Reading only README.md made
+ * them assertions about layout as well, and the README split had to work around them.
+ */
+function docsCorpus(base) {
+  const repo = join(dirname(fileURLToPath(base)), "..");
+  const files = ["README.md", ...readdirSync(join(repo, "docs")).filter((f) => f.endsWith(".md")).map((f) => join("docs", f))];
+  return files.map((f) => readFileSync(join(repo, f), "utf8")).join("\n");
+}
 
 test("every curated tool belongs to exactly one group", () => {
   const grouped = Object.values(TOOL_GROUPS).flat();
@@ -418,7 +433,10 @@ test("a bound connection discloses only the company it is bound to", async () =>
 // constants that produce them.
 test("the README documents the transport limits the code enforces", async () => {
   const { readFileSync } = await import("node:fs");
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  // README plus docs/, because the guarantee is that the limits are written down where an operator
+  // will find them — not that they sit on the front page. Self-hosting moved to docs/ in the README
+  // split, and pinning this to README.md would have held the enforced limits hostage to that layout.
+  const readme = docsCorpus(import.meta.url);
   const http = readFileSync(new URL("../src/http.ts", import.meta.url), "utf8");
 
   const bodyBytes = /MAX_MCP_BODY_BYTES = (\d+) \* 1024 \* 1024/.exec(http)?.[1];
@@ -446,7 +464,7 @@ test("the README documents the transport limits the code enforces", async () => 
 test("the README's payment-routing table matches the classifier", async () => {
   const { readFileSync } = await import("node:fs");
   const { classifyPaymentRouting, classifyInvoiceDelivery } = await import("../dist/policy.js");
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const readme = docsCorpus(import.meta.url);
 
   const paymentFields = ["iban", "bankAccountNumber", "swiftCode", "accountNumber", "bban"];
   const paths = [

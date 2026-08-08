@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { allTools, alwaysOnTools, registeredTools, selectTools, TOOL_GROUPS, SERVER_VERSION } from "../dist/server.js";
@@ -18,6 +18,35 @@ import { TOOLSETS } from "../dist/config.js";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const README = readFileSync(join(repo, "README.md"), "utf8");
+
+/**
+ * The README plus everything under `docs/`, as one haystack.
+ *
+ * These assertions exist to guarantee that something is DOCUMENTED — that 146 tools are listed
+ * somewhere a reader will find them, that an enforced transport limit is written down. They were
+ * pinned to README.md, which quietly made them assertions about documentation ARCHITECTURE too: when
+ * the README was split into a front door plus `docs/`, the three sections these tests name could not
+ * move, and the split had to leave them behind on the front page.
+ *
+ * A file list rather than a glob, so a new page has to be added deliberately and an unlinked stray
+ * markdown file cannot start satisfying a guarantee by accident. Every entry is checked to exist, so
+ * renaming a page fails here rather than silently shrinking the haystack.
+ */
+const DOC_FILES = [
+  "README.md",
+  "docs/README.md",
+  "docs/safety.md",
+  "docs/tools.md",
+  "docs/api-quirks.md",
+  "docs/discovery.md",
+  "docs/self-hosting.md",
+  "docs/development.md",
+];
+const DOCS = DOC_FILES.map((f) => {
+  const text = readFileSync(join(repo, f), "utf8");
+  return { file: f, text };
+});
+const ALL_DOCS = DOCS.map((d) => d.text).join("\n");
 const ENV_EXAMPLE = readFileSync(join(repo, ".env.example"), "utf8");
 const CHANGELOG = readFileSync(join(repo, "CHANGELOG.md"), "utf8");
 const PKG = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
@@ -81,10 +110,26 @@ test("the README's quirk count matches the registry", () => {
   assert.equal(Number(m[1]), QUIRKS.length, `README claims ${m[1]} quirks; there are ${QUIRKS.length}`);
 });
 
-test("every curated tool appears in a README table", () => {
-  // This is what would have caught 32 tools shipping undocumented.
-  const missing = registeredTools.filter((t) => !README.includes(`\`${t.name}\``)).map((t) => t.name);
-  assert.deepEqual(missing, [], `tools absent from the README: ${missing.join(", ")}`);
+test("every curated tool is documented, in the README or a linked page", () => {
+  // This is what would have caught 32 tools shipping undocumented. It searches every documentation
+  // file rather than only the README: the guarantee is that a reader can find the tool, not that it
+  // appears on the front page.
+  const missing = registeredTools
+    .filter((t) => !ALL_DOCS.includes(`\`${t.name}\``))
+    .map((t) => t.name);
+  assert.deepEqual(missing, [], `tools documented nowhere: ${missing.join(", ")}`);
+});
+
+test("the documentation file list is real, so the haystack cannot shrink by a rename", () => {
+  // Without this, renaming docs/tools.md to docs/tools-reference.md would make the list above stop
+  // reading it — and every assertion built on the corpus would get quietly easier to satisfy.
+  for (const { file, text } of DOCS) {
+    assert.ok(text.length > 0, `${file} is listed as documentation but is empty`);
+  }
+  // And every docs/ page must be in the list, or it is documentation nothing checks.
+  const onDisk = readdirSync(join(repo, "docs")).filter((f) => f.endsWith(".md")).sort();
+  const listed = DOC_FILES.filter((f) => f.startsWith("docs/")).map((f) => f.slice("docs/".length)).sort();
+  assert.deepEqual(onDisk, listed, "a docs/ page is not in DOC_FILES, so nothing above searches it");
 });
 
 test("no README table calls an irreversible tool reversible", () => {
