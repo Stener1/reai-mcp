@@ -159,20 +159,27 @@ go through `PATCH` now, and a test pins that.
 Each case names the **constant** that makes its claim, a marker phrase from it, and — the part a marker
 cannot do — the **value that text predicts**. A phrase survives a rewrite that reverses its meaning: the
 review of PR #115 replaced `PHONE_RULE` with text saying the *opposite* of every phone claim while keeping
-all four markers, and the guard passed 4/4. Text that predicts `+46701234567` cannot simultaneously claim
-foreign numbers are rewritten to `+47`, so each probe pins the literal too, and markers must be at least
-twelve characters (`marker: "e"` passed the first version).
+all four markers, and the guard passed 4/4. So each probe pins the literal too, and markers
+must be at least twelve characters (`marker: "e"` passed the first version).
+
+**What that guard cannot do, stated plainly because two rounds of prose here overclaimed it.** The check
+is `text.includes(...)`, which is blind to direction: the review of PR #116 rewrote both constants to
+assert the *opposite* of all seventeen claims while retaining every marker and every predicted literal,
+and the test passed 6/6. A unit test reading prose for meaning would be pretending. So the honest job of
+this guard is narrow — stop a probe outliving the sentence it verifies — and **the live audit is the only
+authority on whether a claim is true.** That is why `INCONCLUSIVE` now exits non-zero: a claim nobody
+checked is not a claim that held.
 
 **On completeness, the first version was a cop-out.** It said the population "cannot be measured
 mechanically" because a storage claim is prose. It can be measured, roughly: the claims live in exactly
 two places — `description:`/`.describe()` in `src/tools/*.ts` and `note:` in `src/reai/quirks.ts` — and
-`npm run audit:census` counts them. Today: **129 agent-facing literals assert something about what is
-stored; 12 are probed.** That ratio is printed rather than asserted, because a keyword sweep over prose is
+`npm run audit:census` counts them. Today: **160 distinct agent-facing literals assert something about what is
+stored; 17 probes cover them, binding to 6 distinct source texts — different units, so not a percentage.** That ratio is printed rather than asserted, because a keyword sweep over prose is
 a lower bound and pinning it would be false precision — but hiding it made 11-of-many look like coverage.
 The cheap unprobed ones are named in the header of `test/storage-drift.test.mjs`, including the flagship
 claim of `reai_create_customer` ("the name you send is then DISCARDED") on the **default**, no-flag path.
 
-First run: **12 of 12 claims verified**, including that the `skipRegistryLookup` override is a stale
+Latest run: **17 of 17 claims verified**, including that the `skipRegistryLookup` override is a stale
 internal directory rather than Brønnøysundregistrene — and that one asks the registry live rather than
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.

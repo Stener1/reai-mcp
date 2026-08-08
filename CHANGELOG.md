@@ -9,12 +9,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Raised the storage floor from 12 claims to 17, starting with the two that carry real consequence.**
+  The census exists to make the gap actionable rather than to make a number look good, so this worked
+  through the list it names.
+  - **The default path.** `reai_create_customer`'s flagship claim — "the name you send is then DISCARDED"
+    when the registry is consulted — was unprobed while both `skipRegistryLookup` cases were covered. It is
+    the path an agent takes when it does nothing special.
+  - **The address half**, which the review of PR #115 pointed out is where the documented hazard lives. A
+    supplied address survives on an ordinary company with the flag set; a directory counterparty overwrites
+    it — and the overwrite is verified against **Brønnøysundregistrene** rather than a remembered string:
+    stored postcode `7900` against the registry's `1331`. "Wrong postcode" is a claim about the registry,
+    so a constant cannot settle it, and an agent could invoice to that address.
+  - `countryCode` defaulting to `NO`, which also settles whether that default is upstream's or ours — it
+    is upstream's, since nothing is sent. And `PHONE_RULE` on a **supplier** — the contact-person probe shipped in #115 — three
+    of the five fields it governs; the lead field stays named-but-unprobed in the census.
+  - One case came back INCONCLUSIVE first time, correctly: creating a second customer for `974761076`
+    collided with the one an earlier case had already made, and the API reported it as a duplicate **name**
+    — the quirk this repository documents about a duplicate organisation number. The classifier pointed at
+    the probe, which now uses a company no other case touches.
+
 - **`scripts/audit-storage.mjs` — the half `audit-messages.mjs` said it could not reach.** That script
   checks the wording of refusals, and its own contract admits every case is a request built to fail, so
   nothing there observes what the API *accepts, normalises or stores*. Two of the five false claims that
   motivated it live in exactly that gap: `skipRegistryLookup` drifts on a `201`, and the phone rule was
-  wrong three separate times about what gets **stored**. Twelve claims now checked against the live API;
-  first run **12 of 12 verified**, including the evidence that the `skipRegistryLookup` override comes from
+  wrong three separate times about what gets **stored**. Seventeen claims now checked against the live API;
+  first run **17 of 17 verified**, including the evidence that the `skipRegistryLookup` override comes from
   a stale internal directory rather than the registry (`971648198` stores as "Statens Innkrevingssentral",
   a superseded name).
   - It writes, which is the whole difference. Only customers — reversible, and they delete cleanly.
@@ -46,8 +65,11 @@ All notable changes to `reai-mcp`. Format loosely follows
     that. Markers must also be ≥12 characters; `marker: "e"` and `marker: " "` both passed before.
   - **The completeness bound was a cop-out and is now a number.** The first version said the population
     "cannot be measured mechanically" because a storage claim is prose. The review enumerated it anyway,
-    from the two places it lives. `npm run audit:census` now prints it: **129 agent-facing literals assert
-    something about what is stored, 12 probed.** Printed rather than asserted, since a keyword sweep is a
+    from the two places it lives. `npm run audit:census` now prints it: **160 distinct agent-facing literals assert
+    something about what is stored; 17 probes cover them, binding to 6 distinct source texts.** Different
+    units, so deliberately not presented as a percentage — and the first version both double-counted
+    fragments of concatenated strings and missed every backtick literal, which hid the five consumers of
+    the most error-prone rule in the repository. Printed rather than asserted, since a keyword sweep is a
     lower bound — but hiding the ratio made 11-of-many read as coverage. The cheap unprobed ones are named,
     including `reai_create_customer`'s flagship "the name you send is then DISCARDED" on the DEFAULT path.
   - `test/smoke-cleanup.test.mjs` learned a second cleanup shape for it: fixtures recorded under
