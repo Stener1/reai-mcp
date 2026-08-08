@@ -8,6 +8,7 @@ import {
   tenantIdArg,
   type ToolContext,
   type ToolDef,
+  PHONE_RULE,
 } from "./registry.js";
 
 /**
@@ -453,7 +454,7 @@ const updateLead = defineTool({
       .max(64, "The API caps phone at 64 characters.")
       .nullable()
       .optional()
-      .describe("Lead phone. Omit to leave unchanged, null to clear. Stored normalised (+47…)."),
+      .describe(`Lead phone. Omit to leave unchanged, null to clear. ${PHONE_RULE}`),
     followUpAt: isoDate
       .nullable()
       .optional()

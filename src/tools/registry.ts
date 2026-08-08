@@ -559,6 +559,44 @@ export const CURRENCY_CODE = z
   .string()
   .regex(/^[A-Z]{3}$/, 'Must be a three-letter uppercase ISO currency code, e.g. "NOK".');
 
+/**
+ * The phone rule, in one place, because three places said three different things and one of them was
+ * false.
+ *
+ * Measured on the live API (tenant 2783, 2026-08-08) across `customer.phone`, `supplier.phone` and
+ * `contactPersons[].phone`, which behave IDENTICALLY:
+ *
+ *  - The value is parsed with **Norway as the default region** and stored **canonicalised to E.164**.
+ *    Nothing is stored as sent: `+46 70 123 45 67` becomes `+46701234567`, `(40) 12 34 56` becomes
+ *    `+4740123456`, and even `tel:40123456` parses. Punctuation and spaces are ignored.
+ *  - A leading `+CC`, `00CC`, or a bare `47` selects the country. Anything else is read as NORWEGIAN.
+ *  - The digits must be valid for whichever country that resolved to, else 400.
+ *
+ * The trap is the combination of the last two. A bare number that happens to be valid in Norway is
+ * stored under +47 with no warning, whatever the caller meant: the Danish mobile `40123456` becomes
+ * `+4740123456`, while `20123456` is refused — not because it is Danish, but because `20` is
+ * unallocated in Norway (`21123456` and `22334455` are both fine). So the risk is a foreign number
+ * saved quietly as the wrong number, and the remedy is always sending the country code with a `+`.
+ * A bare `47` counts as one; a bare `45` does not (`4540123456` is refused, `004540123456` is not).
+ *
+ * What this replaced: a quirk asserting "two phone fields, opposite rules — the ENTITY phone rejects
+ * a +47 prefix", with two tool descriptions telling agents to strip it. Measured false — `PATCH
+ * /api/customers/{id}` and `/api/suppliers/{id}` both answer 200 to `+4722334455` and store it. There
+ * is one rule, not two.
+ *
+ * The one endpoint that genuinely differs is the EMPLOYEE phone, which stores an unparseable value as
+ * null with a 200 instead of refusing it; `organisation.ts` documents that separately and reads the
+ * write back. Everywhere else an unparseable value is a 400 and the stored value is untouched.
+ */
+export const PHONE_RULE =
+  "Stored canonicalised to E.164, so it will not come back exactly as sent — spaces and punctuation " +
+  "are ignored and a Norwegian number sent bare or 0047-prefixed becomes +47…. " +
+  "ALWAYS include the country code with a + for a non-Norwegian number: bare digits are parsed as " +
+  "NORWEGIAN, and if they are valid as such they are stored under +47 with no warning (measured: the " +
+  "Danish mobile 40123456 became +4740123456). Foreign numbers are otherwise accepted — +46701234567, " +
+  "+14155552671, +447911123456 all verified. An unparseable value is refused with 400, worded in " +
+  "Norwegian whatever the number's country, which is not evidence that a Norwegian one was expected.";
+
 export const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be ISO format yyyy-MM-dd, e.g. 2026-03-31");

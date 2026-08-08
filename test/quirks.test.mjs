@@ -62,9 +62,9 @@ test("update-scoped quirks reach the item paths their operations live on", () =>
   // Regression: exact matching silently dropped these, because PATCH/PUT are on
   // /{id} while the quirk named only the collection.
   const cases = [
-    ["PATCH", "/api/customers/{id}", "phone-no-plus47"],
+    ["PATCH", "/api/customers/{id}", "phone-one-rule-parsed-as-norwegian"],
     ["PATCH", "/api/customers/{id}", "customer-name-title-cased"],
-    ["PATCH", "/api/suppliers/{id}", "phone-no-plus47"],
+    ["PATCH", "/api/suppliers/{id}", "phone-one-rule-parsed-as-norwegian"],
     ["PUT", "/api/offers/{id}", "offer-lines-stricter"],
     ["PUT", "/api/offers/{id}", "days-until-due-mandatory"],
     ["PUT", "/api/subscriptions/{id}", "subscription-self-invoicing"],
@@ -85,7 +85,11 @@ test("a quirk only reaches sub-operations when it says it does", () => {
   assert.ok(!emailIds.includes("invoice-from-order-only"), emailIds.join(", "));
 
   const contactIds = quirksFor("POST", "/api/customers/{id}/contact-persons").map((q) => q.id);
-  for (const leaked of ["customer-create-fields", "brreg-lookup", "phone-no-plus47"]) {
+  // phone-one-rule-parsed-as-norwegian was on this list as phone-no-plus47, when it was scoped to the
+  // entity phone only and reaching a contact-person path would have been a leak. It now covers both
+  // deliberately, because re-measuring showed there is ONE rule rather than the two the old note
+  // claimed — so it is no longer a leak candidate for these paths.
+  for (const leaked of ["customer-create-fields", "brreg-lookup"]) {
     assert.ok(!contactIds.includes(leaked), `${leaked} leaked onto contact-persons`);
   }
 
@@ -123,7 +127,7 @@ test("the quirks that motivated this registry reach their endpoints", () => {
     ["POST", "/api/offers", "offer-lines-stricter"],
     ["POST", "/api/orders", "order-send-ehf"],
     ["POST", "/api/customers", "customer-create-fields"],
-    ["POST", "/api/customers", "phone-no-plus47"],
+    ["POST", "/api/customers", "phone-one-rule-parsed-as-norwegian"],
     ["POST", "/api/supplier-invoices", "cost-line-explicit-accounts"],
     ["POST", "/api/subscriptions", "subscription-self-invoicing"],
     ["POST", "/api/vat-returns", "vat-return-does-not-file"],
