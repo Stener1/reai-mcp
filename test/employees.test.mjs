@@ -384,3 +384,107 @@ test("a personal field that IS present is still redacted", async () => {
   assert.ok(!/01019012345/.test(text), "the fødselsnummer must not reach the result");
   assert.ok(!/NO1615201353103/.test(text), "nor the account");
 });
+
+// A 200 is not evidence that the account stored is the account sent, and here that difference is
+// somebody's salary. The same API stores an unparseable phone as null and answers 200.
+test("a stored account that does not match what was sent is flagged, not celebrated", async () => {
+  const { result, text } = await run(
+    "reai_set_employee_bank_account",
+    { id: 1005, accountNumber: "15201353103" },
+    (req) =>
+      req.method === "GET"
+        ? employee({ bankAccount: null })
+        : employee({
+            bankAccount: { bankCode: "1506", accountNumber: "0012345", iban: "NO9815060012345" },
+          }),
+  );
+  assert.equal(result.isError, true, "a mismatch must not read as success");
+  assert.match(text, /DOES NOT MATCH WHAT WAS SENT/);
+  assert.match(text, /15201353103/);
+  assert.match(text, /NO9815060012345/);
+  assert.ok(!/ADDED/.test(text) && !/REPOINTED/.test(text));
+  // The body is still returned: an error that discards what was stored hides the problem.
+  assert.match(text, /"bankCode": "1506"/);
+});
+
+test("an account that vanished entirely is reported as not stored", async () => {
+  const { result, text } = await run(
+    "reai_set_employee_bank_account",
+    { id: 1005, accountNumber: "15201353103" },
+    (req) => (req.method === "GET" ? employee({ bankAccount: null }) : employee({ bankAccount: null })),
+  );
+  assert.equal(result.isError, true);
+  assert.match(text, /WAS NOT STORED/);
+  assert.match(text, /salary run including them will be refused/);
+});
+
+test("a matching account is confirmed as verified, in both the add and repoint cases", async () => {
+  const added = await run("reai_set_employee_bank_account", { id: 1005, accountNumber: "15201353103" }, (req) =>
+    req.method === "GET" ? employee({ bankAccount: null }) : employee(),
+  );
+  assert.equal(added.result.isError, undefined);
+  assert.match(added.text, /ADDED.*verified against what was sent/s);
+
+  // A foreign account need not split into bankCode + accountNumber, so the iban tail is accepted
+  // too — otherwise every non-Norwegian account would be reported as a mismatch.
+  const foreign = await run("reai_set_employee_bank_account", { id: 1005, accountNumber: "1234567890" }, (req) =>
+    req.method === "GET"
+      ? employee({ bankAccount: null })
+      : employee({ bankAccount: { bankCode: null, accountNumber: null, iban: "SE3550000000541234567890" } }),
+  );
+  assert.equal(foreign.result.isError, undefined, "an iban ending in the digits sent is a match");
+});
+
+// The refusal claimed to cover "the lines cannot be read" but only checked the outer array. A
+// relation whose employmentLines is null was flattened to zero lines and then written over — and
+// since the field replaces, that deletes whatever the malformed relation was hiding.
+test("a relation with unreadable lines stops the write, naming it", async () => {
+  for (const lines of [null, undefined, "nope", { id: 1 }]) {
+    const { calls, result, text } = await run(
+      "reai_add_employment_line",
+      { id: 1005, fromDate: "2026-06-01" },
+      {
+        dateOfEmployment: "2026-01-01",
+        employmentRelations: [
+          { id: 1004, employmentLines: [{ id: 997, fromDate: "2026-01-15" }] },
+          { id: 1005, employmentLines: lines },
+        ],
+      },
+    );
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], JSON.stringify(lines));
+    assert.equal(result.isError, true);
+    assert.match(text, /could not be read/);
+    assert.match(text, /relation 1005/);
+  }
+});
+
+test("a relation with an EMPTY line array is readable and does not block the write", async () => {
+  const { calls } = await run(
+    "reai_add_employment_line",
+    { id: 1005, fromDate: "2026-06-01" },
+    (req) =>
+      req.method === "GET"
+        ? {
+            dateOfEmployment: "2026-01-01",
+            employmentRelations: [
+              { id: 1004, employmentLines: [] },
+              { id: 1005, employmentLines: [{ id: 997 }] },
+            ],
+          }
+        : employee({ employmentRelations: [{ id: 1, employmentLines: [{ id: 997 }, { id: 998 }] }] }),
+  );
+  assert.equal(calls.length, 2, "an empty array is a readable answer, not a missing one");
+  assert.equal(calls[1].body.employmentLines.length, 2);
+});
+
+// Measured, and it is why this tool does NOT make phone and email nullable: `null` on either is
+// silently ignored by the API, so accepting one would send a no-op and report a change.
+test("the update tool offers no null for phone or email, and says why", () => {
+  const shape = tool("reai_update_employee").inputSchema;
+  assert.equal(shape.phone.safeParse(null).success, false, "phone null would be a silent no-op");
+  assert.equal(shape.email.safeParse(null).success, false, "email null would be a silent no-op");
+  // The one field the API documents as clearable, and which was measured clearing.
+  assert.equal(shape.endDateOfEmployment.safeParse(null).success, true);
+  assert.match(tool("reai_update_employee").description, /silently IGNORED/);
+  assert.match(tool("reai_update_employee").description, /Employee email is required/);
+});

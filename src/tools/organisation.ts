@@ -480,7 +480,10 @@ const createEmployee = defineTool({
     nationalIdentityNumber: z
       .string()
       .optional()
-      .describe("Fødselsnummer. Needed for the a-melding; omit if you do not have it yet."),
+      .describe(
+        "Fødselsnummer. Needed for the a-melding; omit if you do not have it yet. Checksum-" +
+          'validated — an invalid one answers 400 "Ugyldig fødselsnummer".',
+      ),
     accountNumber: employeeAccountArg
       .optional()
       .describe(
@@ -547,7 +550,12 @@ const updateEmployee = defineTool({
     "Nor does it take accountNumber; that is reai_set_employee_bank_account, so a payment " +
     "destination is never changed as a side effect of fixing a postal code.\n\n" +
     "Setting endDateOfEmployment ends the employment, which the a-melding reports. Pass null to " +
-    "clear it.",
+    "clear it — that one really does clear, measured.\n\n" +
+    "What CANNOT be cleared here: phone and email. `null` on either is silently IGNORED — measured, " +
+    "a stored \"+4722334455\" and a stored address both survived a PATCH that sent null for them — " +
+    'and an empty email answers 409 "Employee email is required". So there is no way to remove ' +
+    "either through this endpoint, and this tool does not pretend otherwise by accepting a null " +
+    "that would do nothing while reporting a change. Overwrite them with a real value instead.",
   risk: "reversible",
   apiPaths: [["PATCH", "/api/employees/{id}"]],
   idempotent: true,
@@ -563,7 +571,16 @@ const updateEmployee = defineTool({
       .nullable()
       .optional()
       .describe("Last day of employment. Ends the employment, which the a-melding reports; null clears it."),
-    nationalIdentityNumber: z.string().nullable().optional().describe("Fødselsnummer; null clears it."),
+    nationalIdentityNumber: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Fødselsnummer. Checksum-validated — an invalid one answers 400 "Ugyldig fødselsnummer", ' +
+          "so this is not a field to fill in with a plausible-looking number. The spec types it " +
+          "nullable and null is accepted; whether it actually clears a stored one was NOT " +
+          "established, because setting one requires a real fødselsnummer.",
+      ),
     addressPart1: z.string().optional().describe("Street address."),
     postalCode: z.string().optional().describe("Postal code."),
     city: z.string().optional().describe("City."),
@@ -652,17 +669,56 @@ const setEmployeeBankAccount = defineTool({
     });
     const now = (res.data?.bankAccount ?? null) as EmployeeRecord | null;
     const name = String(res.data?.name ?? before.data?.name ?? args.id);
-    return ok(res.data?.bankAccount ?? res.data, {
-      note:
-        (previous === null
-          ? `Salary account ADDED for ${name}: ${JSON.stringify(now?.iban ?? null)}. They had none, ` +
-            `so they could not be included in a salary run until now.`
+
+    // A 200 is not evidence that the account stored is the account sent, and on this operation
+    // that difference is somebody's salary. The same API stores an unparseable PHONE as null and
+    // answers 200, so "it did not error" carries no weight here.
+    //
+    // The comparison is on digits: the number goes in whole and comes back split, and measured,
+    // bankCode + accountNumber concatenates back to exactly what was sent ("15201353103" →
+    // "1520" + "1353103"). A non-Norwegian account need not split that way, so a mismatch is
+    // reported loudly rather than treated as proof of failure — the write has already happened,
+    // and refusing after the fact would only hide it.
+    const digits = (value: unknown) => String(value ?? "").replace(/\D/g, "");
+    const sent = digits(args.accountNumber);
+    const storedDigits = `${digits(now?.bankCode)}${digits(now?.accountNumber)}`;
+    const ibanDigits = digits(now?.iban);
+    const stored =
+      now !== null && (storedDigits === sent || ibanDigits.endsWith(sent));
+
+    const verdict = !now
+      ? `THE ACCOUNT WAS NOT STORED. The request answered HTTP ${res.status} but the record now ` +
+        `holds no bankAccount at all, so ${name} still has nowhere for a salary to go — and a ` +
+        `salary run including them will be refused. Read the employee with reai_get_employee, ` +
+        `includePersonalData: true and try again.`
+      : !stored
+        ? `WHAT WAS STORED DOES NOT MATCH WHAT WAS SENT. ${JSON.stringify(args.accountNumber)} was ` +
+          `sent; the record now holds bankCode ${JSON.stringify(now.bankCode ?? null)} + ` +
+          `accountNumber ${JSON.stringify(now.accountNumber ?? null)} (iban ` +
+          `${JSON.stringify(now.iban ?? null)}). For a Norwegian account those concatenate back to ` +
+          `the number sent, so this needs looking at before anyone is paid — check it against the ` +
+          `employee's own written details, not against this conversation. A foreign account may ` +
+          `legitimately be stored differently.`
+        : previous === null
+          ? `Salary account ADDED for ${name}: ${JSON.stringify(now.iban ?? null)}, verified against ` +
+            `what was sent. They had none, so they could not be included in a salary run until now.`
           : `Salary account REPOINTED for ${name}: was ${JSON.stringify(previous.iban ?? null)}, now ` +
-            `${JSON.stringify(now?.iban ?? null)}. Their next salary payment goes to the new one.`) +
+            `${JSON.stringify(now.iban ?? null)}, verified against what was sent. Their next salary ` +
+            `payment goes to the new one.`;
+
+    const result = ok(res.data?.bankAccount ?? res.data, {
+      note:
+        verdict +
         `\n\nStored split, as this API does: bankCode ${JSON.stringify(now?.bankCode ?? null)} + ` +
         `accountNumber ${JSON.stringify(now?.accountNumber ?? null)}. Compare the iban with what you ` +
         `sent, not the accountNumber field.`,
     });
+    // Flagged on the RESULT rather than passed to ok(), which takes no isError — a spread of
+    // `{ isError: true }` into its options compiled fine and did nothing, since excess-property
+    // checking does not reach a spread. And not fail(), because the write already happened: an
+    // error that discards the body would hide what was actually stored.
+    if (!stored) result.isError = true;
+    return result;
   },
 });
 
@@ -737,10 +793,35 @@ const addEmploymentLine = defineTool({
           `easily, because creating an employee without a start date sets it to TODAY.`,
       );
     }
-    const existing = relations.flatMap((relation) => {
-      const lines = (relation as EmployeeRecord).employmentLines;
-      return Array.isArray(lines) ? (lines as EmployeeRecord[]) : [];
-    });
+    // Every relation checked, not just the top-level array. A relation whose employmentLines is
+    // null, absent or some other shape was being flattened to zero lines and then written over —
+    // and since this field REPLACES, that silently deletes whatever the malformed relation was
+    // hiding. The refusal above claimed to cover "the lines cannot be read"; it only covered the
+    // outer array. An EMPTY array is readable and fine; a non-array is not.
+    const unreadable = relations.filter(
+      (relation) => !Array.isArray((relation as EmployeeRecord).employmentLines),
+    );
+    if (unreadable.length > 0) {
+      return fail(
+        `Employee ${args.id} has ${unreadable.length} employment relation(s) whose employmentLines ` +
+          `could not be read — ` +
+          unreadable
+            .map((relation) => {
+              const record = relation as EmployeeRecord;
+              return `relation ${JSON.stringify(record.id ?? null)} has ` +
+                `${JSON.stringify(record.employmentLines ?? null)}`;
+            })
+            .join("; ") +
+          `. Nothing was sent.\n\n` +
+          `Writing employmentLines REPLACES every line on the employee — measured — so treating an ` +
+          `unreadable relation as empty would delete whatever it holds. Read the record with ` +
+          `reai_get_employee to see the real shape. An empty array is fine and this tool accepts ` +
+          `it; only a missing or non-array value stops it.`,
+      );
+    }
+    const existing = relations.flatMap(
+      (relation) => (relation as EmployeeRecord).employmentLines as EmployeeRecord[],
+    );
     // Sent back with their ids, so the API updates the rows it already has rather than
     // recreating them. Only the fields the request schema accepts — employmentType comes back as
     // an object and is not a request field, so echoing it verbatim would be sending the response

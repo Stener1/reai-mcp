@@ -611,7 +611,15 @@ export const QUIRKS: readonly Quirk[] = [
       'ansettelsesstart". The N counts position in the REQUEST array, not a line id. The rejection ' +
       "is atomic — the lines already on the employee all survived it — so a refused write is safe, " +
       "but it is easy to hit: an employee created without a start date has one of TODAY, and any " +
-      "historical line then predates it.",
+      "historical line then predates it.\n\n" +
+      "And null does NOT mean \"clear\" here in general, whatever the field types suggest — only the " +
+      "fields whose own descriptions say so behave that way. Measured: endDateOfEmployment: null " +
+      "cleared a stored date, while phone: null, email: null and accountNumber: null were all " +
+      "silently IGNORED, the stored values still there afterwards. So there is no way to REMOVE a " +
+      'phone or an email through this endpoint; an empty email answers 409 "Employee email is ' +
+      'required". A fødselsnummer is checksum-validated (400 "Ugyldig fødselsnummer"), and so is an ' +
+      'account number — "12345" answers 400 naming the expected BBAN length, and a non-numeric one ' +
+      '"must contain only digits".',
   },
   {
     id: "employee-phone-is-normalised-or-silently-nulled",

@@ -58,6 +58,30 @@ All notable changes to `reai-mcp`. Format loosely follows
     salary run. For someone who has left, `endDateOfEmployment` is usually what is
     wanted, and the tool says so.
 
+  - `null` does **not** mean "clear" on this endpoint in general, whatever the
+    field types suggest — only the fields whose own descriptions say so.
+    `endDateOfEmployment: null` cleared a stored date; `phone: null`,
+    `email: null` and `accountNumber: null` were all silently **ignored**, with the
+    stored values still in place afterwards. So there is no way to remove a phone
+    or an email here, and an empty email answers `409 "Employee email is
+    required"`. The tools say that rather than offering a null that would do
+    nothing while reporting a change.
+  - Both `nationalIdentityNumber` and `accountNumber` are validated: an invalid
+    fødselsnummer answers `400 "Ugyldig fødselsnummer"` (checksummed), `"12345"`
+    answers `400` naming the expected BBAN length, and a non-numeric account
+    answers `"must contain only digits"`.
+  - `reai_set_employee_bank_account` **verifies what was stored** before saying the
+    destination changed. A 200 is not evidence here — the same API stores an
+    unparseable phone as `null` and answers 200 — so the tool compares the digits
+    it sent against `bankCode + accountNumber` (which concatenate back exactly,
+    measured) or the IBAN tail, and flags a mismatch or a missing account as an
+    error result while still returning what was stored.
+  - `reai_add_employment_line` checks **every** relation's `employmentLines`, not
+    just the outer array. A relation whose lines were `null` or some other shape was
+    being flattened to zero and then written over — and since the field replaces,
+    that deletes whatever the malformed relation held. An empty array is readable
+    and still accepted.
+
 ### Fixed
 
 - **Redacting an absent field stated something false.** An employee with no salary
