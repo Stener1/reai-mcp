@@ -1105,13 +1105,19 @@ const unarchiveSupplier = defineTool({
       body: {},
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const stillArchived = res.data?.archived === true;
+    // See the customer tool: only `archived: false` is evidence of recovery.
+    const archived = res.data?.archived;
     return ok(res.data ?? { supplierId: args.id }, {
-      note: stillArchived
-        ? `Supplier ${args.id} still reads archived: true after the call answered HTTP ` +
-          `${res.status}. Nothing was recovered — read it back before relying on it.`
-        : `Supplier ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
-          `back in reai_list_suppliers.`,
+      note:
+        archived === false
+          ? `Supplier ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
+            `back in reai_list_suppliers.`
+          : archived === true
+            ? `Supplier ${args.id} still reads archived: true after the call answered HTTP ` +
+              `${res.status}. Nothing was recovered — read it back before relying on it.`
+            : `Supplier ${args.id}: the call answered HTTP ${res.status} but the response carried no ` +
+              `archived field (${JSON.stringify(archived)}), so whether it is active again is NOT ` +
+              `established. Read it with reai_list_suppliers archived: true.`,
     });
   },
 });

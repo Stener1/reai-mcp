@@ -49,23 +49,32 @@ test("both unarchive tools are registered, reversible, and on the right endpoint
   }
 });
 
-test("unarchiving reports success only when the record actually came back", async () => {
-  const ok = await run("reai_unarchive_customer", { id: 5941 }, { id: 5941, name: "Zz Probe", archived: false });
-  assert.deepEqual(ok.calls.map((c) => `${c.method} ${c.path}`), ["POST /api/customers/5941/unarchive"]);
-  assert.match(ok.text, /active again/);
+for (const [name, noun, listTool] of [
+  ["reai_unarchive_customer", "Customer", "reai_list_customers"],
+  ["reai_unarchive_supplier", "Supplier", "reai_list_suppliers"],
+]) {
+  test(`${name} reports success only when archived came back FALSE`, async () => {
+    const ok = await run(name, { id: 7 }, { id: 7, name: "Zz Probe", archived: false });
+    assert.equal(ok.calls.length, 1);
+    assert.match(ok.text, /active again/);
 
-  // A 200 that leaves archived: true is the case worth catching — nothing was recovered.
-  const stuck = await run("reai_unarchive_customer", { id: 5941 }, { id: 5941, archived: true });
-  assert.match(stuck.text, /still reads archived: true/);
-  assert.match(stuck.text, /Nothing was recovered/);
-});
+    // A 200 that leaves archived: true is the obvious case.
+    const stuck = await run(name, { id: 7 }, { id: 7, archived: true });
+    assert.match(stuck.text, /still reads archived: true/);
+    assert.match(stuck.text, /Nothing was recovered/);
 
-test("the same holds for suppliers", async () => {
-  const ok = await run("reai_unarchive_supplier", { id: 5740 }, { id: 5740, name: "Zz Sup", archived: false });
-  assert.match(ok.text, /active again/);
-  const stuck = await run("reai_unarchive_supplier", { id: 5740 }, { archived: true });
-  assert.match(stuck.text, /still reads archived: true/);
-});
+    // And the one that was wrong: an ABSENT field made `archived === true` false, so a null or
+    // fieldless 200 was reported as "active again" with nothing verified.
+    for (const data of [null, {}, { id: 7 }, { archived: null }]) {
+      const { text } = await run(name, { id: 7 }, data);
+      assert.match(text, /NOT\s+established/, JSON.stringify(data));
+      assert.match(text, new RegExp(listTool));
+      // Matched on the SUCCESS sentence specifically: the unknown branch legitimately contains the
+      // words "active again" inside "whether it is active again is NOT established".
+      assert.ok(!/is active again and/.test(text), JSON.stringify(data));
+    }
+  });
+}
 
 // The delete endpoints are "delete OR archive" and say which. Reporting "deleted or archived" left
 // the caller to guess between a recoverable state and an unrecoverable one.

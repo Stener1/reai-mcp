@@ -1289,13 +1289,23 @@ const unarchiveCustomer = defineTool({
       body: {},
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const stillArchived = res.data?.archived === true;
+    // Only `archived: false` supports the success sentence. `=== true` made an ABSENT field read as
+    // recovered, so a null or fieldless 200 would have been reported as "active again" without
+    // anything having been verified — the same absence-is-not-evidence rule this server applies to
+    // list shapes and delete outcomes.
+    const archived = res.data?.archived;
     return ok(res.data ?? { customerId: args.id }, {
-      note: stillArchived
-        ? `Customer ${args.id} still reads archived: true after the call answered HTTP ` +
-          `${res.status}. Nothing was recovered — read it with reai_get_customer before relying on it.`
-        : `Customer ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
-          `back in reai_list_customers.`,
+      note:
+        archived === false
+          ? `Customer ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
+            `back in reai_list_customers.`
+          : archived === true
+            ? `Customer ${args.id} still reads archived: true after the call answered HTTP ` +
+              `${res.status}. Nothing was recovered — read it with reai_get_customer before relying on it.`
+            : `Customer ${args.id}: the call answered HTTP ${res.status} but the response carried no ` +
+              `archived field (${JSON.stringify(archived)}), so whether it is active again is NOT ` +
+              `established. Read it with reai_list_customers archived: true — if it still appears ` +
+              `there, nothing was recovered.`,
     });
   },
 });
