@@ -1652,16 +1652,26 @@ async function main() {
             ? firstLineOf(textOf(loanRes))
             : `id=${loan?.id} accounts=${loan?.principalAccountNumber}/${loan?.interestExpenseAccountNumber}/${loan?.accruedInterestAccountNumber}`,
         );
+        const vouchersAfterLoan = await countOf(
+          await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+        );
         report(
           "recording a loan posts NOTHING to the ledger",
-          (await countOf(
-            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
-          )) === vouchersBeforeLoan,
-          `vouchers ${vouchersBeforeLoan} before and after`,
+          // Both counts have to be NUMBERS. `undefined === undefined` passed this when the list failed or
+          // came back in a shape countOf cannot read, so the suite could claim it had watched the ledger
+          // during an outage in which it saw nothing at all.
+          typeof vouchersBeforeLoan === "number" &&
+            typeof vouchersAfterLoan === "number" &&
+            vouchersAfterLoan === vouchersBeforeLoan,
+          typeof vouchersBeforeLoan === "number" && typeof vouchersAfterLoan === "number"
+            ? `vouchers ${vouchersBeforeLoan} before, ${vouchersAfterLoan} after`
+            : `the voucher count was UNREADABLE (${vouchersBeforeLoan} → ${vouchersAfterLoan}), so nothing was observed`,
         );
 
-        // reference is unique per company, and says so only in Norwegian.
-        const duplicate = await client.callTool({
+        // Only when the first create actually committed. Otherwise a temporary 5xx on the first call
+        // followed by a recovery would make this a REAL create — of a loan whose id is never assigned to
+        // created.loanId, so the finally could not delete it and the sweep would find it next run.
+        const duplicate = created.loanId === undefined ? undefined : await client.callTool({
           name: "reai_create_loan",
           arguments: {
             reference,
@@ -1675,11 +1685,20 @@ async function main() {
             repaymentType: "bullet",
           },
         });
-        report(
-          "a duplicate loan reference is refused, in English",
-          duplicate.isError === true && /unique/.test(textOf(duplicate)),
-          firstLineOf(textOf(duplicate)),
-        );
+        if (duplicate === undefined) {
+          report(
+            "a duplicate loan reference is refused, in English",
+            false,
+            "SKIPPED — the first loan did not commit, and probing a duplicate then risks creating a real " +
+              "one this run cannot clean up",
+          );
+        } else {
+          report(
+            "a duplicate loan reference is refused, in English",
+            duplicate.isError === true && /unique/.test(textOf(duplicate)),
+            firstLineOf(textOf(duplicate)),
+          );
+        }
       }
 
       if (created.loanId) {
@@ -2554,7 +2573,18 @@ async function main() {
               `past the cut was not examined — narrow the query, or clear the backlog so the whole ` +
               `list fits`;
           }
-          for (const row of listOf(res) ?? []) {
+          // A list this suite cannot READ proves nothing, and `?? []` silently turned that into "clean".
+          // Codex found it on the three new sweeps; it applies to every one of them, so it is fixed in
+          // the shared loop rather than beside the new entries. This is the same failure the truncation
+          // branch above exists for, in a different shape: no rows because the shape was unrecognised,
+          // not because the tenant is tidy.
+          const rows = listOf(res);
+          if (rows === undefined) {
+            truncated = `the ${label} list came back in a shape this suite cannot read, so nothing was ` +
+              `examined — a successful response with no recognisable rows is not evidence of a clean tenant`;
+            continue;
+          }
+          for (const row of rows) {
             const id = row?.[idField];
             if (allowed.has(id)) {
               // Counted as SEEN, so the summary reports what is actually still there. Printing the
