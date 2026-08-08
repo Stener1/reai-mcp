@@ -9,6 +9,32 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Added
+
+- **The live write suite now covers loans and their counterparties**, which had none — the domain with the
+  most measured, undocumented behaviour in this repository and no standing check that any of it is still
+  true. An upstream change to the direction rule, the derived accounts, the reference uniqueness or the
+  deletion ordering now shows up in a suite run rather than in someone's books, which is how the
+  expense-voucher regression was found only by luck.
+  - Eleven checks: the direction-locked pair refused before anything is sent, a borrower loan created with
+    the derived 2220/8150/2950, the voucher count **not** moving (a loan record posts nothing), the
+    duplicate reference refused in English, a partial edit keeping `repaymentType` and both interest
+    accounts, the reclassification refusal quoting the accounts the API would derive, and a creditor a
+    loan still names refusing deletion with the ordering.
+  - Cleanup runs loan-first, which is the other half of that last assertion, and three new sweeps
+    (`loans`, `creditors`, `debtors`) fail if anything test-named survives. All three are fully removable,
+    measured, so a leftover there is a cleanup that did not run rather than a record the API refuses.
+  - The suite now uses `reai_create_creditor` and `reai_delete_creditor` where it previously reached for
+    `reai_request`, so the curated path is what gets exercised.
+  - Share investments are deliberately NOT exercised: an event there is permanent and posts to a real
+    ledger, so a suite that ran it would leave a record behind every time. The section says so.
+- **A leftover sub-account explained rather than ignored.** The suite flagged `zz-si-probe` on account 1810
+  as unaccounted for. Measured: creating a share investment **auto-creates a general sub-account** on its
+  derived asset account, named after the position — and deleting the position removes it again, so this is
+  not a leak in the normal case. It is stuck here because that particular position has an event and cannot
+  be deleted, and sub-accounts have no `DELETE` endpoint at all. Recorded as known-unrecoverable with the
+  reason, which makes the suite green at 158/0 without hiding anything.
+
 ### Changed
 
 - **`reai_list_creditors` and `reai_update_creditor` moved from the `purchase` toolset to `loans`.**

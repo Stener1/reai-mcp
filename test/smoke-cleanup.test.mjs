@@ -63,6 +63,20 @@ const NOT_A_RECORD = {
   variantId: "a variant id read from a stock line; the product's deletion removes it",
 };
 
+/**
+ * Deletes that belong in the TRY half because the suite asserts they are REFUSED.
+ *
+ * The check below cannot tell a cleanup from an assertion, and it should not try: a heuristic like
+ * "there is a nearby report()" would pass a real cleanup that happens to sit next to one. So the
+ * exception is declared, with the reason, and the record still has to be deleted in the finally like
+ * everything else — which the sibling test enforces independently.
+ */
+const DELETED_TO_PROVE_A_REFUSAL = {
+  loanCreditorId:
+    "the loans section asserts that a creditor a loan still names cannot be deleted — the record must " +
+    "survive that call, and it is deleted in the finally after the loan",
+};
+
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
 /** The `finally` of `main`, split from everything before it. */
@@ -98,13 +112,37 @@ for (const path of SUITES) {
 
   test(`${path}: no cleanup of a created record sits in the try half`, () => {
     const { tryHalf } = halves(source(path));
-    const strays = [...deletedKeys(tryHalf)].filter((key) => !(key in NOT_A_RECORD));
+    const strays = [...deletedKeys(tryHalf)].filter(
+      (key) => !(key in NOT_A_RECORD) && !(key in DELETED_TO_PROVE_A_REFUSAL),
+    );
     assert.deepEqual(
       strays,
       [],
       "a cleanup of a created record is in the try half, where it runs before the record exists " +
-        "(and before `attempt` is defined) — move it into the finally",
+        "(and before `attempt` is defined) — move it into the finally, or declare it in " +
+        "DELETED_TO_PROVE_A_REFUSAL if the suite asserts the delete is refused",
     );
+
+    // An exemption that stops being true is worse than none: if the suite ever stops deleting one of
+    // these in the finally, the sibling test catches it — but if the delete leaves the try half
+    // entirely, nothing would notice the entry had gone stale.
+    const { finallyHalf } = halves(source(path));
+    const createdHere = new Set([...tryHalf.matchAll(CREATED_ASSIGNMENT)].map((m) => m[1]));
+    for (const [key, reason] of Object.entries(DELETED_TO_PROVE_A_REFUSAL)) {
+      // Only for the suite that actually creates it — there are two suites here and the exemption
+      // belongs to one of them. Asserting it against both made the OTHER suite fail for a record it
+      // has never heard of.
+      if (!createdHere.has(key)) continue;
+      assert.ok(
+        deletedKeys(tryHalf).has(key),
+        `DELETED_TO_PROVE_A_REFUSAL names ${key}, which is no longer deleted in the try half — remove ` +
+          `the entry. (${reason})`,
+      );
+      assert.ok(
+        deletedKeys(finallyHalf).has(key),
+        `${key} is deleted in the try to prove a refusal, so the finally still has to remove it for real`,
+      );
+    }
   });
 }
 
