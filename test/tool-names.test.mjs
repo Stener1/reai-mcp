@@ -31,6 +31,21 @@ const TOOL_NAME = /\breai_[a-z0-9_]+/g;
  */
 const NOT_A_TOOL = new Set([]);
 
+// Two surfaces are deliberately NOT scanned, and both would produce false failures if someone
+// "improved" this by widening it — so the reasons are here rather than in a commit message.
+//
+//   - `scripts/`. smoke-full-write.mjs asserts that `reai_complete_salary_run` and
+//     `reai_pay_salary_run` do NOT exist: completing a payroll run posts the voucher, creates the
+//     payslips and the employee payments AND starts the a-melding submission to Skatteetaten, so the
+//     check is that no tool offers it. Naming an unregistered tool is the whole point there.
+//   - `CHANGELOG.md`. It records that `reai_list_bank_transactions` was named by a description and
+//     never existed. A history that cannot mention a removed name is not a history.
+//
+// One thing this genuinely does not catch: a name assembled at runtime, `"reai_" + "list_x"` or a
+// template with an interpolated suffix. The regex needs the literal. That is a limit worth stating
+// plainly rather than describing this as total — no tool description in this repository builds its
+// cross-references that way, and if one ever does, this test will not save it.
+
 function unknownNames(text) {
   const found = new Set([...String(text).matchAll(TOOL_NAME)].map((m) => m[0]));
   return [...found].filter((n) => !KNOWN.has(n) && !NOT_A_TOOL.has(n)).sort();
