@@ -67,6 +67,20 @@ export type Quirk = {
   note: string;
 };
 
+/**
+ * Shared by the two employee-account quirks below — see the comment there for why it is two
+ * entries and not one.
+ */
+const EMPLOYEE_ACCOUNT_SPLIT_NOTE =
+  "The request field is `accountNumber` and takes the whole number; the response field is " +
+  "`bankAccount`, an OBJECT, with the number split. Measured: sending accountNumber " +
+  '"15201353103" reads back as bankAccount { employeeBankAccountId, countryCode: "NO", ' +
+  'bankCode: "1520", accountNumber: "1353103", currency: "NOK", iban: "NO1615201353103" }. So a ' +
+  'caller checking the write by comparing `accountNumber` sees "1353103" against what it sent and ' +
+  "concludes it failed; read `bankAccount.iban`, or reassemble bankCode + accountNumber. Note " +
+  "EmployeeRes has no flat accountNumber at all, and the COLLECTION list is a thinner projection " +
+  "still — id, name and email only.";
+
 export const QUIRKS: readonly Quirk[] = [
   // --- Cross-cutting -------------------------------------------------------
   // Note: quirks true of the whole API (tenant scoping, deep links needing
@@ -542,10 +556,15 @@ export const QUIRKS: readonly Quirk[] = [
       'following employees are missing a bank account" — when any INCLUDED employee has none, and ' +
       "it names them. Employees are created without one, so this is the normal first failure: set " +
       "it with `accountNumber` on POST /api/employees or PATCH /api/employees/{id}.\n\n" +
-      "Two more things measured here. Omitting employeeIds includes EVERY employee, so passing " +
-      "nothing is not passing nobody. And creating a run posts NO voucher — the count did not move " +
-      "and voucherId stayed null; the voucher is made at completion, which is why a run in status " +
-      "under_process can be deleted without touching the ledger.",
+      "Two more things. Omitting employeeIds — or sending an empty list — includes every employee " +
+      "ELIGIBLE FOR THE PERIOD, which is the schema's own wording: passing nothing is not passing " +
+      "nobody, and it is not the whole register either, since what makes an employee ineligible is " +
+      "documented nowhere. Read employeeIds on the response to see who is actually in.\n\n" +
+      "And creating a run posts NO voucher — measured, the count did not move and voucherId stayed " +
+      "null; the voucher is made at completion, which is why a run in status under_process can be " +
+      "deleted without touching the ledger. Note the DELETE is really \"delete OR REVERSE\" and " +
+      'says which in {"outcome":"deleted"|"reversed"} — a reversal is what you get once there is ' +
+      "audit history to keep, and it posts.",
   },
   {
     id: "salary-wage-line-create-and-update-differ",
@@ -591,18 +610,25 @@ export const QUIRKS: readonly Quirk[] = [
       "which is what a payroll record should be.",
   },
   {
+    // Two entries for one fact, and deliberately not one entry listing both paths: `methods`
+    // applies to EVERY path in an entry, so a single entry covering POST/PATCH/GET on both also
+    // claimed the COLLECTION GET returns a bankAccount object. It does not — that response is the
+    // EmployeeSummaryRes projection of id, name and email, which `employee-list-is-a-projection`
+    // says a few entries down. Discovery on GET /api/employees therefore showed two notes that
+    // contradicted each other, and the wrong one sent a caller looking for payroll account details
+    // that cannot be in that response at all.
     id: "employee-account-goes-in-flat-and-comes-back-split",
-    paths: ["/api/employees", "/api/employees/{id}"],
-    methods: ["POST", "PATCH", "GET"],
+    paths: ["/api/employees"],
+    methods: ["POST"],
     kind: "shape",
-    note:
-      "The request field is `accountNumber` and takes the whole number; the response field is " +
-      "`bankAccount`, an OBJECT, with the number split. Measured: sending accountNumber " +
-      '"15201353103" reads back as bankAccount { employeeBankAccountId, countryCode: "NO", ' +
-      'bankCode: "1520", accountNumber: "1353103", currency: "NOK", iban: "NO1615201353103" }. So a ' +
-      "caller checking the write by comparing `accountNumber` sees \"1353103\" against what it " +
-      "sent and concludes it failed; read `bankAccount.iban`, or reassemble bankCode + " +
-      "accountNumber. Note EmployeeRes has no flat accountNumber at all.",
+    note: EMPLOYEE_ACCOUNT_SPLIT_NOTE,
+  },
+  {
+    id: "employee-account-split-on-read-and-update",
+    paths: ["/api/employees/{id}"],
+    methods: ["GET", "PATCH"],
+    kind: "shape",
+    note: EMPLOYEE_ACCOUNT_SPLIT_NOTE,
   },
   {
     id: "swift-code-is-normalised",

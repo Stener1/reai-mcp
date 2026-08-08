@@ -246,7 +246,7 @@ test("an unreadable run is not assumed to be a draft", async () => {
 
 test("deleting a draft run goes through, and says why the ledger is safe", async () => {
   const { calls, result, text } = await run("reai_delete_salary_run", { id: 1360 }, (req) =>
-    req.method === "GET" ? runRecord() : null,
+    req.method === "GET" ? runRecord() : { outcome: "deleted" },
   );
   assert.equal(result.isError, undefined);
   assert.deepEqual(
@@ -254,6 +254,56 @@ test("deleting a draft run goes through, and says why the ledger is safe", async
     ["GET /api/salary-payments/1360", "DELETE /api/salary-payments/1360"],
   );
   assert.match(text, /ledger is unaffected/);
+});
+
+// The status check is a precondition, not a lock: this endpoint takes no version or conditional
+// parameter, so a completion landing between the GET and the DELETE turns the same call into a
+// REVERSAL, which posts. The API says which of the two happened; the tool has to read it rather
+// than repeat what the expired check implied.
+test("a run completed between the read and the delete is reported as REVERSED, not safe", async () => {
+  const { result, text } = await run("reai_delete_salary_run", { id: 1360 }, (req) =>
+    req.method === "GET" ? runRecord() : { outcome: "reversed" },
+  );
+  assert.equal(result.isError, undefined);
+  assert.match(text, /REVERSED, not deleted/);
+  assert.match(text, /POSTS\s+TO THE LEDGER/);
+  assert.ok(
+    !/ledger is unaffected/.test(text),
+    "a reversal must never be reported as leaving the ledger untouched",
+  );
+});
+
+test("an unrecognised delete outcome is reported as unknown rather than as a clean delete", async () => {
+  for (const data of [null, {}, { outcome: "something-new" }, { outcome: null }]) {
+    const { text } = await run("reai_delete_salary_run", { id: 1360 }, (req) =>
+      req.method === "GET" ? runRecord() : data,
+    );
+    assert.match(text, /no recognised outcome/, JSON.stringify(data));
+    assert.ok(!/ledger is unaffected/.test(text), JSON.stringify(data));
+  }
+});
+
+// The schema says "all employees eligible for the period", which is not the same as the whole
+// register — and what makes an employee ineligible is documented nowhere.
+test("omitting employeeIds is described as eligible-for-the-period, not as everybody", async () => {
+  const t = tool("reai_create_salary_run");
+  const described = t.inputSchema.employeeIds._def.description ?? "";
+  for (const text of [described, t.description]) {
+    assert.match(text, /eligible/i);
+  }
+  const { text } = await run(
+    "reai_create_salary_run",
+    { period: "2026-08", paymentDate: "2026-08-31" },
+    { ...runRecord(), employeeIds: [987, 988] },
+    { status: 201 },
+  );
+  assert.match(text, /ELIGIBLE/);
+  assert.match(text, /2 employee\(s\)/);
+  assert.match(text, /987, 988/);
+  assert.ok(
+    !/EVERY employee/.test(text),
+    "the note must not claim the run covers every employee on the books",
+  );
 });
 
 test("deleting a line hits the line, not the run", async () => {
@@ -308,16 +358,19 @@ test("the payroll quirks are attached where a caller meets them", () => {
   }
   // The employee bank account is the precondition for payroll, and its field is renamed and
   // split in the response — a caller verifying its own write needs to know before it panics.
-  for (const [m, p] of [
-    ["POST", "/api/employees"],
-    ["PATCH", "/api/employees/{id}"],
-    ["GET", "/api/employees/{id}"],
-  ]) {
-    assert.ok(
-      ids(m, p).includes("employee-account-goes-in-flat-and-comes-back-split"),
-      `${m} ${p}`,
-    );
+  assert.ok(
+    ids("POST", "/api/employees").includes("employee-account-goes-in-flat-and-comes-back-split"),
+  );
+  for (const m of ["GET", "PATCH"]) {
+    assert.ok(ids(m, "/api/employees/{id}").includes("employee-account-split-on-read-and-update"), m);
   }
+  // And NOT on the collection GET, which returns the id/name/email projection: two quirks on one
+  // operation saying opposite things about the same field is worse than one of them missing.
+  const collection = ids("GET", "/api/employees");
+  assert.ok(
+    !collection.some((id) => id.startsWith("employee-account")),
+    `GET /api/employees carries ${collection.join(", ")} — the list has no bankAccount to describe`,
+  );
 });
 
 test("the tool text names the a-melding consequence rather than only refusing", () => {

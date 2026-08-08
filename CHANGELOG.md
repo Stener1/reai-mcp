@@ -255,6 +255,26 @@ All notable changes to `reai-mcp`. Format loosely follows
   - `reai_delete_salary_run` refuses when the run cannot be READ back, not only
     when its status is wrong. "Probably a draft" is not a basis for deleting
     payroll.
+  - That check is a **precondition, not a lock**, and the tool now says so. The
+    endpoint is really "delete **or reverse**": it deletes when no accounting
+    reversal is needed and records a reversal when audit history must be kept,
+    answering `{"outcome":"deleted"}` or `{"outcome":"reversed"}`. It takes no
+    version or conditional parameter, so a run completed in the window between the
+    read and the delete gets reversed — which posts. The tool reads the outcome and
+    reports which of the two happened; only `"deleted"` gets the sentence about the
+    ledger being unaffected, and an unrecognised outcome is reported as unknown.
+    The full-write suite asserts a draft comes back `"deleted"`.
+  - Omitting `employeeIds` includes every employee **eligible for the period** —
+    the schema's wording, and not the whole register, since what makes an employee
+    ineligible is documented nowhere. The tool text said "every employee"; it now
+    reports the `employeeIds` the API actually returned and says to compare them
+    against `reai_list_employees` when coverage matters.
+  - The employee bank-account quirk is two entries, not one. `methods` applies to
+    every path in an entry, so a single entry covering POST/PATCH/GET on both
+    `/api/employees` and `/api/employees/{id}` also claimed the COLLECTION list
+    returns a split `bankAccount` — it returns the id/name/email projection, which
+    the neighbouring `employee-list-is-a-projection` quirk says, so discovery on
+    that one operation showed two notes contradicting each other.
   - Employee master data carries two traps of its own, both now quirks. The request
     field is `accountNumber` and takes the whole number; the response field is
     `bankAccount`, an object, with it **split** — `"15201353103"` in reads back as

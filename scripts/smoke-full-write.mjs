@@ -964,6 +964,14 @@ async function main() {
       // an employee attached that then could not be deleted either.
       if (Number.isInteger(run?.id)) created.salaryRunId = run.id;
       const runId = created.salaryRunId;
+      // The API's own wording is "all employees eligible for the period", so the response's
+      // employeeIds is what says who is in — asserted here because the tool's note reports that
+      // list and a wrong one would read as coverage the run does not have.
+      report(
+        "the run includes exactly the employee asked for",
+        !runRes.isError && JSON.stringify(run?.employeeIds ?? null) === JSON.stringify([payable.id]),
+        `employeeIds=${JSON.stringify(run?.employeeIds ?? null)} (asked for [${payable.id}])`,
+      );
       report(
         "reai_create_salary_run opens a DRAFT",
         !runRes.isError && run?.status === "under_process",
@@ -1081,11 +1089,23 @@ async function main() {
     // record, and deleting the parent first is what left four orders stranded on this tenant
     // once already. A draft run deletes cleanly (measured 200) because it posted nothing.
     if (created.salaryRunId) {
-      await attempt(
+      // Asserting the OUTCOME, not just the absence of an error: this endpoint deletes OR records
+      // a reversal and says which in {"outcome":...}. A draft must come back "deleted" — if it
+      // ever answers "reversed" here, something posted to a live tenant's ledger and the cleanup
+      // is the last place that would notice.
+      const del = await attempt(
         "test salary run deleted",
         () => client.callTool({ name: "reai_delete_salary_run", arguments: { id: created.salaryRunId } }),
         (r) => firstLineOf(textOf(r)),
       );
+      if (del && !del.isError) {
+        const outcome = jsonOf(del)?.outcome;
+        report(
+          "the draft was DELETED, not reversed",
+          outcome === "deleted",
+          `outcome=${JSON.stringify(outcome)}`,
+        );
+      }
     }
     for (const employeeId of created.salaryEmployeeIds) {
       await attempt(

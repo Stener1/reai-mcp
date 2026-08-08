@@ -210,12 +210,15 @@ const createSalaryRun = defineTool({
     "What it does contain is not nothing: a run is pre-populated with wage lines derived from " +
     "expense postings for the period, and those lines cannot be edited (the API says so on the " +
     "update endpoint). So read the run before adding anything, or the same pay goes in twice.\n\n" +
+    "Omitting employeeIds includes everyone the API considers ELIGIBLE for the period, which is " +
+    "its wording and not the same as every employee on the books — read employeeIds on the " +
+    "response when it matters who is in the run.\n\n" +
     "Every employee included must already have a bank account, or the whole call is refused with " +
     '400 "Følgende ansatte mangler bankkonto" naming the ones that do not. Employees are created ' +
     "without one; set it with accountNumber on the employee.\n\n" +
     "Requires REAI_WRITE_MODE=full. Completing the run is a separate operation and deliberately " +
     "not a tool here — see reai_api_notes for POST /api/salary-payments/{id}/complete, which posts " +
-    "the voucher, schedules real payments and files the a-melding.",
+    "the voucher, creates the payslips, schedules real payments and files the a-melding.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/salary-payments"]],
   inputSchema: {
@@ -229,8 +232,10 @@ const createSalaryRun = defineTool({
       .min(1)
       .optional()
       .describe(
-        "Which employees to include. OMIT to include every employee — which is what the API does " +
-          "with an empty list, so passing nothing is not the same as passing nobody.",
+        "Which employees to include. Omitting it, or sending an empty list, includes every employee " +
+          "ELIGIBLE FOR THE PERIOD — the API's own wording — so passing nothing is not the same as " +
+          "passing nobody. It is not the whole register either: who counts as eligible is the API's " +
+          "rule and is not documented, so read employeeIds on the response when coverage matters.",
       ),
     tenantId: tenantIdArg,
   },
@@ -248,9 +253,20 @@ const createSalaryRun = defineTool({
         `paying ${run?.paymentDate ?? args.paymentDate}. ${describeStatus(run?.status)}`,
     ];
     if (args.employeeIds === undefined) {
+      // Deliberately reports the count the API came back with rather than describing the set. The
+      // endpoint includes everyone ELIGIBLE for the period, and what makes an employee ineligible
+      // is undocumented, so "every employee" would be an overstatement a caller could act on —
+      // reading a run as covering the whole register and missing someone left out.
+      const included = run?.employeeIds;
       notes.push(
-        `No employeeIds were given, so this includes EVERY employee — ` +
-          `${run?.employeeIds?.length ?? "an unknown number"} of them.`,
+        Array.isArray(included)
+          ? `No employeeIds were given, so the API included everyone it considers ELIGIBLE for ` +
+            `${args.period}: ${included.length} employee(s) — ids ${included.join(", ") || "none"}. ` +
+            `That is not necessarily every employee on the books. Compare it against ` +
+            `reai_list_employees if coverage matters.`
+          : `No employeeIds were given, so the API included everyone it considers ELIGIBLE for ` +
+            `${args.period} — which is not necessarily every employee. The response carried no ` +
+            `employeeIds, so read the run back to see who is actually in it.`,
       );
     }
     notes.push(
@@ -433,12 +449,19 @@ const deleteSalaryRun = defineTool({
   name: "reai_delete_salary_run",
   title: "Delete a salary run",
   description:
-    "Delete a payroll run. Measured on a draft (under_process): DELETE answers 200 and the ledger " +
-    "is untouched, because a draft run has posted nothing.\n\n" +
-    "What it does to a COMPLETED run was not established — completing one posts a voucher, " +
-    "creates payslips and payments and files the a-melding, and none of that could be produced " +
-    "here without enabling external sending. So this tool refuses anything that is not still " +
-    "under_process rather than guessing; use reai_request if you have decided otherwise.",
+    "Delete a payroll run that is still a draft. Measured on one (under_process): DELETE answers " +
+    '200 with {"outcome":"deleted"} and the ledger is untouched, because a draft has posted ' +
+    "nothing.\n\n" +
+    "The endpoint is really \"delete OR REVERSE\": by its own description it deletes when no " +
+    'accounting reversal is needed and RECORDS A REVERSAL when audit history must be kept, ' +
+    'answering {"outcome":"reversed"} instead. A reversal posts to the ledger.\n\n' +
+    "So this tool reads the run first and refuses anything not still under_process — and then " +
+    "reads the outcome the API returned rather than assuming the precondition held. There is no " +
+    "conditional-delete or version parameter on this endpoint, so the check cannot be atomic: if " +
+    "someone completes the run in the window between the two calls, the DELETE lands on a " +
+    "completed run and reverses it. That is what the outcome field is read for, and the tool says " +
+    "plainly which of the two happened instead of claiming the ledger is safe.\n\n" +
+    "To delete a completed run deliberately, use reai_request — the refusal here names it.",
   risk: "irreversible",
   destructive: true,
   apiPaths: [
@@ -475,19 +498,39 @@ const deleteSalaryRun = defineTool({
           `deleted.\n\n` +
           `${describeStatus(typeof status === "string" ? status : undefined)}\n\n` +
           `What deleting a run in that state does was never established — producing one requires ` +
-          `completing it, which posts a voucher, schedules payments and files the a-melding. If you ` +
+          `completing it, which posts a voucher, creates payslips, schedules payments and files the ` +
+          `a-melding. If you ` +
           `have decided to do it anyway, reai_request DELETE /api/salary-payments/${args.id} will.`,
       );
     }
-    const res = await ctx.client.request<unknown>({
+    const res = await ctx.client.request<{ outcome?: string }>({
       method: "DELETE",
       path: `/api/salary-payments/${args.id}`,
       tenantId,
     });
+    // The status check above is a precondition, not a lock: this endpoint takes no version or
+    // conditional parameter, so a completion landing between the GET and the DELETE turns the same
+    // call into a REVERSAL. The outcome field is the only thing that knows which happened, and
+    // reporting "the ledger is unaffected" without reading it would be a claim about the books
+    // made from a check that had already expired.
+    const outcome = res.data?.outcome;
     return ok(res.data ?? { deleted: args.id }, {
       note:
-        `Draft salary run ${args.id} deleted (HTTP ${res.status}). A draft has posted nothing, so ` +
-        `the ledger is unaffected — measured.`,
+        outcome === "deleted"
+          ? `Draft salary run ${args.id} deleted (HTTP ${res.status}), outcome "deleted". Nothing ` +
+            `was posted for a draft, so the ledger is unaffected.`
+          : outcome === "reversed"
+            ? `Salary run ${args.id} was REVERSED, not deleted (HTTP ${res.status}, outcome ` +
+              `"reversed"). The API records a reversal when audit history must be kept, which ` +
+              `means this run was no longer a draft by the time the delete landed — it was read ` +
+              `as under_process moments earlier, so it was completed in between. A reversal POSTS ` +
+              `TO THE LEDGER. Read the run and its voucher before doing anything else, and tell ` +
+              `whoever completed it.`
+            : `Salary run ${args.id}: DELETE answered HTTP ${res.status}, but the response carried ` +
+              `no recognised outcome (${JSON.stringify(outcome)}). This endpoint deletes OR ` +
+              `records a reversal and says which, so with neither word present, whether anything ` +
+              `was posted is unknown — read the run and the ledger rather than assuming it was a ` +
+              `clean delete.`,
     });
   },
 });
