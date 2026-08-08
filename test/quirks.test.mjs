@@ -170,3 +170,36 @@ test("quirks reach operations that no curated tool covers", () => {
     assert.ok(quirksFor(method, path).length > 0, `${entry} should carry at least one quirk`);
   }
 });
+
+test("a hazard on a create is attached to the create, not to the failure it causes later", async () => {
+  // Review's finding, and the sequence matters more than the wording: the warning that an opening
+  // position makes a share investment permanent was attached to DELETE, so a caller met it only when
+  // trying to remove the record — after the decision that made it permanent. A success-path hazard
+  // belongs on the operation that causes it, with no `statuses`, so `reai_describe_endpoint` and a
+  // successful call both carry it.
+  const { QUIRKS, quirksFor } = await import("../dist/reai/quirks.js");
+
+  const onCreate = quirksFor("POST", "/api/share-investments").map((q) => q.id);
+  assert.ok(
+    onCreate.includes("share-investment-opening-position-is-permanent"),
+    "the caller has to be told before the record exists",
+  );
+  const warning = QUIRKS.find((q) => q.id === "share-investment-opening-position-is-permanent");
+  assert.equal(warning.statuses, undefined, "a success-path hazard is not keyed to a status code");
+  assert.match(warning.note, /openingQuantity/);
+  assert.match(warning.note, /cannot be deleted|permanent/);
+
+  // And the 400 explanation stays where the 400 happens, still scoped to it.
+  const onDelete = QUIRKS.find((q) => q.id === "share-investment-with-events-cannot-be-deleted");
+  assert.deepEqual(onDelete.statuses, [400]);
+  assert.deepEqual(onDelete.methods, ["DELETE"]);
+  // It has to point back at the decision rather than leaving the caller stuck.
+  assert.match(onDelete.note, /POST \/api\/share-investments/);
+
+  // An event posts to the ledger, so that warning must reach the event endpoint itself.
+  assert.ok(
+    quirksFor("POST", "/api/share-investments/{id}/events")
+      .map((q) => q.id)
+      .includes("share-investment-event-posts-a-voucher"),
+  );
+});
