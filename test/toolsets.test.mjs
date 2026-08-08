@@ -820,3 +820,79 @@ test("the close refusal that nominates a different month says which one", async 
   assert.match(textOf(res), /runs in order/);
   assert.doesNotMatch(textOf(res), /Godkjenning/, "the Norwegian must not be all the caller gets");
 });
+
+test("a foreign-currency reconciliation labels its amounts", async () => {
+  // The API returns bankCurrency, tenantCurrency and bankInTenantCurrency, and a company bank can be
+  // created in any currency — so bare numbers would let an EUR statement balance read as kroner.
+  const { registeredTools } = await import("../dist/server.js");
+  const textOf = (r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  const read = (data) =>
+    registeredTools.find((t) => t.name === "reai_get_manual_reconciliation").handler(
+      { bankAccountId: 1, month: "2026-07" },
+      {
+        config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+        session: {},
+        client: { request: async () => ({ status: 200, data }), deepLink: () => "" },
+      },
+    );
+
+  const foreign = await read({
+    month: "2026-07", bankCurrency: "EUR", tenantCurrency: "NOK", bankInTenantCurrency: false,
+    monthEndingBalance: 100, bankStatementEndingBalance: 100, difference: 0, reconciliationLocked: false,
+    canClose: true, canReopen: false,
+  });
+  assert.match(textOf(foreign), /100 EUR/, "the amounts must carry their unit");
+  assert.match(textOf(foreign), /NOT in the tenant currency \(NOK\)/, "and say the books are in another");
+
+  const domestic = await read({
+    month: "2026-07", bankCurrency: "NOK", tenantCurrency: "NOK", bankInTenantCurrency: true,
+    monthEndingBalance: 0, bankStatementEndingBalance: 0, difference: 0, reconciliationLocked: false,
+    canClose: true, canReopen: false,
+  });
+  assert.match(textOf(domestic), /0 NOK/);
+  assert.doesNotMatch(textOf(domestic), /NOT in the tenant currency/, "no warning when it matches");
+});
+
+test("a 5xx carrying a state phrase is not reported as nothing having changed", async () => {
+  // A failed POST or PUT is the case this client treats as ambiguous and will not retry, so "Nothing was
+  // changed" is the one claim not to make. All three state translations are gated on 409, the status they
+  // were measured at.
+  const { registeredTools } = await import("../dist/server.js");
+  const { ReaiApiError } = await import("../dist/reai/errors.js");
+  const err = new ReaiApiError({
+    status: 500,
+    method: "POST",
+    path: "/api/manual-reconciliations/1/close",
+    rawBody: '{"detail":"Angi sluttsaldoen før du lukker avstemmingen."}',
+    problem: { detail: "Angi sluttsaldoen før du lukker avstemmingen." },
+  });
+  await assert.rejects(
+    () =>
+      registeredTools.find((t) => t.name === "reai_close_manual_reconciliation").handler(
+        { bankAccountId: 1, month: "2026-07" },
+        {
+          config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+          session: {},
+          client: { request: async () => { throw err; }, deepLink: () => "" },
+        },
+      ),
+    /HTTP 500/,
+    "a 5xx must propagate as the ambiguous failure it is",
+  );
+});
+
+test("the session instructions and the UI tool point at the curated reconciliation tools", async () => {
+  // The tools landed and the guidance every session receives still named the raw endpoint, so an agent
+  // would route around them — and around the translations, which are the reason they exist.
+  const { readFileSync } = await import("node:fs");
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const ui = readFileSync(new URL("../src/tools/ui.ts", import.meta.url), "utf8");
+  for (const [label, text] of [["src/server.ts", server], ["src/tools/ui.ts", ui]]) {
+    assert.match(text, /reai_get_manual_reconciliation/, `${label} should name the curated tool`);
+    assert.doesNotMatch(
+      text,
+      /reai_request[^\n]*manual-reconciliations/,
+      `${label} still sends the caller to the raw endpoint`,
+    );
+  }
+});

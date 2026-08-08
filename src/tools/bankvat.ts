@@ -919,6 +919,12 @@ type ManualReconciliation = {
   bankAccountName?: string;
   month?: string;
   currencyCode?: string;
+  // The API returns all three, and the amounts below are in `bankCurrency` — which need not be the
+  // tenant's. A company bank can be created in any currency, so printing bare numbers would let an EUR
+  // statement balance read as kroner.
+  bankCurrency?: string;
+  tenantCurrency?: string;
+  bankInTenantCurrency?: boolean;
   openingBalance?: number | null;
   monthEndingBalance?: number | null;
   bankStatementEndingBalance?: number | null;
@@ -937,9 +943,16 @@ function describeReconciliation(r: ManualReconciliation): string {
         `compare and the month cannot be closed. Enter it with reai_set_bank_statement_balance.`,
     );
   } else {
+    const unit = r.bankCurrency ?? r.currencyCode ?? "";
+    const amount = (v: number | null | undefined) => (v === null || v === undefined ? "unknown" : `${v} ${unit}`.trim());
     parts.push(
-      `Statement ${r.bankStatementEndingBalance}, books ${r.monthEndingBalance ?? "unknown"}, difference ` +
-        `${r.difference ?? "unknown"}.`,
+      `Statement ${amount(r.bankStatementEndingBalance)}, books ${amount(r.monthEndingBalance)}, ` +
+        `difference ${amount(r.difference)}.` +
+        (r.bankInTenantCurrency === false
+          ? ` This account is NOT in the tenant currency (${r.tenantCurrency ?? "unknown"}), so those ` +
+            `figures are in ${unit || "the account's own currency"} and do not compare directly with the ` +
+            `rest of the books.`
+          : ``),
     );
     if (r.difference !== 0 && r.difference !== null && r.difference !== undefined) {
       parts.push(
@@ -980,7 +993,14 @@ function translateReconciliationError(
   if (!(err instanceof ReaiApiError)) return undefined;
   const detail = `${err.problem?.detail ?? ""} ${err.rawBody ?? ""} ${err.message}`;
 
-  if (/Angi sluttsaldoen/i.test(detail)) {
+  // Every state translation below is gated on 409, which is the status all three were measured at. A
+  // phrase-only match would convert a 5xx whose body happens to contain one of these sentences into a
+  // definitive "Nothing was changed" — and a failed POST or PUT is exactly the case this client treats as
+  // ambiguous and does not retry, so claiming nothing happened is the one thing not to say. The same
+  // lesson as scoping a quirk to its status.
+  const isState = err.status === 409;
+
+  if (isState && /Angi sluttsaldoen/i.test(detail)) {
     return fail(
       `${ctx.month} cannot be closed yet because no bank statement balance has been entered for account ` +
         `${ctx.bankAccountId}. Nothing was changed.\n\n` +
@@ -995,7 +1015,7 @@ function translateReconciliationError(
   // today at 2026-08-08: 2026-08 and 2026-09 both answered this naming 2026-07, while 2025-12 and 2026-07
   // fell through to the missing-balance check instead. So the months are worked in order and the current
   // one cannot be closed before it has ended.
-  const nominated = /Godkjenning er kun tilgjengelig for ([0-9]{4}-[0-9]{2})/i.exec(detail);
+  const nominated = isState ? /Godkjenning er kun tilgjengelig for ([0-9]{4}-[0-9]{2})/i.exec(detail) : null;
   if (nominated) {
     return fail(
       `${ctx.month} cannot be closed on account ${ctx.bankAccountId}: the API only permits closing ` +
@@ -1006,7 +1026,7 @@ function translateReconciliationError(
     );
   }
 
-  if (/ikke låst/i.test(detail)) {
+  if (isState && /ikke låst/i.test(detail)) {
     return fail(
       `${ctx.month} is not locked for account ${ctx.bankAccountId}, so there is nothing to reopen. ` +
         `Nothing was changed.\n\n` +

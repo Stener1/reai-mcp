@@ -64,6 +64,18 @@ All notable changes to `reai-mcp`. Format loosely follows
   - The ambiguous `404 "Bankkonto ikke funnet"` is translated too: it is what a missing id says *and* what a
     perfectly good synced account says, so the refusal names `reai_list_company_banks` as the way to tell
     them apart and points at the synced tool.
+  - **Three more from review, and the first is the one that would have wasted the whole PR.** The
+    connect-time instructions every session receives still sent agents to `/api/manual-reconciliations/{id}`
+    through the escape hatch, and the UI tool repeated it twice — so the curated tools, and the translations
+    that are the reason they exist, would have been routed around. Updated in both places, with a test that
+    fails if either points at the raw endpoint again.
+  - The amounts were printed unlabelled while the API returns `bankCurrency`, `tenantCurrency` and
+    `bankInTenantCurrency`. A company bank can be created in any currency, so an EUR statement balance read
+    as kroner; the figures now carry their unit and say when the account is not in the tenant currency.
+  - The three state translations matched on the message alone, so a 5xx whose body happened to contain one
+    of those Norwegian sentences would have been converted into a definitive *"Nothing was changed"* — and a
+    failed POST or PUT is precisely what this client treats as ambiguous and will not retry, so that is the
+    one claim not to make. All three are gated on 409 now, the status they were measured at.
   - Verified live on 2783 in three passes, each cleaning up: the full state machine, then every refusal in
     English, then the nominated-month path through to a successful close.
 
