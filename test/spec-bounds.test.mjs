@@ -267,7 +267,7 @@ test("the query sweep sees a useful number of operations, not zero", () => {
   // A sweep that resolves nothing passes silently, which is the failure mode this repo keeps
   // naming. Measured: ten tool operations carry documented query bounds, three of them a maxLength.
   const ops = queryOperations();
-  assert.ok(ops.length >= 10, `only ${ops.length} tool operations resolved to query constraints`);
+  assert.ok(ops.length >= 13, `only ${ops.length} of 18 tool operations resolved to query constraints`);
   const withMaxLength = ops.filter((o) =>
     Object.values(o.constraints).some((c) => typeof c.maxLength === "number"),
   );
@@ -363,7 +363,10 @@ test("a renamed parameter would be CHECKED, not skipped", () => {
 
 test("the sweep reaches inside arrays, which is where the motivating bug lived", () => {
   const ops = writeOperations();
-  assert.ok(ops.length >= 20, `only ${ops.length} tool write operations resolved to a request schema`);
+  // 67 today. The floor was 20 — 30%, the ratio this repo's own comments call decorative — because it
+  // was written when the sweep was new and never re-measured as the toolsets grew. See test/README.md
+  // on floors going stale.
+  assert.ok(ops.length >= 50, `only ${ops.length} of 67 tool write operations resolved to a request schema`);
   const find = (name) => ops.find((o) => o.tool.name === name);
 
   // Spec side: the nested locations resolve at all.

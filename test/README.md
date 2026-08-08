@@ -29,6 +29,16 @@ node --test test/ 2>&1 | grep -E '^ok [0-9]+ -' | sed 's/^ok [0-9]* - //' | sort
 #      allTools.length = 0; registeredTools.length = 0;
 #      for (const k of Object.keys(TOOL_GROUPS)) TOOL_GROUPS[k] = [];
 #      QUIRKS.length = 0; escalatingBodyFieldNames.length = 0;
+#      alwaysOnTools.length = 0;   // omitted from the first three runs; it survives with 7 tools,
+#                                  // which is the only reason `orientation and the escape hatch are
+#                                  // never groupable away` appeared as a candidate at all
+#
+#    NOT a registry corpus, and the audit missed it entirely for three runs: the SPEC INDEX. With
+#    spec/index.json's `operations: []`, 752 of 859 tests still pass, and two sweeps in
+#    spec.test.mjs were vacuous — one read the precomputed `counts` instead of the array it claims
+#    to cover, the other used the same filter as its neighbour twelve lines up without the
+#    `exposed.length > 0` that neighbour carries. Empty this too:
+#      node -e "const j=require('./spec/index.json'); j.operations=[]; require('fs').writeFileSync('./spec/index.json', JSON.stringify(j))"
 #
 #    A compiled file ends with `//# sourceMappingURL=...` and NO trailing newline, so a bare
 #    `>>` append lands inside that comment and does nothing. Write a newline first. This is not a
@@ -37,15 +47,34 @@ node --test test/ 2>&1 | grep -E '^ok [0-9]+ -' | sed 's/^ok [0-9]* - //' | sort
 #    trusting a single result:
 #      node -e "import('./dist/reai/quirks.js').then(m=>console.log(m.QUIRKS.length))"  # must be 0
 
-# 4. Anything still passing that mentions a corpus is a candidate.
+# 4. Still passing WITH the corpus gone, and referencing a corpus. Both halves matter: `comm -12`
+#    alone is the ~600 tests that pass either way, virtually none of which touch the registry.
 node --test test/ 2>&1 | grep -E '^ok [0-9]+ -' | sed 's/^ok [0-9]* - //' | sort > /tmp/empty.txt
-comm -12 /tmp/baseline.txt /tmp/empty.txt
+comm -12 /tmp/baseline.txt /tmp/empty.txt > /tmp/survivors.txt   # passed before AND after
+comm -23 /tmp/baseline.txt /tmp/empty.txt                        # broke: the corpus really was emptied
+#    Then keep only the survivors whose test body names a corpus — this is the step that takes ~600
+#    down to the reported handful, and it was NOT mechanised in the first version of this recipe, so
+#    the "thirty sweeps" headline was not reproducible from it. A reconstruction that splits each
+#    file on /^test\(/ and greps the body for a corpus name gives 28 at the first commit, not 30.
 ```
+
+Note two things about the copy in step 1. `--exclude=.git` makes `no symlink is tracked in git` and
+`no gitlink is tracked in git` fail in the BASELINE — expected, not a broken copy. And the numbers in
+this file come from `tar -c | tar -x` plus `node --test test/` on macOS with Node 20.
 
 Then read each candidate. Not every one is a defect: a test of policy arithmetic legitimately
 never touches the registry, and `tool names are unique` cannot be broken by a filter narrowing.
-The ones that matter are those whose **filter is a name prefix, a risk tier or a boolean flag**,
-because those stop matching after an ordinary rename.
+The ones that matter are those whose **filter is a name prefix, a risk tier or a boolean flag** *in
+the unsafe direction* — where a rename makes the sweep examine FEWER things. A narrowing that makes
+it stricter (`every curated tool declares the API paths it calls` exempts a fixed list of six names;
+losing a name means one more tool is required to declare) needs no floor, and the unqualified rule
+would wrongly demand one.
+
+**Emptying a corpus tests a floor's denominator, not its predicate.** A floor can pass this audit
+and still be unable to catch the drift it names — `every tool that deletes is annotated destructive`
+filtered on `reai_delete_` prefix OR `DELETE` method, and since no tool matched the prefix without
+also matching the method, renaming every `reai_delete_*` left the count unmoved. The acceptance bar
+is *observed failing under a mutation of the filter's own key*, not under an emptied corpus.
 
 ## What the first run found
 
@@ -94,8 +123,9 @@ Breaking tenant resolution in one line took the preflight sweep from 52 tools ex
 passed, floor and all, because the 76 read tools were still there to be counted.
 
 So for those three the floor counts **what the sweep actually exercised**, not what it selected:
-tools compared (30 of 41), tools that echoed the payload (51 of 68), tools that reached the request
-(39 of 52). Verified against a realistic regression — every `reai_list_*` handler returning without
+tools compared (31 of 42 — stated as 41 first, and a measured number stated wrongly in a document
+about measuring is worth naming), tools that echoed the payload (51 of 68), tools that reached the
+request (39 of 52). Verified against a realistic regression — every `reai_list_*` handler returning without
 calling the API — where all three fail and the population floors did not.
 
 The question to ask of any floor: *if the thing this test examines silently stopped happening, would
@@ -137,17 +167,52 @@ at 29–39% of their population — `/api/users` paths at 2 of 7, `reai_get_*` r
 read-tier tools at 30 of 76, irreversible declared paths at 20 of 51. A regression turning half the
 read tools into writes would have sailed past all of them. **A floor low enough to survive the
 regression it is meant to catch is decoration**; the populations are now measured and the floors sit
-at 16/22, 17/23, 18/25, 5/7, 57/76, 38/51, 10/12, and 3/3 where the population is the whole list.
+at 16/22, 17/23, 18/25, 5/7, 38/51 and 10/12 — that last one 83%, because ⌊0.75 × 12⌋ = 9 would sit
+below a population this small usefully allows.
 
-All twelve floors were then checked to fire: with every corpus emptied, each of the twelve fails.
-That check is the only reason the two floors landing in the wrong place — one written into the
-neighbouring test, one swallowed by the `sourceMappingURL` line — were caught at all. **A floor
-that has not been observed failing is a claim, not a guard.**
+Two are not floors at all but **pins**: `transmits` at 3 of 3 and `escalatingBodyFieldNames` at 3 of 3.
+Deliberately removing the last transmitting tool fails them with "the filter has stopped matching",
+which is a false diagnosis of a correct change. They are kept because the alternative — no guard on a
+population of three — is worse, but the next person to un-curate `reai_credit_invoice` should expect
+to edit the test, not to have found a bug.
+
+The recalibration reached three pre-existing floors too, since the same argument applies to them:
+`writeOperations` at 20 of 67 and the query sweep at 10 of 18 in `spec-bounds.test.mjs`, and
+`withRouting` at 10 of 19 in `payment-routing.test.mjs`. One reported as slack was not:
+`escalatingFieldNames` measures 13, so its floor of 12 is 92%.
+
+**This idiom is older than this note.** `archive.test.mjs` pins exactly (`checked === 11`) and says a
+floor of 8 "left three tools' worth of slack to disappear into"; `spec-bounds.test.mjs` uses 100 of
+124 for the same reason. The stricter standard already applied in this suite before it was written
+down here — and the first floor this audit produced, `examined >= 8` against 25, is literally the
+number `archive.test.mjs` names as the bad example.
+
+All twelve floors were then checked to fire with every corpus emptied. That check caught two floors
+landing in the wrong place — one written into the neighbouring test, one swallowed by the
+`sourceMappingURL` line. But it is a weaker bar than it sounds: see the note above on the denominator.
+**A floor that has not been observed failing under a mutation of its own filter key is a claim, not a
+guard.**
 
 ## What is genuinely left alone
 
-Twenty-two sweeps still pass with every corpus emptied. Eight of them narrow, and each was checked
-individually rather than as a group:
+Twenty-two sweeps still pass with every corpus emptied (a mechanised reconstruction gives 20 — the
+difference is which bodies count as "references a corpus", not a disagreement about any one test).
+**Three of them narrow.** An earlier version of this section said eight and then listed examples of
+the non-narrowing kind, so the three that matter were never named. They are:
+
+- `no curated tool is more permissive than the escape hatch would be` — narrowed on `if (!tool.apiPaths)
+  continue`, which an empty array satisfies. That was a real hole, not a bucketing question: an
+  irreversible delete tool with `apiPaths: []` and its risk downgraded to `reversible` passed the whole
+  suite except one documentation count. Fixed, not filed.
+- `every curated tool declares the API paths it calls` — narrows on an exempt list of six names, in the
+  safe direction: losing a name makes the sweep stricter. No floor; this is the exception the rule needs
+  a direction qualifier for.
+- `every curated tool's declared apiPaths still resolve` — narrows on `if (!method || !path) continue`.
+  If `apiPaths` entries ever became objects rather than tuples, every entry is skipped and it passes.
+  Left alone deliberately: `apiPaths` being tuples is asserted directly elsewhere, and a floor here
+  would duplicate that.
+
+The buckets the rest fall into:
 
 - **Whole-corpus sweeps** (`tool names are unique`, `every tool declares a risk the policy knows`,
   `declared API paths exist in the spec`, the toolset-selection tests). Their only route to vacuity
@@ -155,7 +220,9 @@ individually rather than as a group:
   A floor here adds nothing a caller would ever see.
 - **Audits of hand-written lists** (`every DELIBERATELY_LOOSER entry is real`, `every
   RENAMED_QUERY_ARGS entry is a real rename`). An empty list means there is genuinely nothing to
-  audit; a floor would forbid removing the last exemption.
+  audit; a floor would forbid removing the last exemption. Both lists are `{}` today, so **those two
+  tests currently assert nothing** — correct behaviour, but say it plainly rather than leaving
+  "audits of hand-written lists" to imply the lists exist.
 - **Deliberate-omission claims** (`generate-due is deliberately not curated`, `the Nordnet import is
   uncurated on the record`). These assert a tool is absent, so an empty registry satisfying them is
   not a false pass — the corresponding presence is pinned by the count tests.

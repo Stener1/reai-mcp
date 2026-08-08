@@ -595,14 +595,12 @@ test("every response-shaping exemption names a real field and a real test", asyn
 });
 
 test("no read tool accepts an input it never sends", async () => {
-  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
-  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
-  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
-  // A population floor is not enough here: every tool in this sweep can be SKIPPED at runtime
-  // (the stub never reached the request, or the tool states no count), and a harness that stops
-  // reaching the request skips all of them while the population stays intact. Found by the
-  // independent review of PR #108: breaking tenant resolution took this sweep from 52 tools
-  // examined to 7, and it still passed. So the floor counts what was actually exercised.
+  // A population floor is not enough here. This sweep skips a tool three ways — it declares no
+  // sendable field, its handler refuses the argument combination locally, or the stub never reached
+  // the request — and a harness that stops reaching the request skips every one of them while the 76
+  // read tools stay there to be counted. Found by the independent review of PR #108: breaking tenant
+  // resolution took this sweep from 52 tools examined to 7, and it passed. So the floor counts the
+  // work, not the population. See test/README.md.
   let exercised = 0;
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude

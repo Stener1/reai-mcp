@@ -46,7 +46,13 @@ async function against(tool, data) {
       },
       deepLink: () => "link",
     },
-    config: { writeMode: "read-only", tenantId: 2634 },
+    // `defaultTenantId`, which is the key the real config carries — `tenantId` was dead here, in a
+    // harness whose whole value is fidelity. It never showed because argumentsFor() seeds tenantId
+    // into the ARGUMENTS, so resolveTenantId returns the explicit value and never reads the config.
+    // Named by the review of PR #108, along with the correction that this is why breaking
+    // config.defaultTenantId does not move these two sweeps' counts — not, as I wrote in a commit
+    // message, because they "never go through resolveTenantId". They do; it just answers earlier.
+    config: { writeMode: "read-only", defaultTenantId: 2634 },
     session: {},
   };
   let text;
@@ -154,8 +160,8 @@ test("no read tool gives the same answer for an empty list and a shape surprise"
     "a tool told the model there is nothing, about a response that contained something",
   );
   assert.ok(
-    conflateExamined >= 30,
-    `only ${conflateExamined} tools were actually compared (of 41 today) — the sweep is skipping its subjects`,
+    conflateExamined >= 31,
+    `only ${conflateExamined} tools were actually compared (of 42 today) — the sweep is skipping its subjects`,
   );
 });
 

@@ -9,6 +9,16 @@ import {
 
 test("the index loads and covers the documented API", () => {
   const index = getSpecIndex();
+  // The ARRAY, not just `counts`. `counts` is precomputed by scripts/build-spec-index.mjs and
+  // written into spec/index.json, so this test passed with `operations: []` — it asserted that the
+  // build script's own summary agreed with itself, about a corpus that wasn't there. Found by the
+  // independent review of PR #108, which emptied a corpus my audit never touched: with no
+  // operations at all, 752 of 859 tests still passed.
+  assert.equal(
+    index.operations.length,
+    index.counts.total,
+    "the operations array disagrees with the counts the build script recorded",
+  );
   assert.ok(index.counts.total > 400, `expected >400 operations, got ${index.counts.total}`);
   assert.ok(index.counts.public > 300, `expected >300 public operations, got ${index.counts.public}`);
   assert.ok(index.counts.internal > 0);
@@ -232,7 +242,12 @@ test("business operations behind the -ctrl heuristic are discoverable", () => {
 // scalar-and-scalar-array query model cannot express; it is excluded for that reason.
 test("every exposed business operation is actually callable through reai_request", () => {
   const index = getSpecIndex();
-  for (const op of index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"))) {
+  const exposed = index.operations.filter((o) => !o.internal && !o.path.startsWith("/api/"));
+  // The same filter as its sibling twelve tests above — a boolean flag AND a path prefix — but that
+  // one carried `exposed.length > 0` and this one did not, so the same drift failed there and passed
+  // here. Same file, same filter, one floored and one not, until the review of PR #108 noticed.
+  assert.ok(exposed.length > 0, "the allowlist should expose something");
+  for (const op of exposed) {
     const described = describeOperation(op);
     for (const p of described.parameters ?? []) {
       if (p.in !== "query") continue;

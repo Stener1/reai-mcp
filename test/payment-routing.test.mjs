@@ -170,7 +170,7 @@ test("the spec scan finds what it is looking for", () => {
   const withRouting = ops.filter(({ fields }) =>
     [...fields].some((f) => paymentRoutingFieldNames.has(f.toLowerCase())),
   );
-  assert.ok(withRouting.length >= 10, `only ${withRouting.length} ops carry a routing field`);
+  assert.ok(withRouting.length >= 14, `only ${withRouting.length} of 19 ops carry a routing field`);
 
   // Named operations, so a traversal that silently stops following $ref or oneOf fails
   // here rather than passing two empty assertions further down.
