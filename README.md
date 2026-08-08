@@ -608,6 +608,24 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
+A third cause, found later: the table was **almost all nouns** — it held a handful of verbs (`avstemme`, `reconcile`, `signing`, `owes`) and none for any action endpoint. Of the 65 distinct trailing segments after a path placeholder, roughly 25–30 are actions — `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close` — and not one had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses` first and the endpoint that approves the claim fifth.
+
+Three of the words had to come back out, all homographs and all found by review: `aktiver` is the balance-sheet noun for **assets** as well as "activate", `avslutt` means **terminate** a contract rather than close a period, and `levere` is how a Norwegian **files a return** — that one took three filing queries the ranker had answered correctly and pointed them all at an expense claim. The expense sense survives as a phrase mapping, where the object of the verb can be seen. The action vocabulary is enumerated from those segments rather than from any benchmark's phrasing, and covers both the imperative and the verbal noun, since a Norwegian query uses either.
+
+**Three corpora, each measured once before being tuned against, and each retired to a regression floor afterwards** — because a benchmark you have read the failures of is no longer measuring anything:
+
+All three live in `test/discovery-heldout.test.mjs` (`CASES`, `FRESH`, `EVERYDAY`); `test/discovery-norwegian.test.mjs` holds a separate 31-case set, 28 of them top-3, which asserts English **ranks** and word-order stability.
+
+| corpus | before this work | after fixing only the queries that returned NOTHING | now |
+|---|---|---|---|
+| first (`CASES`, 41) | 17 | — | **39** top-3, 41 top-10 |
+| second (`FRESH`, 28) | 19 | 23 | **26** top-3 |
+| third (`EVERYDAY`, 27) | 14 | 18 | **19** top-3, 23 top-10 |
+
+What the action vocabulary generalises to is **+2 of 28 on the corpus it was not fitted to** — the same +2 it bought on the one whose failures I had read, which is the comparison worth quoting. What moved all three further was routing the words through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
+
+The rule held across all three: a query that returns **nothing** strands an agent and is worth fixing; a query that returns the right endpoint at rank five is not worth tuning for. Five of the third corpus's thirty targets named endpoints that do not exist — the fourth time in this work that a "ranking failure" was really a wrong assumption about the API.
+
 An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **105 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:

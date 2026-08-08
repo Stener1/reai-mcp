@@ -11,6 +11,96 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 **145 tools**: 138 across eleven accounting domains, plus 7 always-on.
 
+### Added
+
+- **Norwegian action vocabulary, enumerated from the API's own action segments.** The synonym
+  table was all nouns. The API has **65 segments hanging off a resource instance** —
+  `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close`, `/{id}/unarchive` and
+  so on — and not one had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses`
+  first and `/api/expenses/{id}/approve` fifth. Both the imperative and the verbal noun are
+  covered, since a Norwegian query uses either (*"godkjenn reiseregningen"*, *"til
+  godkjenning"*).
+  - Enumerated from the spec's action segments rather than from any benchmark's phrasings —
+    the difference between covering a category and fitting a score.
+  - **Half of it was missing at first**, and review found it: the words went into the synonym
+    table but not into `METHOD_INTENT` and `WRITE_INTENT_VERBS`, which the file's own comments
+    say must be kept in step. So *"aktiver abonnement"* expanded to `activate`, matched the
+    right path segment, and still lost to three `GET`s because nothing said a write was
+    wanted — `/activate` ranked fifth. Routing the imperatives through those tables put it
+    first and lifted **all three** corpora: 36 → 39, 23 → 26, 18 → 20. Verbal nouns and
+    participles stay out (*"hvilke venter på godkjenning"* is a question, *"avsluttet"* is a
+    participle), as those tables' own exclusions require.
+  - **And that spent the second corpus as a measurement**, which is said plainly where it
+    used to claim otherwise: I read its failures before doing this work, so it is a regression
+    floor now, exactly like the tuned one, and its floor moved to 25 to match.
+
+- **A third corpus, written afterwards and measured once.** Different angle again: questions a
+  business owner asks their bookkeeper, and instructions a bookkeeper gives the system — half
+  naming an action, half plain reads, so the score says something about both.
+  - The honest sequence, corrected after review pointed out that my "first measurement" was
+    taken with the action vocabulary **already applied** and so was never a baseline:
+    **14 of 28** on `main` → 16 with the action words → 18 after fixing the empties → 20 once
+    those words reached the method tables → **19 of 27** after removing three homograph
+    collisions. So what the vocabulary generalises to is **+2 of 28 on a corpus it was not
+    fitted to** — the same +2 it bought on the one whose failures I had read. That is the
+    number worth quoting and the PR did not state it until review worked it out.
+  - The last step is a deliberate **loss** of one case. Keeping `aktiver` would have held this
+    corpus a case higher while answering *"hvilke aktiver har selskapet"* with a subscription
+    activation. A corpus is a proxy; that is a real question. Those two were
+    `land` — the plainest way to ask which countries the API accepts, whose vocabulary was
+    never added when the country list became a tool — and `skylder` (owes), for *"hvem skylder
+    oss penger"*, which is the customer ledger.
+  - Same rule as before, and it is the whole discipline: an empty result strands an agent and
+    is worth fixing; a right answer at rank five is not worth tuning for.
+  - **Six words were removed on semantic grounds, not string grounds**, every one found by
+    review. Three are accounting errors:
+    - `nedskriv` (impair — write the value down, keep the asset) had been mapped to
+      `POST /api/assets/{id}/write-off`, which takes no amount and is the **destructive
+      disposal** for something scrapped, lost or sold. *"nedskriv maskinen"* would have
+      steered an agent toward disposing of the machine. There is no write-down endpoint, so
+      the word maps to nothing — the same call as `valutakurs`, where a confident wrong answer
+      is worse than no result.
+    - `underkjenn` (reject a claim) had been mapped to `/unapprove`, which by its own
+      description returns an **already approved** expense to `for_approval` and is refused
+      otherwise. Rejecting a pending claim has no endpoint at all.
+    - `åpne` alone is an adjective as often as an imperative: *"åpne poster"* — open items,
+      i.e. unpaid — is a read, and the mapping put three mutating
+      `POST /api/postings/*/open` operations above `GET /api/postings/groups`. `gjenåpne`
+      carries the meaning unambiguously.
+  - And three are **homographs** that made the ranker worse than before this PR — the only net
+    regressions it introduced, each verified against `main`:
+    - `levere` is how a Norwegian **files a return**. *"lever mva-meldingen"*, *"levere
+      skattemeldingen"* and *"lever årsregnskapet"* were all answered correctly before and all
+      pointed at `POST /api/expenses/{id}/deliver` after — `deliver` exists on exactly one
+      endpoint in this API. The expense sense survives as a phrase mapping, where the object of
+      the verb can be seen; the bare word maps to nothing.
+    - `aktiver` is the balance-sheet noun for **assets** (*aktiver og passiver*) as well as the
+      imperative. *"hvilke aktiver har selskapet"* ranked a subscription activation. Removed;
+      `aktivere` carries the verb sense, and the unambiguous noun `aktiva` was added.
+    - `avslutt` means **terminate** — an employment, a lease — not close a period.
+      *"avslutt arbeidsforholdet"* ranked the bank-reconciliation close endpoints. Removed;
+      `lukk`/`lukke` carry the period sense.
+    - All three also came out of `METHOD_INTENT` and `WRITE_INTENT_VERBS`, where they would have
+      implied a write on a read question — the same trap those tables already document for `lag`
+      (a team) and `betal` (from *"hvilke betalinger"*).
+  - Two claims here were **overstated and are corrected**: the table was not verbless
+    (`avstemme`, `reconcile`, `signing`, `owe`, `owes` were already in it, and `skylder` is a
+    translation of `owes`), and the API does not have 65 *action* segments — it has 65 distinct
+    trailing segments after a path placeholder, of which roughly 25–30 are actions and the rest
+    are sub-resources like `address`, `attachments` and `pdf`. About a dozen real actions still
+    have no Norwegian word.
+  - `skylder` (owes) is **direction-neutral** now. Hard-coding the customer side ranked both
+    customer-ledger routes above the supplier ledger for *"hva skylder vi"* — the opposite
+    side of the books. The direction lives in `PHRASE_SYNONYMS`, which can tell *"skylder
+    oss"* from *"skylder vi"*.
+  - Five of the thirty targets I wrote named endpoints that **do not exist** — no
+    `/api/offers/{id}/convert`, no `/api/vat-returns/{id}/submit`, no
+    `/api/warehouses/{id}/name`, no `/api/invoices/{id}/register-payment`, and validation only
+    on tax returns. Three were repointed, two dropped. That is the fourth time in this work a
+    "ranking failure" turned out to be my own wrong assumption about the API — and a **sixth**
+    target was wrong in a way the existence check could not catch: `nedskriv maskinen` pointed
+    at an endpoint that exists and means something else. Dropped, leaving 27 cases.
+
 ### Fixed
 
 - **The bounds sweep gained its third leg — PATH parameters — and the first thing it found
