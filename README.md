@@ -15,7 +15,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 - **156 tools**: 149 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **115 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **116 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 
@@ -479,7 +479,7 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **115 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **116 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 170 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.

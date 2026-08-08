@@ -1542,6 +1542,30 @@ export const QUIRKS: readonly Quirk[] = [
       "tidy up afterwards.",
   },
   {
+    // On the CREATE, with no `statuses`, because this is a success-path hazard and the moment to know is
+    // BEFORE the record exists. It was first written on the DELETE, which meant the warning arrived only
+    // when a caller tried to remove the position — by which time the decision that made it permanent was
+    // several steps in the past. Found in review; the sequence is exactly how this repository learned it.
+    id: "share-investment-opening-position-is-permanent",
+    paths: ["/api/share-investments"],
+    methods: ["POST"],
+    kind: "irreversible",
+    note:
+      "An OPENING POSITION IS AN EVENT, and an event makes this record permanent. Passing " +
+      "openingQuantity, openingCostAmount and openingDate silently creates a PURCHASE event — measured " +
+      "on tenant 2783: event 42, quantity 100, pricePerUnit derived as 500 from 50000/100 — and a " +
+      "position with any event cannot be deleted: " +
+      'DELETE answers 400 "Aksjeposten har registrerte transaksjoner og kan ikke slettes." There is no ' +
+      "endpoint that removes an event, so from that first event the record is there for good. Nothing in " +
+      "the create response says any of this.\n\n" +
+      "Clearing the opening fields afterwards does NOT undo it: measured, the PUT answered 200 and the " +
+      "event stayed.\n\n" +
+      "So decide here. Create the position WITHOUT an opening balance if you might need to remove it, " +
+      "check it looks right, and then add the purchase as an explicit event. One share investment on the " +
+      "write test tenant is unremovable because this was learned in the other order; it is renamed to say " +
+      "so.",
+  },
+  {
     id: "share-investment-with-events-cannot-be-deleted",
     paths: ["/api/share-investments/{id}"],
     methods: ["DELETE"],
@@ -1549,17 +1573,12 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "irreversible",
     note:
       'A 400 "Aksjeposten har registrerte transaksjoner og kan ikke slettes." means the position has ' +
-      "events and the API will not remove it. There is no way to remove the events either, so the " +
-      "record is PERMANENT from its first event onward.\n\n" +
-      "The trap is that an opening position IS an event. Passing openingQuantity, openingCostAmount and " +
-      "openingDate to POST /api/share-investments silently creates a PURCHASE event — measured: event " +
-      "42, quantity 100, pricePerUnit derived as 500 from 50000/100 — so an investment created with an " +
-      "opening balance can never be deleted, and nothing in the create response says so. Clearing those " +
-      "fields with a later PUT does NOT remove the event; measured, it answered 200 and the event " +
-      "stayed.\n\n" +
-      "Create the position WITHOUT an opening balance if you may need to remove it, and add the purchase " +
-      "as an explicit event once you are sure. One share investment on the write test tenant is " +
-      "unremovable because this was learned the hard way; it is labelled as a probe.",
+      "events and the API will not remove it. There is no endpoint that removes an event either, so the " +
+      "record is permanent from its first event onward and this refusal is final rather than an ordering " +
+      "problem to work around.\n\n" +
+      "If you did not knowingly add an event, the likely cause is an opening position: openingQuantity, " +
+      "openingCostAmount and openingDate on the create silently produce a PURCHASE event. See the quirk " +
+      "on POST /api/share-investments, which is where that decision gets made.",
   },
   {
     id: "share-investment-event-needs-a-settlement-account",

@@ -100,14 +100,18 @@ All notable changes to `reai-mcp`. Format loosely follows
   (`403 "only available for accountant tenants"`). The `module-gating` quirk read as though share
   investments were gated outright; it now states the measurement and keeps the 403 guidance as the
   conditional it is.
-- Four quirks from driving the domain on tenant 2783 (114 total), all four undocumented:
+- Five quirks from driving the domain on tenant 2783 (116 total), all of them undocumented:
   - **An EVENT posts to the ledger; the investment itself does not.** Voucher count 0 before and after
     creating a position, then a `DIVIDEND` of 1000 booked voucher `SH1-2026` with postings on 1920 and
     8071 — share investments have their own voucher series, and the event response carries its
     `voucherId`. There is no `DELETE` for an event: the document has `GET` and `POST` on that path and
     nothing else.
   - **An investment with any event can never be deleted** — `400 "Aksjeposten har registrerte
-    transaksjoner og kan ikke slettes."` — and *an opening position is an event*. Passing
+    transaksjoner og kan ikke slettes."` — and *an opening position is an event*. Review caught that this
+    warning was attached to the `DELETE`, so a caller met it only when trying to remove the record, after
+    the decision that made it permanent: the hazard is now a quirk on `POST /api/share-investments` with
+    no `statuses`, since it is a success-path consequence, and the `400` explanation stays on the delete
+    and points back at the create. That ordering is exactly how this repository learned the rule. Passing
     `openingQuantity`/`openingCostAmount`/`openingDate` to the create silently produces a `PURCHASE`
     event (measured: quantity 100, `pricePerUnit` derived as 500 from 50000/100), so a position created
     with an opening balance is permanent from birth, and nothing in the response says so. Clearing those
