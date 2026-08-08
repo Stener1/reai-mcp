@@ -4,6 +4,7 @@ import { salaryTools } from "../dist/tools/salary.js";
 import { registeredTools, destructiveHintFor } from "../dist/server.js";
 import { classifyRequest, classifyTransmission } from "../dist/policy.js";
 import { quirksFor } from "../dist/reai/quirks.js";
+import { resolveOperation } from "../dist/reai/spec.js";
 import { z } from "zod";
 
 const tool = (name) => {
@@ -324,4 +325,44 @@ test("the tool text names the a-melding consequence rather than only refusing", 
   assert.match(all, /a-melding/i);
   assert.match(all, /payslip/i);
   assert.match(all, /bank account/i);
+});
+
+// Three payroll endpoints live outside /api under the salary-ctrl tag with no summary, no
+// description and no required fields in the spec, so discovery would show them as bare names.
+// Two of them are the A-melding submission and a payment instruction.
+test("the undocumented /salary aliases carry a quirk, and reach it from a concrete path", () => {
+  for (const path of [
+    "/salary/{id}/complete",
+    "/salary/{id}/payment-date",
+    "/salary/{id}/register-payment",
+  ]) {
+    assert.ok(
+      quirksFor("POST", path).some((q) => q.id === "salary-ctrl-aliases-have-no-documentation"),
+      path,
+    );
+  }
+  // reai_request is given a CONCRETE path and looks the quirks up through resolveOperation, so
+  // the template match above is not enough on its own to prove a caller sees this.
+  for (const concrete of ["/salary/1360/complete", "/salary/1360/payment-date"]) {
+    const op = resolveOperation("POST", concrete);
+    assert.ok(op, `${concrete} does not resolve to a spec operation`);
+    assert.ok(
+      quirksFor("POST", op.path).some((q) => q.id === "salary-ctrl-aliases-have-no-documentation"),
+      concrete,
+    );
+  }
+});
+
+test("both /salary aliases that transmit are gated on the send axis; payment-date is not, on purpose", () => {
+  assert.equal(classifyTransmission("POST", "/salary/1360/complete", undefined), "external");
+  assert.equal(classifyTransmission("POST", "/salary/1360/register-payment", undefined), "external");
+  // Recorded, not endorsed: with no documentation and no way to reach a completed run without
+  // sending, whether this moves money is unestablished. The quirk says so in those words, and
+  // this assertion exists so a later change to either has to change the other.
+  assert.equal(classifyTransmission("POST", "/salary/1360/payment-date", undefined), "none");
+  assert.equal(classifyRequest("POST", "/salary/1360/payment-date"), "irreversible");
+  const quirk = quirksFor("POST", "/salary/{id}/payment-date").find(
+    (q) => q.id === "salary-ctrl-aliases-have-no-documentation",
+  );
+  assert.match(quirk.note, /NOT gated as a send/);
 });

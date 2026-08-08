@@ -508,6 +508,30 @@ export const QUIRKS: readonly Quirk[] = [
       "done, which is the point.",
   },
   {
+    id: "salary-ctrl-aliases-have-no-documentation",
+    paths: [
+      "/salary/{id}/complete",
+      "/salary/{id}/payment-date",
+      "/salary/{id}/register-payment",
+    ],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "Three payroll endpoints live OUTSIDE /api, under the salary-ctrl tag, and the spec gives " +
+      "them no summary, no description and no required fields — an endpoint list shows them as " +
+      "bare names. What they are is not a mystery, though:\n\n" +
+      "/salary/{id}/complete is the same operation as POST /api/salary-payments/{id}/complete, " +
+      "which is to say it posts the voucher, creates payslips and payments and files the A-melding " +
+      "with Skatteetaten. /register-payment records or instructs payment of a run. Both are " +
+      "treated as EXTERNAL SENDS and refused unless REAI_ALLOW_EXTERNAL_SEND is on — the /api " +
+      "patterns alone would not have caught them, since they are not under /api.\n\n" +
+      "/payment-date is NOT gated as a send, and this is stated rather than glossed: it reads as " +
+      "setting the payout date on a run, which is local, but with no documentation and no way to " +
+      "test it on a run that has not been completed, that is inference. It is classified " +
+      "irreversible, so `full` mode is required. Treat it as unknown, and prefer the documented " +
+      "/api paths for anything you intend to be sure about.",
+  },
+  {
     id: "salary-run-needs-employee-bank-accounts",
     paths: ["/api/salary-payments"],
     methods: ["POST"],
