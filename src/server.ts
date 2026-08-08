@@ -111,6 +111,37 @@ export const ESCALATION_PROBES: readonly unknown[] = ["probe", true, "create_inv
  * flipped to destructiveHint: false. That is the regression the comment in policy.test.mjs
  * describes as historical, and it was reachable.
  */
+/**
+ * Which tools a client actually sees, and how many the policy withheld.
+ *
+ * Four filters in order: the toolset selection, the opt-in UI surface, the write ceiling, and the
+ * external-send switch. This is the safety surface — it decides whether an agent can even attempt an
+ * irreversible or outbound call — and it was inline in buildServer, where nothing could test it. The
+ * live smoke suites assert one configuration each and need a real token to do it; the matrix does not
+ * need either.
+ *
+ * Extracted rather than rewritten: same four steps, same order, same arithmetic.
+ */
+export function visibleTools(config: {
+  toolsets: readonly string[];
+  enableUi: boolean;
+  writeMode: Parameters<typeof isAllowed>[1];
+  allowExternalSend: boolean;
+}): { byToolset: ToolDef[]; selected: ToolDef[]; visible: ToolDef[]; hiddenByPolicy: number } {
+  // The pairing view is opt-in. A client that does not render HTML resources would get
+  // kilobytes of markup where it expected an answer, so it is off unless asked for.
+  const byToolset = selectTools(config.toolsets);
+  const selected = [...byToolset, ...(config.enableUi ? uiTools : [])];
+  const allowedByWriteMode = selected.filter((t) => isAllowed(t.risk, config.writeMode));
+  // A transmitting tool is hidden unless external send is explicitly enabled,
+  // even in full mode: a posting can be reversed, a sent invoice cannot.
+  const visible = allowedByWriteMode.filter((t) => config.allowExternalSend || t.transmits !== true);
+  // `byToolset` is returned because the shortfall reported to the model is measured against the
+  // TOOLSET selection, not against `selected`: counting the opt-in UI tool as part of the toolset
+  // reported one fewer hidden tool than exists.
+  return { byToolset, selected, visible, hiddenByPolicy: selected.length - visible.length };
+}
+
 export function destructiveHintFor(tool: ToolDef): boolean {
   return tool.destructive === true || tool.risk === "irreversible" || hasEscalatingFields(tool);
 }
@@ -171,17 +202,7 @@ export function buildServer(opts: BuildServerOptions): McpServer {
 
   const ctx: ToolContext = { client, config, session };
 
-  // The pairing view is opt-in. A client that does not render HTML resources would get
-  // kilobytes of markup where it expected an answer, so it is off unless asked for.
-  const byToolset = selectTools(config.toolsets);
-  const selected = [...byToolset, ...(config.enableUi ? uiTools : [])];
-  const allowedByWriteMode = selected.filter((t) => isAllowed(t.risk, config.writeMode));
-  // A transmitting tool is hidden unless external send is explicitly enabled,
-  // even in full mode: a posting can be reversed, a sent invoice cannot.
-  const visible = allowedByWriteMode.filter(
-    (t) => config.allowExternalSend || t.transmits !== true,
-  );
-  const hiddenByPolicy = selected.length - visible.length;
+  const { byToolset, visible, hiddenByPolicy } = visibleTools(config);
   // Counted against the TOOLSET selection, not against `selected`. Adding the UI tool to
   // `selected` while measuring the shortfall from `allTools` — which never contains it —
   // reported one fewer hidden tool than exists, in the instructions the model reads.
