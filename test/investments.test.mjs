@@ -256,3 +256,24 @@ test("the Nordnet bulk import is deliberately not curated", () => {
     /ledger/,
   );
 });
+
+test("the update path cannot express an opening balance, even when handed one", async () => {
+  // The gate on `reai_create_share_investment` is worth nothing if the update can do the same thing
+  // unguarded. Verified through the real server, zod strips an undeclared argument and the PUT body is
+  // clean — but that leaves the guarantee resting on validation defaults, so the merge vocabulary itself
+  // must not contain the opening fields. This drives the handler DIRECTLY, which is the layer where the
+  // difference shows.
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: { ...POSITION } },
+    { status: 200, data: { ...POSITION, name: "Renamed" } },
+  ]);
+  await tool("reai_update_share_investment").handler(
+    { id: 19, name: "Renamed", openingQuantity: 100, openingCostAmount: 5000, openingDate: "2026-01-02" },
+    ctx,
+  );
+  const put = sent.find((s) => s.method === "PUT");
+  assert.ok(put, "the write should still happen");
+  for (const field of ["openingQuantity", "openingCostAmount", "openingDate"]) {
+    assert.ok(!(field in put.body), `${field} must not reach the API through the update path`);
+  }
+});

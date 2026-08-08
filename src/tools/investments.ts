@@ -75,7 +75,21 @@ import {
 const INSTRUMENT_TYPES = ["LISTED_SHARE", "UNLISTED_SHARE", "FUND", "BOND", "OTHER"] as const;
 const EVENT_TYPES = ["PURCHASE", "SALE", "DIVIDEND", "CAPITAL_REPAYMENT", "WRITE_DOWN"] as const;
 
-/** Everything `PUT /api/share-investments/{id}` accepts, which is what `POST` accepts too. */
+/**
+ * What the UPDATE merge may carry. Deliberately NOT the whole PUT body.
+ *
+ * `PUT /api/share-investments/{id}` also accepts openingQuantity, openingCostAmount and openingDate, and
+ * those are exactly the fields that create a PURCHASE event and make a position permanent. Leaving them
+ * in this list meant the only thing stopping `reai_update_share_investment` from doing what
+ * `reai_create_share_investment` guards against was zod stripping an undeclared argument: verified
+ * through the real server, `{ id, name, openingQuantity: 100 }` reaches the handler without the opening
+ * field and the PUT body is clean — but calling the handler directly forwards it, and one `.passthrough()`
+ * or one added argument would make that the live path. `mergeForReplacement`'s own comment warns about
+ * this shape: "adding an argument and forgetting the list is exactly how that stops being true".
+ *
+ * So the update cannot express an opening balance at all, structurally. Creating an event is
+ * reai_add_share_investment_event's job, where it is classified and explained.
+ */
 const INVESTMENT_SETTABLE = [
   "name",
   "ticker",
@@ -85,9 +99,6 @@ const INVESTMENT_SETTABLE = [
   "withinExemptionMethod",
   "assetAccountNumber",
   "companyBankId",
-  "openingQuantity",
-  "openingCostAmount",
-  "openingDate",
 ] as const;
 
 /** What the API requires on a PUT — `instrumentType` is required in fact and not in the document. */

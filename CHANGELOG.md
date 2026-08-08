@@ -61,6 +61,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     five argument bounds I had guessed at (the spec caps `name` at 150, `ticker` 20, `isin` 12,
     `organizationNumber` 9, `assetAccountNumber` 10, and requires `amount` ≥ 0.01), and the read-tool
     sweep required the local `query` filter to be declared with the test that proves it.
+  - **One structural weakness found and closed before review.** `INVESTMENT_SETTABLE` — the vocabulary the
+    update merge may carry — listed the opening fields, because they are part of the `PUT` body. That meant
+    the only thing stopping `reai_update_share_investment` from creating the very event the create tool
+    guards against was zod stripping an undeclared argument: verified through the real server, the PUT body
+    comes out clean, but calling the handler directly forwards it, and one `.passthrough()` or one added
+    argument would make that the live path. The opening fields are out of that list, so the update cannot
+    express an opening balance at all, and there is a test driving the handler directly to keep it that way.
+    `mergeForReplacement`'s own comment warns about this exact shape.
   - Verified live on tenant 2783 without creating a single event: the opening-balance refusal fires, a
     position created empty reports itself deletable and deletes, the merge keeps `ticker` through a
     rename, and the known-permanent record refuses deletion with the reason. Nothing new was left behind.
