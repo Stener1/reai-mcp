@@ -1411,9 +1411,11 @@ function translateContactError(err: unknown, customerId: number, contactPersonId
       `The phone number was refused as not a valid number. This field is INTERNATIONAL — measured, ` +
         `+46701234567, +14155552671, +447911123456 and +4915112345678 are all accepted and stored ` +
         `exactly as sent — so do not "fix" a foreign number by changing its country code.\n` +
-        `The shorthand is the Norwegian-only part: a Norwegian number may be sent bare (90123456) or ` +
-        `with 0047, and both are stored as +4790123456. Anything else needs its full country code, ` +
-        `because bare digits are read as Norwegian and a bare foreign number is refused.\n` +
+        `ALWAYS send a non-Norwegian number with its country code. Bare digits are interpreted as ` +
+        `NORWEGIAN, and the outcome is one of two things, neither of them what a foreign caller ` +
+        `wants: refused, as here, or SILENTLY STORED UNDER +47 if the digits happen to be valid ` +
+        `Norwegian. Measured: the Danish mobile 40123456 was stored as +4740123456 without complaint, ` +
+        `while 20123456 was refused. A wrong number saved quietly is worse than this error.\n` +
         `Note that this refusal is worded in Norwegian whatever the number's country, so the message ` +
         `is not evidence that a Norwegian number was expected. The API's own words: ${detail}`,
     );
@@ -1527,11 +1529,14 @@ const createCustomerContact = defineTool({
     "Only `name` is required, and a blank or whitespace-only one is refused. Duplicate names are " +
     "allowed, so adding the same person twice creates two records.\n\n" +
     "The phone field is international: a foreign E.164 number is accepted and stored as sent " +
-    "(+46701234567, +14155552671 and +447911123456 all verified). The shorthand is Norwegian-only — " +
-    "90123456 and 0047-prefixed forms are accepted and normalised to +4790123456 — so a non-Norwegian " +
-    "number needs its full country code, since bare digits are read as Norwegian. A rejection is " +
-    "worded in Norwegian regardless of the number's country, which is not evidence that a Norwegian " +
-    "one was expected.\n\n" +
+    "(+46701234567, +14155552671 and +447911123456 all verified).\n" +
+    "**Always include the country code for a non-Norwegian number.** Bare digits are interpreted as " +
+    "NORWEGIAN, and if they happen to be valid Norwegian they are stored under +47 with no warning — " +
+    "measured, the Danish mobile 40123456 became +4740123456, while 20123456 was refused. So the risk " +
+    "is not only rejection; it is a foreign number saved silently as the wrong one. Norwegian numbers " +
+    "may be sent bare or 0047-prefixed and normalise to +47 as expected. A rejection is worded in " +
+    "Norwegian regardless of the number's country, which is not evidence that a Norwegian one was " +
+    "expected.\n\n" +
     "Reversible: remove it again with reai_delete_customer_contact.",
   risk: "reversible",
   apiPaths: [["POST", "/api/customers/{id}/contact-persons"]],
@@ -1558,8 +1563,9 @@ const createCustomerContact = defineTool({
       .string()
       .optional()
       .describe(
-        "Phone number. Any country's E.164 form is accepted and stored as sent; the bare and " +
-          "0047-prefixed shorthands are Norwegian-only and normalise to +47.",
+        "Phone number. Any country's E.164 form is accepted and stored as sent. Send the country " +
+          "code unless the number is Norwegian: bare digits are read as Norwegian and, if valid as " +
+          "such, stored under +47 without warning.",
       ),
     tenantId: tenantIdArg,
   },

@@ -239,7 +239,18 @@ Measured on tenant 2783 on 2026-08-08, every probe record deleted afterwards.
 
 **The phone number is normalised, and the field is international — those are two separate facts, and conflating them produced bad advice.** A Norwegian number may be sent bare (`90123456`) or `0047`-prefixed, and both are stored as `+4790123456`, so a Norwegian value does not come back as it was sent. The tools report that renormalisation, on the update as well as the create — more important there, since a previous value was overwritten.
 
-But foreign numbers are accepted and stored **exactly as sent**: `+46701234567`, `+14155552671`, `+447911123456` and `+4915112345678` all verified. Only the shorthand is Norwegian, because bare digits are read as `+47` — which is why a bare foreign number is refused.
+But foreign numbers are accepted and stored **exactly as sent**: `+46701234567`, `+14155552671`, `+447911123456` and `+4915112345678` all verified.
+
+**Always send a non-Norwegian number with its country code**, and the reason is sharper than "otherwise it is refused" — which is what an earlier version of this page said, and it was wrong in the direction that costs something. Bare digits are interpreted as *Norwegian*, and that has two outcomes:
+
+| sent bare | stored | why |
+|---|---|---|
+| `90123456` | `+4790123456` | valid Norwegian, and meant as such |
+| `40123456` | **`+4740123456`** | a real **Danish** mobile, also valid Norwegian — accepted silently as `+47` |
+| `20123456` | *refused* | Danish landline prefix, not valid Norwegian |
+| `701234567` | *refused* | Swedish, nine digits |
+
+So the failure mode to fear is not a rejection but a foreign number **saved quietly as the wrong one** — someone then calls the wrong person. Codex caught the categorical claim on PR #111.
 
 The refusal is `"Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47."`, **and it says that for a malformed Swedish or American number too.** The first version of the translation read that as "the number must be Norwegian and start with 4 or 9", which for a foreign contact points the agent at the one part of the number that was correct. Codex caught it on PR #110. The message is not evidence about the number's country.
 

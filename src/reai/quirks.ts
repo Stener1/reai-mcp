@@ -122,8 +122,13 @@ export const QUIRKS: readonly Quirk[] = [
       "The phone number is NORMALISED, not merely validated: 90123456, 004790123456 and " +
       "+4790123456 are all stored as +4790123456, so a Norwegian value does not come back as it was " +
       "sent. But the field really is international — +46701234567, +14155552671, +447911123456 and " +
-      "+4915112345678 were all accepted and stored EXACTLY as sent. Only the shorthand is " +
-      "Norwegian: bare digits are read as +47, so a bare foreign number is refused.\n" +
+      "+4915112345678 were all accepted and stored EXACTLY as sent.\n" +
+      "Bare digits are interpreted as NORWEGIAN, and that has two outcomes rather than one. An " +
+      "earlier version of this note said a bare foreign number is simply refused; it is not. If the " +
+      "digits are valid Norwegian they are stored under +47 SILENTLY — measured, the Danish mobile " +
+      "40123456 became +4740123456, while 20123456 was refused. Always send a non-Norwegian number " +
+      "with its country code: the failure mode to fear here is a wrong number saved without " +
+      "complaint, not a rejection.\n" +
       "The refusal is \"Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47.\" — " +
       "and it says that for a malformed SWEDISH or American number too, so do not read it as \"this " +
       "number must be Norwegian\" and start rewriting country codes.",

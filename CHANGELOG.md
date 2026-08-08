@@ -9,6 +9,15 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **"A bare foreign number is refused" was categorical, and wrong in the direction that costs
+  something.** Codex's follow-up on the fix below. Bare digits are interpreted as *Norwegian*, and if
+  they happen to be valid Norwegian they are stored under `+47` **with no warning** — measured, the
+  Danish mobile `40123456` became `+4740123456`, while `20123456` was refused. So the outcome to warn
+  about is not a rejection but a foreign number saved quietly as the wrong one, which is how someone
+  ends up calling the wrong person. The guidance now leads with "always send the country code" and names
+  both outcomes; the test asserts the categorical claim is gone rather than only that the new text is
+  present.
+
 - **The contact-phone refusal told an agent the number had to be Norwegian, on a field that is
   international.** Codex caught it on PR #110 and the measurement is decisive: `+46701234567`,
   `+14155552671`, `+447911123456` and `+4915112345678` are all accepted and stored **exactly as sent**.

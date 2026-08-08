@@ -103,6 +103,36 @@ test("the phone refusal does not tell an agent to rewrite a foreign country code
   );
 });
 
+test("the bare-digits advice names the silent outcome, not just the refusal", async () => {
+  // Codex's follow-up on PR #111, and the more dangerous half of the same fact. The fix for #111 said
+  // "a bare foreign number is refused", which is categorical and wrong in the direction that costs
+  // something: measured, the Danish mobile 40123456 is stored as +4740123456 with no warning, because
+  // it is also valid Norwegian, while 20123456 is refused. A wrong number saved quietly beats a
+  // rejection for harm — someone calls the wrong person — so the guidance has to lead with it.
+  await assert.rejects(
+    () =>
+      run(
+        "reai_create_customer_contact",
+        { customerId: 1, name: "Ada", phone: "20123456" },
+        {
+          error: apiError(
+            400,
+            "Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47.",
+          ),
+        },
+      ),
+    (err) => {
+      // The categorical claim must be gone.
+      assert.doesNotMatch(err.message, /a bare foreign number is refused/);
+      // Both outcomes named, with the silent one called out as such.
+      assert.match(err.message, /SILENTLY STORED UNDER \+47/);
+      assert.match(err.message, /40123456 was stored as \+4740123456/);
+      assert.match(err.message, /ALWAYS send a non-Norwegian number with its country code/);
+      return true;
+    },
+  );
+});
+
 test("a missing CUSTOMER and a missing CONTACT are told apart, which they were not", async () => {
   // The bug this pins, found by the independent review of PR #110: the customer branch matched
   // /Customer with id=/i case-INSENSITIVELY, and the contact-not-found sentence is
