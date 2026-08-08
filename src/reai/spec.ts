@@ -777,10 +777,23 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
   // say which method, or the write it asked for gets only the weak generic bonus
   // and a GET on the same resource still wins ("post a voucher" returned
   // GET /api/vouchers).
-  [["register", "registered", "create", "created", "add", "new", "make", "submit", "start", "post", "book", "enter", "record", "close", "pay", "issue", "upload", "file", "settle"], ["POST"]],
-  [["update", "change", "edit", "modify", "rename"], ["PUT", "PATCH"]],
-  [["delete", "remove", "cancel"], ["DELETE"]],
-  [["list", "show", "find", "search", "fetch", "read", "view", "see", "which", "what"], ["GET"]],
+  [["register", "registered", "create", "created", "add", "new", "make", "submit", "start", "post", "book", "enter", "record", "close", "pay", "issue", "upload", "file", "settle",
+    // Norwegian. This table had none at all, although WRITE_INTENT_VERBS already held four — so
+    // "opprett kreditnota" licensed a write and then implied no method, leaving it the weak generic
+    // bonus the comment above warns about. Measured: "opprett kreditnota" ranked the endpoint first
+    // while "lag kreditnota" did not find it at all, and `lag` is the commoner verb of the two.
+    // Both spellings, because these tables are consulted with RAW tokens rather than the
+    // ASCII-folded ones TERM_SYNONYMS uses: measured, "oppdater" matched and "bokfør" did not.
+    "opprett", "opprette", "lag", "lage", "registrer", "registrere",
+    "bokfor", "bokfore", "bokfør", "bokføre"], ["POST"]],
+  [["update", "change", "edit", "modify", "rename",
+    "endre", "oppdater", "oppdatere", "rediger"], ["PUT", "PATCH"]],
+  [["delete", "remove", "cancel", "slett", "slette", "fjern", "fjerne"], ["DELETE"]],
+  [["list", "show", "find", "search", "fetch", "read", "view", "see", "which", "what",
+    // Left OUT deliberately: "betal"/"betale" (pay). A stemmer that strips -ing turns the READ
+    // phrasing "hvilke betalinger" into "betal", which would license a write on a question about
+    // payments — the exact false positive the note below this table was written about.
+    "vis", "hent", "finn", "hvilke", "hva"], ["GET"]],
 ];
 
 /**
@@ -799,7 +812,11 @@ const WRITE_INTENT_VERBS = new Set([
   // Safe as exact tokens: "postings" and "submission" tokenize to themselves, so
   // these do not fire on the read phrasings that broke the earlier heuristic.
   "post", "book", "close", "enter", "record", "submit",
-  "opprett", "slett", "endre", "registrer",
+  // Kept in step with METHOD_INTENT above, which is what the comment there asks for.
+  "opprett", "opprette", "lag", "lage", "registrer", "registrere",
+  "slett", "slette", "fjern", "fjerne",
+  "endre", "oppdater", "oppdatere", "rediger",
+  "bokfor", "bokfore", "bokfør", "bokføre",
 ]);
 
 function hasWriteIntent(tokens: readonly string[]): boolean {
@@ -851,6 +868,13 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btrial\s+balance\b/g, "ledger balance"],
   [/\bchart\s+of\s+accounts\b/g, "chart-of-accounts"],
   [/\bcash\s+register\b/g, "kassasystem"],
+  // Hyphenated Norwegian terms, which tokenise into halves that mean something else. "a-melding"
+  // became "a" + "melding", and `melding` maps to return/returns — so the payroll filing that goes
+  // to Skatteetaten ranked the TAX RETURN first. Measured; it is the sharpest instance because the
+  // two are different filings to the same authority.
+  [/\ba[-\s]?melding(en|er)?\b/g, "salary complete amelding"],
+  [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
+  [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
 ];
 
 const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
@@ -903,6 +927,66 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // receives Norwegian words. A handful were already here; these are the rest of the
   // everyday vocabulary, measured against queries a bookkeeper would actually ask.
   // Keys are ASCII-folded because lookupForms folds before looking up: "lonn", not "lønn".
+  // --- Measured against a HELD-OUT set of Norwegian queries ---------------------
+  //
+  // The vocabulary above was tuned against the queries in test/discovery-norwegian.test.mjs,
+  // which I wrote. Scored against 45 fresh queries built from bookkeeping vocabulary instead,
+  // the ranker managed 17 in the top 3 — and a dozen returned NOTHING AT ALL, which is the
+  // outcome that leaves an agent stuck rather than merely misdirected. These are the terms that
+  // found nothing, each mapped to the endpoint that answers it.
+  //
+  // Expense claims. "reiseregning" (travel claim) and "utlegg" (out-of-pocket) are the two words
+  // a Norwegian actually uses for /api/expenses; the endpoint's own name matches neither.
+  produkt: ["product", "products"],
+  produkter: ["product", "products"],
+  vare: ["product", "products"],
+  varer: ["product", "products"],
+  valuta: ["currency", "currencies"],
+  valutakurs: ["currency", "currencies"],
+  kontoutskrift: ["ledger", "postings"],
+  reiseregning: ["expense", "expenses", "travel"],
+  utlegg: ["expense", "expenses"],
+  utleggsrefusjon: ["expense", "expenses"],
+  kjoregodtgjorelse: ["expense", "mileage", "expenses"],
+  kilometergodtgjorelse: ["expense", "mileage", "expenses"],
+  diett: ["expense", "per-diem", "expenses"],
+  diettgodtgjorelse: ["expense", "per-diem", "expenses"],
+  godtgjorelse: ["expense", "allowance"],
+  // Payroll vocabulary that is not the word "salary".
+  feriepenger: ["salary", "wage-specs", "holiday"],
+  forskuddstrekk: ["salary", "tax"],
+  arbeidsgiveravgift: ["salary", "tax"],
+  amelding: ["salary", "complete", "amelding"],
+  // Time.
+  timeforing: ["timesheet"],
+  // Documents and attachments — both returned nothing, and both are real endpoints.
+  vedlegg: ["attachment", "attachments"],
+  dokument: ["document", "documents"],
+  dokumenter: ["document", "documents"],
+  // Access control, added with the tools that read it.
+  tilgang: ["user", "users", "permission", "role"],
+  tilganger: ["user", "users", "permission", "role"],
+  bruker: ["user", "users"],
+  brukere: ["user", "users"],
+  rolle: ["role", "roles", "user"],
+  roller: ["role", "roles", "user"],
+  rettighet: ["permission", "permissions", "user"],
+  rettigheter: ["permission", "permissions", "user"],
+  // Counterparty detail.
+  kontaktperson: ["contact-persons", "contact", "customer"],
+  kontaktpersoner: ["contact-persons", "contact", "customer"],
+  organisasjonsnummer: ["organization", "organisation", "customer", "supplier"],
+  orgnummer: ["organization", "organisation", "customer", "supplier"],
+  stillingsprosent: ["employee", "employment", "percentage"],
+  // Invoice sub-operations. "kreditnota" ranked the SUPPLIER credit-note lookup first, which is
+  // a different thing from crediting a customer invoice.
+  betalingspaminnelse: ["reminders", "reminder", "dunning"],
+  purregebyr: ["reminders", "reminder"],
+  inkasso: ["reminders", "debt-collection"],
+  // Transport.
+  peppol: ["peppol", "ehf"],
+  ehf: ["ehf", "peppol"],
+
   lager: ["warehouse", "inventory"],
   varelager: ["warehouse", "inventory"],
   beholdning: ["warehouse", "inventory"],
@@ -921,7 +1005,7 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   tilbud: ["offer"],
   ordre: ["order"],
   purring: ["reminders", "dunning"],
-  kreditnota: ["credit", "invoice"],
+  kreditnota: ["credit", "invoice", "invoices"],
   innbetaling: ["payment", "customer"],
   utbetaling: ["payment", "supplier"],
   betaling: ["payment"],
