@@ -51,6 +51,8 @@ What actually helps: `--max-instances` caps the spend, `REAI_ALLOWED_REDIRECT_HO
 
 Access tokens are **sealed**: the user's ReAI token is encrypted into the token itself with AES-256-GCM, along with the tenant and write mode chosen at authorization time. Any instance can therefore serve any request with no shared session store — which is what makes a scale-to-zero, multi-instance deployment practical.
 
+The sealed write mode is not the last word on it. Every request applies the narrower of that and the operator's *current* `REAI_WRITE_MODE`, so redeploying with a tighter ceiling binds tokens that were already issued — [safety.md](safety.md#the-remote-write-ceiling-is-the-narrower-of-two) has both directions of that rule and why each matters.
+
 The trade-offs are worth stating plainly:
 
 - **`REAI_ENCRYPTION_KEY` is required in production.** Without it a random key is generated at startup, so every existing authorization breaks on restart, and separate instances reject each other's tokens. The server warns loudly.
@@ -87,10 +89,16 @@ So the binding is exactly as strong as this process, which is the right architec
 
 ## Request limits
 
-The MCP endpoint enforces a body-size ceiling and a JSON-RPC batch ceiling, both well above any real
-tool call, and both are documented next to the constants that produce them in
-[the README](../README.md#request-limits) — including why an oversized body sometimes gets no `413` at
-all, and why `GET /mcp` answers `405`.
+The MCP endpoint enforces two ceilings, both well above any real tool call:
+
+| Limit | Value | Why |
+|---|---|---|
+| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413` and the connection is closed — but see the note below, because a *far* oversized body gets no response at all |
+| JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
+
+**A `413` is not guaranteed.** To answer at all, the server has to finish reading the body it is rejecting: closing while data is still arriving makes the OS send `RST`, which discards the response the client has not read yet. So an oversized body is drained first — bounded at 32 MB and 5 seconds — and only then answered. Past either bound the request is destroyed with **no response**, which the client sees as a connection reset. The 400 MB case above is exactly that. Worth knowing before diagnosing a silent reset as a network fault.
+
+`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. No client capability is lost: the server runs with `enableJsonResponse`, so a POST is answered with a single JSON response rather than an event stream, and there is nothing a standalone stream would have carried.
 
 ## Verify a deployment
 

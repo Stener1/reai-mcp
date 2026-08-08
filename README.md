@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **145 tools** across eleven accounting domains, plus a discovery escape hatch that reaches all 321 public API operations.
+- **145 tools**: 138 curated across eleven accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **105 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -52,11 +52,18 @@ Two properties make this more than a label:
 
 The default is deliberately the middle setting, not the permissive one.
 
+On a remote deployment the ceiling is **composed rather than chosen once**. A grant is sealed at
+authorization time carrying the mode the user picked on the consent page, and every request applies
+whichever of that and the server's *current* `REAI_WRITE_MODE` is narrower — so tightening the
+deployment binds tokens that were already issued, and a permissive server never widens a grant
+somebody deliberately narrowed:
+[docs/safety.md](docs/safety.md#the-remote-write-ceiling-is-the-narrower-of-two).
+
 Both switches sit on one path, and a curated tool is not a softer route to the API than the escape
 hatch is — they converge on the same gates, in this order:
 
 ```
-  curated tool (145) ---+
+  curated tool (138) ---+
                         +---> 1. write policy .......... REAI_WRITE_MODE
   reai_request (321) ---+     2. external-send gate .... REAI_ALLOW_EXTERNAL_SEND  ---> ReAI API
                               3. PUT omission gate ..... reai_request only
@@ -389,7 +396,7 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
+It sits outside the default surface rather than inside it — every count in this README is the default 145, and `REAI_ENABLE_UI=1` registers a 146th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
 Anything not listed — projects, timesheets, share investments, loans — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
@@ -449,11 +456,19 @@ problem. Browse them from an agent with `reai_api_notes`, or read the whole regi
 
 This is a Norwegian accounting system and its users type Norwegian, where the definite article is a
 suffix and nouns glue together — so *"lønnskjøring"*, *"varelager"* and *"send fakturaen"* have to
-resolve to endpoints whose paths are in English. They do: on a 31-query bilingual set — 21 Norwegian,
-10 English — all 31 find their endpoint and 28 of them rank it in the top three. Three further corpora
-hold the measurement as regression floors in `test/discovery-heldout.test.mjs`, each scored once
-before anything was tuned against it, because a benchmark whose failures you have read is no longer
-measuring anything. [docs/discovery.md](docs/discovery.md) has the numbers and the four causes fixed.
+resolve to endpoints whose paths are in English. They do, and the definite article is handled rather
+than hoped for: the suffixes `-n`, `-ne`, `-en` and `-et` are stripped and retried whenever the
+remaining stem is a word the synonym table already knows, so `kunden`, `ordren`, `utgiften` and
+`dokumentet` all resolve — and a test asserts inflection does not change the *rank*, not merely that
+something comes back. A stem-*changing* definite (`anleggsmiddel` → `anleggsmidlet`, which drops a
+vowel) is still out of reach, and the test names that case rather than omitting it.
+
+On a 31-query bilingual set — 21 Norwegian, 10 English — all 31 find their endpoint and 28 of them rank
+it in the top three. Three further corpora hold the measurement as regression floors in
+`test/discovery-heldout.test.mjs`, each scored once before anything was tuned against it, because a
+benchmark whose failures you have read is no longer measuring anything.
+[docs/discovery.md](docs/discovery.md) has those numbers, the four causes that were fixed, and why the
+stem gate is load-bearing rather than precautionary.
 
 ## Self-hosting as a remote connector
 
@@ -475,23 +490,18 @@ are all in [docs/self-hosting.md](docs/self-hosting.md).
 
 ### Request limits
 
-The MCP endpoint enforces two ceilings, both well above any real tool call:
-
-| Limit | Value | Why |
-|---|---|---|
-| Request body | 8 MB | The transport otherwise parses an unbounded body: a 400 MB POST exhausted the heap of a 512 MiB container, taking every other in-flight request with it. Over the limit is answered `413` and the connection is closed — but see the note below, because a *far* oversized body gets no response at all |
-| JSON-RPC batch | 50 messages | Every entry in a batch is dispatched concurrently, so 1000 of them meant 1000 simultaneous ReAI calls. The write policy is applied per call and never sees the aggregate, which in `full` mode made one HTTP request a route to thousands of postings |
-
-**A `413` is not guaranteed.** To answer at all, the server has to finish reading the body it is rejecting: closing while data is still arriving makes the OS send `RST`, which discards the response the client has not read yet. So an oversized body is drained first — bounded at 32 MB and 5 seconds — and only then answered. Past either bound the request is destroyed with **no response**, which the client sees as a connection reset. The 400 MB case above is exactly that. Worth knowing before diagnosing a silent reset as a network fault.
-
-`GET /mcp` answers **405**. A standalone SSE stream exists to carry server-initiated messages, which requires a session; this server is stateless by design — a fresh MCP server per request — so nothing could ever be sent on one. The spec permits either SSE or 405 here, and 405 is the honest answer. No client capability is lost: the server runs with `enableJsonResponse`, so a POST is answered with a single JSON response rather than an event stream, and there is nothing a standalone stream would have carried.
+The MCP endpoint enforces two transport ceilings, both well above any real tool call: an **8 MB**
+request body and a **50-message** JSON-RPC batch. Each has a surprise in it worth reading before
+diagnosing one as a network fault — an oversized body does not reliably get a `413`, and `GET /mcp`
+answers `405` on purpose, not by omission. The measurements behind both numbers, and both
+explanations, are in [docs/self-hosting.md](docs/self-hosting.md#request-limits).
 
 ## Development
 
 ```bash
 npm install
 npm run build        # rebuild the spec index, then compile
-npm test             # build + 760 unit tests (no credentials needed)
+npm test             # build + the unit suite (no credentials needed)
 npm run typecheck
 npm run smoke        # read-only, end-to-end against the live API (needs a token)
 ```
