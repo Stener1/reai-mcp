@@ -1485,8 +1485,15 @@ function lookupForms(token: string): string[] {
     // Both the singular -n and the plural -ne, on a stem long enough that stripping cannot make a
     // short word disappear: `lan` (loan) is 3 characters and must survive, and the guard is what
     // keeps it.
-    if (base.endsWith("ne") && base.length > 5) add(base.slice(0, -2));
-    if (base.endsWith("n") && base.length > 4) add(base.slice(0, -1));
+    // Only when the stem is a word this table KNOWS. Stripping -n from anything long enough was the
+    // first version and it double-counted: `documentation` also produced `documentatio`, which
+    // matchStrength then matched against the same endpoint token twice, and "product documentation"
+    // ranked the document-reception endpoints above every product endpoint — worse than before the
+    // rule existed. Review caught it. A derived form that is not a synonym key buys nothing here and
+    // can only distort, so the gate is the point rather than a precaution.
+    const known = (stem: string) => Object.prototype.hasOwnProperty.call(TERM_SYNONYMS, stem);
+    if (base.endsWith("ne") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
+    if (base.endsWith("n") && base.length > 4 && known(base.slice(0, -1))) add(base.slice(0, -1));
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];

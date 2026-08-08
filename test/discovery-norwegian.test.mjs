@@ -240,3 +240,21 @@ test("a short word ending in -n survives, though nothing currently distinguishes
     assert.ok(rankOf(query, want) >= 0, `"${query}" should still find ${want}`);
   }
 });
+
+test("a suffix rule only fires on a stem the table knows", () => {
+  // Review's finding, and the reason the -n rule is gated. Stripping a trailing -n from anything long
+  // enough also turns `documentation` into `documentatio`, and matchStrength then matches both forms
+  // against the same endpoint token — so a two-word English query was skewed by one word counting
+  // twice. Measured against main: "product documentation" ranked /api/products first before the rule
+  // and the document-reception endpoints first after it. Worse than not having the rule at all.
+  //
+  // A derived form that is not a synonym key buys nothing and can only distort, which makes the gate
+  // the mechanism rather than a safeguard.
+  for (const [query, want] of [
+    ["product documentation", "GET /api/products"],
+    ["subscription", "GET /api/subscriptions"],
+  ]) {
+    const at = rankOf(query, want);
+    assert.ok(at >= 0 && at < 3, `"${query}" should rank ${want} in the top 3, got ${at + 1}`);
+  }
+});

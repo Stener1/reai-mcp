@@ -28,6 +28,13 @@ All notable changes to `reai-mcp`. Format loosely follows
     by measurement — `kundene`, `leverandørene` and `fakturaene` all resolve by other paths, so a
     test built from those would have passed with the rule deleted. `avtalene` is the one that
     needs it.
+  - The rules fire **only when the stripped stem is a synonym key**, which review made necessary
+    and is better than the precaution it looks like. Blind stripping also turned
+    `documentation` into `documentatio`, and `matchStrength` matched both forms against the same
+    endpoint token — so one word counted twice and *"product documentation"* ranked the
+    document-reception endpoints above every product endpoint, **worse than not having the rule
+    at all**. A derived form that is not a key buys nothing and can only distort. Pinned by a
+    test that fails with the gate removed.
   - Two limits are stated rather than hidden. A **stem-changing** definite is out of reach
     (`anleggsmiddel` → `anleggsmidlet` drops a vowel), so that case is written into the test as
     an exclusion with the reason. And the length guard that stops `lån` being stripped to `lå`
