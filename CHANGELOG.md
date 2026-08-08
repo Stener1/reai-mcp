@@ -15,8 +15,9 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,
   `reai_update_lead`, `reai_log_lead_contact`, `reai_convert_lead`, `reai_delete_lead`.
-  Measured on tenant 2783, the CRM half of the leads domain has four traps, and each one
-  turns a 200 into something other than what was asked for:
+  Measured on tenant 2783, the CRM half of the leads domain has six traps. Four are a 200
+  that means something other than what was asked for; two are a documented route that does
+  not exist (a status-clearing null answers 400, the org form of convert answers 404):
   - **Null means two opposite things depending on the endpoint.** `PATCH /api/leads/...`
     documents null as "leave unchanged" and honours that — `{notes: null, email: null,
     phone: null, followUpAt: null}` against a lead holding all four returned 200 and

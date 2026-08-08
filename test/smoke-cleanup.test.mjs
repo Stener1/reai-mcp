@@ -15,8 +15,13 @@ import { readFileSync } from "node:fs";
  * as leftovers on the tenant, noticed afterwards by hand.
  *
  * Two things this guard does NOT catch, said plainly so it is not mistaken for more than it is:
- *  - A record created but never recorded in `created` at all. Nothing does that today; the
- *    detection would have to reason about call ordering rather than text.
+ *  - A record created but never recorded in `created` at all. The lead section of
+ *    scripts/smoke-full-write.mjs is now exactly that: it materialises a lead row and, briefly, a
+ *    customer, and records neither in `created`. That is deliberate — it owns its cleanup in its own
+ *    try/catch/finally, deletes only a customer proven new against a baseline it took first, and
+ *    re-reads to confirm — but it does mean this guard cannot see that section, and the comment used
+ *    to claim nothing did that. Detecting it in general would have to reason about call ordering
+ *    rather than text.
  *  - A `created.x` assigned LATE — after further remote calls — so a throw in between leaves the
  *    finally with nothing to delete. The key is referenced, so this passes. Codex caught one of
  *    those by reading, which is the honest way.

@@ -162,8 +162,11 @@ function enumType(schema, fallback) {
   // fields in the spec read as non-nullable regardless of what they declare. That silence is not
   // harmless -- test/merge-tools.test.mjs decides from this exact string whether a tool may accept
   // null, so a nullable enum looked like a tool bug and the fix on offer was to drop a correct
-  // `.nullable()`. Both signals count: `type: [..., "null"]`, which typeName encodes, and a null
-  // sitting among the enum values, which is filtered out above and would otherwise vanish.
+  // `.nullable()`. The signal that matters here is `type: [..., "null"]`, which typeName has already
+  // encoded into `fallback` — that covers 36 of the 65 enum-typed body fields in this spec. The
+  // second clause is defensive only: OpenAPI also permits a null AMONG the enum values, which the
+  // filter above would swallow, and no schema in this spec currently does that. Kept because the
+  // filter is what makes it invisible, and named as defensive so nobody hunts for the case it fixes.
   const nullable = String(fallback ?? "").endsWith("?") || declared.some((e) => e === null);
   return `enum(${shown}${suffix})${array ? "[]" : ""}${nullable ? "?" : ""}`;
 }

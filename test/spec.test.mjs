@@ -257,7 +257,11 @@ test("every exposed business operation is actually callable through reai_request
  */
 test("a body field the spec declares nullable is rendered nullable, enum or not", async () => {
   const { readFileSync } = await import("node:fs");
-  const raw = JSON.parse(readFileSync("spec/reai-openapi.json", "utf8"));
+  // Resolved from this file, not from the cwd, as every other spec read in the suite already is —
+  // `cd /tmp && node --test test/spec.test.mjs` failed here and nowhere else.
+  const { fileURLToPath } = await import("node:url");
+  const specPath = fileURLToPath(new URL("../spec/reai-openapi.json", import.meta.url));
+  const raw = JSON.parse(readFileSync(specPath, "utf8"));
   const index = getSpecIndex();
   const deref = (schema) => {
     const ref = schema?.$ref;
@@ -288,4 +292,31 @@ test("a body field the spec declares nullable is rendered nullable, enum or not"
   // Without enum fields in the sample this test would pass on the very bug it exists to catch.
   assert.ok(enumsChecked >= 20, `expected nullable enum fields to check; saw ${enumsChecked}`);
   assert.deepEqual(missing, [], "these fields are nullable in the spec but do not say so in the index");
+
+  // The other direction, which matters just as much: a blanket `nullable = true` in enumType would
+  // satisfy everything above AND silently disarm test/merge-tools.test.mjs, which skips every field
+  // whose descriptor ends in "?" — so the guard that decides whether a tool may accept null would
+  // stop checking anything at all.
+  const overclaimed = [];
+  let nonNullableEnums = 0;
+  for (const op of index.operations) {
+    const fields = op.body?.fields;
+    if (!fields) continue;
+    const spec = raw.paths?.[op.path]?.[op.method.toLowerCase()];
+    const body = deref(spec?.requestBody)?.content?.["application/json"]?.schema;
+    const properties = deref(body)?.properties;
+    if (!properties) continue;
+    for (const [name, descriptor] of Object.entries(fields)) {
+      const schema = deref(properties[name]);
+      if (!schema || !String(descriptor).startsWith("enum(")) continue;
+      const declaredNull =
+        (Array.isArray(schema.type) && schema.type.includes("null")) ||
+        (Array.isArray(schema.enum) && schema.enum.includes(null));
+      if (declaredNull) continue;
+      nonNullableEnums += 1;
+      if (String(descriptor).endsWith("?")) overclaimed.push(`${op.method} ${op.path} ${name}: ${descriptor}`);
+    }
+  }
+  assert.ok(nonNullableEnums >= 10, `expected non-nullable enum fields too; saw ${nonNullableEnums}`);
+  assert.deepEqual(overclaimed, [], "these enum fields are NOT nullable in the spec but say they are");
 });

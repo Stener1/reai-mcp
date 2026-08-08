@@ -1830,7 +1830,8 @@ async function main() {
         try {
           const res = await client.callTool({
             name: "reai_list_customers",
-            arguments: { organizationNumber: org, ...(archived ? { archived: true } : {}), pageSize: 50, tenantId },
+            // No pageSize: reai_list_customers does not take one, and zod strips it silently.
+            arguments: { organizationNumber: org, ...(archived ? { archived: true } : {}), tenantId },
           });
           if (res.isError) return UNREADABLE;
           const rows = listOf(res);
@@ -1960,15 +1961,31 @@ async function main() {
       );
 
       // 5. A contact event, which is append-only: nothing can remove it but deleting the lead.
+      const eventNote = `Zz ${STAMP}`.slice(0, 180);
       const logged = await callLead("reai_log_lead_contact", {
         contactedOn: today,
         source: "phone",
-        note: `Zz ${STAMP}`.slice(0, 180),
+        note: eventNote,
       });
       report(
-        "a contact event is recorded and reported as unremovable",
+        "logging a contact event reports it as unremovable",
         !logged.isError && /cannot be removed on its own/.test(textOf(logged)),
-        logged.isError ? firstLineOf(textOf(logged)) : firstLineOf(textOf(logged)),
+        firstLineOf(textOf(logged)),
+      );
+      // Read the event BACK, rather than trusting the 200 and the tool's own prose. This domain has
+      // already produced a write that answered 200 and stored nothing (PUT .../contact on an unsaved
+      // company), so a check that only reads the response would miss the same failure here. The
+      // detail endpoint carries contactEvents, which is what makes the read-back possible at all.
+      const detail = jsonOf(await lead());
+      const events = detail?.contactEvents;
+      report(
+        "the contact event is actually there when the lead is read back",
+        Array.isArray(events) && events.some((e) => e?.note === eventNote && e?.source === "phone"),
+        !Array.isArray(events)
+          ? `COULD NOT READ contactEvents (${JSON.stringify(events)}) — this proves nothing`
+          : events.some((e) => e?.note === eventNote)
+            ? `${events.length} event(s), including this run's`
+            : `STORED NOTHING — ${events.length} event(s) and none is this run's`,
       );
 
       // 6. Conversion, then back out of it completely. The endpoint is id-only, so this also proves

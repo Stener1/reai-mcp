@@ -95,6 +95,9 @@ type LeadRow = {
   hasPhone?: boolean | null;
   registeredAt?: string | null;
   status?: string | null;
+  notes?: string | null;
+  email?: string | null;
+  phone?: string | null;
   followUpAt?: string | null;
   /** Only on the detail response. The search row flattens these to the top level instead. */
   lead?: LeadState | null;
@@ -315,7 +318,22 @@ async function readLeadState(
     tenantId,
   });
   const record = res.data ?? {};
-  return { record, state: record.lead ?? { id: record.id, status: record.status } };
+  // The fallback carries EVERY field, not just id and status. It never fires today — an untouched
+  // company still returns a `lead` object with all fields null — but if a response ever arrived
+  // flattened, dropping email and phone here would make the contact carry-over send null for a field
+  // the caller never mentioned, which is exactly the silent data loss these tools exist to prevent.
+  return {
+    record,
+    state:
+      record.lead ?? {
+        id: record.id,
+        status: record.status,
+        notes: record.notes,
+        email: record.email,
+        phone: record.phone,
+        followUpAt: record.followUpAt,
+      },
+  };
 }
 
 const isSaved = (state: LeadState) => state.id !== null && state.id !== undefined;
@@ -369,7 +387,7 @@ const saveLead = defineTool({
         : `The POST succeeded but the lead still reads id null, so nothing was actually saved. Do ` +
           `not treat this company as tracked.`,
     });
-    // Flagged on the RESULT, following reai_update_company_bank: a verified non-outcome must reach
+    // Flagged on the RESULT, following reai_set_employee_bank_account: a verified non-outcome must reach
     // the caller as an error and not only as prose, since prose is what an agent skims. Not fail(),
     // because the response body is the evidence for the claim and discarding it would hide it.
     if (!isSaved(after.state)) result.isError = true;
@@ -420,7 +438,10 @@ const updateLead = defineTool({
       .max(20000, "The API caps notes at 20000 characters.")
       .nullable()
       .optional()
-      .describe("Free-text notes. Omit to leave unchanged, null to clear. Replaces any existing note."),
+      .describe(
+        "Free-text notes. Omit to leave unchanged, null or an empty string to clear. Replaces any " +
+          "existing note.",
+      ),
     email: z
       .string()
       .max(320, "The API caps email at 320 characters.")
@@ -466,8 +487,10 @@ const updateLead = defineTool({
     // acting on it anyway would create a lead in order to empty it — state produced by a request to
     // remove state. Reported as the answer it is rather than as an error, since the caller's
     // intended end state is already the actual one.
+    const asksToClear = (key: "notes" | "email" | "phone" | "followUpAt") =>
+      args[key] === null || (key === "notes" && args[key] === "");
     const clearsOnly = (["notes", "email", "phone", "followUpAt"] as const).every(
-      (key) => !given(key) || args[key] === null,
+      (key) => !given(key) || asksToClear(key),
     );
     if (!isSaved(before.state) && clearsOnly && !given("status")) {
       return ok(before.record, {
@@ -499,7 +522,10 @@ const updateLead = defineTool({
     // Values being SET go in one PATCH; the endpoint takes them all and ignores what is absent.
     const patch: Record<string, unknown> = {};
     if (args.status !== undefined && args.status !== null) patch.status = args.status;
-    if (typeof args.notes === "string") patch.notes = args.notes;
+    // An empty string is a CLEAR, not a set: UpdateLeadNotesReq documents "Null or empty clears the
+    // notes", and PATCH cannot clear at all, so routing "" through it would store an empty note on
+    // some tenants and silently do nothing on others. It goes to the setter with the nulls instead.
+    if (typeof args.notes === "string" && args.notes !== "") patch.notes = args.notes;
     if (typeof args.followUpAt === "string") patch.followUpAt = args.followUpAt;
     if (Object.keys(patch).length > 0) {
       await ctx.client.request({ method: "PATCH", path: `/api/leads/org/${org}`, tenantId, body: patch });
@@ -507,7 +533,7 @@ const updateLead = defineTool({
     }
 
     // Values being CLEARED each need their own setter, which is the only place null means clear.
-    if (args.notes === null) {
+    if (args.notes === null || args.notes === "") {
       await ctx.client.request({
         method: "PUT",
         path: `/api/leads/org/${org}/notes`,
@@ -560,33 +586,49 @@ const updateLead = defineTool({
 
     const after = await readLeadState(ctx, tenantId, args.orgNumber);
 
-    // Verify the end state the caller asked for, field by field, and say so when it did not happen.
+    // Verify the end state the caller asked for, and separate two very different outcomes.
     //
-    // Worth the arithmetic in this domain specifically: one of these endpoints answered 200 and
-    // stored nothing at all, and another applied to a different set of fields than the body named.
-    // A tool over an API like that should not report the intent back as though it were the outcome.
-    // Phone is compared loosely because ReAI normalises it — 40000000 is stored as +4740000000, so
-    // only the difference between "something" and "nothing" is checkable here.
-    const mismatches: string[] = [];
-    const compare = (key: "status" | "notes" | "email" | "followUpAt") => {
+    // Worth checking at all in this domain because one of these endpoints answered 200 and stored
+    // nothing, and another applied to a different set of fields than the body named. But byte
+    // equality is the wrong test: ReAI rewrites what it stores, and not only for phone numbers —
+    // reai_create_customer documents the stored name coming back title-cased. Comparing exactly
+    // would report a successful write as a failure the first time an agent's note carried a trailing
+    // space or the API returned a date as a timestamp.
+    //
+    // So only the two things that cannot be normalisation count as failures: a field asked to be
+    // CLEARED that still reads a value, and a field asked to be SET that reads null. A stored value
+    // that differs some other way is reported as a difference and nothing more. This is also why
+    // phone needs no special case any more — the general rule already covers it.
+    const failures: string[] = [];
+    const rewritten: string[] = [];
+    const show = (v: unknown) => JSON.stringify(v ?? null);
+    const check = (key: "status" | "notes" | "email" | "phone" | "followUpAt") => {
       if (!given(key)) return;
-      const want = args[key] ?? null;
+      const want = key !== "status" && asksToClear(key) ? null : (args[key] ?? null);
       const got = after.state[key] ?? null;
-      if (want !== got) {
-        mismatches.push(`${key}: asked for ${JSON.stringify(want)}, reads ${JSON.stringify(got)}`);
+      if (want === null) {
+        if (got !== null) failures.push(`${key}: asked to clear it, reads ${show(got)}`);
+        return;
       }
+      if (got === null) {
+        failures.push(`${key}: asked for ${show(want)}, reads null`);
+        return;
+      }
+      if (String(want) !== String(got)) rewritten.push(`${key}: sent ${show(want)}, stored ${show(got)}`);
     };
-    compare("status");
-    compare("notes");
-    compare("email");
-    compare("followUpAt");
-    if (given("phone")) {
-      const got = after.state.phone ?? null;
-      if (args.phone === null && got !== null) {
-        mismatches.push(`phone: asked to clear it, reads ${JSON.stringify(got)}`);
-      } else if (args.phone !== null && got === null) {
-        mismatches.push(`phone: asked for ${JSON.stringify(args.phone)}, reads null`);
-      }
+    check("status");
+    check("notes");
+    check("email");
+    check("phone");
+    check("followUpAt");
+    // The row itself, which is the failure the whole save-first exists to prevent: without this the
+    // note could read "this CREATED lead null" and still report success, because every field the
+    // caller named happened to come back as asked.
+    if (!isSaved(after.state)) {
+      failures.push(
+        `the lead still reads id null, so none of this was stored against anything — see ` +
+          `reai_save_lead for the same failure mode`,
+      );
     }
 
     const field = (key: keyof LeadState) =>
@@ -603,14 +645,18 @@ const updateLead = defineTool({
         (after.state.convertedCustomerId
           ? `. Still linked to customer ${after.state.convertedCustomerId} from an earlier conversion.`
           : `.`) +
-        (mismatches.length > 0
+        (failures.length > 0
           ? `\n\nBUT THE WRITE DID NOT FULLY TAKE. Read back from the API:\n` +
-            mismatches.map((m) => `  - ${m}`).join("\n") +
+            failures.map((m) => `  - ${m}`).join("\n") +
             `\n\nEvery call above returned success, so this is the API storing something other ` +
             `than what it accepted. Re-read with reai_get_lead before relying on any of it.`
+          : ``) +
+        (rewritten.length > 0
+          ? `\n\nStored, but not exactly as sent — this API rewrites values (a phone becomes E.164, ` +
+            `a name comes back title-cased):\n` + rewritten.map((m) => `  - ${m}`).join("\n")
           : ``),
     });
-    if (mismatches.length > 0) result.isError = true;
+    if (failures.length > 0) result.isError = true;
     return result;
   },
 });

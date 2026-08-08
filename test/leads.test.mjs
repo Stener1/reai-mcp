@@ -225,6 +225,10 @@ test("the documented query-parameter maxima are enforced locally", () => {
  *     catch that instead of watching a mocked 200 go by.
  *   - PUT .../contact does not create the lead. A tool that writes contact details to an unsaved
  *     company gets a 200 and stores nothing, so the fake keeps the id null for that one call.
+ *
+ * PUT .../status is deliberately NOT modelled. Status is routed through PATCH, so nothing should ever
+ * call it, and the fake's unknown-path throw is a stronger guard than a model would be: route status
+ * there by mistake and every test using this fake fails loudly.
  */
 const ORG = "938225605";
 
@@ -271,14 +275,6 @@ function fakeLead(initial = {}) {
       if (method === "PUT" && path.endsWith("/follow-up")) {
         materialise();
         state.followUpAt = body?.followUpAt ?? null;
-        return { data: {}, status: 200 };
-      }
-      if (method === "PUT" && path.endsWith("/status")) {
-        if (body?.status === null || body?.status === undefined) {
-          throw new Error('ReAI PUT /status failed with HTTP 400: Validation failed');
-        }
-        materialise();
-        state.status = body.status;
         return { data: {}, status: 200 };
       }
       if (method === "PUT" && path.endsWith("/contact")) {
@@ -339,9 +335,16 @@ test("every lead write is classified no more permissively than the escape hatch 
     for (const [method, path] of tool(name).apiPaths) {
       const concrete = path.replace("{orgNumber}", ORG).replace("{id}", "1");
       assert.equal(classifyRequest(method, concrete), "reversible", `${method} ${concrete}`);
-      // A lead write must never look like an external send, whatever the body. "none" is the
-      // answer for a path carrying no transmission pattern at all; "internal" would also be fine.
-      assert.notEqual(classifyTransmission(method, concrete, undefined), "external", `${method} ${concrete}`);
+      // A lead write must never look like an external send. The body is the interesting part: these
+      // tools carry an email address and a phone number, which is exactly the shape that earns an
+      // external classification elsewhere in this API, so the bodyless call proves little on its own.
+      for (const body of [undefined, { email: "someone@example.com", phone: "+4740000000" }]) {
+        assert.notEqual(
+          classifyTransmission(method, concrete, body),
+          "external",
+          `${method} ${concrete} with ${JSON.stringify(body)}`,
+        );
+      }
     }
   }
   assert.equal(tool("reai_delete_lead").destructive, true);
@@ -464,7 +467,12 @@ test("reai_convert_lead saves first, converts by id, and reports the customer", 
   const { text } = await runLive("reai_convert_lead", { orgNumber: ORG }, fake);
   const writes = fake.calls.filter((c) => c.method === "POST").map((c) => c.path);
   assert.deepEqual(writes, ["/api/leads", "/api/leads/53797/convert"], "id-only endpoint needs the save first");
-  assert.ok(!writes.some((p) => p.includes("/org/")), "the org form of convert answers 404");
+  // Not a second reading of the same deepEqual: this one is about the path SHAPE, and it is the
+  // property that survives if the ids or the call order ever change legitimately.
+  assert.ok(
+    writes.every((p) => !p.includes("/org/")),
+    `convert has no /org/{orgNumber} form — it answers 404 — but got ${JSON.stringify(writes)}`,
+  );
   assert.match(text, /is now customer 5983/);
   assert.match(text, /saved first/);
 });
@@ -694,4 +702,88 @@ test("logging a contact event is reversible-class, and the reason is the descrip
   assert.match(logTool.description, /no endpoint that removes a contact event/);
   assert.match(logTool.description, /reai_delete_lead/);
   assert.match(logTool.description, /every other event/);
+});
+
+test("a value the API rewrites is reported as rewritten, not as a failed write", async () => {
+  // Review's finding, and it was mine to fix: comparing byte-for-byte turned three ordinary server
+  // behaviours into "the write did not take". None of them is a failure — reai_create_customer
+  // already documents this API title-casing a stored name, so rewriting is the norm here, not the
+  // exception. Only "asked to clear it, still set" and "asked to set it, reads null" can be failures.
+  for (const [label, sent, stored] of [
+    ["a trimmed note", { notes: "Called them " }, { notes: "Called them" }],
+    ["a lower-cased email", { email: "Zz@Example.INVALID" }, { email: "zz@example.invalid" }],
+    ["a date returned as a timestamp", { followUpAt: "2026-12-01" }, { followUpAt: "2026-12-01T00:00:00" }],
+    ["a normalised phone", { phone: "40000000" }, { phone: "+4740000000" }],
+  ]) {
+    const fake = fakeLead({ id: 700 });
+    const inner = fake.client.request;
+    fake.client.request = async (req) => {
+      const res = await inner(req);
+      if (req.method !== "GET") Object.assign(fake.state, stored);
+      return res;
+    };
+    const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, ...sent }, fake);
+    assert.notEqual(result.isError, true, `${label} must not be an error`);
+    assert.ok(!/DID NOT FULLY TAKE/.test(text), label);
+    assert.match(text, /Stored, but not exactly as sent/, label);
+  }
+});
+
+test("reai_update_lead does not report success against a lead that still reads id null", async () => {
+  // The tool's own headline hazard, inside the tool built to prevent it: a POST /api/leads that
+  // answers 200 without creating the row. Every named field then reads back as asked -- because
+  // nothing was stored anywhere -- so only checking the fields would have called this a success and
+  // printed "CREATED lead null".
+  const fake = fakeLead();
+  fake.client.request = async (req) => ({
+    data: req.method === "GET" ? { orgNumber: ORG, companyName: "X", lead: { id: null } } : {},
+    status: 200,
+  });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, email: "x@y.no" }, fake);
+  assert.equal(result.isError, true);
+  assert.match(text, /still reads id null/);
+  assert.match(text, /reai_save_lead/);
+});
+
+test("an empty note clears, because the endpoint documents empty as a clear", async () => {
+  // UpdateLeadNotesReq: "Null or empty clears the notes". PATCH cannot clear at all, so routing ""
+  // through it would store an empty note where the caller asked for none.
+  const fake = fakeLead({ id: 700, notes: "something" });
+  await runLive("reai_update_lead", { orgNumber: ORG, notes: "" }, fake);
+  assert.equal(fake.state.notes, null, "an empty note must clear, not store an empty string");
+  const patches = fake.calls.filter((c) => c.method === "PATCH");
+  assert.equal(patches.length, 0, "nothing was being set, so there is no PATCH to make");
+  assert.ok(fake.calls.some((c) => c.path.endsWith("/notes")), "it goes to the clearing setter");
+});
+
+test("readLeadState carries every field when a response arrives flattened", async () => {
+  // The fallback never fires against today's API. If it ever does, dropping email and phone would
+  // make the contact carry-over send null for a field the caller never mentioned.
+  const fake = fakeLead({ id: 700 });
+  fake.client.request = async (req) => {
+    fake.calls.push(req);
+    if (req.method === "GET") {
+      // No `lead` object: the shape the search rows use.
+      return {
+        data: { orgNumber: ORG, companyName: "X", id: 700, status: "active", email: "keep@b.no", phone: "+4740000000" },
+        status: 200,
+      };
+    }
+    return { data: {}, status: 200 };
+  };
+  await runLive("reai_update_lead", { orgNumber: ORG, notes: "hello" }, fake);
+  const contact = fake.calls.find((c) => c.path.endsWith("/contact"));
+  assert.equal(contact, undefined, "no contact field was mentioned, so no contact call");
+
+  // And when one IS mentioned, the untouched neighbour comes from the flattened fields.
+  const second = fakeLead({ id: 700 });
+  second.client.request = async (req) => {
+    second.calls.push(req);
+    return req.method === "GET"
+      ? { data: { orgNumber: ORG, companyName: "X", id: 700, email: "keep@b.no", phone: "+4740000000" }, status: 200 }
+      : { data: {}, status: 200 };
+  };
+  await runLive("reai_update_lead", { orgNumber: ORG, email: "new@b.no" }, second);
+  const call = second.calls.find((c) => c.path.endsWith("/contact"));
+  assert.deepEqual(call.body, { email: "new@b.no", phone: "+4740000000" });
 });
