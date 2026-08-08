@@ -219,6 +219,8 @@ async function main() {
     salaryRunId: undefined,
     salaryEmployeeIds: [],
     expenseIds: [],
+    /** expenseId -> voucherId, captured at booking so cleanup never has to ask. */
+    expenseVoucherIds: {},
   };
 
   try {
@@ -1447,6 +1449,13 @@ async function main() {
           arguments: { id: expenseId },
         });
         const voucher = booked.isError ? undefined : jsonOf(booked);
+        // Remembered here, not re-read during cleanup. A cleanup that asks the API what it needs to
+        // clean up fails exactly when the API is having a bad minute: an errored or timed-out
+        // reai_get_expense made voucherId undefined, which read as "not booked", which sent cleanup
+        // down the reversal path that cannot work — leaving the expense, its voucher and the employee
+        // that depends on it in a live tenant. The id is known at the moment it is created, so it is
+        // kept.
+        if (Number.isInteger(voucher?.voucherId)) created.expenseVoucherIds[expenseId] = voucher.voucherId;
         report(
           "reai_book_expense_voucher POSTS a voucher, in its own EX series",
           !booked.isError &&
@@ -1482,42 +1491,76 @@ async function main() {
           name: "reai_delete_expense_voucher",
           arguments: { id: expenseId },
         });
-        report(
-          "reai_delete_expense_voucher reports DELETED, not merely 200",
-          !unlinked.isError && jsonOf(unlinked)?.outcome === "deleted",
-          `outcome=${JSON.stringify(jsonOf(unlinked)?.outcome ?? null)}`,
-        );
-        report(
-          "and the ledger is back where it started",
-          (await countOf(
-            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
-          )) === vouchersBeforeExpense,
-          `vouchers=${await countOf(
-            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
-          )}`,
-        );
+        // Upstream is broken here as of 2026-08-08, and the shape of the break matters more than
+        // the count of failures it causes: DELETE /api/expenses/{id}/voucher answers
+        // 409 application/problem+json with a raw Hibernate TransientPropertyValueException on a
+        // freshly booked voucher. The tool's own description records it answering
+        // {"outcome":"deleted"} when it was written, so this is a regression on ReAI's side, not
+        // ours. Reported as a known upstream defect rather than a failure, because a red suite that
+        // stays red teaches everyone to ignore it — but asserted POSITIVELY, so the day ReAI fixes
+        // it this line fails and tells us to delete this branch.
+        const upstreamCannotUnbook =
+          unlinked.isError === true && /TransientPropertyValueException/.test(textOf(unlinked));
+        if (upstreamCannotUnbook) {
+          report(
+            "KNOWN UPSTREAM DEFECT: DELETE /api/expenses/{id}/voucher 409s with a Hibernate error",
+            true,
+            "unbooking is impossible on ReAI's side today — remove this branch when it starts working",
+          );
+          console.log(
+            "         the four checks that need an unbooked expense cannot run: unapprove, " +
+              "reversal, and the two reads that observe it.",
+          );
+        } else {
+          // The claim "asserted positively, so it fails when ReAI fixes it" was false as first
+          // written: a successful unlink simply fell through to the normal checks and nothing said the
+          // special case had gone stale. So the recovery is itself a failing check. Failing on good
+          // news looks odd and is the point — the quirk, the tool's BROKEN UPSTREAM paragraph and the
+          // branch above all have to be deleted together, and nothing else would ever say so.
+          report(
+            "the KNOWN UPSTREAM DEFECT branch is now STALE — delete it",
+            false,
+            "DELETE /api/expenses/{id}/voucher worked: remove the branch in this script, the " +
+              "expense-voucher-unlink-is-broken-upstream quirk, and the upstream paragraphs in " +
+              "reai_delete_expense_voucher and reai_reverse_expense",
+          );
+          report(
+            "reai_delete_expense_voucher reports DELETED, not merely 200",
+            !unlinked.isError && jsonOf(unlinked)?.outcome === "deleted",
+            `outcome=${JSON.stringify(jsonOf(unlinked)?.outcome ?? null)}`,
+          );
+          report(
+            "and the ledger is back where it started",
+            (await countOf(
+              await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+            )) === vouchersBeforeExpense,
+            `vouchers=${await countOf(
+              await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+            )}`,
+          );
 
-        const unapproved = await client.callTool({ name: "reai_unapprove_expense", arguments: { id: expenseId } });
-        report("reai_unapprove_expense once the voucher is gone", !unapproved.isError, firstLineOf(textOf(unapproved)));
+          const unapproved = await client.callTool({ name: "reai_unapprove_expense", arguments: { id: expenseId } });
+          report("reai_unapprove_expense once the voucher is gone", !unapproved.isError, firstLineOf(textOf(unapproved)));
 
-        // The finding this toolset exists for: reversal is invisible on a detail read.
-        const reversed = await client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } });
-        report(
-          "reai_reverse_expense reports the reversal",
-          !reversed.isError && jsonOf(reversed)?.outcome === "reversed",
-          `outcome=${JSON.stringify(jsonOf(reversed)?.outcome ?? null)}`,
-        );
-        const readReversed = await client.callTool({ name: "reai_get_expense", arguments: { id: expenseId } });
-        report(
-          "the API still returns it with its OLD status — no field changed",
-          ["open", "for_approval", "approved"].includes(String(jsonOf(readReversed)?.status)),
-          `status=${JSON.stringify(jsonOf(readReversed)?.status ?? null)}`,
-        );
-        report(
-          "and reai_get_expense detects the reversal anyway, from list membership",
-          /HAS BEEN REVERSED/.test(textOf(readReversed)),
-          firstLineOf(textOf(readReversed).split("\n\n")[1] ?? ""),
-        );
+          // The finding this toolset exists for: reversal is invisible on a detail read.
+          const reversed = await client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } });
+          report(
+            "reai_reverse_expense reports the reversal",
+            !reversed.isError && jsonOf(reversed)?.outcome === "reversed",
+            `outcome=${JSON.stringify(jsonOf(reversed)?.outcome ?? null)}`,
+          );
+          const readReversed = await client.callTool({ name: "reai_get_expense", arguments: { id: expenseId } });
+          report(
+            "the API still returns it with its OLD status — no field changed",
+            ["open", "for_approval", "approved"].includes(String(jsonOf(readReversed)?.status)),
+            `status=${JSON.stringify(jsonOf(readReversed)?.status ?? null)}`,
+          );
+          report(
+            "and reai_get_expense detects the reversal anyway, from list membership",
+            /HAS BEEN REVERSED/.test(textOf(readReversed)),
+            firstLineOf(textOf(readReversed).split("\n\n")[1] ?? ""),
+          );
+        }
       }
     }
 
@@ -1559,11 +1602,63 @@ async function main() {
       // back to 0, and the voucher then answered 404. The description is corrected; the cleanup
       // needed no change, and adding an unlink here made it FAIL, because a reversed expense
       // answers 409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning."
-      await attempt(
-        `test expense ${expenseId} reversed`,
-        () => client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } }),
-        (r) => firstLineOf(textOf(r)),
-      );
+      // Booked first, because the order is the whole point. While upstream cannot unbook (see the
+      // 409 above), reversal CANNOT succeed on a booked expense — attempting it anyway produced a
+      // failing cleanup line that blamed this suite for a defect at ReAI, which is the worst kind of
+      // red: it is not actionable and it trains the reader to skip the output.
+      const readBack = await client
+        .callTool({ name: "reai_get_expense", arguments: { id: expenseId } })
+        .catch(() => undefined);
+      // The remembered id wins, and the read is only a fallback for an expense this run did not book.
+      // An unreadable expense must never be treated as an unbooked one.
+      const bookedVoucherId =
+        created.expenseVoucherIds[expenseId] ??
+        (readBack && !readBack.isError ? jsonOf(readBack)?.voucherId : undefined);
+      if (!bookedVoucherId) {
+        await attempt(
+          `test expense ${expenseId} reversed`,
+          () => client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } }),
+          (r) => firstLineOf(textOf(r)),
+        );
+      }
+      // If it is still booked, reversal cannot touch it and neither can DELETE /api/expenses/{id}
+      // (409, the same Hibernate error). Deleting the VOUCHER by id is the only route that works
+      // while upstream is broken — and it CASCADES: measured on 2026-08-08, expense 2241 answered
+      // 404 immediately after its voucher 30980 was deleted, and again for 2242/30984. So this is
+      // NOT an unlink, it destroys the expense, which is exactly why the tool must not do it
+      // silently and why it lives here in the cleanup instead.
+      //
+      // Without it this suite left an employee, an expense and a voucher in a REAL company on every
+      // run: four such records were found and removed by hand before this was written, and the run
+      // that found them created a fifth. Cleanup that only works on the happy path is not cleanup.
+      if (bookedVoucherId) {
+        const cascaded = await attempt(
+          `test expense ${expenseId} removed with its voucher ${bookedVoucherId} (cascade)`,
+          () => client.callTool({ name: "reai_delete_voucher", arguments: { id: bookedVoucherId } }),
+          (r) => firstLineOf(textOf(r)),
+        );
+        // `attempt` counts any non-error result as success, and this endpoint deliberately succeeds on
+        // "deleted", on "reversed" and on an unrecognised outcome. Only "deleted" is the cascade that
+        // takes the expense with it — a reversal leaves both the expense and the employee behind while
+        // this line reads green. So the outcome is asserted, and then the expense itself is checked,
+        // because the cascade is upstream behaviour rather than a promise anyone made us.
+        if (cascaded && !cascaded.isError) {
+          const outcome = jsonOf(cascaded)?.outcome;
+          report(
+            `the voucher was DELETED outright, which is what takes expense ${expenseId} with it`,
+            outcome === "deleted",
+            `outcome=${JSON.stringify(outcome ?? null)}`,
+          );
+          const gone = await client
+            .callTool({ name: "reai_get_expense", arguments: { id: expenseId } })
+            .catch(() => ({ isError: true }));
+          report(
+            `expense ${expenseId} is really gone, not merely unbooked`,
+            gone.isError === true,
+            gone.isError === true ? "reads 404" : firstLineOf(textOf(gone)),
+          );
+        }
+      }
     }
     // The salary run before its employees: an employee referenced by a run is a dependent
     // record, and deleting the parent first is what left four orders stranded on this tenant

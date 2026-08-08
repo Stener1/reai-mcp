@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReaiApiError } from "../reai/errors.js";
 import {
   defineTool,
   fail,
@@ -707,7 +708,13 @@ const deleteExpenseVoucher = defineTool({
     'answering {"outcome":"deleted"} or {"outcome":"reversed"}. A reversal posts to the ledger.\n\n' +
     "So this tool reads the outcome rather than reporting success from a 200. Measured on a " +
     'freshly booked voucher: {"outcome":"deleted"}, and the ledger count went back down.\n\n' +
-    "The expense itself is kept and can be booked again.",
+    "The expense itself is kept and can be booked again.\n\n" +
+    "BROKEN UPSTREAM as of 2026-08-08: on a freshly booked voucher this now answers 409 with a raw " +
+    "Hibernate TransientPropertyValueException, which is a persistence bug on ReAI's side and not " +
+    "something a different body fixes. While it lasts, a booked expense cannot be unwound through " +
+    "its own endpoints at all — unapprove refuses it for being booked, reverse will not take it, and " +
+    "DELETE /api/expenses/{id} answers the same 409. The runtime note on the failure says what the " +
+    "one working route costs.",
   risk: "irreversible",
   destructive: true,
   apiPaths: [["DELETE", "/api/expenses/{id}/voucher"]],
@@ -716,11 +723,45 @@ const deleteExpenseVoucher = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request<{ outcome?: string }>({
-      method: "DELETE",
-      path: `/api/expenses/${args.id}/voucher`,
-      tenantId: requireTenantId(args.tenantId, ctx),
-    });
+    const tenantId = requireTenantId(args.tenantId, ctx);
+    let res;
+    try {
+      res = await ctx.client.request<{ outcome?: string }>({
+        method: "DELETE",
+        path: `/api/expenses/${args.id}/voucher`,
+        tenantId,
+      });
+    } catch (err) {
+      // The upstream 409 is caught by name rather than let through as an API error, because the
+      // API's own message is a Java stack type: a caller reading
+      // "TransientPropertyValueException: Persistent instance of 'no.reai.ex.mdl.Expense'..." has no
+      // way to tell a bug on ReAI's side from a body it got wrong, and will keep trying variations.
+      //
+      // What it deliberately does NOT do is fall back to deleting the voucher by id. That call
+      // succeeds, and it also destroys the expense — measured twice, 404 on the expense immediately
+      // after. Silently turning "unlink the voucher, keep the expense" into "delete both" would
+      // destroy the record the caller asked to preserve, so the route is named, its cost is stated,
+      // and the decision stays with whoever asked.
+      if (err instanceof ReaiApiError && err.status === 409 &&
+          /TransientPropertyValueException/.test(`${err.message} ${err.rawBody ?? ""}`)) {
+        return fail(
+          `Unbooking expense ${args.id} is BROKEN ON ReAI'S SIDE, not in this request. ` +
+            `DELETE /api/expenses/${args.id}/voucher answered 409 with a raw Hibernate ` +
+            `TransientPropertyValueException, which is a server-side persistence bug — no change to ` +
+            `this call makes it work, and it did work when this tool was written.\n\n` +
+            `Everything that needs the expense unbooked is blocked with it: unapprove refuses a ` +
+            `booked expense, reverse will not take it, and DELETE /api/expenses/${args.id} answers ` +
+            `the same 409.\n\n` +
+            `There is one route that works, and it is not this one: deleting the VOUCHER itself with ` +
+            `reai_delete_voucher on the id in the expense's voucherId. Read what it costs before ` +
+            `using it — it CASCADES, and the expense is deleted too (measured: the expense answered ` +
+            `404 immediately afterwards). That is not the unlink you asked for, so this tool will not ` +
+            `do it for you. On a real company's books it also leaves a gap in the voucher number ` +
+            `series.`,
+        );
+      }
+      throw err;
+    }
     const outcome = res.data?.outcome;
     return ok(res.data ?? { expenseId: args.id }, {
       note:
@@ -753,6 +794,12 @@ const reverseExpense = defineTool({
     'fails: 409 "is reversed and can no longer be delivered".\n\n' +
     "reai_get_expense compensates by checking list membership. Nothing else does, so a reversed " +
     "expense read through reai_request looks live.\n\n" +
+    "BROKEN UPSTREAM as of 2026-08-08 for a BOOKED expense: this sends DELETE /api/expenses/{id}, " +
+    "which now answers 409 with a raw Hibernate TransientPropertyValueException whenever the expense " +
+    "has a voucher. So the paragraph below describes what this used to do and will do again, not what " +
+    "it can do today — a booked expense cannot be reversed at all until ReAI fixes it, and unbooking " +
+    "it first is blocked by the same defect. reai_delete_expense_voucher explains the one route that " +
+    "works and what it costs.\n\n" +
     "It DOES take the voucher with it, which an earlier version of this description got wrong. " +
     "Measured: an expense booked to voucher 30808 was reversed, the day's voucher count went from 1 " +
     "back to 0, and DELETE /api/vouchers/30808 then answered 404 \"Bilag ikke funnet\" — the voucher " +
