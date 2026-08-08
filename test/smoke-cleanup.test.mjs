@@ -34,6 +34,9 @@ const SUITES = [
   // outside this guard — which exists because the same mistake was made three times in three
   // iterations. Its three customer probes use the same `created.x = …` / delete-in-`finally` idiom.
   "scripts/audit-messages.mjs",
+  // The storage audit CREATES records — that is the only way to see what the API stores — so it belongs
+  // here more obviously than the message audit did.
+  "scripts/audit-storage.mjs",
 ];
 
 /**
@@ -112,6 +115,27 @@ for (const path of SUITES) {
   test(`${path}: every created record is DELETED inside the finally`, () => {
     const { tryHalf, finallyHalf } = halves(source(path));
     const created = new Set([...tryHalf.matchAll(CREATED_ASSIGNMENT)].map((m) => m[1]));
+
+    // A second shape, and a stronger one. `scripts/audit-storage.mjs` records fixtures under COMPUTED
+    // keys — `created[key] = …`, because how many it makes depends on the case list — and its finally
+    // sweeps `Object.entries(created)` with a delete. No key can be forgotten there, which is more than
+    // the named-key form guarantees; the cost is that this guard cannot enumerate them.
+    //
+    // So the proof required is different: every assignment goes through the computed form, and the
+    // sweep really deletes. Accepted only when BOTH hold, so a script cannot get here by writing no
+    // cleanup at all.
+    const computed = [...tryHalf.matchAll(/created\[[A-Za-z0-9_]+\]\s*=/g)];
+    if (computed.length > 0 && created.size === 0) {
+      const sweeps = /for\s*\(\s*const\s*\[[^\]]+\]\s*of\s*Object\.entries\(\s*created\s*\)\s*\)\s*\{([\s\S]{0,600})/.exec(
+        finallyHalf,
+      );
+      assert.ok(
+        sweeps && /(?:name:\s*"reai_delete_[a-z_]+"|method:\s*"DELETE"|"DELETE",)/.test(sweeps[1]),
+        `${path} records fixtures under computed keys but its finally does not sweep them with a delete`,
+      );
+      return;
+    }
+
     assert.ok(created.size >= 3, `expected several created records; found ${[...created]}`);
 
     // Deleted, not merely mentioned. The first version checked `finallyHalf.includes("created.x")`,

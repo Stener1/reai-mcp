@@ -9,6 +9,36 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`scripts/audit-storage.mjs` — the half `audit-messages.mjs` said it could not reach.** That script
+  checks the wording of refusals, and its own contract admits every case is a request built to fail, so
+  nothing there observes what the API *accepts, normalises or stores*. Two of the five false claims that
+  motivated it live in exactly that gap: `skipRegistryLookup` drifts on a `201`, and the phone rule was
+  wrong three separate times about what gets **stored**. Eight claims now checked against the live API;
+  first run **8 of 8 verified**, including the evidence that the `skipRegistryLookup` override comes from
+  a stale internal directory rather than the registry (`971648198` stores as "Statens Innkrevingssentral",
+  a superseded name).
+  - It writes, which is the whole difference. Only customers — reversible, and they delete cleanly.
+    Everything is recorded in `created` and removed in a `finally`; a record that cannot be confirmed
+    deleted **fails the run**; the token's reachable tenants are verified first, since a single-tenant
+    token ignores `X-Tenant-Id`; and a test asserts it never touches `/api/vouchers`,
+    `/api/share-investments` or `/api/general-sub-accounts`, the three paths the message audit had to have
+    removed from it.
+  - **It reads the record back instead of trusting the write.** Not caution for its own sake: `phone` is
+    not a create field, which `reai_create_customer` already documents, and the first version of these
+    probes sent it to `POST /api/customers` and reported **four DRIFTs against `PHONE_RULE`, all
+    `stored null`** — when the value had never been written. The phone claims go through `PATCH` now and a
+    test pins that. Counting both audits, that is the fourth time the three-outcome design has pointed at
+    a broken probe instead of a correct description.
+  - Each case names the **constant** making its claim plus a marker phrase, and `test/storage-drift.test.mjs`
+    asserts the marker is still present — so editing `PHONE_RULE` fails the suite until the probe is
+    revisited. Verified by mutation. What that test deliberately does not do is claim every storage claim
+    has a probe: the population is prose and cannot be measured, and asserting completeness one cannot
+    measure is what three earlier PRs here were spent unwinding.
+  - `test/smoke-cleanup.test.mjs` learned a second cleanup shape for it: fixtures recorded under
+    **computed** keys with a `for (… of Object.entries(created))` sweep, which cannot forget a key.
+    Accepted only when the sweep really deletes — verified by making it report-only and watching the guard
+    fail.
+
 - **`scripts/audit-messages.mjs` — does the API still produce the refusal strings this repository
   matches on?** Five consecutive iterations found a false *measured* claim in shipped guidance (the phone
   rule three times, `skipRegistryLookup`, a quirk telling agents to strip a correct `+47`, a 404

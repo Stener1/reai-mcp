@@ -68,6 +68,10 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 # Does the API still say what we claim it says? Every case is designed to FAIL.
 REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/audit-messages.mjs --tenant 1234
+
+# Does it still STORE what we claim it stores? Creates records, deletes them.
+REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
+  node scripts/audit-storage.mjs --tenant 1234
 ```
 
 ### Why `audit-messages.mjs` exists, and what it does not cover
@@ -126,6 +130,37 @@ text-reading dependency is added to `src/` without a probe, or if an exemption n
 longer exists. It covers four shapes — `/re/.test`, `/re/.exec`, `.includes`/`.startsWith`/`.endsWith`
 on any receiver, and `case "…":` — because the first version saw only the first and was demonstrably
 blind to the rest, including `loans.ts`'s wrong-table diagnosis, which needed no test data at all.
+
+### `audit-storage.mjs`: the half the message audit cannot reach
+
+`audit-messages.mjs` checks the wording of **refusals**, and says so plainly: every case there is a
+request built to fail, so nothing observes what the API *accepts, normalises or stores*. Two of the five
+false claims that motivated it live in that gap — `skipRegistryLookup` drifts on a `201`, and the phone
+rule was wrong three times about what gets **stored**.
+
+So this one writes. That difference dictates the design: only customers, which delete cleanly and which
+`classifyRequest` calls reversible; everything recorded in `created` and removed in a `finally`; a record
+that cannot be confirmed deleted **fails the run**; and the token's reachable tenants verified before
+anything is written, since a single-tenant token ignores `X-Tenant-Id`. A test asserts it never writes to
+`/api/vouchers`, `/api/share-investments` or `/api/general-sub-accounts` — the three paths the message
+audit had to have removed from it.
+
+**It reads the record back rather than trusting the write**, and that is not caution for its own sake. A
+create can echo a field it silently dropped. `phone` is not a create field — `reai_create_customer` says
+so — and the first version of these probes sent it to `POST /api/customers` and reported **four DRIFTs
+against `PHONE_RULE`, all `stored null`**, when the value had never been written at all. The phone claims
+go through `PATCH` now, and a test pins that.
+
+Each case names the **constant** that makes its claim and a marker phrase from it.
+`test/storage-drift.test.mjs` asserts the marker is still there, so editing `PHONE_RULE` fails the suite
+until the probe is revisited — which is exactly when a claim and its measurement can diverge. What that
+test deliberately does *not* do is assert every storage claim in the repository has a probe: a storage
+claim is prose, its population cannot be measured mechanically, and asserting completeness you cannot
+measure is what three earlier PRs here were spent unwinding.
+
+First run: **8 of 8 claims verified**, including the evidence that the `skipRegistryLookup` override
+comes from a stale internal directory rather than Brønnøysundregistrene (`971648198` stores as
+`Statens Innkrevingssentral`, a superseded name).
 
 ## A note on `npm audit`
 

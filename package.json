@@ -48,7 +48,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
     "smoke": "node scripts/smoke.mjs",
-    "audit:messages": "node scripts/audit-messages.mjs"
+    "audit:messages": "node scripts/audit-messages.mjs",
+    "audit:storage": "node scripts/audit-storage.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
