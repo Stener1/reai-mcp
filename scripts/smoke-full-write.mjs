@@ -218,6 +218,7 @@ async function main() {
     supplierId: undefined,
     salaryRunId: undefined,
     salaryEmployeeIds: [],
+    expenseIds: [],
   };
 
   try {
@@ -1327,6 +1328,149 @@ async function main() {
         );
       }
     }
+
+    // --- Expense claims: the state machine, and the ledger step in the middle -
+    //
+    // Placed after payroll deliberately. A salary run is pre-populated with wage lines derived from
+    // expense postings for the period, so booking an expense BEFORE that section would change what
+    // the run contains and quietly invalidate its assertions.
+    console.log("\n  Expense claims:");
+    if (Number.isInteger(empId)) {
+      const vouchersBeforeExpense = countOf(
+        await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+      );
+      const createdExp = await client.callTool({
+        name: "reai_create_expense",
+        arguments: {
+          title: `${STAMP} expense`,
+          travel: false,
+          employeeId: empId,
+          costs: [
+            { date: today, description: `${STAMP} taxi`, amount: 500, category: "taxi", vatCode: "0" },
+            { date: today, description: `${STAMP} hotel`, amount: 900, category: "hotel", vatCode: "0" },
+          ],
+        },
+      });
+      const expData = createdExp.isError ? undefined : jsonOf(createdExp);
+      const expenseId = expData?.id;
+      if (Number.isInteger(expenseId)) created.expenseIds.push(expenseId);
+      report(
+        "reai_create_expense",
+        !createdExp.isError && Number.isInteger(expenseId) && expData?.totalAmount === 1400,
+        expenseId ? `id=${expenseId} total=${expData?.totalAmount}` : textOf(createdExp).slice(0, 180),
+      );
+      report(
+        "a draft expense posts nothing",
+        vouchersBeforeExpense !== undefined &&
+          (await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )) === vouchersBeforeExpense,
+        `vouchers still ${vouchersBeforeExpense}`,
+      );
+
+      if (Number.isInteger(expenseId)) {
+        // The line arrays are complete lists: two rows in, one row sent, one row left.
+        const replaced = await client.callTool({
+          name: "reai_update_expense",
+          arguments: {
+            id: expenseId,
+            costs: [{ date: today, description: `${STAMP} taxi only`, amount: 500, category: "taxi", vatCode: "0" }],
+          },
+        });
+        const afterReplace = replaced.isError ? undefined : jsonOf(replaced);
+        report(
+          "sending one cost row REPLACES the list — 1400 becomes 500",
+          !replaced.isError && afterReplace?.totalAmount === 500 && afterReplace?.costs?.length === 1,
+          `total=${afterReplace?.totalAmount} rows=${afterReplace?.costs?.length}`,
+        );
+
+        for (const [label, name] of [
+          ["reai_deliver_expense", "reai_deliver_expense"],
+          ["reai_approve_expense", "reai_approve_expense"],
+        ]) {
+          const r = await client.callTool({ name, arguments: { id: expenseId } });
+          report(label, !r.isError, firstLineOf(textOf(r)));
+        }
+
+        const booked = await client.callTool({
+          name: "reai_book_expense_voucher",
+          arguments: { id: expenseId },
+        });
+        const voucher = booked.isError ? undefined : jsonOf(booked);
+        report(
+          "reai_book_expense_voucher POSTS a voucher, in its own EX series",
+          !booked.isError &&
+            Number.isInteger(voucher?.voucherId) &&
+            /^EX/.test(String(voucher?.voucherNumber ?? "")),
+          voucher ? `voucher=${voucher.voucherId} number=${voucher.voucherNumber}` : textOf(booked).slice(0, 160),
+        );
+        report(
+          "and the ledger moved by exactly one",
+          (await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )) === (vouchersBeforeExpense ?? 0) + 1,
+          `${vouchersBeforeExpense} → ${await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )}`,
+        );
+        // status STILL says approved, which is the trap the read tool exists to explain.
+        const readBooked = await client.callTool({ name: "reai_get_expense", arguments: { id: expenseId } });
+        report(
+          'a booked expense still reads status "approved" — voucherId is the only tell',
+          jsonOf(readBooked)?.status === "approved" && /IS in the ledger/.test(textOf(readBooked)),
+          `status=${jsonOf(readBooked)?.status} voucherId=${jsonOf(readBooked)?.voucherId}`,
+        );
+
+        const blocked = await client.callTool({ name: "reai_unapprove_expense", arguments: { id: expenseId } });
+        report(
+          "unapproving a booked expense is refused locally, naming the voucher",
+          blocked.isError === true && /booked to voucher/.test(textOf(blocked)),
+          firstLineOf(textOf(blocked)),
+        );
+
+        const unlinked = await client.callTool({
+          name: "reai_delete_expense_voucher",
+          arguments: { id: expenseId },
+        });
+        report(
+          "reai_delete_expense_voucher reports DELETED, not merely 200",
+          !unlinked.isError && jsonOf(unlinked)?.outcome === "deleted",
+          `outcome=${JSON.stringify(jsonOf(unlinked)?.outcome ?? null)}`,
+        );
+        report(
+          "and the ledger is back where it started",
+          (await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )) === vouchersBeforeExpense,
+          `vouchers=${await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )}`,
+        );
+
+        const unapproved = await client.callTool({ name: "reai_unapprove_expense", arguments: { id: expenseId } });
+        report("reai_unapprove_expense once the voucher is gone", !unapproved.isError, firstLineOf(textOf(unapproved)));
+
+        // The finding this toolset exists for: reversal is invisible on a detail read.
+        const reversed = await client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } });
+        report(
+          "reai_reverse_expense reports the reversal",
+          !reversed.isError && jsonOf(reversed)?.outcome === "reversed",
+          `outcome=${JSON.stringify(jsonOf(reversed)?.outcome ?? null)}`,
+        );
+        const readReversed = await client.callTool({ name: "reai_get_expense", arguments: { id: expenseId } });
+        report(
+          "the API still returns it with its OLD status — no field changed",
+          ["open", "for_approval", "approved"].includes(String(jsonOf(readReversed)?.status)),
+          `status=${JSON.stringify(jsonOf(readReversed)?.status ?? null)}`,
+        );
+        report(
+          "and reai_get_expense detects the reversal anyway, from list membership",
+          /HAS BEEN REVERSED/.test(textOf(readReversed)),
+          firstLineOf(textOf(readReversed).split("\n\n")[1] ?? ""),
+        );
+      }
+    }
+
   } finally {
     // --- 5. Clean up, most dependent first -----------------------------------
     //
@@ -1348,6 +1492,25 @@ async function main() {
       }
     };
 
+    // Expenses before the employee they belong to, for the same dependency reason as the salary
+    // run: a record referencing an employee is what makes DELETE /api/employees/{id} answer 409.
+    // Reversal is the only removal this API offers for an expense, and it is idempotent — a second
+    // reverse of an already-reversed expense answered ok, measured — so this is safe to repeat.
+    for (const expenseId of created.expenseIds) {
+      // Reversing is enough, including for an expense still carrying a posted voucher. Review
+      // raised the opposite concern — that a throw between booking and the normal unlink would
+      // leave an EX voucher in a live ledger — on the strength of this tool's own description,
+      // which claimed reversing "does not touch a voucher". That claim was wrong. Measured: a
+      // booked expense reversed with its voucher live took the voucher with it, the count went 1
+      // back to 0, and the voucher then answered 404. The description is corrected; the cleanup
+      // needed no change, and adding an unlink here made it FAIL, because a reversed expense
+      // answers 409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning."
+      await attempt(
+        `test expense ${expenseId} reversed`,
+        () => client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
     // The salary run before its employees: an employee referenced by a run is a dependent
     // record, and deleting the parent first is what left four orders stranded on this tenant
     // once already. A draft run deletes cleanly (measured 200) because it posted nothing.

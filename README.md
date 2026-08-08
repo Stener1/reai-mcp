@@ -388,10 +388,22 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_supplier_invoices` · `reai_get_supplier_invoice` | Registered supplier invoices and credit notes | read |
 | `reai_list_reception_documents` | The document inbox — incoming invoices and receipts not yet booked | read |
 | `reai_parse_ehf_attachment` | Parse an incoming EHF invoice into structured data | read |
-| `reai_list_expenses` | Employee expense claims, incl. per diems and mileage | read |
+| `reai_list_expenses` · `reai_get_expense` | Employee expense claims, incl. per diems and mileage. The detail read also answers "has this been reversed", which the API cannot be asked directly | read |
+| `reai_create_expense` · `reai_update_expense` | Draft a claim and edit it while it is open. The line arrays are each the **complete list** — sending one cost row deletes the others | **irreversible** |
+| `reai_deliver_expense` · `reai_approve_expense` · `reai_unapprove_expense` | Move a claim through open → for_approval → approved. Unapproving refuses while a voucher exists, and says which one to delete | **irreversible** |
+| `reai_book_expense_voucher` · `reai_delete_expense_voucher` | Post the expense to the ledger, and unlink it again. The delete is "delete **or** reverse" and reports which | **irreversible** |
+| `reai_reverse_expense` | Withdraw a claim. It is not deleted, and no visible field changes — see below | **irreversible** |
 | `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data. Changing bank details (`iban`, `bankAccountNumber`, `swiftCode`) escalates the call to irreversible — see below | reversible |
 | `reai_create_supplier_invoice` | Register a supplier invoice directly | **irreversible** |
 | `reai_register_supplier_invoice_payment` | Record paying a supplier | **irreversible** |
+
+Expense claims are the other half of payroll: a salary run arrives pre-populated with wage lines derived from expense postings for the period, so what is approved here is what gets paid out there. The whole state machine was driven on the test tenant — `open → deliver → for_approval → approve → approved → voucher`, and back down by deleting the voucher and unapproving — and three things it does are worth knowing before using it.
+
+**`status` never says "booked".** A booked expense still reads `approved`; the only difference is that `voucherId` is set. Booking is also where the ledger moves: the voucher count went from 0 to 1 and came back as `{expenseId, voucherId, voucherNumber: "EX1-2026", voucherDate}`, its own number series. And booking an expense that is still `for_approval` **approves it as part of the same call**, so it can skip the approve step entirely.
+
+**`status` never says "reversed" either, and that one hides.** `DELETE /api/expenses/{id}` answers `{"outcome":"reversed"}`, the expense vanishes from the list — and `GET /api/expenses/{id}` still returns it with whatever status it had before. No visible field changes. `?status=reversed` is rejected with a `400`, so the API cannot even be asked. The only positive signal is that a transition fails: `409 "Expense 2203 is reversed and can no longer be delivered"`. `reai_get_expense` spends one filtered list call to answer it properly, because acting on a withdrawn claim as though it were live is the mistake worth preventing.
+
+**`category` is optional to create and required to deliver.** A cost row is accepted with no category, and then delivering answers `400 "Kategori må velges for kostnadsrad."` — naming no row. It is an enum of 28 values, so the tools take it as one and say when a row is missing it.
 
 ### Bank & VAT
 | Tool | Purpose | Risk |
@@ -522,19 +534,19 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 114 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 123 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 37 tools
-REAI_TOOLSETS=purchase             # 23 tools
+REAI_TOOLSETS=purchase             # 32 tools
 REAI_TOOLSETS=organisation         # 20 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 114
+(unset)                            # all 123
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -545,7 +557,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **85 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **90 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

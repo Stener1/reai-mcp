@@ -591,6 +591,91 @@ export const QUIRKS: readonly Quirk[] = [
       "is 50%: a 1 × 5000 COMMISSION line produced payableAmount 2500 and totalTaxDeducted 2500.",
   },
   {
+    id: "reversing-an-expense-unposts-its-voucher",
+    paths: ["/api/expenses/{id}", "/api/expenses/{id}/voucher"],
+    methods: ["DELETE"],
+    kind: "workflow",
+    note:
+      "Reversing an expense TAKES ITS VOUCHER WITH IT. Measured: an expense booked to voucher 30808 " +
+      "was reversed with DELETE /api/expenses/{id}, the day's voucher count went from 1 back to 0, " +
+      'and DELETE /api/vouchers/30808 then answered 404 "Bilag ikke funnet". The voucher is gone ' +
+      "rather than stranded, so a booked expense does NOT have to be unlinked before it is " +
+      "reversed.\n\n" +
+      "The consequence for ordering is the other way round from what it looks like. Once the expense " +
+      "is reversed, DELETE /api/expenses/{id}/voucher answers " +
+      '409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning." — not because the voucher is ' +
+      "stuck, but because there is no longer an expense to unlink it from. A 409 there after a " +
+      "reversal is expected and means nothing is left to do.",
+  },
+  {
+    id: "expense-status-never-says-booked-or-reversed",
+    paths: ["/api/expenses/{id}", "/api/expenses"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "The status field answers less than it appears to. Its enum is open | for_approval | " +
+      "approved, and TWO important states are missing from it.\n\n" +
+      "BOOKED is not a status. An expense posted to the ledger still reads \"approved\" — the only " +
+      "difference is that voucherId is set, so that is what \"is this in the ledger\" is answered " +
+      "by. Measured.\n\n" +
+      "REVERSED is not a status either, and it hides. DELETE /api/expenses/{id} answers " +
+      '{"outcome":"reversed"} and the expense then disappears from GET /api/expenses — while ' +
+      "GET /api/expenses/{id} still returns it with whatever status it had before, unchanged. " +
+      "?status=reversed cannot be used to find them: the filter rejects the word with a 400 " +
+      "(\"Failed to convert 'status' with value: 'reversed'\"). The only positive signal is that a " +
+      'transition fails, e.g. 409 "Expense 2203 is reversed and can no longer be delivered". To ' +
+      "establish whether one specific expense is reversed, ask for the LIST filtered by its own " +
+      "status and see whether the id is in it — absent means reversed. reai_get_expense does that.",
+  },
+  {
+    id: "expense-category-optional-to-create-required-to-deliver",
+    paths: ["/api/expenses", "/api/expenses/{id}", "/api/expenses/{id}/deliver"],
+    methods: ["POST", "PATCH"],
+    kind: "validation",
+    note:
+      "A cost row's `category` is typed nullable and is genuinely optional on POST /api/expenses — " +
+      "the row is accepted with none. It is REQUIRED to deliver: measured, " +
+      '400 "Kategori må velges for kostnadsrad." ("a category must be selected for the cost row"), ' +
+      "and the message names no row, so on a claim with several the offender has to be found by " +
+      "hand. It is an enum of 28 values (advertising, flight, hotel, taxi, software, " +
+      "representation_deductible, work_clothes and so on) which drive the account the cost maps " +
+      "to, so guessing has a bookkeeping consequence rather than just a validation one.\n\n" +
+      "The same shape applies to the rest of the completion validation: an employee and a payable " +
+      "amount are optional to create and required to deliver.",
+  },
+  {
+    id: "expense-line-arrays-are-complete-lists",
+    paths: ["/api/expenses/{id}"],
+    methods: ["PATCH"],
+    kind: "shape",
+    note:
+      "Scalars patch and the ARRAYS REPLACE, in the same request. Omitting title or purpose leaves " +
+      "them alone, and purpose, employeeId and projectId are cleared by sending null. But costs, " +
+      "perDiems and mileageAllowances are each \"the complete list\": measured, an expense with two " +
+      "cost rows PATCHed with one came back with one and its total fell from 300 to 100 — the other " +
+      "row is gone. Omitting an array preserves it (also measured: a title-only PATCH left the rows " +
+      "untouched), so the danger is only in sending one. Include the rows you are keeping.\n\n" +
+      "Only an OPEN expense can be changed at all. Delivered, approved, booked or reversed all " +
+      'answer 409 — "er bokført på bilag og kan ikke lenger endres" for a booked one. The way back ' +
+      "is: delete the voucher, unapprove, edit.",
+  },
+  {
+    id: "booking-an-expense-approves-it-too",
+    paths: ["/api/expenses/{id}/voucher"],
+    methods: ["POST"],
+    kind: "workflow",
+    note:
+      "This POSTS TO THE LEDGER: the voucher count moved by one, and the response is " +
+      '{expenseId, voucherId, voucherNumber, voucherDate} with its own series ("EX1-2026").\n\n' +
+      "It also APPROVES an expense that is still for_approval, as part of the same call — measured, " +
+      "an expense went straight from for_approval to approved-with-a-voucher. So this is not a " +
+      "step that needs /approve first, and it is not a safe way to \"check\" anything.\n\n" +
+      "The DELETE on the same path is \"delete OR reverse\", answering " +
+      '{"outcome":"deleted"} or {"outcome":"reversed"} — deleted while no accounting history has to ' +
+      "be kept, reversed once it must, and a reversal posts. The expense survives either way and " +
+      "can be booked again, which means a second booking is a second voucher.",
+  },
+  {
     id: "employee-patch-really-patches-except-one-field",
     paths: ["/api/employees/{id}"],
     methods: ["PATCH"],
@@ -1123,9 +1208,12 @@ export const QUIRKS: readonly Quirk[] = [
     paths: ["/api/expenses"],
     kind: "workflow",
     note:
-      "An expense claim moves create → deliver → approve → book the voucher, and each step is its " +
-      "own call (/deliver, /approve, /voucher). Nothing posts until /voucher. DELETE " +
-      "/api/expenses/{id} reverses rather than removes.",
+      "An expense claim moves create → deliver → approve → book the voucher, each step its own " +
+      "call (/deliver, /approve, /voucher). Nothing posts until /voucher — and /voucher does NOT " +
+      "need /approve first: it approves a for_approval expense as part of booking, measured, so " +
+      "\"each step is its own call\" does not mean each step is required. DELETE /api/expenses/{id} " +
+      "reverses rather than removes, and leaves no visible trace of having done so. The " +
+      "endpoint-specific entries say what each of those actually does.",
   },
 
   // --- Bank ----------------------------------------------------------------

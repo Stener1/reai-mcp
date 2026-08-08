@@ -22,6 +22,7 @@ import { assetTools } from "./tools/assets.js";
 import { subscriptionTools } from "./tools/subscriptions.js";
 import { warehouseTools } from "./tools/warehouses.js";
 import { agreementTools } from "./tools/agreements.js";
+import { expenseTools } from "./tools/expenses.js";
 import { salaryTools } from "./tools/salary.js";
 
 export const SERVER_NAME = "reai-mcp";
@@ -35,7 +36,7 @@ export const SERVER_VERSION = "0.3.0";
 export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   bookkeeping: bookkeepingTools,
   sales: salesTools,
-  purchase: purchaseTools,
+  purchase: [...purchaseTools, ...expenseTools],
   bank: bankVatTools,
   organisation: organisationTools,
   assets: assetTools,
