@@ -35,6 +35,10 @@ export type RequestOptions = {
   omitTenant?: boolean;
   /** Expect binary content (PDFs, attachment downloads) rather than JSON. */
   binary?: boolean;
+  /**
+   * Extra request headers. Names are lowercased before use, and `authorization`, `x-tenant-id` and
+   * `content-type` are REFUSED — this client owns those three. Pass `tenantId` for the tenant.
+   */
   headers?: Record<string, string>;
   timeoutMs?: number;
 };
@@ -82,6 +86,45 @@ function mayRetry(method: string, cause: "status-429" | "ambiguous"): boolean {
   return cause === "status-429" || RETRY_SAFE_METHODS.has(method.toUpperCase());
 }
 
+/**
+ * Headers a caller may not set, because each one is a boundary the caller is on the wrong side of.
+ *
+ * Refused rather than dropped, which is the same choice `buildUrl` makes below for an ambiguous
+ * path segment: "refuse rather than resolve it silently". Nothing in this repository passes any of
+ * these — verified across every `client.request` call site — so a caller who does is a programming
+ * error or an attack, and silently binding their request to a different company than they asked for
+ * is how that becomes a post-mortem instead of a stack trace. The obvious way to write a
+ * cross-tenant probe is `headers: {"X-Tenant-Id": n}`; this tells that author to pass `tenantId`.
+ *
+ * `authorization` is on the list for a stronger reason than the tenant: substituting the bearer
+ * token is a larger break than redirecting one request, and it sat one line above the tenant header
+ * unprotected while that one was being fixed.
+ */
+const RESERVED_HEADERS = new Set(["authorization", "x-tenant-id", "content-type"]);
+
+function normaliseCallerHeaders(supplied: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(supplied ?? {})) {
+    const lower = name.toLowerCase();
+    if (RESERVED_HEADERS.has(lower)) {
+      throw new ReaiConfigError(
+        `The ${lower} header is set by this client and cannot be supplied by a caller. ` +
+          (lower === "x-tenant-id"
+            ? "Pass `tenantId` on the request instead — the tenant is a boundary, not a header."
+            : lower === "authorization"
+              ? "The token comes from the client's configuration."
+              : "It follows from the body being JSON or multipart."),
+      );
+    }
+    // Lowercased so the internal object cannot hold two keys for one header. This is tidiness, not
+    // the guard: `Headers` normalises names anyway, so keeping the caller's casing here changes
+    // nothing observable — measured, and stated because an unfalsifiable line invites being read as
+    // load-bearing. The refusal above is what does the work.
+    out[lower] = value;
+  }
+  return out;
+}
+
 export class ReaiClient {
   readonly baseUrl: string;
   private readonly token: string;
@@ -120,30 +163,30 @@ export class ReaiClient {
     const tenantId = opts.omitTenant ? undefined : (opts.tenantId ?? this.defaultTenantId);
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
 
+    // Header names are LOWERCASE throughout, which is not cosmetic. HTTP names are
+    // case-insensitive but object keys are not, so `{"content-type": x, "Content-Type": y}` is two
+    // keys for one header, and undici resolves that by comma-FOLDING them into `x, y` — with the
+    // caller's value first, because the spread came first. Measured on the pre-fix build: a caller
+    // passing `x-tenant-id: 2634` against bound tenant 2783 put `X-Tenant-Id: 2634, 2783` on the
+    // wire. Upstream answered 400, but for the wrong reason — the folded value fails an integer
+    // parse. A genuine duplicate (two header lines, which an HTTP/2 path or a Headers instance
+    // would produce) is NOT rejected: upstream honours the FIRST value, so the same shape would
+    // have crossed with 200. Lowercasing every name means a collision is an overwrite, which is a
+    // thing one can reason about, instead of a fold.
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.token}`,
-      Accept: opts.binary ? "*/*" : "application/json",
-      "User-Agent": "reai-mcp",
-      // The tenant header is NOT part of what a caller may supply. Dropped by lowercased name
-      // rather than by relying on the assignment below, for two reasons: HTTP header names are
-      // case-insensitive but object keys are not, so a caller's `x-tenant-id` would survive
-      // alongside the one set here and be transmitted as a second header (upstream answers 400 to
-      // a duplicate, so that direction fails closed -- but only by luck). And the assignment order
-      // was the boundary's last line of defence: moving this spread after it, exactly the sort of
-      // tidy-up a formatter or a refactor invites, let a caller override the bound tenant with the
-      // entire test suite still green. test/tenant.test.mjs pins it now.
-      ...Object.fromEntries(
-        Object.entries(opts.headers ?? {}).filter(([k]) => k.toLowerCase() !== "x-tenant-id"),
-      ),
+      authorization: `Bearer ${this.token}`,
+      accept: opts.binary ? "*/*" : "application/json",
+      "user-agent": "reai-mcp",
+      ...normaliseCallerHeaders(opts.headers),
     };
-    if (tenantId !== undefined) headers["X-Tenant-Id"] = String(tenantId);
+    if (tenantId !== undefined) headers["x-tenant-id"] = String(tenantId);
 
     let payload: RequestInit["body"];
     if (opts.body instanceof FormData) {
       payload = opts.body; // fetch sets the multipart boundary itself
     } else if (opts.body !== undefined && opts.body !== null) {
       payload = JSON.stringify(opts.body);
-      headers["Content-Type"] = "application/json";
+      headers["content-type"] = "application/json";
     }
 
     const started = Date.now();

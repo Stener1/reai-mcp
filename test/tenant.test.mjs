@@ -266,17 +266,30 @@ test("the spelling rules do not refuse an ordinary value", async () => {
 /**
  * The boundary's last line of defence, which nothing pinned.
  *
- * `resolveTenantId` decides WHICH tenant, and `reai_request` refuses a request that names another
- * one — but all of that is upstream of a single line in ReaiClient.request that assigns
- * `X-Tenant-Id` after spreading `opts.headers`. Move the spread after the assignment, which is
- * exactly what tidying that object invites, and a caller-supplied header wins. Measured on
- * 2026-08-08: with the two lines swapped, 859 tests passed.
+ * `resolveTenantId` decides WHICH tenant and `reai_request` refuses a request that names another —
+ * but both are upstream of one line in ReaiClient.request, which spread `opts.headers` into the
+ * header object and assigned `X-Tenant-Id` afterwards. The bound tenant won only because that
+ * assignment came second. Move the spread after it and a caller's header wins: measured, 859 tests
+ * passed with the two lines swapped.
  *
- * Two separate ways to lose it, so two tests: precedence, and the case-insensitivity of HTTP header
- * names versus the case-SENSITIVITY of object keys — `{ "x-tenant-id": "9999" }` does not collide
- * with `headers["X-Tenant-Id"]`, so both would be transmitted. Upstream answers 400 to a duplicate
- * X-Tenant-Id (measured against the live API), so that direction fails closed, but only by luck:
- * a boundary should not depend on the other end rejecting an ambiguity we sent.
+ * The wire behaviour, measured through the real pre-fix build against a local server rather than
+ * reasoned about — and the first version of this comment got it wrong twice, which is why it is
+ * spelled out:
+ *
+ *   - Object keys are case-SENSITIVE, header names are not, so `{"x-tenant-id": "2634"}` did not
+ *     collide with the `X-Tenant-Id` set below it. Both keys existed. But undici does not send two
+ *     headers: building `Headers` from a record APPENDS, which comma-folds. What actually went out
+ *     was a single `x-tenant-id: 2634, 2783` — caller's value first.
+ *   - Upstream answers 400 to that, and the first version of this comment recorded the reason as
+ *     "a duplicate is rejected". It is not. The message is `X-Tenant-Id header must be a valid
+ *     integer`: the FOLDED value fails an integer parse. Sent as two genuine header lines, upstream
+ *     honours the FIRST — 200, with the caller's company's data. Which is what line 74 above has
+ *     said all along.
+ *
+ * So the pre-fix code failed closed only because of how undici flattens a record. Swap in a Headers
+ * instance, an array of pairs, or an HTTP/2 path that emits separate lines, and the same code
+ * crosses tenants with a 200. That is too much load for an implementation detail of the fetch stack
+ * to carry, so the client now refuses the header instead of racing it.
  */
 function clientCapturingHeaders(defaultTenantId = 2783) {
   const sent = [];
@@ -291,30 +304,63 @@ function clientCapturingHeaders(defaultTenantId = 2783) {
   return { client, sent };
 }
 
-const tenantHeaders = (headers) =>
-  Object.entries(headers)
-    .filter(([k]) => k.toLowerCase() === "x-tenant-id")
-    .map(([, v]) => String(v));
+/**
+ * What the WIRE sees, not what the object holds. The first version of these tests read
+ * `init.headers` directly, so they inspected the pre-fetch record and could not have observed the
+ * fold that the comment above is about — the misdiagnosis was invisible to the tests placed under
+ * it. `new Headers(...)` applies the same normalisation undici does.
+ */
+const onTheWire = (headers, name) => new Headers(headers).get(name);
 
-test("a caller-supplied header cannot displace the bound tenant", async () => {
+test("the client refuses a caller-supplied tenant header rather than dropping it", async () => {
   const { client, sent } = clientCapturingHeaders(2783);
-  await client.request({
-    method: "GET",
-    path: "/api/company-banks",
-    headers: { "X-Tenant-Id": "2634" },
-  });
-  assert.deepEqual(tenantHeaders(sent[0]), ["2783"], "the caller's tenant header must not be sent");
+  await assert.rejects(
+    () => client.request({ method: "GET", path: "/api/company-banks", headers: { "X-Tenant-Id": "2634" } }),
+    /tenant is a boundary, not a header/,
+  );
+  // Refused before anything was sent, in either spelling.
+  await assert.rejects(
+    () => client.request({ method: "GET", path: "/api/company-banks", headers: { "x-tenant-id": "2634" } }),
+    /cannot be supplied by a caller/,
+  );
+  assert.deepEqual(sent, [], "nothing should reach fetch");
 });
 
-test("and it cannot smuggle one past in a different case", async () => {
+test("and the same for the two other headers this client owns", async () => {
+  const { client, sent } = clientCapturingHeaders(2783);
+  // Substituting the bearer token is a larger break than redirecting one request, and it sat
+  // unprotected one line above the tenant header while that one was being fixed.
+  await assert.rejects(
+    () => client.request({ method: "GET", path: "/api/customers", headers: { Authorization: "Bearer other" } }),
+    /token comes from the client's configuration/,
+  );
+  // content-type had the identical case-collision bug: a caller's `content-type: text/plain` with a
+  // JSON body folded to `text/plain, application/json`.
+  await assert.rejects(
+    () => client.request({ method: "POST", path: "/api/customers", body: { name: "x" }, headers: { "content-type": "text/plain" } }),
+    /follows from the body being JSON or multipart/,
+  );
+  assert.deepEqual(sent, [], "nothing should reach fetch");
+});
+
+test("one tenant header reaches the wire, and every other caller header survives", async () => {
   const { client, sent } = clientCapturingHeaders(2783);
   await client.request({
     method: "GET",
     path: "/api/company-banks",
-    // Lowercase, so it does not collide with the key the client sets. Both would go on the wire.
-    headers: { "x-tenant-id": "2634", "X-Request-Extra": "kept" },
+    headers: { "X-Request-Extra": "kept", "X-Another": "also kept" },
   });
-  assert.deepEqual(tenantHeaders(sent[0]), ["2783"], "exactly one tenant header, and it is the bound one");
-  // And the filter is narrow: every other caller header still arrives.
-  assert.equal(sent[0]["X-Request-Extra"], "kept");
+  assert.equal(onTheWire(sent[0], "x-tenant-id"), "2783", "exactly the bound tenant, unfolded");
+  assert.equal(onTheWire(sent[0], "x-request-extra"), "kept");
+  assert.equal(onTheWire(sent[0], "x-another"), "also kept");
+  assert.equal(onTheWire(sent[0], "authorization"), "Bearer t");
+});
+
+test("omitTenant still sends no tenant header at all", async () => {
+  // The reference-data endpoints get that property from `omitTenant`, not from a header, and this
+  // is the case where the old code would have sent a caller's header alone with nothing to override
+  // it — the one behaviour change here, and it is in the safe direction.
+  const { client, sent } = clientCapturingHeaders(2783);
+  await client.request({ method: "GET", path: "/api/me", omitTenant: true });
+  assert.equal(onTheWire(sent[0], "x-tenant-id"), null);
 });

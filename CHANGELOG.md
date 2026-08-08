@@ -11,6 +11,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The tenant boundary rested on the position of one line, and `Authorization` was never protected at
+  all.** `ReaiClient.request` spread caller-supplied headers into its header object and assigned
+  `X-Tenant-Id` afterwards, so the bound tenant won only because that assignment came second. Moving the
+  spread after it — a refactor, not a formatter; no formatter reorders statements — lets a caller override
+  the tenant, with 859 tests still passing. Latent, since `reai_request` has no `headers` argument and no
+  caller in the repository passes one, but it is the last line of the boundary the consent page promises.
+  - The wire behaviour was measured through the real build against a local server, and the first attempt
+    at this fix recorded it wrongly twice. Object keys are case-sensitive and header names are not, so a
+    caller's `x-tenant-id` did not collide with the `X-Tenant-Id` set below it — but undici does not then
+    send two headers: building `Headers` from a record appends, which comma-**folds**. What went out was a
+    single `x-tenant-id: 2634, 2783`, caller's value first. Upstream answers 400 to that, and not because
+    it rejects duplicates: the folded value fails an integer parse. Sent as two genuine header lines,
+    upstream honours the **first** — 200, with the caller's company's data.
+  - So the old code failed closed only because of how one fetch implementation flattens a record. The
+    client now **refuses** `authorization`, `x-tenant-id` and `content-type` from a caller rather than
+    racing them, which is the choice `buildUrl` already makes for an ambiguous path segment: refuse
+    rather than resolve it silently. Substituting the bearer token is a larger break than redirecting one
+    request, and it sat unprotected one line above the tenant header. `content-type` had the identical
+    case-collision bug: a caller's `text/plain` with a JSON body folded to `text/plain, application/json`.
+  - Recorded with it: a read-only re-probe of the live API on `GET /api/company-banks`, which
+    discriminates cleanly (tenant 2634 holds three, 2783 none). Query spellings of a tenant id are
+    ignored, a matrix parameter is rejected, and `/api/company-banks/2634` is read as a **record** id —
+    which is why the guard consults the spec for path parameters and nowhere else. A scan refusing every
+    tenant-shaped path segment would refuse `/api/customers/2634`, an ordinary call.
+
 - **Swept the test suite for the failure it has produced three times in one day, instead of waiting for a
   fourth.** A documentation check that read one file, a count check whose band admitted the wrong number,
   and an enum check that skipped everything nested in an array — all three were found by review, and all
