@@ -119,8 +119,15 @@ test("the position and the event are classified apart, because only one of them 
   ]) {
     assert.equal(tool(name).risk, "read");
   }
-  // The event is the one that moves money into the books, so it is flagged destructive as well.
-  assert.equal(tool("reai_add_share_investment_event").destructive, true);
+  // NOT asserting `destructive: true` on the event tool. Review showed the flag changes nothing for an
+  // irreversible tool — `destructiveHintFor` already returns true — and that no other ledger-posting POST
+  // in this repo carries it. What matters is the hint the client actually receives, so that is what this
+  // asserts instead.
+  const { destructiveHintFor } = await import("../dist/server.js");
+  if (typeof destructiveHintFor === "function") {
+    assert.equal(destructiveHintFor(tool("reai_add_share_investment_event")), true);
+  }
+  assert.equal(tool("reai_add_share_investment_event").destructive, undefined);
 });
 
 test("an event reports the voucher it booked, and says when it cannot confirm one", async () => {
@@ -215,8 +222,8 @@ test("the event list explains why a position is undeletable, including the invis
   ]);
   const text = textOf(await tool("reai_list_share_investment_events").handler({ id: 19 }, ctx));
   assert.match(text, /2 event\(s\)/);
-  assert.match(text, /1 of them booked a ledger voucher/);
-  assert.match(text, /opening balance given at creation looks like/);
+  assert.match(text, /1 of them report a ledger voucher/);
+  assert.match(text, /one way to get it, and not the only/, "the cause is offered, not asserted");
   assert.match(text, /cannot be deleted/);
 
   // No events is the deletable state, and worth saying so plainly.
@@ -246,15 +253,154 @@ test("an unexpected list shape is not reported as an empty portfolio", async () 
   assert.match(text, /Zz Holding AS/);
 });
 
-test("the Nordnet bulk import is deliberately not curated", () => {
-  // One call, an unknown number of events, every one of them a posting and every position it touches made
-  // permanent. Recorded as a decision rather than an oversight, next to the reasoning in the module doc.
-  const names = registeredTools.map((t) => t.name);
-  assert.ok(!names.some((n) => /nordnet/i.test(n)), "no curated Nordnet import");
-  assert.match(
-    tool("reai_create_share_investment").description + tool("reai_add_share_investment_event").description,
-    /ledger/,
+test("the Nordnet import is uncurated on the record, not by omission", async () => {
+  // The first version of this test asserted that no tool name matches /nordnet/i and that the word
+  // "ledger" appears somewhere in two unrelated descriptions. Review called it vacuous and was right:
+  // neither half would fail if the reasoning were deleted, which is the only thing that makes an absence
+  // a decision. So it asserts the reasoning survives, in the file a maintainer would read.
+  const { readFileSync } = await import("node:fs");
+  assert.ok(!registeredTools.some((t) => /nordnet/i.test(t.name)), "no curated Nordnet import");
+  const source = readFileSync(new URL("../src/tools/investments.ts", import.meta.url), "utf8");
+  const section = /## Nordnet import[\s\S]*?\*\//.exec(source)?.[0] ?? "";
+  assert.ok(section, "the module doc must carry the reasoning for leaving it out");
+  assert.match(section, /bulk|unknown number/i, "why one call is different from one posting");
+  assert.match(section, /permanent/i);
+  // And the claim that was corrected: reai_request cannot send multipart, so it is NOT a way in.
+  assert.match(section, /multipart/i, "the reachability claim has to be the true one");
+});
+
+test("update refuses when a required field is missing from both the change and the record", () => {
+  // Named but untested before: the merge test only proved instrumentType was carried BACK. Deleting it
+  // from INVESTMENT_REQUIRED, or removing the refusal branch entirely, passed the whole suite.
+  const REQUIRED_CASES = [
+    [{ id: 19, name: "X" }, { id: 19, name: "old" }, "instrumentType"],
+    [{ id: 19, instrumentType: "BOND" }, { id: 19, instrumentType: "LISTED_SHARE" }, "name"],
+  ];
+  return Promise.all(
+    REQUIRED_CASES.map(async ([changes, record, missing]) => {
+      const { ctx, sent } = ctxFor([{ status: 200, data: record }]);
+      const res = await tool("reai_update_share_investment").handler(changes, ctx);
+      assert.equal(res.isError, true, `a record with no ${missing} must not be written`);
+      assert.match(textOf(res), new RegExp(missing));
+      assert.match(textOf(res), /required in fact/);
+      assert.equal(sent.length, 1, "nothing may be written");
+    }),
   );
+});
+
+test("update writes exactly the fields it is allowed to, and no derived ones", async () => {
+  // The stronger assertion the repo already uses for the address tool: the whole key set, not two fields.
+  // It is what catches a derived field being echoed into a replacing PUT, and an opening field slipping
+  // into the merge vocabulary.
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: { ...POSITION } },
+    { status: 200, data: { ...POSITION, name: "Renamed" } },
+  ]);
+  await tool("reai_update_share_investment").handler({ id: 19, name: "Renamed" }, ctx);
+  const body = sent.find((x) => x.method === "PUT").body;
+  assert.deepEqual(
+    Object.keys(body).sort(),
+    ["assetAccountNumber", "instrumentType", "name", "ticker", "withinExemptionMethod"].sort(),
+    "quantity, costPrice, status and currency are derived and must never be sent; neither may an opening field",
+  );
+});
+
+test("an envelope response stops the write, not just a non-object", async () => {
+  // The previous version passed `"not a record"`, which fails readableRecord's !isObject branch whatever
+  // the expect-list says — so it never exercised the guard it appeared to. The dangerous shape is the
+  // envelope, which readableRecord's own docstring records producing a destructive PUT on a live tenant.
+  for (const data of [{ data: { ...POSITION } }, { content: [POSITION] }, {}]) {
+    const { ctx, sent } = ctxFor([{ status: 200, data }]);
+    const res = await tool("reai_update_share_investment").handler({ id: 19, name: "X" }, ctx);
+    assert.equal(res.isError, true, `envelope ${JSON.stringify(data).slice(0, 30)} must stop the write`);
+    assert.match(textOf(res), /REPLACES/);
+    assert.equal(sent.length, 1, "nothing may be written");
+  }
+});
+
+test("an absent exemption flag or asset account is reported as unknown, not as a fact", async () => {
+  // The repo's named defect class, and this file had it twice: a bare ternary read an ABSENT
+  // withinExemptionMethod as "outside the exemption method" — a tax classification asserted from a
+  // missing field — and `?? "none"` turned a missing account into a claim about state.
+  const { ctx } = ctxFor([{ status: 200, data: { id: 19, name: "Acme AS", instrumentType: "LISTED_SHARE" } }]);
+  const text = textOf(await tool("reai_get_share_investment").handler({ id: 19 }, ctx));
+  assert.doesNotMatch(text, /outside the exemption method/);
+  assert.doesNotMatch(text, /Asset account none/);
+  assert.match(text, /carries no assetAccountNumber/);
+
+  // A stored false IS a fact and must still be reported.
+  const explicit = ctxFor([{ status: 200, data: { ...POSITION, withinExemptionMethod: false } }]);
+  assert.match(textOf(await tool("reai_get_share_investment").handler({ id: 19 }, explicit.ctx)), /outside the exemption method/);
+});
+
+test("the create translates the settlement-account refusal its own opening balance can provoke", async () => {
+  // An accepted opening balance IS an event, so this path can hit the refusal the event tool translates.
+  // Before this, the caller who acknowledged permanence in writing got raw Norwegian back.
+  const err = new ReaiApiError({
+    status: 400,
+    method: "POST",
+    path: "/api/share-investments",
+    rawBody: '{"detail":"Velg verdipapirkontoen transaksjonen ble gjort opp mot."}',
+    problem: { detail: "Velg verdipapirkontoen transaksjonen ble gjort opp mot." },
+  });
+  const { ctx } = ctxFor([err]);
+  const res = await tool("reai_create_share_investment").handler(
+    { ...CREATE_ARGS, openingQuantity: 100, openingCostAmount: 5000, openingDate: "2026-01-02", acceptPermanentPosition: true },
+    ctx,
+  );
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /companyBankId/);
+  assert.match(textOf(res), /OPENING BALANCE/);
+});
+
+test("the query filter searches every field it claims to", async () => {
+  // Dropping isin or instrumentType from the filter, or swapping includes for startsWith, all survived.
+  const rows = [
+    { ...POSITION, id: 1, name: "Alpha", ticker: "ALP", isin: "NO0010000001", instrumentType: "FUND" },
+    { ...POSITION, id: 2, name: "Beta", ticker: "BET", isin: "NO0010000002", instrumentType: "BOND" },
+  ];
+  for (const [needle, wanted] of [["no0010000001", "Alpha"], ["fund", "Alpha"], ["bet", "Beta"], ["eta", "Beta"]]) {
+    const { ctx } = ctxFor([{ status: 200, data: rows }]);
+    const text = textOf(await tool("reai_list_share_investments").handler({ query: needle }, ctx));
+    assert.match(text, /1 share investment\(s\)/, `"${needle}" should match exactly one`);
+    assert.match(text, new RegExp(wanted), `"${needle}" should find ${wanted} — mid-string too`);
+  }
+});
+
+test("an event with no voucher is unconfirmed, not classified as an opening balance", async () => {
+  // The list called a voucherless PURCHASE an opening balance. Absence of a voucherId only means the
+  // posting is unconfirmed — the add-event handler says exactly that about the same shape.
+  const { ctx } = ctxFor([{ status: 200, data: [{ id: 43, eventType: "PURCHASE", eventDate: "2026-06-01", voucherId: null }] }]);
+  const text = textOf(await tool("reai_list_share_investment_events").handler({ id: 19 }, ctx));
+  assert.match(text, /1 event\(s\)/);
+  assert.match(text, /UNCONFIRMED/, "absence of a voucherId is an unknown, not a classification");
+  assert.doesNotMatch(text, /is what an opening balance/, "it must not assert the cause it cannot know");
+  assert.match(text, /cannot be deleted/, "the position is still permanent, whatever the voucher says");
+});
+
+test("the delete succeeds loudly when there are no events", async () => {
+  // Only the error path was covered.
+  const { ctx, sent } = ctxFor([{ status: 204, data: undefined }]);
+  const res = await tool("reai_delete_share_investment").handler({ id: 19 }, ctx);
+  assert.notEqual(res.isError, true, textOf(res));
+  assert.equal(sent[0].method, "DELETE");
+  assert.equal(sent[0].path, "/api/share-investments/19");
+  assert.match(textOf(res), /had no events/);
+});
+
+test("a negative quantity cannot become a permanent event", async () => {
+  // Unbounded in the document, and an event cannot be deleted, so a negative-unit PURCHASE would be
+  // permanent. Refused locally, and recorded as a local decision rather than a documented bound.
+  const schema = tool("reai_add_share_investment_event").inputSchema;
+  const { z } = await import("zod");
+  const parsed = z.object(schema).safeParse({
+    id: 19, eventType: "PURCHASE", eventDate: "2026-06-01", amount: 1000, companyBankId: 1, quantity: -5,
+  });
+  assert.equal(parsed.success, false, "a negative quantity must not reach a permanent event");
+  const okParse = z.object(schema).safeParse({
+    id: 19, eventType: "PURCHASE", eventDate: "2026-06-01", amount: 1000, companyBankId: 1, quantity: 5,
+  });
+  assert.equal(okParse.success, true);
 });
 
 test("the update path cannot express an opening balance, even when handed one", async () => {

@@ -19,9 +19,10 @@ import {
 /**
  * Share investments (aksjeposter) — a portfolio the company holds, and the events that move it.
  *
- * Seven operations, all measured on the write test tenant before any of this was written, because the
- * document is unusually quiet here: it marks one field required on the create, nothing required on an
- * event, and says nothing at all about what any of it does to the ledger.
+ * Eight operations, of which seven are curated — the Nordnet import is the exception, for reasons at the
+ * bottom. All measured on the write test tenant before any of this was written, because the document is
+ * unusually quiet here: it marks one field required on the create, nothing required on an event, and says
+ * nothing at all about what any of it does to the ledger.
  *
  * ## An EVENT posts. The position does not.
  *
@@ -30,10 +31,16 @@ import {
  * `SH1-2026 "Utbytte …"` with postings on 1920 and 8071. So the position is a record and an event is an
  * accounting entry, which is why they are classified apart in everything below.
  *
- * There is no `DELETE` for an event. The document has `GET` and `POST` on that path and nothing else.
- * The only undo is on the voucher, and there it answers `{"outcome":"reversed"}` rather than `"deleted"`
- * — two offsetting postings are booked, the original stays, and the voucher then vanishes from
- * `GET /api/vouchers` while still reading 200 by id. Net effect zero, trace permanent.
+ * There is no `DELETE` for an event. The document has `GET` and `POST` on that path and nothing else, so
+ * the only undo is on the voucher — and `reai_delete_voucher` deletes OR reverses, with ReAI choosing
+ * which. Measured once here, on one SH voucher: it answered `{"outcome":"reversed"}`, two offsetting
+ * postings were booked, the original stayed, and the voucher then vanished from `GET /api/vouchers` while
+ * still reading 200 by id. Net effect zero, trace permanent.
+ *
+ * That is one observation, not a rule, and the distinction matters because the classification here leans
+ * on it. This repository's own `supplier-invoice-reverses` quirk records the opposite outcome on an open
+ * period — "reversed" that left no vouchers and no postings at all — so read the outcome the delete
+ * reports rather than assuming permanence.
  *
  * ## An opening position IS an event, and that makes the record permanent
  *
@@ -57,19 +64,32 @@ import {
  *     `400 "Velg verdipapirkontoen transaksjonen ble gjort opp mot."` A tenant with no company bank
  *     cannot record one at all.
  *   - `PUT` also requires `instrumentType`, though `required` lists only `name`, and it REPLACES:
- *     `ticker` went from `"ZZ"` to null by omission. `quantity`, `costPrice` and `assetAccountNumber`
- *     survive because they are derived rather than settable, so checking one of those and concluding the
- *     record is intact would be wrong. `reai_update_share_investment` reads and merges.
+ *     `ticker` went from `"ZZ"` to null by omission. `quantity` and `costPrice` survived, and those two
+ *     genuinely are derived — they are not in `ShareInvestmentReq` and cannot be sent at all.
+ *     `assetAccountNumber` survived too, and the first version of this comment explained that the same
+ *     way, which is WRONG: it is in the request schema, this server sends it, and the create tool offers
+ *     it as an override. Why it survived an omitting PUT is unmeasured — preserved, or re-derived — so
+ *     the honest statement is that it did, once, and not that it cannot be cleared. Either way, checking
+ *     a derived field and concluding the record is intact would be a mistake:
+ *     `reai_update_share_investment` reads and merges.
  *   - `withinExemptionMethod` is fritaksmetoden. Whether a holding qualifies has real tax consequences
  *     and is not something this server can determine; the flag is carried as given and the tool says so
  *     rather than guessing.
  *
  * ## Nordnet import is deliberately not curated
  *
- * `POST /api/share-investments/import/nordnet` takes a `file` and creates transactions in bulk. Every
- * one of those is an event, so it posts, and by the rule above every position it touches becomes
- * permanent. A tool that turns one call into an unknown number of irreversible postings is not something
- * to offer an agent casually, and `reai_request` reaches it for anyone who means it.
+ * `POST /api/share-investments/import/nordnet` takes a `file` and creates transactions in bulk. Every one
+ * of those is an event, so it posts, and by the rule above every position it touches becomes permanent. A
+ * tool that turns one call into an unknown number of irreversible postings is not something to offer an
+ * agent casually.
+ *
+ * The first version of this paragraph added "and `reai_request` reaches it for anyone who means it",
+ * which is probably false and was not checked. Nothing in this server ever constructs a `FormData`, and
+ * `ReaiClient` only sends multipart when the body already IS one — a JSON-transported MCP argument never
+ * is. The document declares this operation `application/json` with `file: {format: binary}`, alone among
+ * the seven file-upload operations in the spec, which reads like a generator artefact rather than a real
+ * JSON endpoint. So the honest statement is that this import belongs in the ReAI web UI, and that
+ * whether the JSON form works is unknown — establishing it would require a call that posts.
  */
 
 const INSTRUMENT_TYPES = ["LISTED_SHARE", "UNLISTED_SHARE", "FUND", "BOND", "OTHER"] as const;
@@ -140,7 +160,15 @@ const describeInvestment = (i: Investment): string =>
     i.instrumentType,
     i.quantity !== null && i.quantity !== undefined ? `${i.quantity} units` : undefined,
     i.costPrice !== null && i.costPrice !== undefined ? `cost ${i.costPrice} ${i.currency ?? ""}`.trim() : undefined,
-    i.withinExemptionMethod ? "within the exemption method" : "outside the exemption method",
+    // Three-way. A bare ternary reported an ABSENT flag as "outside the exemption method", which is a
+    // tax classification asserted from a missing field — the defect class this repository names in
+    // test/writes.test.mjs ("an absent response field is reported as unknown, not as zero"), and worse
+    // here because the create tool says in the same breath that it does not judge whether it applies.
+    i.withinExemptionMethod === true
+      ? "within the exemption method"
+      : i.withinExemptionMethod === false
+        ? "outside the exemption method"
+        : undefined,
     i.status,
   ]
     .filter(Boolean)
@@ -176,7 +204,8 @@ function translateInvestmentError(err: unknown, ctx: { id?: number }): ToolResul
         `marks nothing on this body as required, so there is no way to know from the schema. Nothing was ` +
         `posted.\n\n` +
         `reai_list_company_banks gives the id. A company with no bank account registered cannot record a ` +
-        `share investment event at all.`,
+        `share investment event at all — and that includes an OPENING BALANCE on a create, since that is ` +
+        `an event too, which is why this refusal can arrive from a call that never mentioned an event.`,
     );
   }
   return undefined;
@@ -250,8 +279,10 @@ const getInvestment = defineTool({
     const inv = res.data ?? {};
     const notes = [describeInvestment(inv)];
     notes.push(
-      `Asset account ${inv.assetAccountNumber ?? "none"}, derived at creation from the instrument type ` +
-        `and never re-derived.`,
+      inv.assetAccountNumber
+        ? `Asset account ${inv.assetAccountNumber}, derived at creation from the instrument type.`
+        : `The response carries no assetAccountNumber, so this says nothing about whether the position ` +
+          `has one — "none" would be a claim about state built from an absence.`,
     );
     return ok(inv, { note: notes.join("\n\n") });
   },
@@ -285,10 +316,13 @@ const listEvents = defineTool({
     return okList(rows, {
       noun: "event",
       suffix:
-        `. ${posted} of them booked a ledger voucher` +
+        `. ${posted} of them report a ledger voucher` +
         (opening.length
-          ? `; ${opening.length} PURCHASE event(s) carry no voucher, which is what an opening balance ` +
-            `given at creation looks like. Their presence is why this position cannot be deleted.`
+          ? `; ${opening.length} PURCHASE event(s) carry NO voucherId, which means their posting is ` +
+            `UNCONFIRMED rather than absent — the same shape reai_add_share_investment_event reports as ` +
+            `unconfirmed. An opening balance given at creation is one way to get it, and not the only ` +
+            `one, so read the ledger rather than concluding either. Whatever it turns out to be, an ` +
+            `event exists, and that alone is why this position cannot be deleted.`
           : `. While any event exists, the position cannot be deleted.`),
       empty:
         `No events, so nothing has moved this position and it is still deletable. An opening balance ` +
@@ -336,8 +370,16 @@ const createInvestment = defineTool({
       .describe("Fritaksmetoden. Stored as given — this server does not judge whether it applies."),
     assetAccountNumber: z.string().max(10).optional().describe("Overrides the derived asset account. Max 10 characters."),
     companyBankId: z.number().int().positive().optional().describe("The securities account it is held through."),
-    openingQuantity: z.number().optional().describe("Units already held. Creates a PURCHASE event — see acceptPermanentPosition."),
-    openingCostAmount: z.number().optional().describe("What those units cost. Creates a PURCHASE event."),
+    openingQuantity: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Units already held, greater than zero. Creates a PURCHASE event — see acceptPermanentPosition."),
+    openingCostAmount: z
+      .number()
+      .positive()
+      .optional()
+      .describe("What those units cost. Creates a PURCHASE event."),
     openingDate: isoDate.optional().describe("When the opening position was acquired. Creates a PURCHASE event."),
     acceptPermanentPosition: z
       .literal(true)
@@ -373,19 +415,31 @@ const createInvestment = defineTool({
       );
     }
 
-    const res = await ctx.client.request<Investment>({
-      method: "POST",
-      path: "/api/share-investments",
-      body,
-      tenantId: resolved,
-    });
+    let res;
+    try {
+      res = await ctx.client.request<Investment>({
+        method: "POST",
+        path: "/api/share-investments",
+        body,
+        tenantId: resolved,
+      });
+    } catch (err) {
+      // An accepted opening balance IS an event, so this call can hit the settlement-account refusal —
+      // which means the caller who did the one thing this tool made them acknowledge in writing was
+      // getting the raw Norwegian back. Found in review.
+      const translated = translateInvestmentError(err, {});
+      if (translated) return translated;
+      throw err;
+    }
     const created = res.data ?? {};
     const notes = [
       `Share investment ${created.id ?? "?"} recorded: ${describeInvestment(created)}. Nothing was posted ` +
         `to the ledger — a position is a record, and only an event posts.`,
-      `Asset account ${created.assetAccountNumber ?? "none"}, derived from instrumentType ` +
-        `${created.instrumentType ?? "?"} and never re-derived. Check it now rather than after the first ` +
-        `event.`,
+      created.assetAccountNumber
+        ? `Asset account ${created.assetAccountNumber}, derived from instrumentType ` +
+          `${created.instrumentType ?? "the type given"}. Check it now rather than after the first event.`
+        : `The response carries no assetAccountNumber, so which account this posts to is UNCONFIRMED — ` +
+          `read it back with reai_get_share_investment rather than assuming it has none.`,
     ];
     if (openingFields.length > 0) {
       notes.push(
@@ -416,9 +470,12 @@ const updateInvestment = defineTool({
     "reads the record first and merges.\n\n" +
     "Measured: a body carrying only `name` is refused with " +
     '400 "Validation failed" naming `instrumentType`, which the document does NOT list as required; and ' +
-    "a body carrying name and instrumentType set `ticker` to null by omission. `quantity`, `costPrice` " +
-    "and `assetAccountNumber` survived, because they are derived rather than settable — so checking one " +
-    "of those and concluding the record is intact would be wrong.\n\n" +
+    "a body carrying name and instrumentType set `ticker` to null by omission.\n\n" +
+    "`quantity` and `costPrice` survived and always will: they are derived from the events and are not in " +
+    "the request schema at all. `assetAccountNumber` also survived, and that is an OBSERVATION rather " +
+    "than a rule — it IS settable, this tool sends it, and whether an omitting PUT preserves or " +
+    "re-derives it was not measured. So do not treat a surviving account number as proof the write was " +
+    "harmless.\n\n" +
     "This cannot change what a position HOLDS. Quantity and cost come from events; add one with " +
     "reai_add_share_investment_event.",
   risk: "irreversible",
@@ -467,12 +524,19 @@ const updateInvestment = defineTool({
           `supplies ${missing.length === 1 ? "it" : "them"}. Nothing was written.`,
       );
     }
-    const res = await ctx.client.request<Investment>({
-      method: "PUT",
-      path: `/api/share-investments/${id}`,
-      body: merged,
-      tenantId: resolved,
-    });
+    let res;
+    try {
+      res = await ctx.client.request<Investment>({
+        method: "PUT",
+        path: `/api/share-investments/${id}`,
+        body: merged,
+        tenantId: resolved,
+      });
+    } catch (err) {
+      const translated = translateInvestmentError(err, { id });
+      if (translated) return translated;
+      throw err;
+    }
     const notes = [
       `Changed ${given.join(", ")} on share investment ${id}` +
         (kept.length
@@ -504,9 +568,18 @@ const addEvent = defineTool({
     "It also makes the position permanent: from the first event, the position can no longer be deleted.\n\n" +
     "`companyBankId` is required in practice — the securities account the transaction settled against — " +
     "and the API asks for it in Norwegian while the document marks nothing required. This tool requires " +
-    "it up front so the refusal does not have to be translated.",
+    "it up front so the refusal does not have to be translated.\n\n" +
+    "What is NOT known, and worth saying rather than implying: whether a SALE of more units than the " +
+    "position holds is refused, what happens on a position whose `status` is not OPEN, and whether an " +
+    "event dated into a closed period is accepted. None of that was measured, because measuring it means " +
+    "posting. A PURCHASE or SALE needs a `quantity`; a DIVIDEND does not.",
+  // No `destructive: true`. It would change nothing — `destructiveHintFor` already returns true for any
+  // irreversible tool — and this posting POST is not the shape the flag marks elsewhere in this repo,
+  // where it means "removes a record", "transmits", or "a replacing PUT that erases data".
+  // reai_create_voucher, reai_book_expense_voucher and reai_book_bank_transactions all post to the ledger
+  // and do not carry it. Claiming it as an extra protection, which an earlier version of this file did,
+  // was decorative.
   risk: "irreversible",
-  destructive: true,
   apiPaths: [["POST", "/api/share-investments/{id}/events"]],
   inputSchema: {
     id: z.number().int().positive().describe("Share investment id."),
@@ -521,9 +594,18 @@ const addEvent = defineTool({
       .int()
       .positive()
       .describe("The securities account it settled against, from reai_list_company_banks. Required in practice."),
-    quantity: z.number().optional().describe("Units bought or sold. Leave out for a dividend."),
-    pricePerUnit: z.number().optional().describe("Price per unit, for a purchase or sale."),
-    feeAmount: z.number().min(0).optional().describe("Brokerage or fee, if any."),
+    // Positive, which the document does NOT say — it leaves quantity, pricePerUnit and feeAmount as bare
+    // numbers. A negative quantity would be a permanent event nobody can delete, and a negative price or
+    // fee is not a thing; refusing locally costs a caller nothing and the API gives no better message.
+    // Recorded as a local decision rather than a documented bound, which is the distinction
+    // test/spec-bounds.test.mjs exists to keep honest.
+    quantity: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Units bought or sold, greater than zero. Leave out for a dividend."),
+    pricePerUnit: z.number().positive().optional().describe("Price per unit, for a purchase or sale."),
+    feeAmount: z.number().min(0).optional().describe("Brokerage or fee, if any. Not negative."),
     description: z.string().optional().describe("Free text carried onto the voucher."),
     externalReference: z
       .string()
