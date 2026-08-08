@@ -219,6 +219,8 @@ async function main() {
     salaryRunId: undefined,
     salaryEmployeeIds: [],
     expenseIds: [],
+    /** expenseId -> voucherId, captured at booking so cleanup never has to ask. */
+    expenseVoucherIds: {},
   };
 
   try {
@@ -1447,6 +1449,13 @@ async function main() {
           arguments: { id: expenseId },
         });
         const voucher = booked.isError ? undefined : jsonOf(booked);
+        // Remembered here, not re-read during cleanup. A cleanup that asks the API what it needs to
+        // clean up fails exactly when the API is having a bad minute: an errored or timed-out
+        // reai_get_expense made voucherId undefined, which read as "not booked", which sent cleanup
+        // down the reversal path that cannot work — leaving the expense, its voucher and the employee
+        // that depends on it in a live tenant. The id is known at the moment it is created, so it is
+        // kept.
+        if (Number.isInteger(voucher?.voucherId)) created.expenseVoucherIds[expenseId] = voucher.voucherId;
         report(
           "reai_book_expense_voucher POSTS a voucher, in its own EX series",
           !booked.isError &&
@@ -1503,6 +1512,18 @@ async function main() {
               "reversal, and the two reads that observe it.",
           );
         } else {
+          // The claim "asserted positively, so it fails when ReAI fixes it" was false as first
+          // written: a successful unlink simply fell through to the normal checks and nothing said the
+          // special case had gone stale. So the recovery is itself a failing check. Failing on good
+          // news looks odd and is the point — the quirk, the tool's BROKEN UPSTREAM paragraph and the
+          // branch above all have to be deleted together, and nothing else would ever say so.
+          report(
+            "the KNOWN UPSTREAM DEFECT branch is now STALE — delete it",
+            false,
+            "DELETE /api/expenses/{id}/voucher worked: remove the branch in this script, the " +
+              "expense-voucher-unlink-is-broken-upstream quirk, and the upstream paragraphs in " +
+              "reai_delete_expense_voucher and reai_reverse_expense",
+          );
           report(
             "reai_delete_expense_voucher reports DELETED, not merely 200",
             !unlinked.isError && jsonOf(unlinked)?.outcome === "deleted",
@@ -1585,10 +1606,14 @@ async function main() {
       // 409 above), reversal CANNOT succeed on a booked expense — attempting it anyway produced a
       // failing cleanup line that blamed this suite for a defect at ReAI, which is the worst kind of
       // red: it is not actionable and it trains the reader to skip the output.
-      const booked = await client
+      const readBack = await client
         .callTool({ name: "reai_get_expense", arguments: { id: expenseId } })
         .catch(() => undefined);
-      const bookedVoucherId = booked ? jsonOf(booked)?.voucherId : undefined;
+      // The remembered id wins, and the read is only a fallback for an expense this run did not book.
+      // An unreadable expense must never be treated as an unbooked one.
+      const bookedVoucherId =
+        created.expenseVoucherIds[expenseId] ??
+        (readBack && !readBack.isError ? jsonOf(readBack)?.voucherId : undefined);
       if (!bookedVoucherId) {
         await attempt(
           `test expense ${expenseId} reversed`,
@@ -1607,11 +1632,32 @@ async function main() {
       // run: four such records were found and removed by hand before this was written, and the run
       // that found them created a fifth. Cleanup that only works on the happy path is not cleanup.
       if (bookedVoucherId) {
-        await attempt(
+        const cascaded = await attempt(
           `test expense ${expenseId} removed with its voucher ${bookedVoucherId} (cascade)`,
           () => client.callTool({ name: "reai_delete_voucher", arguments: { id: bookedVoucherId } }),
           (r) => firstLineOf(textOf(r)),
         );
+        // `attempt` counts any non-error result as success, and this endpoint deliberately succeeds on
+        // "deleted", on "reversed" and on an unrecognised outcome. Only "deleted" is the cascade that
+        // takes the expense with it — a reversal leaves both the expense and the employee behind while
+        // this line reads green. So the outcome is asserted, and then the expense itself is checked,
+        // because the cascade is upstream behaviour rather than a promise anyone made us.
+        if (cascaded && !cascaded.isError) {
+          const outcome = jsonOf(cascaded)?.outcome;
+          report(
+            `the voucher was DELETED outright, which is what takes expense ${expenseId} with it`,
+            outcome === "deleted",
+            `outcome=${JSON.stringify(outcome ?? null)}`,
+          );
+          const gone = await client
+            .callTool({ name: "reai_get_expense", arguments: { id: expenseId } })
+            .catch(() => ({ isError: true }));
+          report(
+            `expense ${expenseId} is really gone, not merely unbooked`,
+            gone.isError === true,
+            gone.isError === true ? "reads 404" : firstLineOf(textOf(gone)),
+          );
+        }
       }
     }
     // The salary run before its employees: an employee referenced by a run is a dependent

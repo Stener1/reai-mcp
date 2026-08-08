@@ -794,6 +794,12 @@ const reverseExpense = defineTool({
     'fails: 409 "is reversed and can no longer be delivered".\n\n' +
     "reai_get_expense compensates by checking list membership. Nothing else does, so a reversed " +
     "expense read through reai_request looks live.\n\n" +
+    "BROKEN UPSTREAM as of 2026-08-08 for a BOOKED expense: this sends DELETE /api/expenses/{id}, " +
+    "which now answers 409 with a raw Hibernate TransientPropertyValueException whenever the expense " +
+    "has a voucher. So the paragraph below describes what this used to do and will do again, not what " +
+    "it can do today — a booked expense cannot be reversed at all until ReAI fixes it, and unbooking " +
+    "it first is blocked by the same defect. reai_delete_expense_voucher explains the one route that " +
+    "works and what it costs.\n\n" +
     "It DOES take the voucher with it, which an earlier version of this description got wrong. " +
     "Measured: an expense booked to voucher 30808 was reversed, the day's voucher count went from 1 " +
     "back to 0, and DELETE /api/vouchers/30808 then answered 404 \"Bilag ikke funnet\" — the voucher " +

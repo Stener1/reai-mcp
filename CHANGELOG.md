@@ -53,13 +53,29 @@ All notable changes to `reai-mcp`. Format loosely follows
     defect is upstream, names the route and states its cost — and leaves the decision with the caller.
     Caught by name because the API's own message is a Java stack type: a caller cannot tell a ReAI bug
     from a body it got wrong, and will keep trying variations.
-  - The suite now recognises that 409 as a known upstream defect instead of nine cascading failures —
-    asserted *positively*, so the day ReAI fixes it the line fails and says to delete the branch — and
-    its cleanup checks whether the expense is still booked **first**, then removes it through the
-    cascade. Verified live: every check passes and tenant 2783 is left with 0 employees and 0 expenses,
+  - The suite now recognises that 409 as a known upstream defect instead of nine cascading failures,
+    and its cleanup checks whether the expense is still booked **first**, then removes it through the
+    cascade. The claim that this was "asserted positively, so it fails when ReAI fixes it" was **false
+    as first written** — Codex caught that a successful unlink simply fell through to the normal checks
+    and nothing said the special case had gone stale. Recovery is now itself a failing check, naming
+    the three places that have to be deleted together. Failing on good news looks odd and is the only
+    thing that would ever say so. Verified live: every check passes and tenant 2783 is left with 0 employees and 0 expenses,
     where the same run previously left one of each plus a voucher.
   - New quirk, `expense-voucher-unlink-is-broken-upstream`, so `reai_describe_endpoint` says all of
-    this before an agent tries it. 106 quirks.
+    this before an agent tries it. 106 quirks. Three corrections to it came from review, all fair:
+    it is registered for `DELETE /api/expenses/{id}` as well, because the same 409 comes from there and
+    that is the operation `reai_reverse_expense` actually sends; it is scoped `statuses: [409]`, since
+    an unscoped note would answer a 401, 403 or a genuinely wrong id with authoritative text saying the
+    problem is a Hibernate bug nothing can fix; and it cited `POST /api/expenses/{id}/reverse`, **which
+    does not exist** — the reversal is the DELETE. That last one is precisely the error the new
+    `test/tool-names.test.mjs` guard was written for, one level down: the guard checks tool names, not
+    endpoint paths in prose.
+  - Cleanup no longer asks the API what it needs to clean up. The voucher id is remembered at booking
+    time, because an errored or timed-out read made it `undefined`, which read as "not booked", which
+    sent cleanup down the path that cannot work — leaving the expense, the voucher and the employee
+    behind exactly when the API is having a bad minute. And the cascade is now *proved* rather than
+    assumed: `reai_delete_voucher` succeeds on `"deleted"`, on `"reversed"` and on an unrecognised
+    outcome, so the outcome is asserted and the expense is then read back to confirm it is gone.
 
 - **Two test comments overstated the case for discovery by 47%.** Both said "the ~250 uncovered
   operations"; the real figure is **170** — 321 public operations minus the 151 distinct

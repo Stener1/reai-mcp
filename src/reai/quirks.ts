@@ -1519,8 +1519,17 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "expense-voucher-unlink-is-broken-upstream",
-    paths: ["/api/expenses/{id}/voucher"],
+    // Both endpoints, because the note is about both: the same 409 comes back from the plain expense
+    // delete, which is the operation `reai_reverse_expense` actually sends. Registering only the
+    // /voucher path meant a caller inspecting the endpoint they were about to be blocked on saw
+    // nothing.
+    paths: ["/api/expenses/{id}/voucher", "/api/expenses/{id}"],
     methods: ["DELETE"],
+    // Scoped to the status the prose explains. Without this the failed-request path treats the note as
+    // universal, so a 401, 403 or a genuinely missing expense id would come back with authoritative
+    // text saying the problem is a Hibernate bug and that nothing the caller changes can help --
+    // sending them away from the credentials, permissions or wrong id that actually caused it.
+    statuses: [409],
     kind: "gotcha",
     note:
       "BROKEN UPSTREAM as of 2026-08-08, and the 409 says so in a way no caller should have to " +
@@ -1532,9 +1541,11 @@ export const QUIRKS: readonly Quirk[] = [
       "no body a caller can change to make it work. It used to work: this repository measured " +
       '{"outcome":"deleted"} and the ledger count going back down when the tool was written.\n\n' +
       "Because unbooking is impossible, everything downstream of it is too: the expense stays " +
-      "approved and booked, POST /api/expenses/{id}/unapprove refuses it for being booked, " +
-      "POST /api/expenses/{id}/reverse does not take it, and DELETE /api/expenses/{id} answers the " +
-      "same 409. An expense booked today cannot be unwound through its own endpoints at all.\n\n" +
+      "approved and booked, POST /api/expenses/{id}/unapprove refuses it for being booked, and " +
+      "DELETE /api/expenses/{id} -- which is the reversal, the operation reai_reverse_expense sends " +
+      "-- answers the same 409. An expense booked today cannot be unwound through its own endpoints " +
+      "at all. (An earlier draft of this note cited POST /api/expenses/{id}/reverse, which does not " +
+      "exist in the spec. Reversal is the DELETE.)\n\n" +
       "The one route that works is DELETE /api/vouchers/{voucherId} on the voucher named by the " +
       'expense\'s voucherId, which answers {"outcome":"deleted"} — but it CASCADES. Measured twice: ' +
       "expense 2241 answered 404 immediately after voucher 30980 was deleted, and 2242 after 30984. " +
