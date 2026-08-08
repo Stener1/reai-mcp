@@ -11,6 +11,41 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The lender half of the loan matrix was unrecordable, and the counterparties were in the wrong
+  toolset.** Deferred deliberately from the loans PR and closed here. Every `company_loan_to_owner`,
+  every `company_loan_to_employee` and the lender side of `intercompany` and `other` needs a **debtor**
+  id, and nothing listed or created one — so four of the eight legal type/perspective combinations could
+  only be recorded by dropping to `reai_request`.
+  - Four new tools: `reai_list_debtors`, `reai_create_debtor`, `reai_update_debtor`, `reai_delete_debtor`,
+    plus `reai_create_creditor` and `reai_delete_creditor` for the side that had a list and an update but
+    no way to make or remove one. 156 tools.
+  - **`reai_list_creditors` and `reai_update_creditor` moved from `purchase` to `loans`,** on evidence
+    rather than taste: `creditorId` and `debtorId` occur **once each in the entire API document**, both
+    on `LoanRes`, and nothing else references either. A creditor *sounds* like a payables concept, which
+    is presumably how it came to sit with suppliers, but in ReAI it is one end of a loan. The practical
+    cost of the old placement: enabling only `loans` left a caller unable to create what its own tools
+    demand, while enabling only `purchase` gave two tools for a domain that toolset does not cover.
+  - **Names are unique on neither side.** Measured: two debtors called the same thing were created as
+    ids 19 and 20 without complaint — unlike a loan's `reference`, which is rejected. So an agent told
+    to use "the debtor called X" can be choosing between duplicates, and `reai_list_debtors` counts
+    repeated names and says to choose by id.
+  - The asymmetry between the two is real and visible in the shapes, not merely the tidy story the old
+    comment admitted was unverified: a creditor is `{id, name, bankAccountNumber, …}`, a debtor is
+    `{id, name, …}` with no account at all. Re-measured while moving it: `PUT /api/creditors/{id} {name}`
+    — what a rename looks like — answered 200 and set `bankAccountNumber` from 15062099533 to **null**,
+    which is what `reai_update_creditor`'s read-merge-write exists to prevent and why
+    `reai_update_debtor` needs none.
+  - Both deletes translate the `409` the ordering causes: the API says
+    *"Cannot delete creditor that is referenced by one or more loans"*, which names the constraint but
+    not the way out — loans first, and `reai_list_loans` shows which point where. An unrelated 409 is
+    rethrown rather than explained as a loan reference, which is the PR #97 lesson.
+  - Verified live through the curated tools only, on tenant 2783: a `company_loan_to_owner` recorded
+    end to end (accounts 1370/8050 derived, `relatedParty` inferred), the duplicate-name warning fired,
+    deleting the referenced debtor was refused with the ordering, deleting the loan then let it through,
+    and a creditor rename kept its bank account. 0 debtors and 0 creditors left behind.
+
+### Added
+
 - **Loans: five curated tools, and four constraints the spec does not state.** `/api/loans` had no
   curated coverage and was listed as blocked on "no data" — both test companies have zero loans. With
   a write tenant available the domain could be *measured* instead of guessed, which is the only way any
@@ -111,7 +146,7 @@ All notable changes to `reai-mcp`. Format loosely follows
     required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
     omission gate, which named all ten omitted fields.
 
-**150 tools**: 143 across twelve accounting domains, plus 7 always-on.
+**156 tools**: 149 across twelve accounting domains, plus 7 always-on.
 ### Fixed
 
 - **A whole domain was almost unnameable, and one of its commonest words pointed at the wrong thing.**

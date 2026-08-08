@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **150 tools**: 143 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **156 tools**: 149 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **110 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -365,7 +365,6 @@ The sharp edge here fails silently. `variantId` is optional in the schema and re
 | Tool | Purpose | Risk |
 |---|---|---|
 | `reai_update_company_bank` | Change a company account — label, currency, SWIFT, or the number itself — **without emptying `bban`** | **irreversible** |
-| `reai_list_creditors` · `reai_update_creditor` | Loan counterparties the company owes, and the account repayments go to | read / **irreversible** |
 | `reai_set_supplier_address` | Change part of a supplier's address without dropping the postcode | reversible |
 
 Each of these wraps a `PUT` that replaces rather than patches, on a record carrying a payment destination the schema does not require — so the body an ordinary rename produces is accepted and empties the account. All three read the record first and merge. The measurements, and why the two account-carrying ones need `REAI_WRITE_MODE=full` even though they are the *safe* way to do the job, are in [docs/safety.md](docs/safety.md#the-three-curated-merge-tools).
@@ -397,6 +396,11 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 | `reai_create_loan` | Record a loan. Infers `relatedParty` for owner, employee and intercompany loans, which the API never does | irreversible |
 | `reai_update_loan` | Change a loan. Reads and merges, because the `PUT` replaces; refuses a `perspective` flip without a new `counterpartyId` | irreversible |
 | `reai_delete_loan` | Remove the record outright — measured `204`, then `404` | irreversible |
+| `reai_list_creditors` · `reai_create_creditor` | Counterparties the company borrows **from** — the id a `borrower` loan needs. A creditor carries the account repayments go to | read / reversible |
+| `reai_update_creditor` | Rename one, or change that account. Reads and merges: a raw `PUT {name}` sets `bankAccountNumber` to null, measured | **irreversible** |
+| `reai_delete_creditor` | Remove one. Its loans first — a referenced creditor answers `409` | reversible |
+| `reai_list_debtors` · `reai_create_debtor` | Counterparties the company lends **to** — the id every `lender` loan needs. A debtor has no bank account, just a name | read / reversible |
+| `reai_update_debtor` · `reai_delete_debtor` | Rename or remove one. Nothing a replacing `PUT` can erase here, which is why this needs no merge and the creditor one does | reversible |
 
 **`perspective` decides which table `counterpartyId` is read from.** `borrower` reads it as a **creditor** id, `lender` as a **debtor** id — measured, the wrong one answers `404 "Creditor with id=N not found"` or `"Debtor with id=N not found"`. The response then renames it again, to `creditorId` or `debtorId`.
 
@@ -415,6 +419,8 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 
 `reference` is also unique per company — another Norwegian-only `400`, explained in English by the tool.
 
+**The counterparties live here, not with suppliers.** `creditorId` and `debtorId` appear exactly once each in the whole API document, both on `LoanRes` — nothing else references either — so a creditor is not a payables concept in ReAI, it is one end of a loan. They used to sit in `purchase`, which meant a caller who enabled only `loans` could not create the counterparty its own tools require. **Names are not unique on either side**: two debtors with the same name were created as separate ids, so list before creating and choose by id.
+
 These are `irreversible` even though a loan record posts nothing — measured, the voucher count did not move — because the record is the basis for later interest and repayment postings, and the measurement was taken on a company with no loan history to lose. The two reads are unaffected.
 
 **Shape is not membership.** Every `countryCode` argument here checks two uppercase letters and every `currencyCode` three, because a pattern is all the spec documents — so `UK` passes local validation and is refused by the API, which is the worst division of labour available. These two endpoints are the actual lists. Both `404`s above are answers rather than failures, and only for the documented message: [docs/tools.md](docs/tools.md#reference-data-and-company-state).
@@ -425,16 +431,16 @@ These are `irreversible` even though a loan record posts nothing — measured, t
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count in this README is the default 150, and `REAI_ENABLE_UI=1` registers a 151st tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
+It sits outside the default surface rather than inside it — every count in this README is the default 156, and `REAI_ENABLE_UI=1` registers a 157th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
 Anything not listed — projects, timesheets, share investments, debtors — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 150 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 156 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
 REAI_TOOLSETS=bookkeeping,sales    # 49 tools
-REAI_TOOLSETS=purchase             # 33 tools
+REAI_TOOLSETS=purchase             # 31 tools
 REAI_TOOLSETS=bank                 # 21 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
@@ -443,8 +449,8 @@ REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
-REAI_TOOLSETS=loans                # 12 tools
-(unset)                            # all 150
+REAI_TOOLSETS=loans                # 20 tools
+(unset)                            # all 156
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference` and `loans`; listing all twelve is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.

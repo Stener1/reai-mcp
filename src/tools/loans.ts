@@ -3,6 +3,7 @@ import { ReaiApiError } from "../reai/errors.js";
 import {
   CURRENCY_CODE,
   defineTool,
+  requiredName,
   fail,
   isoDate,
   mergeForReplacement,
@@ -102,6 +103,170 @@ import {
  * reversal. A creditor or debtor still referenced by a loan cannot be deleted: measured
  * `409 "Cannot delete creditor that is referenced by one or more loans"`, so loans go first.
  */
+
+/**
+ * ## The counterparties
+ *
+ * Creditors and debtors moved here from the purchase toolset, and the reason is a measurement rather
+ * than taste: `creditorId` and `debtorId` appear **once each in the entire document**, both on
+ * `LoanRes`. Nothing else in this API references either. They were grouped with suppliers because a
+ * creditor sounds like a payables concept, but in ReAI they exist only as the two ends of a loan — so
+ * a caller who enabled only `loans` could not create the counterparty its own tools require, and one
+ * who enabled only `purchase` got two tools for a domain that toolset does not cover.
+ *
+ * Measured while adding the missing half:
+ *
+ *   - A creditor carries `{id, name, bankAccountNumber, createdAt, updatedAt}`; a debtor has no bank
+ *     account at all, just `{id, name, createdAt, updatedAt}`. So the asymmetry the comment below
+ *     calls "coherent, and unverified" is at least real in the shapes.
+ *   - `PUT /api/creditors/{id} {name}` — what a rename looks like — answered 200 and set
+ *     `bankAccountNumber` to **null**, freshly re-measured: 15062099533 → null. That is what
+ *     `reai_update_creditor` exists to prevent.
+ *   - **Names are not unique on either side.** Two debtors called the same thing were created without
+ *     complaint, ids 19 and 20. Unlike a loan's `reference`, nothing collides, so an agent that
+ *     creates before it lists can silently end up choosing between duplicates.
+ *   - A blank name is refused: `400 "Validation failed"` with `fieldErrors[].field: "name"`.
+ */
+
+/**
+ * Creditors and debtors: the counterparties on a LOAN.
+ *
+ * What a "creditor" is here is INFERRED from the document, not stated by it. The ingredients are
+ * real: `LoanRes` carries `creditorId` and `debtorId`, `LoanReq` takes a `counterpartyId`, and
+ * `perspective` is borrower | lender. The step from there to "a creditor is the counterparty when
+ * the company borrows, and its bankAccountNumber is where repayments go" rests on the English
+ * meaning of the word plus that enum — nothing says `creditorId` is the one populated on the
+ * borrower side, and nothing documents what the account number is for. The same goes for the
+ * tidy story about why creditors carry an account number and debtors do not: coherent, and
+ * unverified. Treat it as the best available reading rather than as measured.
+ *
+ * `creditorId` appears exactly once in the whole document, on LoanRes, so nothing here claims a
+ * creditor is used anywhere else.
+ */
+const CREDITOR_SETTABLE = ["name", "bankAccountNumber"] as const;
+
+const listCreditors = defineTool({
+  name: "reai_list_creditors",
+  title: "List creditors",
+  description:
+    "Loan counterparties the company owes — each with the bank account its repayments go to. " +
+    "The document links these to loans through `LoanRes.creditorId`; a debtor is the mirror " +
+    "image, for a loan the company has made.",
+  risk: "read",
+  apiPaths: [["GET", "/api/creditors"]],
+  inputSchema: { tenantId: tenantIdArg },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/creditors",
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const rows = res.data;
+    const missingAccount = Array.isArray(rows)
+      ? rows.filter((r) => !(r as { bankAccountNumber?: unknown }).bankAccountNumber).length
+      : 0;
+    return okList(rows, {
+      noun: "creditor",
+      suffix:
+        missingAccount > 0
+          ? `. ${missingAccount} ${missingAccount === 1 ? "has" : "have"} no bank account number.`
+          : ".",
+      empty:
+        "No creditors. A loan can still exist without one — LoanRes.creditorId is nullable — so " +
+        "this being empty does not mean the company has no debt.",
+    });
+  },
+});
+
+const updateCreditor = defineTool({
+  name: "reai_update_creditor",
+  title: "Change a creditor",
+  description:
+    "Rename a creditor, or change the bank account its loan repayments go to. Pass only what you " +
+    "want different; the rest is kept.\n\n" +
+    "This exists because the underlying call replaces rather than patches, and `bankAccountNumber` " +
+    "is not required — so `PUT {name}`, which is what a rename looks like, is accepted with a 200 " +
+    "and sets the account number to null. Measured on a live tenant. The next repayment has " +
+    "nowhere to go, and nothing in the response says so.\n\n" +
+    "Needs REAI_WRITE_MODE=full, because the raw PUT can destroy a payment destination and a " +
+    "curated tool must not be a softer route to it. Between the read and the write there is a " +
+    "lost-update window: an edit made in the ReAI UI in between is silently reverted.",
+  risk: "irreversible",
+  destructive: true,
+  apiPaths: [
+    ["GET", "/api/creditors/{id}"],
+    ["PUT", "/api/creditors/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Creditor id, from reai_list_creditors."),
+    name: requiredName(255).optional().describe("What the creditor is called."),
+    bankAccountNumber: z
+      .string()
+      .max(50)
+      .nullable()
+      .optional()
+      .describe(
+        "The account loan repayments are paid into. Changing it changes where money goes; null " +
+          "clears it deliberately, which leaves the repayment with no destination.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const current = await ctx.client.request<unknown>({
+      method: "GET",
+      path: `/api/creditors/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data, undefined, CREDITOR_SETTABLE);
+    if (!record) {
+      return fail(
+        `Could not read creditor ${id}: ${problem}. Nothing was written — this endpoint REPLACES ` +
+          `the record, so the bank account number you did not pass would have been erased.`,
+      );
+    }
+    const { merged, kept, unknown, missing, given } = mergeForReplacement({
+      existing: record,
+      changes,
+      settable: CREDITOR_SETTABLE,
+      required: ["name"],
+    });
+    if (given.length === 0) return fail("No changes were given, so nothing was written.");
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on a creditor, and neither your change nor the ` +
+          `stored record supplies it. Nothing was written.`,
+      );
+    }
+    const res = await ctx.client.request<Record<string, unknown>>({
+      method: "PUT",
+      path: `/api/creditors/${id}`,
+      body: merged,
+      tenantId: resolved,
+    });
+    const notes = [
+      `Changed ${given.join(", ")} on creditor ${id}` +
+        (kept.length
+          ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and written ` +
+            `back unchanged, because this endpoint replaces rather than patches.`
+          : `.`),
+    ];
+    if (merged.bankAccountNumber === null || merged.bankAccountNumber === undefined) {
+      notes.push(
+        `This creditor now has NO bank account number, so a loan repayment to it has no ` +
+          `destination. That is what you asked for if you passed null; otherwise it was already empty.`,
+      );
+    }
+    if (unknown.length > 0) {
+      notes.push(
+        `Note: ${unknown.join(", ")} was not already set. Fine for a first-time value; a misspelt ` +
+          `name looks the same, so confirm it took effect.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
+  },
+});
 
 /** Every field `PUT /api/loans/{id}` accepts, which is the same set `POST` accepts. */
 const LOAN_SETTABLE = [
@@ -865,4 +1030,251 @@ const deleteLoan = defineTool({
   },
 });
 
-export const loanTools: ToolDef[] = [listLoans, getLoan, createLoan, updateLoan, deleteLoan];
+
+/**
+ * The one refusal a counterparty delete can hit, in words rather than in Norwegian-flavoured English.
+ *
+ * Measured: `409 "Cannot delete creditor that is referenced by one or more loans"`. The message names
+ * the constraint but not the way out, and the way out is an ordering — loans first — which the caller
+ * cannot infer from a 409 alone.
+ */
+function referencedByLoan(err: unknown, kind: "creditor" | "debtor", id: number): ToolResult | undefined {
+  if (!(err instanceof ReaiApiError) || err.status !== 409) return undefined;
+  const detail = `${err.message} ${err.rawBody ?? ""}`;
+  if (!/referenced by one or more loans/i.test(detail)) return undefined;
+  return fail(
+    `${kind === "creditor" ? "Creditor" : "Debtor"} ${id} is still named by at least one loan, so the API ` +
+      `refuses to delete it. Nothing was deleted.\n\n` +
+      `Delete the loans first — reai_list_loans shows which point here, under ` +
+      `${kind === "creditor" ? "`creditorId`" : "`debtorId`"} — and then this. A loan delete is a real ` +
+      `delete, so the reference goes with it rather than lingering in an archive.`,
+  );
+}
+
+const createCreditor = defineTool({
+  name: "reai_create_creditor",
+  title: "Record a creditor",
+  description:
+    "A counterparty the company borrows FROM — the id `reai_create_loan` needs when `perspective` is " +
+    "`borrower`. Nothing else in this API uses a creditor, so this exists to make a loan recordable.\n\n" +
+    "`bankAccountNumber` is where repayments go. Set it here if you know it: a later rename through " +
+    "the RAW endpoint erases it, because `PUT` replaces and the field is not required — measured, " +
+    "15062099533 → null on a `PUT {name}`. reai_update_creditor merges and so does not do that.\n\n" +
+    "Names are NOT unique: two creditors with the same name are accepted as separate records. List " +
+    "before creating, or you may be choosing between duplicates later. A blank name is refused with " +
+    '400 "Validation failed".',
+  risk: "reversible",
+  apiPaths: [["POST", "/api/creditors"]],
+  inputSchema: {
+    name: requiredName(255).describe("What the creditor is called. Not unique — check the list first."),
+    bankAccountNumber: z
+      .string()
+      .max(50)
+      .optional()
+      .describe("The account loan repayments are paid into. Worth setting now; a raw PUT can erase it."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, ...body } = args;
+    const res = await ctx.client.request<{ id?: number; name?: string; bankAccountNumber?: string | null }>({
+      method: "POST",
+      path: "/api/creditors",
+      body,
+      tenantId: requireTenantId(tenantId, ctx),
+    });
+    const created = res.data ?? {};
+    const notes = [
+      `Creditor ${created.id ?? "?"} created${created.name ? `: ${created.name}` : ""}. Pass this id as ` +
+        `counterpartyId on a loan with perspective "borrower".`,
+    ];
+    if (!created.bankAccountNumber) {
+      notes.push(
+        `No bankAccountNumber, so a repayment to this creditor has no destination yet. ` +
+          `reai_update_creditor sets one without erasing the name.`,
+      );
+    }
+    return ok(created, { note: notes.join("\n\n") });
+  },
+});
+
+const deleteCreditor = defineTool({
+  name: "reai_delete_creditor",
+  title: "Delete a creditor",
+  description:
+    "Remove a creditor. Delete its loans first: a creditor still referenced by one answers " +
+    '409 "Cannot delete creditor that is referenced by one or more loans" — measured. ' +
+    "reai_list_loans shows which loans point at it, under `creditorId`.",
+  risk: "reversible",
+  destructive: true,
+  apiPaths: [["DELETE", "/api/creditors/{id}"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Creditor id, from reai_list_creditors."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    try {
+      const res = await ctx.client.request<unknown>({
+        method: "DELETE",
+        path: `/api/creditors/${args.id}`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      return ok(res.data ?? { deleted: args.id }, {
+        note: `Creditor ${args.id} deleted — HTTP ${res.status}. Any loan that referenced it would have blocked this.`,
+      });
+    } catch (err) {
+      return referencedByLoan(err, "creditor", args.id) ?? (() => { throw err; })();
+    }
+  },
+});
+
+const listDebtors = defineTool({
+  name: "reai_list_debtors",
+  title: "List debtors",
+  description:
+    "Counterparties the company has lent TO — the id `reai_create_loan` needs when `perspective` is " +
+    "`lender`, which is every `company_loan_to_owner`, every `company_loan_to_employee`, and the " +
+    "lender side of `intercompany` and `other`.\n\n" +
+    "A debtor is `{id, name}` and carries NO bank account, unlike a creditor: measured, the record is " +
+    "`{id, name, createdAt, updatedAt}` and nothing else. Names are not unique, so this list can " +
+    "legitimately contain two identical rows with different ids.\n\n" +
+    "Empty does not mean the company has lent nothing — `LoanRes.debtorId` is nullable.",
+  risk: "read",
+  apiPaths: [["GET", "/api/debtors"]],
+  inputSchema: { tenantId: tenantIdArg },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: "/api/debtors",
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const rows = res.data;
+    // Duplicate names are legal here, and an agent picking "the one called X" needs to know when that
+    // phrase does not identify a record.
+    const duplicated = Array.isArray(rows)
+      ? [
+          ...new Set(
+            rows
+              .map((r) => String((r as { name?: unknown }).name ?? ""))
+              .filter((n, i, all) => n !== "" && all.indexOf(n) !== i),
+          ),
+        ]
+      : [];
+    return okList(rows, {
+      noun: "debtor",
+      suffix: duplicated.length
+        ? `. ${duplicated.length} name(s) appear more than once (${duplicated.join(", ")}) — names are ` +
+          `not unique here, so choose by id.`
+        : ".",
+      empty:
+        "No debtors. A loan the company has made can still exist without one — LoanRes.debtorId is " +
+        "nullable — so this being empty does not prove the company has lent nothing.",
+    });
+  },
+});
+
+const createDebtor = defineTool({
+  name: "reai_create_debtor",
+  title: "Record a debtor",
+  description:
+    "A counterparty the company lends TO — the id `reai_create_loan` needs when `perspective` is " +
+    "`lender`. Without this, the whole lender half of the loan matrix could only be recorded through " +
+    "reai_request.\n\n" +
+    "`name` is the only field: a debtor has no bank account, which is the one asymmetry with a " +
+    "creditor and is visible in the record shape rather than merely assumed. Names are NOT unique — " +
+    "measured, two debtors with the same name were created as ids 19 and 20 without complaint — so " +
+    "list first if you mean to reuse one. A blank name is refused with 400.",
+  risk: "reversible",
+  apiPaths: [["POST", "/api/debtors"]],
+  inputSchema: {
+    name: requiredName(255).describe("What the debtor is called. Not unique — check the list first."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<{ id?: number; name?: string }>({
+      method: "POST",
+      path: "/api/debtors",
+      body: { name: args.name },
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const created = res.data ?? {};
+    return ok(created, {
+      note:
+        `Debtor ${created.id ?? "?"} created${created.name ? `: ${created.name}` : ""}. Pass this id as ` +
+        `counterpartyId on a loan with perspective "lender" — a debtor id sent with "borrower" is ` +
+        `looked up among CREDITORS and answers 404.`,
+    });
+  },
+});
+
+const updateDebtor = defineTool({
+  name: "reai_update_debtor",
+  title: "Rename a debtor",
+  description:
+    "Rename a debtor. `name` is the only field the record has, so unlike its creditor counterpart " +
+    "there is nothing a replacing PUT can quietly erase — which is why this needs no read-merge-write " +
+    "and reai_update_creditor does.",
+  risk: "reversible",
+  apiPaths: [["PUT", "/api/debtors/{id}"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Debtor id, from reai_list_debtors."),
+    name: requiredName(255).describe("The new name."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<{ id?: number; name?: string }>({
+      method: "PUT",
+      path: `/api/debtors/${args.id}`,
+      body: { name: args.name },
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    return ok(res.data ?? { id: args.id, name: args.name }, {
+      note: `Debtor ${args.id} renamed to ${JSON.stringify(args.name)}. Any loan pointing at it is unaffected.`,
+    });
+  },
+});
+
+const deleteDebtor = defineTool({
+  name: "reai_delete_debtor",
+  title: "Delete a debtor",
+  description:
+    "Remove a debtor. Delete its loans first: the creditor side answers " +
+    '409 "Cannot delete creditor that is referenced by one or more loans" and a debtor is the mirror ' +
+    "image. reai_list_loans shows which loans point at it, under `debtorId`.",
+  risk: "reversible",
+  destructive: true,
+  apiPaths: [["DELETE", "/api/debtors/{id}"]],
+  inputSchema: {
+    id: z.number().int().positive().describe("Debtor id, from reai_list_debtors."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    try {
+      const res = await ctx.client.request<unknown>({
+        method: "DELETE",
+        path: `/api/debtors/${args.id}`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+      return ok(res.data ?? { deleted: args.id }, {
+        note: `Debtor ${args.id} deleted — HTTP ${res.status}. Any loan that referenced it would have blocked this.`,
+      });
+    } catch (err) {
+      return referencedByLoan(err, "debtor", args.id) ?? (() => { throw err; })();
+    }
+  },
+});
+
+export const loanTools: ToolDef[] = [
+  listLoans,
+  getLoan,
+  createLoan,
+  updateLoan,
+  deleteLoan,
+  listCreditors,
+  createCreditor,
+  updateCreditor,
+  deleteCreditor,
+  listDebtors,
+  createDebtor,
+  updateDebtor,
+  deleteDebtor,
+];

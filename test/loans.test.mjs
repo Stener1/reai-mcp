@@ -640,3 +640,115 @@ test("both loan quirks are scoped to the right methods and statuses", async () =
   assert.deepEqual(quirksFor("GET", "/api/loans").map((q) => q.id), []);
   assert.deepEqual(quirksFor("GET", "/api/loans/{id}").map((q) => q.id), []);
 });
+
+/**
+ * The counterparties, which are the reason the lender half of the loan matrix was unusable: every
+ * `company_loan_to_owner`, every `company_loan_to_employee` and the lender side of `intercompany` and
+ * `other` need a DEBTOR id, and nothing listed or created one.
+ */
+test("the counterparty tools live in the loans toolset, not purchase", async () => {
+  const { TOOL_GROUPS } = await import("../dist/server.js");
+  const names = TOOL_GROUPS.loans.map((t) => t.name);
+  for (const name of [
+    "reai_list_creditors",
+    "reai_create_creditor",
+    "reai_update_creditor",
+    "reai_delete_creditor",
+    "reai_list_debtors",
+    "reai_create_debtor",
+    "reai_update_debtor",
+    "reai_delete_debtor",
+  ]) {
+    assert.ok(names.includes(name), `${name} belongs with the loans it exists for`);
+  }
+  // The point of the move: enabling only `loans` must be a workable configuration.
+  assert.ok(
+    !TOOL_GROUPS.purchase.some((t) => /creditor|debtor/.test(t.name)),
+    "a counterparty tool left behind in purchase defeats the move",
+  );
+});
+
+test("a debtor list warns when a name identifies more than one record", async () => {
+  // Measured: two debtors with the same name were created as ids 19 and 20 without complaint. An agent
+  // told to use "the debtor called X" needs to know when that phrase does not name a record.
+  const { ctx } = ctxFor([
+    { status: 200, data: [
+      { id: 19, name: "Kari Nordmann" },
+      { id: 20, name: "Kari Nordmann" },
+      { id: 21, name: "Ola Nordmann" },
+    ] },
+  ]);
+  const text = textOf(await tool("reai_list_debtors").handler({}, ctx));
+  assert.match(text, /3 debtor\(s\)/);
+  assert.match(text, /appear more than once/);
+  assert.match(text, /Kari Nordmann/);
+  assert.match(text, /choose by id/);
+
+  // And it stays quiet when every name is distinct.
+  const distinct = ctxFor([{ status: 200, data: [{ id: 1, name: "A" }, { id: 2, name: "B" }] }]);
+  assert.doesNotMatch(textOf(await tool("reai_list_debtors").handler({}, distinct.ctx)), /more than once/);
+});
+
+test("creating a creditor without an account says the repayment has nowhere to go", async () => {
+  const { ctx, sent } = ctxFor([{ status: 201, data: { id: 91, name: "A Bank AS", bankAccountNumber: null } }]);
+  const res = await tool("reai_create_creditor").handler({ name: "A Bank AS" }, ctx);
+  assert.equal(sent[0].path, "/api/creditors");
+  assert.match(textOf(res), /no destination yet/i);
+  assert.match(textOf(res), /perspective "borrower"/);
+
+  // With an account it does not nag.
+  const withAccount = ctxFor([{ status: 201, data: { id: 92, name: "A Bank AS", bankAccountNumber: "15062099533" } }]);
+  const ok = await tool("reai_create_creditor").handler({ name: "A Bank AS", bankAccountNumber: "15062099533" }, withAccount.ctx);
+  assert.doesNotMatch(textOf(ok), /no destination/i);
+});
+
+test("creating a debtor points at the perspective its id belongs to", async () => {
+  const { ctx, sent } = ctxFor([{ status: 201, data: { id: 19, name: "Kari Nordmann" } }]);
+  const res = await tool("reai_create_debtor").handler({ name: "Kari Nordmann" }, ctx);
+  assert.deepEqual(sent[0].body, { name: "Kari Nordmann" }, "a debtor has no other field");
+  assert.match(textOf(res), /perspective "lender"/);
+  // The trap worth naming at the moment the id is handed over.
+  assert.match(textOf(res), /looked up among CREDITORS and answers 404/);
+});
+
+test("deleting a referenced counterparty explains the ordering, both sides", async () => {
+  // Measured: 409 "Cannot delete creditor that is referenced by one or more loans". The message names
+  // the constraint and not the way out, which is an ordering the caller cannot infer from a 409.
+  for (const [toolName, kind, field] of [
+    ["reai_delete_creditor", "Creditor", "creditorId"],
+    ["reai_delete_debtor", "Debtor", "debtorId"],
+  ]) {
+    const err = new ReaiApiError({
+      status: 409,
+      method: "DELETE",
+      path: "/api/creditors/91",
+      rawBody: '{"detail":"Cannot delete creditor that is referenced by one or more loans"}',
+    });
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: { request: async () => { throw err; }, deepLink: () => "" },
+    };
+    const res = await tool(toolName).handler({ id: 91 }, ctx);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), new RegExp(`${kind} 91 is still named by at least one loan`));
+    assert.match(textOf(res), /Delete the loans first/);
+    assert.match(textOf(res), new RegExp(field));
+  }
+});
+
+test("an unrelated 409 is not explained as a loan reference", async () => {
+  // The PR #97 lesson: a confident wrong explanation is worse than none. Anything else must rethrow.
+  const err = new ReaiApiError({
+    status: 409,
+    method: "DELETE",
+    path: "/api/creditors/91",
+    rawBody: '{"detail":"Some other conflict entirely"}',
+  });
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: { request: async () => { throw err; }, deepLink: () => "" },
+  };
+  await assert.rejects(() => tool("reai_delete_creditor").handler({ id: 91 }, ctx), /Some other conflict/);
+});
