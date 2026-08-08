@@ -595,6 +595,14 @@ test("every response-shaping exemption names a real field and a real test", asyn
 });
 
 test("no read tool accepts an input it never sends", async () => {
+  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
+  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
+  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
+  {
+    const { registeredTools: everyTool } = await import("../dist/server.js");
+    const reads = everyTool.filter((t) => t.risk === "read");
+    assert.ok(reads.length >= 30, `only ${reads.length} read tools — the risk filter has stopped matching`);
+  }
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude
   // system-only accounts and did not. This sweeps for the same class across every

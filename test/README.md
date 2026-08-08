@@ -24,8 +24,18 @@ ln -s "$PWD/node_modules" "$D/node_modules" && cd "$D" && npm run build
 # 2. Baseline: what passes normally.
 node --test test/ 2>&1 | grep -E '^ok [0-9]+ -' | sed 's/^ok [0-9]* - //' | sort > /tmp/baseline.txt
 
-# 3. Empty the corpora in dist: allTools, registeredTools, TOOL_GROUPS, QUIRKS.
-#    (Rewrite each `export const X = [...]` to `export const X = [];`.)
+# 3. Empty the corpora in dist. The exports are arrays, so appending statements that clear them
+#    empties every consumer at the module boundary, after registration has run:
+#      allTools.length = 0; registeredTools.length = 0;
+#      for (const k of Object.keys(TOOL_GROUPS)) TOOL_GROUPS[k] = [];
+#      QUIRKS.length = 0; escalatingBodyFieldNames.length = 0;
+#
+#    A compiled file ends with `//# sourceMappingURL=...` and NO trailing newline, so a bare
+#    `>>` append lands inside that comment and does nothing. Write a newline first. This is not a
+#    footnote: it silently invalidated the second run of this audit, which reported two floors as
+#    firing when the corpus they guard had never been emptied. Assert the corpus is empty before
+#    trusting a single result:
+#      node -e "import('./dist/reai/quirks.js').then(m=>console.log(m.QUIRKS.length))"  # must be 0
 
 # 4. Anything still passing that mentions a corpus is a candidate.
 node --test test/ 2>&1 | grep -E '^ok [0-9]+ -' | sed 's/^ok [0-9]* - //' | sort > /tmp/empty.txt
@@ -39,7 +49,7 @@ because those stop matching after an ordinary rename.
 
 ## What the first run found
 
-Thirty sweeps passed with every corpus emptied. Five had fragile filters and now carry a floor:
+Thirty sweeps passed with every corpus emptied. Five had fragile filters and got the first floors:
 
 | sweep | filter that could stop matching |
 |---|---|
@@ -54,6 +64,47 @@ count of offenders but a count of the population being constrained. "No salary t
 run" is satisfied by there being no salary tools at all, which is exactly what it would read the
 day the toolset fails to register.
 
-The remaining twenty-five were left alone deliberately: they iterate the whole registry without a
-narrowing filter, so the only way to empty them is to empty the registry itself, which would fail
-dozens of other tests first. Adding floors there would be ritual rather than protection.
+## What the second run found, and the claim it refuted
+
+The paragraph that stood here said the remaining twenty-five were left alone deliberately, because
+"they iterate the whole registry without a narrowing filter". **That was wrong, and it was wrong in
+the same way as the guards this audit exists to find: asserted rather than measured.** Grepping the
+twenty-five for narrowing constructs found fifteen that do narrow — by risk tier, by name prefix,
+or by a `.filter()` — including two of the safety invariants and the read-shape sweep that had
+already caught a real bug in the loans toolset.
+
+Seven more now carry a floor:
+
+| sweep | filter that could stop matching |
+|---|---|
+| `anything creatable in reversible mode is also deletable in it` | mode visibility **and** `reai_create_` prefix |
+| `every delete tool's endpoint is classified no worse than the tool claims` | `reai_delete_` prefix |
+| `no read tool gives the same answer for an empty list and a shape surprise` | `risk === "read"` |
+| `and the rows are not thrown away either` | `risk === "read"` |
+| `no read tool accepts an input it never sends` | `risk === "read"` |
+| `no tool is softer than the policy for any path it declares` | declared paths classifying `irreversible` |
+| `a curated tool accepting an arms-a-send field escalates like the escape hatch` | `escalatingBodyFieldNames` |
+
+All twelve floors were then checked to fire: with every corpus emptied, each of the twelve fails.
+That check is the only reason the two floors landing in the wrong place — one written into the
+neighbouring test, one swallowed by the `sourceMappingURL` line — were caught at all. **A floor
+that has not been observed failing is a claim, not a guard.**
+
+## What is genuinely left alone
+
+Twenty-two sweeps still pass with every corpus emptied. Eight of them narrow, and each was checked
+individually rather than as a group:
+
+- **Whole-corpus sweeps** (`tool names are unique`, `every tool declares a risk the policy knows`,
+  `declared API paths exist in the spec`, the toolset-selection tests). Their only route to vacuity
+  is an empty registry, and an empty registry fails 263 tests in this suite — measured, not assumed.
+  A floor here adds nothing a caller would ever see.
+- **Audits of hand-written lists** (`every DELIBERATELY_LOOSER entry is real`, `every
+  RENAMED_QUERY_ARGS entry is a real rename`). An empty list means there is genuinely nothing to
+  audit; a floor would forbid removing the last exemption.
+- **Deliberate-omission claims** (`generate-due is deliberately not curated`, `the Nordnet import is
+  uncurated on the record`). These assert a tool is absent, so an empty registry satisfying them is
+  not a false pass — the corresponding presence is pinned by the count tests.
+
+The distinction that matters is not "does it filter" but **can the filter stop matching while the
+software is still working**. A risk tier or a name prefix can; an exemption list cannot.

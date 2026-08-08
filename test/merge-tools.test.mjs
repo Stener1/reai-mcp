@@ -384,6 +384,16 @@ test("every tool that wraps a replacement declares the read it depends on", () =
 });
 
 test("no tool is softer than the policy for any path it declares", () => {
+  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
+  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
+  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
+  const irreversiblePaths = registeredTools.flatMap((t) =>
+    (t.apiPaths ?? []).filter(([m, p]) => classifyRequest(m, p.replace(/\{[^}]+\}/g, "7")) === "irreversible"),
+  );
+  assert.ok(
+    irreversiblePaths.length >= 20,
+    `only ${irreversiblePaths.length} irreversible declared paths — this invariant is about nothing`,
+  );
   const softer = [];
   for (const t of registeredTools) {
     for (const [method, path] of t.apiPaths ?? []) {

@@ -802,6 +802,12 @@ test("anything creatable in reversible mode is also deletable in it", async () =
   const { isAllowed } = await import("../dist/policy.js");
 
   const visible = allTools.filter((t) => isAllowed(t.risk, "reversible"));
+  // A floor, because this sweep narrows twice — by mode and by name prefix — and a filter that
+  // stops matching leaves the assertion below about the empty set. See test/README.md.
+  assert.ok(
+    visible.filter((t) => t.name.startsWith("reai_create_")).length >= 10,
+    `only ${visible.filter((t) => t.name.startsWith("reai_create_")).length} create tools visible in reversible mode`,
+  );
   const names = new Set(visible.map((t) => t.name));
   const gaps = visible
     .filter((t) => t.name.startsWith("reai_create_"))
@@ -825,7 +831,12 @@ test("every delete tool's endpoint is classified no worse than the tool claims",
   // not a mode — passing it as one is how this test first failed.
   const minimumMode = { read: "read-only", reversible: "reversible", irreversible: "full" };
 
-  for (const tool of allTools.filter((t) => t.name.startsWith("reai_delete_"))) {
+  const deleters = allTools.filter((t) => t.name.startsWith("reai_delete_"));
+  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
+  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
+  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
+  assert.ok(deleters.length >= 15, `only ${deleters.length} reai_delete_* tools — the prefix has stopped matching`);
+  for (const tool of deleters) {
     const mode = minimumMode[tool.risk];
     assert.ok(mode, `${tool.name} has an unrecognised risk "${tool.risk}"`);
     for (const [method, path] of tool.apiPaths ?? []) {

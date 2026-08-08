@@ -146,6 +146,12 @@ test("a curated tool accepting an arms-a-send field escalates like the escape ha
     automaticbillinggeneration: true,
     outputmode: "create_invoice",
   };
+  // Floor: if the exported list empties, every assertion below is about nothing and the
+  // send-arming check silently stops testing. See test/README.md.
+  assert.ok(
+    escalatingBodyFieldNames.length >= 3,
+    `only ${escalatingBodyFieldNames.length} escalating body fields — policy has stopped exporting them`,
+  );
   for (const name of escalatingBodyFieldNames) {
     assert.ok(name in arming, `no probe value for the escalating field ${name} — add one`);
     assert.equal(

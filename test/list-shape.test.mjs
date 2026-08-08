@@ -132,6 +132,14 @@ async function conflatesEmptyWithSurprise(tool) {
 }
 
 test("no read tool gives the same answer for an empty list and a shape surprise", async () => {
+  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
+  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
+  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
+  {
+    const { registeredTools } = await import("../dist/server.js");
+    const reads = registeredTools.filter((t) => t.risk === "read");
+    assert.ok(reads.length >= 30, `only ${reads.length} read tools — the risk filter has stopped matching`);
+  }
   const offenders = [];
   for (const tool of registeredTools) {
     if (tool.risk !== "read" || tool.name === "reai_request") continue;
@@ -167,6 +175,9 @@ test("every empty-shape override is load-bearing", async () => {
 test("and the rows are not thrown away either", async () => {
   // Reporting the surprise is only half of it: the payload has to survive, or an operator
   // cannot see what the endpoint actually sent. Checked by marker rather than by wording.
+  // Floor: same read filter as the sweep above, same failure mode if it stops matching.
+  const reads = registeredTools.filter((t) => t.risk === "read");
+  assert.ok(reads.length >= 30, `only ${reads.length} read tools — the risk filter has stopped matching`);
   const marker = "UNIQUE-MARKER-9c1f";
   const wrapped = { content: [{ id: 1, name: marker }], totalElements: 1 };
   const swallowed = [];
