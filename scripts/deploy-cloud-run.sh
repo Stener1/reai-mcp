@@ -287,10 +287,25 @@ build_env_arg() {
 # as it is ready, so that would leave a window in which the host allowlist is
 # absent and a spoofed Host header decides what the deployment advertises.
 echo "==> Deploying"
+# What is actually running, recorded where a later run can read it back.
+#
+# Nothing did this before, and it cost something concrete: revisions 00135 through 00136 served two
+# agent-facing quirks that had already been measured false and corrected in git -- for two days, because
+# the only way to tell what was deployed was to compare timestamps, and a timestamp cannot distinguish
+# "committed before the deploy" from "merged after it". scripts/check-deployed.mjs reads this label.
+#
+# A dirty tree is stamped as such rather than pretending the commit describes what was built.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  COMMIT="${COMMIT}-dirty"
+  echo "WARNING: deploying a DIRTY working tree. The label will say ${COMMIT}."
+fi
+
 gcloud run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
   --source=. \
+  --labels="commit=${COMMIT}" \
   --service-account="$SERVICE_ACCOUNT" \
   --allow-unauthenticated \
   --min-instances=0 \
