@@ -833,3 +833,113 @@ test("every path placeholder is either swept or listed as unattributable", () =>
       "way the list above needs updating on purpose, because everything not on it is swept",
   );
 });
+
+/**
+ * The other direction: a tool must not be STRICTER than the spec either.
+ *
+ * Everything above guards against looseness — a tool accepting what the API will reject, so the caller
+ * gets a bare 400 instead of a reason. This guards the mirror, which is quieter and therefore worse: an
+ * enum hardcoded in a tool schema that has fallen behind the document REFUSES a value the API accepts,
+ * locally, with a validation error that reads like the caller's mistake. Nothing upstream is consulted,
+ * so nothing ever corrects it.
+ *
+ * There are eighteen `z.enum(...)` lists across the curated tools, seven of them added by this repository
+ * in a single day — loan types, perspectives, repayment types, day counts, interest treatments, instrument
+ * types, event types. Every one is a copy of something the document states, and a copy is a claim with a
+ * shelf life. Measured when this was written: no drift, which is exactly when the guard is worth adding
+ * rather than after a spec refresh has quietly broken a domain.
+ *
+ * `DELIBERATELY_NARROWER` is for cases where refusing a documented value is the point — there are none
+ * today, and an entry has to say why.
+ */
+const DELIBERATELY_NARROWER = {};
+
+/**
+ * Follow a `$ref` anywhere in the document, not only into `components.schemas`.
+ *
+ * `constraintsOf` above resolves through the `SCHEMAS` map because request bodies only ever point there.
+ * Parameters do not: several of this document's query parameters are `$ref`s into
+ * `components.parameters`, and an enum on one of those is exactly the kind this sweep must see.
+ */
+function derefAny(node, guard = 0) {
+  let n = node;
+  while (n && typeof n === "object" && typeof n.$ref === "string" && guard < 10) {
+    n = n.$ref.replace(/^#\//, "").split("/").reduce((acc, key) => acc?.[key], SPEC);
+    guard++;
+  }
+  return n;
+}
+
+/** A zod enum's members, through optional / nullable / default / array wrappers. */
+function zodEnumValues(schema) {
+  let def = schema?._def;
+  for (let i = 0; i < 6 && def; i++) {
+    if (Array.isArray(def.values)) return def.values;
+    def = def.innerType?._def ?? def.type?._def ?? def.schema?._def;
+  }
+  return undefined;
+}
+
+/** Every enum the spec declares for a property name on one operation, body and parameters alike. */
+function specEnumsFor(method, path) {
+  const op = SPEC.paths?.[path]?.[method.toLowerCase()];
+  if (!op) return {};
+  const found = {};
+  const walk = (schema, depth = 0) => {
+    const s = derefAny(schema);
+    if (!s || depth > 4) return;
+    for (const [name, raw] of Object.entries(s.properties ?? {})) {
+      const prop = derefAny(raw);
+      if (Array.isArray(prop?.enum)) found[name] = prop.enum;
+      const items = derefAny(prop?.items);
+      if (Array.isArray(items?.enum)) found[name] = items.enum;
+      if (prop?.properties) walk(prop, depth + 1);
+    }
+  };
+  walk(derefAny(op.requestBody)?.content?.["application/json"]?.schema);
+  for (const raw of op.parameters ?? []) {
+    const param = derefAny(raw);
+    const schema = derefAny(param?.schema);
+    if (Array.isArray(schema?.enum)) found[param.name] = schema.enum;
+    const items = derefAny(schema?.items);
+    if (Array.isArray(items?.enum)) found[param.name] = items.enum;
+  }
+  return found;
+}
+
+test("no tool enum has fallen behind the values the spec allows", () => {
+  const narrower = [];
+  let compared = 0;
+  for (const tool of registeredTools) {
+    for (const [arg, schema] of Object.entries(tool.inputSchema ?? {})) {
+      const mine = zodEnumValues(schema);
+      if (!mine) continue;
+      for (const [method, path] of tool.apiPaths ?? []) {
+        const theirs = specEnumsFor(method, path)[arg];
+        if (!theirs) continue;
+        compared++;
+        const key = `${tool.name}.${arg}`;
+        if (key in DELIBERATELY_NARROWER) continue;
+        const missing = theirs.filter((v) => !mine.includes(v));
+        if (missing.length > 0) {
+          narrower.push(`${key} (${method} ${path}) refuses ${missing.join(", ")}`);
+        }
+      }
+    }
+  }
+
+  // The sweep has to be doing work: if the zod unwrapping or the spec walk breaks, every enum silently
+  // stops being compared and this passes on an empty set — the vacuity the documentation guard was caught
+  // by one iteration ago, in a test that also looked fine.
+  assert.ok(
+    compared >= 8,
+    `only ${compared} tool enums were matched against the document — the unwrapping or the spec walk has ` +
+      `stopped finding them, so this test is passing on nothing`,
+  );
+  assert.deepEqual(
+    narrower,
+    [],
+    "these tools refuse values the API documents, which the caller sees as their own mistake — widen the " +
+      "enum, or record why refusing it is deliberate in DELIBERATELY_NARROWER",
+  );
+});
