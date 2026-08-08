@@ -376,6 +376,8 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
 | `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data. The delete **archives** instead when the customer has transactions, and reports which of the two happened | reversible |
 | `reai_unarchive_customer` | Bring an archived customer back. An archived one is invisible to the list unless you pass `archived: true` | reversible |
+| `reai_search_leads` | Prospecting: search the Norwegian company register (Brønnøysund) with this tenant's lead state on top — filter by legal form, industry, city, registration date, whether Brreg lists an accountant, whether an email or phone is on file | read |
+| `reai_get_lead` | One company by **organisation number**, with its lead state if any | read |
 | `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
 | `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
 | `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
@@ -462,6 +464,12 @@ So "accountant" is not a narrower role than "admin": both are exactly the owner'
 Permission codes carry their scope as a prefix, and it is easy to miss: `self:…` reaches only the acting user's own records — their employee card, their expenses, their timesheets — while `tenant:…` reaches the company's. `ROLE_EMPLOYEE`'s six permissions are all `self:`.
 
 The writes on these paths stay with `reai_request`, and are already gated: `POST /api/users` **invites** an email address and is classified as an external send, `PUT /api/users/{id}` changes what someone may do, and `DELETE` revokes access. Granting privilege is the one write in this API where what leaves the tenant is not data but authority.
+
+**Leads are the company register, not a list of your records** — which is the thing to know before reading a result. `GET /api/leads` searches Brønnøysund and layers whatever lead state this tenant has on top: measured, every row of the default first page came back with `id: null` and `status: null`, i.e. companies nobody here has touched. `leadFilter` separates them (`all` / `saved` / `unsaved`).
+
+Two addressing schemes exist and only one always works. An unsaved company has no id, so `GET /api/leads/null` answers `400 "Failed to convert 'id' with value: 'null'"` — the organisation number is on every row either way, which is why `reai_get_lead` takes that. And the envelope is `{items, page, hasPrevious, hasNext}` with **no total**, so "how many companies match" is not a question one call answers; the tool reports what it received and whether more exists rather than implying a figure. `pageSize` is capped at 200, above which the API answers a bare `400 "Validation failed"` naming no field, so the tool bounds it locally.
+
+Nothing in either tool contacts anybody. Placing a call is a separate internal endpoint, already classified as an external send.
 
 Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
 
@@ -558,11 +566,11 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 134 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 136 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
-REAI_TOOLSETS=bookkeeping,sales    # 42 tools
+REAI_TOOLSETS=bookkeeping,sales    # 44 tools
 REAI_TOOLSETS=purchase             # 33 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
@@ -570,7 +578,7 @@ REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 134
+(unset)                            # all 136
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -581,7 +589,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **96 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **97 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

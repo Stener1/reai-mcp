@@ -9,9 +9,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**134 tools**: 127 across ten accounting domains, plus 7 always-on.
+**136 tools**: 129 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Leads** (2 read tools) — `reai_search_leads` and `reai_get_lead`. The last
+  substantial uncovered domain with real data on it, and it is not what the name
+  suggests: `GET /api/leads` searches the Norwegian company register (Brønnøysund)
+  and layers whatever lead state this tenant has on top. Prospecting, with 21 filters
+  — legal form, industry-code prefix, city, registration date range, whether Brreg
+  lists an **accountant**, whether an email or phone is on file, follow-up due dates,
+  dedupe by owner.
+  - **Most results are not leads.** Measured, every row of the default first page came
+    back with `id: null` and `status: null` — companies nobody here has touched.
+    `leadFilter` separates them (`all` / `saved` / `unsaved`), and the search reports
+    how many of the rows it returned are unsaved rather than leaving that to be noticed.
+  - **Two addressing schemes, one of which cannot work.** `/api/leads/{id}` and
+    `/api/leads/org/{orgNumber}` both exist, but an unsaved company has no id:
+    `GET /api/leads/null` answers `400 "Failed to convert 'id' with value: 'null'"`.
+    The organisation number is on every row either way, so `reai_get_lead` takes that
+    and validates its nine digits.
+  - **The response carries no total.** The envelope is `{items, page, hasPrevious,
+    hasNext, latestRegisteredAt}`, so "how many companies match" is not a question one
+    call answers — the tool reports the count it received and whether more exists, and
+    a response with no `items` array is reported as **unknown** rather than as none,
+    which for a question about the whole register would be a confidently wrong answer.
+  - `pageSize` is bounded locally at 200 because the API's refusal above it is a bare
+    `400 "Validation failed"` naming no field.
+  - Neither tool contacts anybody. Placing a call is a separate internal endpoint,
+    already classified as an external send, and a test asserts that stays true.
 
 - **General sub-accounts** (4 tools) — `reai_list_sub_accounts`,
   `reai_sub_accounts_for_account`, `reai_create_sub_account`,

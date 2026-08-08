@@ -663,6 +663,25 @@ export const QUIRKS: readonly Quirk[] = [
       "breaks any routine that posts to it without a subAccountId.",
   },
   {
+    id: "leads-are-the-company-register-not-your-records",
+    match: "descendants",
+    paths: ["/api/leads"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "This is not a list of records the tenant owns. GET /api/leads searches the Norwegian company " +
+      "register (Brønnøysund) and layers whatever lead state the tenant has on top — measured, every " +
+      "row of the default first page came back with id null and status null, i.e. companies nobody " +
+      "here has touched. `leadFilter` is what separates them: all | saved | unsaved.\n\n" +
+      "TWO ADDRESSING SCHEMES, and only one always works. /api/leads/{id} and " +
+      "/api/leads/org/{orgNumber} both exist, but an unsaved company has no id: " +
+      '`GET /api/leads/null` answers 400 "Failed to convert \'id\' with value: \'null\'". The ' +
+      "organisation number is on every row either way, so it is the handle to use.\n\n" +
+      "The envelope is {items, page, hasPrevious, hasNext, latestRegisteredAt} — a page marker and no " +
+      "TOTAL, so \"how many companies match\" cannot be answered from one call. And pageSize is " +
+      'capped at 200: 500 answers a bare 400 "Validation failed" that names no field.',
+  },
+  {
     id: "three-roles-are-the-same-role",
     // /api/users/permissions is here because the last paragraph is specifically about it — the
     // quirk warned that the catalogue omits the self-scoped codes while not being attached to the
