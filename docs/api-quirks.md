@@ -2,7 +2,7 @@
 
 An accounting API has more sharp edges than its schema admits, and most of what follows was learned
 from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit
-messages, it lives in [`src/reai/quirks.ts`](../src/reai/quirks.ts) as **108 quirks keyed to the
+messages, it lives in [`src/reai/quirks.ts`](../src/reai/quirks.ts) as **110 quirks keyed to the
 operations they affect** — so they surface automatically in `reai_describe_endpoint` and
 `reai_search_endpoints`, including for the 170 public operations no curated tool covers.
 

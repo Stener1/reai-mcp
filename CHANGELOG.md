@@ -73,6 +73,38 @@ All notable changes to `reai-mcp`. Format loosely follows
       what it touches, and excluding it from the merge-tool invariant that finds read-merge-write tools
       by exactly that pair.
     - Each of the four behavioural fixes is mutation-verified on its own.
+  - **An independent review then found nine more, and one of its findings is that my own summary was
+    overstated.** "All three write-ups are fixed" was wrong: there was a fourth copy of the corrected
+    `interestTreatment` claim, in the create tool's own description — the string an agent actually
+    reads. Deleted.
+    - The **wrong-table 404 was passed through raw**, which is the failure this whole domain is about.
+      A debtor id sent with `perspective: "borrower"` answered `404 "Creditor with id=78 not found"`
+      from a POST, where a 404 reads as a missing endpoint rather than a misdirected id. Both write
+      tools now name the id space they searched and which perspective would fit. The duplicate-reference
+      translation was in `create` only, leaving the curated `PUT` **worse informed than `reai_request`**,
+      whose quirk covers it — both now share one helper.
+    - `counterpartyNote` **fabricated a perspective**: an absent value read as "borrower", so the tool
+      asserted a classification for a record it could not classify. Three cases now, not two.
+    - The README said *"Anything not listed — projects, timesheets, share investments, **loans** — is
+      reachable through the escape hatch"* three sections below a Loans table, and the `REAI_TOOLSETS`
+      block gained no `loans` row (nor `bank`, which was missing already — `test/docs.test.mjs` only
+      checks rows that are present, so an omission is invisible to CI).
+    - **Twelve behaviours survived deliberate mutation of `src/`** — the matrix and the merge were
+      pinned, but nothing that only *speaks* to the caller was: the lender branch of
+      `missingInterestAccounts` (no test drove a lender loan through either read tool), the `accrue`
+      arm, the `capitalize` exemption, the list's whole INCONSISTENT note, both error translations, the
+      no-op guard, three of the four inherently-related types, and the quirk scoping that PR #97 exists
+      to protect. Ten new tests, each verified against the mutation it was written for.
+    - Two quirks added (110 total) for hazards recorded only where the wrong reader would look: the
+      `409` on deleting a creditor or debtor still referenced by a loan was documented in
+      `reai_delete_loan`'s description, which nobody deleting a creditor will read, and the loan `DELETE`
+      being a real delete had no quirk at all. The pair quirk now leads with its trigger, since it fires
+      on any 400 from those paths and there are other 400s.
+    - `companyBankId` was flagged as possibly unverified — the one settable field with no evidence a GET
+      returns it, and this API has a habit of renaming fields in responses. Measured: it comes back
+      under the same name, so the merge preserves it. The same read turned up `outstandingPrincipal` and
+      `accruedInterestBalance`, which no endpoint here moves — so repayments happen in the ReAI UI, and
+      the read tools now say so.
   - Two new quirks (108 total) so the escape hatch warns as well, and both hazards were verified live
     through the real tools: the direction rule and duplicate reference are refused before anything is
     sent, a partial edit keeps all nine untouched fields, and reaching the unwired state at all

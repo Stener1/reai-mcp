@@ -1524,10 +1524,12 @@ export const QUIRKS: readonly Quirk[] = [
     statuses: [400],
     kind: "validation",
     note:
-      "loanType and perspective are not independent, and the refusal is a Norwegian sentence about a " +
-      'rule nothing documents: 400 "Lånetypen er ikke gyldig for valgt låneperspektiv". Four of the ' +
-      "six types are direction-locked, because the name already states the direction. Measured, all " +
-      "twelve combinations, on tenant 2783:\n\n" +
+      'IF the 400 reads "Lånetypen er ikke gyldig for valgt låneperspektiv", it is this: loanType and ' +
+      "perspective are not independent, and that sentence is the whole explanation the API gives for a " +
+      "rule nothing documents. (This endpoint has other 400s — a principalAmount under 0.01, a " +
+      "reference over 30 characters, a malformed date — and they are not this one.) Four of the six " +
+      "types are direction-locked, because the name already states the direction. Measured, all twelve " +
+      "combinations, on tenant 2783:\n\n" +
       "  bank_loan                 borrower only\n" +
       "  owner_loan_to_company     borrower only\n" +
       "  company_loan_to_owner     lender only\n" +
@@ -1539,6 +1541,35 @@ export const QUIRKS: readonly Quirk[] = [
       "`reference` is unique per company as well, and says so in Norwegian too: " +
       '400 "Lån med referanse X finnes allerede." reai_create_loan checks the pair locally and ' +
       "translates both.",
+  },
+  {
+    id: "creditor-or-debtor-referenced-by-a-loan-cannot-be-deleted",
+    paths: ["/api/creditors/{id}", "/api/debtors/{id}"],
+    methods: ["DELETE"],
+    statuses: [409],
+    kind: "workflow",
+    note:
+      'A 409 "Cannot delete creditor that is referenced by one or more loans" means what it says, and ' +
+      "the order is the fix: delete the loans first, then the counterparty. Measured on tenant 2783 for " +
+      "a creditor; a debtor is the mirror image, since a loan names exactly one of the two depending on " +
+      "its perspective.\n\n" +
+      "reai_list_loans shows which loans point where — read `creditorId` and `debtorId` rather than " +
+      "looking for `counterpartyId`, which is the request-side name only. Deleting a loan is a real " +
+      "delete (204, then 404), so this is not an archive that keeps the link alive.",
+  },
+  {
+    id: "loan-delete-is-real-not-an-archive",
+    paths: ["/api/loans/{id}"],
+    methods: ["DELETE"],
+    kind: "irreversible",
+    note:
+      "204, and the id then reads 404. A real delete: no archive, no {\"outcome\"} variant, nothing " +
+      "that brings the record back, and no endpoint here recreates one with its history. Measured on " +
+      "tenant 2783.\n\n" +
+      "The derived ledger accounts go with it, along with `outstandingPrincipal` and " +
+      "`accruedInterestBalance`. Since the API derives those accounts only at CREATION, re-recording " +
+      "the loan afterwards will derive them from the new loanType and perspective rather than restore " +
+      "what was there.",
   },
   {
     id: "loan-interest-accounts-are-cleared-by-omission",

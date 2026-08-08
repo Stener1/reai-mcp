@@ -5,6 +5,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registeredTools } from "../dist/server.js";
 import { classifyRequest } from "../dist/policy.js";
+import { ReaiApiError } from "../dist/reai/errors.js";
+
+/** The one perspective each direction-locked type accepts, for tests that need a valid pair. */
+const ALLOWED_FOR = {
+  bank_loan: "borrower",
+  owner_loan_to_company: "borrower",
+  company_loan_to_owner: "lender",
+  company_loan_to_employee: "lender",
+  intercompany: "borrower",
+  other: "borrower",
+};
 
 const tool = (name) => {
   const found = registeredTools.find((t) => t.name === name);
@@ -414,4 +425,218 @@ test("create reports the accounts the API derived, since nothing re-derives them
   assert.match(text, /2950/);
   assert.match(text, /never\s+re-derived/);
   assert.match(text, /CREDITOR id because perspective is borrower/);
+});
+
+/**
+ * The notes and the error translations, which an independent review found survived deliberate mutation
+ * of `src/` — twelve behaviours the module doc argues for and nothing pinned. The matrix and the merge
+ * were genuinely covered; everything that only *speaks* to the caller was not, which is the half a
+ * reader of the tool descriptions relies on most.
+ */
+const LENDER_LOAN = {
+  ...LOAN,
+  id: 15,
+  loanType: "company_loan_to_owner",
+  perspective: "lender",
+  counterpartyName: "Kari Nordmann",
+  counterpartyType: "owner",
+  creditorId: null,
+  debtorId: 16,
+  principalAccountNumber: "1370",
+  interestExpenseAccountNumber: null,
+  interestIncomeAccountNumber: "8050",
+  accruedInterestAccountNumber: "1760",
+};
+
+test("a lender loan is judged against the INCOME account, not the expense one", async () => {
+  // `missingInterestAccounts` branches on perspective, and no test drove a lender loan through either
+  // read tool — so hardcoding `wantsExpense = true` passed the whole suite. A lender loan legitimately
+  // has no expense account; complaining about it would be a false alarm on every receivable.
+  const clean = ctxFor([{ status: 200, data: LENDER_LOAN }]);
+  assert.doesNotMatch(textOf(await tool("reai_get_loan").handler({ id: 15 }, clean.ctx)), /INCONSISTENT/);
+
+  // And when the income account IS missing, that is what gets named.
+  const broken = ctxFor([{ status: 200, data: { ...LENDER_LOAN, interestIncomeAccountNumber: null } }]);
+  const text = textOf(await tool("reai_get_loan").handler({ id: 15 }, broken.ctx));
+  assert.match(text, /INCONSISTENT/);
+  // The SENTENCE, not the whole result: the record is echoed below it and names every field it has.
+  const sentence = /INCONSISTENT[^\n]*/.exec(text)?.[0] ?? "";
+  assert.match(sentence, /interestIncomeAccountNumber/);
+  assert.doesNotMatch(sentence, /interestExpenseAccountNumber/, "a lender loan has no expense account to miss");
+});
+
+test("accrue is judged like pay_separately, and capitalize is exempt", async () => {
+  // Both post interest somewhere other than the principal, so both need the accounts. capitalize adds
+  // interest to the principal and legitimately has neither — flagging it would train callers to ignore
+  // the warning.
+  const accrue = ctxFor([{ status: 200, data: { ...LOAN, interestTreatment: "accrue", interestExpenseAccountNumber: null, accruedInterestAccountNumber: null } }]);
+  assert.match(textOf(await tool("reai_get_loan").handler({ id: 13 }, accrue.ctx)), /INCONSISTENT/);
+
+  const capitalize = ctxFor([{ status: 200, data: { ...LOAN, interestTreatment: "capitalize", interestExpenseAccountNumber: null, accruedInterestAccountNumber: null } }]);
+  assert.doesNotMatch(textOf(await tool("reai_get_loan").handler({ id: 13 }, capitalize.ctx)), /INCONSISTENT/);
+});
+
+test("the list names every loan that cannot post its interest", async () => {
+  // The whole INCONSISTENT branch of reai_list_loans was untested: `contradictory.length > 99` passed.
+  const rows = [
+    { ...LOAN, id: 1 },
+    { ...LOAN, id: 2, interestExpenseAccountNumber: null, accruedInterestAccountNumber: null },
+  ];
+  const { ctx } = ctxFor([{ status: 200, data: rows }]);
+  const text = textOf(await tool("reai_list_loans").handler({}, ctx));
+  assert.match(text, /1 loan\(s\) claim an interest treatment they have no account for/);
+  assert.match(text, /2 \(pay_separately/, "the offending loan must be named");
+});
+
+test("the wrong-table 404 is translated, in both write tools", async () => {
+  // The failure this whole module is about, and it was reaching callers raw: a 404 from a POST reads as
+  // "endpoint or record not found", not "your id is in the other id space".
+  const err = new ReaiApiError({
+    status: 404,
+    method: "POST",
+    path: "/api/loans",
+    rawBody: "Creditor with id=78 not found",
+  });
+  const throwing = {
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: { request: async () => { throw err; }, deepLink: () => "" },
+  };
+  const created = await tool("reai_create_loan").handler(
+    {
+      reference: "X", loanType: "bank_loan", perspective: "borrower", counterpartyId: 78,
+      currency: "NOK", principalAmount: 1000, interestRateAnnual: 1,
+      disbursementDate: "2026-08-08", repaymentType: "bullet",
+    },
+    throwing,
+  );
+  assert.equal(created.isError, true);
+  assert.match(textOf(created), /not a creditor/i);
+  assert.match(textOf(created), /perspective: "lender"/, "it must name the perspective that would fit");
+
+  // The same on update, where a 404 after a successful GET can only be the counterparty.
+  let call = 0;
+  const updating = {
+    ...throwing,
+    client: {
+      request: async () => { if (call++ === 0) return { status: 200, data: LOAN }; throw err; },
+      deepLink: () => "",
+    },
+  };
+  const updated = await tool("reai_update_loan").handler({ id: 13, counterpartyId: 78 }, updating);
+  assert.equal(updated.isError, true);
+  assert.match(textOf(updated), /not a creditor/i);
+});
+
+test("the duplicate reference is translated, in both write tools", async () => {
+  // One of the four headline claims, and it had no coverage at all in either tool.
+  const err = new ReaiApiError({
+    status: 400,
+    method: "POST",
+    path: "/api/loans",
+    rawBody: '{"detail":"Lån med referanse X finnes allerede."}',
+  });
+  const base = {
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+  };
+  const create = await tool("reai_create_loan").handler(
+    {
+      reference: "X", loanType: "bank_loan", perspective: "borrower", counterpartyId: 78,
+      currency: "NOK", principalAmount: 1000, interestRateAnnual: 1,
+      disbursementDate: "2026-08-08", repaymentType: "bullet",
+    },
+    { ...base, client: { request: async () => { throw err; }, deepLink: () => "" } },
+  );
+  assert.equal(create.isError, true);
+  assert.match(textOf(create), /already exists/);
+  assert.match(textOf(create), /unique/);
+
+  let n = 0;
+  const update = await tool("reai_update_loan").handler(
+    { id: 13, reference: "X" },
+    { ...base, client: { request: async () => { if (n++ === 0) return { status: 200, data: LOAN }; throw err; }, deepLink: () => "" } },
+  );
+  assert.equal(update.isError, true, "the curated PUT was worse informed than reai_request");
+  assert.match(textOf(update), /already exists/);
+});
+
+test("every inherently related loan type is inferred, not just one", async () => {
+  // INHERENTLY_RELATED could be cut to a single entry and the suite still passed, so three of the four
+  // types were only claimed.
+  for (const loanType of ["owner_loan_to_company", "company_loan_to_owner", "company_loan_to_employee", "intercompany"]) {
+    const perspective = ALLOWED_FOR[loanType];
+    const { ctx, sent } = ctxFor([{ status: 201, data: { ...LOAN, loanType, perspective, relatedParty: true } }]);
+    await tool("reai_create_loan").handler(
+      {
+        reference: "R-" + loanType, loanType, perspective, counterpartyId: 1,
+        currency: "NOK", principalAmount: 1000, interestRateAnnual: 1,
+        disbursementDate: "2026-08-08", repaymentType: "bullet",
+      },
+      ctx,
+    );
+    assert.equal(sent[0].body.relatedParty, true, `${loanType} is a related party by construction`);
+  }
+  // bank_loan is not one, and must not be tampered with.
+  const arms = ctxFor([{ status: 201, data: LOAN }]);
+  await tool("reai_create_loan").handler(
+    {
+      reference: "B-1", loanType: "bank_loan", perspective: "borrower", counterpartyId: 1,
+      currency: "NOK", principalAmount: 1000, interestRateAnnual: 1,
+      disbursementDate: "2026-08-08", repaymentType: "bullet",
+    },
+    arms.ctx,
+  );
+  assert.equal(arms.sent[0].body.relatedParty, undefined, "a bank loan must be left alone");
+});
+
+test("create warns when the API stored relatedParty false on a related-party type", async () => {
+  // The caller can pass `false` deliberately; the record then disagrees with what note disclosure
+  // needs, so the answer says so rather than staying silent.
+  const { ctx } = ctxFor([{ status: 201, data: { ...LOAN, loanType: "intercompany", relatedParty: false } }]);
+  const res = await tool("reai_create_loan").handler(
+    {
+      reference: "IC-2", loanType: "intercompany", perspective: "borrower", counterpartyId: 1,
+      currency: "NOK", principalAmount: 1000, interestRateAnnual: 1,
+      disbursementDate: "2026-08-08", repaymentType: "bullet", relatedParty: false,
+    },
+    ctx,
+  );
+  assert.match(textOf(res), /WARNING/);
+  assert.match(textOf(res), /relatedParty is false/);
+});
+
+test("an update with no changes writes nothing", async () => {
+  const { ctx, sent } = ctxFor([{ status: 200, data: LOAN }]);
+  const res = await tool("reai_update_loan").handler({ id: 13 }, ctx);
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /No changes were given/);
+  assert.equal(sent.length, 1);
+});
+
+test("a record with no perspective is not assumed to be a borrower loan", async () => {
+  // The note read `perspective === "lender" ? … : "because perspective is borrower"`, so an absent
+  // value produced a confident false statement about which id space applied.
+  const { perspective, ...noPerspective } = LOAN;
+  const { ctx } = ctxFor([{ status: 200, data: noPerspective }]);
+  const text = textOf(await tool("reai_get_loan").handler({ id: 13 }, ctx));
+  assert.match(text, /does not say which perspective/);
+  assert.doesNotMatch(text, /because perspective is borrower/);
+});
+
+test("both loan quirks are scoped to the right methods and statuses", async () => {
+  // PR #97 fixed a quirk that explained every failure on its endpoint as one specific defect. Nothing
+  // pinned that fix for these entries, so a later edit could reintroduce it silently.
+  const { quirksFor, QUIRKS } = await import("../dist/reai/quirks.js");
+  const pair = QUIRKS.find((q) => q.id === "loan-type-and-perspective-are-constrained-pairs");
+  assert.deepEqual(pair.statuses, [400], "the pair rule explains one status only");
+  assert.deepEqual([...pair.methods].sort(), ["POST", "PUT"]);
+
+  const omission = QUIRKS.find((q) => q.id === "loan-interest-accounts-are-cleared-by-omission");
+  assert.equal(omission.statuses, undefined, "a success-path hazard is not keyed to a status");
+  assert.deepEqual(omission.methods, ["PUT"]);
+
+  // A read must attract neither.
+  assert.deepEqual(quirksFor("GET", "/api/loans").map((q) => q.id), []);
+  assert.deepEqual(quirksFor("GET", "/api/loans/{id}").map((q) => q.id), []);
 });

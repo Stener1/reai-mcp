@@ -15,7 +15,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 - **150 tools**: 143 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **108 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **110 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 
@@ -427,7 +427,7 @@ These are `irreversible` even though a loan record posts nothing — measured, t
 
 It sits outside the default surface rather than inside it — every count in this README is the default 150, and `REAI_ENABLE_UI=1` registers a 151st tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
-Anything not listed — projects, timesheets, share investments, loans — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+Anything not listed — projects, timesheets, share investments, debtors — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
 If 150 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
@@ -435,6 +435,7 @@ If 150 tools is more than your client wants to see, narrow it with `REAI_TOOLSET
 REAI_TOOLSETS=bookkeeping          # 19 tools
 REAI_TOOLSETS=bookkeeping,sales    # 49 tools
 REAI_TOOLSETS=purchase             # 33 tools
+REAI_TOOLSETS=bank                 # 21 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
@@ -442,6 +443,7 @@ REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
+REAI_TOOLSETS=loans                # 12 tools
 (unset)                            # all 150
 ```
 
@@ -470,7 +472,7 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **108 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **110 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 170 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.

@@ -13,6 +13,7 @@ import {
   resolveTenantId,
   tenantIdArg,
   type ToolDef,
+  type ToolResult,
 } from "./registry.js";
 
 /**
@@ -217,6 +218,54 @@ const INHERENTLY_RELATED: readonly string[] = [
   "intercompany",
 ];
 
+/**
+ * Turn the two upstream errors that matter into something a caller can act on, for BOTH write tools.
+ *
+ * The wrong-table 404 is the one this whole module is about, and it was reaching callers raw: a debtor
+ * id sent with `perspective: "borrower"` answers `404 "Creditor with id=78 not found"` — from a POST,
+ * where a 404 reads as "the endpoint or the record was not found" rather than "your id is in the other
+ * id space". The tool holds both the perspective and the id, so it can say which space was searched
+ * and what to change.
+ *
+ * The duplicate reference was translated in `create` only, which left the curated PUT worse informed
+ * than `reai_request` — the quirk covers PUT, the tool did not.
+ */
+function translateLoanError(
+  err: unknown,
+  ctx: { perspective?: unknown; counterpartyId?: unknown; reference?: unknown },
+): ToolResult | undefined {
+  if (!(err instanceof ReaiApiError)) return undefined;
+  const detail = `${err.message} ${err.rawBody ?? ""}`;
+
+  const wrongTable = /(Creditor|Debtor) with id=(\d+) not found/.exec(detail);
+  if (err.status === 404 && wrongTable) {
+    const searched = wrongTable[1] ?? "Creditor";
+    const id = wrongTable[2] ?? "?";
+    const other = searched === "Creditor" ? "Debtor" : "Creditor";
+    const otherPerspective = searched === "Creditor" ? "lender" : "borrower";
+    return fail(
+      `Counterparty ${id} is not a ${searched.toLowerCase()}, and with perspective ` +
+        `${JSON.stringify(ctx.perspective ?? null)} that is the id space this call searched. Nothing ` +
+        `was written.\n\n` +
+        `perspective decides the table: borrower reads counterpartyId as a CREDITOR id, lender as a ` +
+        `DEBTOR id. So either ${id} is a ${other.toLowerCase()} and you meant ` +
+        `perspective: ${JSON.stringify(otherPerspective)}, or the id is wrong for the direction you ` +
+        `meant. The API's own answer is a bare 404, which reads as a missing endpoint rather than a ` +
+        `misdirected id.`,
+    );
+  }
+
+  if (err.status === 400 && /finnes allerede/.test(detail)) {
+    return fail(
+      `A loan with reference ${JSON.stringify(ctx.reference ?? null)} already exists on this company. ` +
+        `The API requires the reference to be unique and says so only in Norwegian ("Lån med ` +
+        `referanse ... finnes allerede"). Nothing was written — pick a different reference, or find ` +
+        `the existing loan with reai_list_loans.`,
+    );
+  }
+  return undefined;
+}
+
 type LoanRecord = {
   id?: number;
   reference?: string;
@@ -240,6 +289,12 @@ type LoanRecord = {
   interestExpenseAccountNumber?: string | null;
   interestIncomeAccountNumber?: string | null;
   accruedInterestAccountNumber?: string | null;
+  companyBankId?: number | null;
+  dayCountConvention?: string;
+  // Derived balances, present on every read and settable by nothing. Measured on a GET:
+  // `outstandingPrincipal` and `accruedInterestBalance` come back alongside createdAt/updatedAt.
+  outstandingPrincipal?: number | null;
+  accruedInterestBalance?: number | null;
 };
 
 const describeLoan = (loan: LoanRecord): string => {
@@ -274,10 +329,17 @@ function missingInterestAccounts(loan: LoanRecord): string[] {
   return missing;
 }
 
-const counterpartyNote = (perspective: string | undefined): string =>
-  perspective === "lender"
-    ? "counterpartyId is read as a DEBTOR id because perspective is lender"
-    : "counterpartyId is read as a CREDITOR id because perspective is borrower";
+const counterpartyNote = (perspective: string | undefined): string => {
+  // Three cases, not two. Reading an absent perspective as "borrower" made the tool ASSERT that a
+  // record it could not classify was a borrower loan — a fabricated fact, and precisely the kind this
+  // file spends its length trying to prevent.
+  if (perspective === "lender") return "counterpartyId is read as a DEBTOR id because perspective is lender";
+  if (perspective === "borrower") return "counterpartyId is read as a CREDITOR id because perspective is borrower";
+  return (
+    "This record does not say which perspective it has, so which id space its counterparty belongs to " +
+    "cannot be stated: borrower means a creditor id, lender means a debtor id"
+  );
+};
 
 const listLoans = defineTool({
   name: "reai_list_loans",
@@ -353,7 +415,10 @@ const getLoan = defineTool({
   name: "reai_get_loan",
   title: "Read one loan",
   description:
-    "One loan, with its derived ledger accounts and resolved counterparty.\n\n" +
+    "One loan, with its derived ledger accounts, resolved counterparty and current balances. " +
+    "`outstandingPrincipal` and `accruedInterestBalance` come back on every read and nothing here " +
+    "sets them — they answer how much is left, and no endpoint in this API moves them, so repayments " +
+    "happen in the ReAI UI.\n\n" +
     "The accounts are the part worth reading. They are derived at creation from loanType, " +
     "perspective — measured: a borrower bank loan gets principal 2220, interest expense 8150, " +
     "accrued interest 2950; a company loan to the owner gets 1370, interest income 8050, accrued " +
@@ -394,10 +459,14 @@ const createLoan = defineTool({
     "easy to get wrong.\n\n" +
     "**`counterpartyId` is not one id space.** `perspective: \"borrower\"` reads it as a CREDITOR " +
     "id; `perspective: \"lender\"` reads it as a DEBTOR id. Measured: the wrong one answers " +
-    '404 "Creditor with id=N not found" or "Debtor with id=N not found". Create the counterparty ' +
-    "first if it does not exist — both take just a name.\n\n" +
+    '404 "Creditor with id=N not found" or "Debtor with id=N not found", and this tool turns that ' +
+    "into a sentence naming which id space it searched.\n\n" +
+    "There is no curated tool for either side yet: reai_list_creditors and reai_update_creditor exist " +
+    "in the purchase toolset, but nothing lists debtors and nothing creates either. Until that lands, " +
+    "create the counterparty with reai_request on /api/creditors or /api/debtors — both need only a " +
+    "name. Said explicitly rather than implying a curated tool that is not there.\n\n" +
     "**The ledger accounts are derived here and only here.** Leave them out and the API wires up " +
-    "the standard Norwegian accounts from loanType, perspective and interestTreatment (measured: " +
+    "the standard Norwegian accounts from loanType and perspective (measured: " +
     "2220/8150/2950 for a borrower bank loan; 1370/8050/1760 for a company loan to the owner). " +
     "Nothing re-derives them later, so a wrong loanType now means hand-written account numbers " +
     "forever.\n\n" +
@@ -463,6 +532,11 @@ const createLoan = defineTool({
     // Refused here rather than upstream, because upstream refuses in Norwegian and does not say what
     // the rule is: `400 "Lånetypen er ikke gyldig for valgt låneperspektiv"`. Measured for all twelve
     // combinations -- see ALLOWED_PERSPECTIVES.
+    // The `??` is unreachable here -- loanType is a zod enum over exactly the six keys -- and kept for
+    // the shape it shares with the update path, where merged.loanType comes from the API and the
+    // fallback is live. Failing OPEN there is deliberate: a type this table has not heard of is one
+    // whose rule nobody has measured, and the API refuses a bad pair anyway with the message the quirk
+    // now documents.
     const allowed = ALLOWED_PERSPECTIVES[body.loanType] ?? ["borrower", "lender"];
     if (!allowed.includes(body.perspective)) {
       const reason = DIRECTION_REASON[body.loanType];
@@ -490,18 +564,12 @@ const createLoan = defineTool({
         tenantId: resolved,
       });
     } catch (err) {
-      // `reference` is UNIQUE per company, which the spec does not say. Measured:
-      // `400 "Lån med referanse X finnes allerede."` Named here because the message is Norwegian and
-      // a caller retrying with the same reference will keep getting it.
-      const detail = err instanceof ReaiApiError ? `${err.message} ${err.rawBody ?? ""}` : String(err);
-      if (err instanceof ReaiApiError && err.status === 400 && /finnes allerede/.test(detail)) {
-        return fail(
-          `A loan with reference ${JSON.stringify(body.reference)} already exists on this company. ` +
-            `The API requires the reference to be unique and says so only in Norwegian ("Lån med ` +
-            `referanse ... finnes allerede"). Nothing was created — pick a different reference, or ` +
-            `find the existing loan with reai_list_loans and edit that one.`,
-        );
-      }
+      const translated = translateLoanError(err, {
+        perspective: body.perspective,
+        counterpartyId: body.counterpartyId,
+        reference: body.reference,
+      });
+      if (translated) return translated;
       throw err;
     }
     const loan = res.data ?? {};
@@ -639,8 +707,9 @@ const updateLoan = defineTool({
       return fail(
         `loan ${id} would end up as loanType ${mergedType} with perspective ${mergedPerspective}, ` +
           `which the API refuses: ${DIRECTION_REASON[mergedType] ?? `that type only accepts ${allowed.join(" or ")}`}. ` +
-          `Nothing was written. Change both fields together, or pick a type that accepts the ` +
-          `direction you mean — intercompany and other accept either.`,
+          `Nothing was written. Change both fields together — and note that changing perspective also ` +
+          `needs a counterpartyId, because it selects which table that id is read from — or pick a ` +
+          `type that accepts the direction you mean, since intercompany and other accept either.`,
       );
     }
 
@@ -711,12 +780,25 @@ const updateLoan = defineTool({
     }
     const inferredOnUpdate = typeChanged && !given.includes("relatedParty") && INHERENTLY_RELATED.includes(mergedType);
 
-    const res = await ctx.client.request<LoanRecord>({
-      method: "PUT",
-      path: `/api/loans/${id}`,
-      body: merged,
-      tenantId: resolved,
-    });
+    let res;
+    try {
+      res = await ctx.client.request<LoanRecord>({
+        method: "PUT",
+        path: `/api/loans/${id}`,
+        body: merged,
+        tenantId: resolved,
+      });
+    } catch (err) {
+      // Both translations apply here too. A 404 after a SUCCESSFUL GET of this loan can only be about
+      // the counterparty, and `reference` is settable here, so the duplicate is reachable as well.
+      const translated = translateLoanError(err, {
+        perspective: merged.perspective,
+        counterpartyId: merged.counterpartyId,
+        reference: merged.reference,
+      });
+      if (translated) return translated;
+      throw err;
+    }
     const after = res.data ?? {};
 
     const notes = [
