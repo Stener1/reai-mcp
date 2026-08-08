@@ -1518,6 +1518,23 @@ export const QUIRKS: readonly Quirk[] = [
       "a repeated key. This server handles that for you.",
   },
   {
+    id: "manual-reconciliation-404-means-not-manual-not-missing",
+    paths: ["/api/manual-reconciliations/{bankAccountId}"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      'A 404 "Bankkonto ikke funnet" here does NOT mean the bank account id is wrong. It means the ' +
+      "account is not a MANUAL one. Measured on tenant 2634: all three of its company banks are " +
+      'providerType "ztl" — bank-synced — and every one of them answers that 404 from this endpoint ' +
+      "while appearing normally in reai_list_company_banks. So the message names the wrong thing, " +
+      "and an agent reading it literally will go looking for a bank account that was never " +
+      "missing.\n\n" +
+      "Which view an account belongs to is decided by providerType: a synced account reconciles " +
+      "through GET /api/bank-reconciliations/{bankAccountId} (reai_get_bank_reconciliation), and " +
+      "only a manual account has a statement balance to reconcile against here. Check providerType " +
+      "first rather than trying both and reading the 404 as an answer about the id.",
+  },
+  {
     id: "invoice-email-is-cleared-by-an-empty-string-not-by-null",
     paths: ["/api/customers/{id}"],
     methods: ["PATCH"],

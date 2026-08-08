@@ -555,3 +555,173 @@ test("the probe sees refinements, not the schema underneath them", () => {
   // z.array(z.object({...}).refine(...)).
   assert.ok(at("reai_create_subscription", "subscriptionLines[].quantity"));
 });
+
+/**
+ * The third leg: PATH parameters.
+ *
+ * The two sweeps above walk request bodies and query strings. A path parameter is the one input a
+ * caller cannot avoid — every `{id}` in this API is one — and nothing checked them, which is how
+ * reai_get_annual_accounts shipped taking a NUMBER for the same fiscal year that
+ * reai_get_tax_return and reai_create_vat_return both take as a four-digit string. An agent using
+ * two of the three in one session had to guess which wanted `2025` and which wanted `"2025"`.
+ *
+ * Two things are deliberately NOT enforced here, and both are decisions rather than omissions:
+ *
+ *  1. **int32 ceilings.** 158 path parameters declare `format: int32`, and 67 tool arguments accept
+ *     2147483648. Adding `.max(2147483647)` to every id would be 67 edits for a value no caller
+ *     reaches by accident, and the API answers such a call with a clear `400 "Failed to convert
+ *     'id'"`. Membership of the int32 range is the API's to judge, the same division of labour
+ *     reai_list_countries documents for country codes: this server checks the SHAPE. Pinned as a
+ *     test below so the decision is visible rather than looking like a gap nobody noticed.
+ *  2. **The letter of `exclusiveMinimum: 0` on a string-typed year.** Three fiscal-year parameters
+ *     declare that, which taken literally would admit "1" and "40000". All three tools require four
+ *     digits instead. That is narrower than the spec and defensible — no company has books for year
+ *     5 — and it is different in kind from the floor of 2000 an earlier version of the
+ *     annual-accounts tool had, which excluded 1999, a year a real tenant could ask about.
+ */
+function pathOperations() {
+  const out = [];
+  for (const tool of registeredTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      const item = SPEC.paths[path];
+      const op = item?.[method.toLowerCase()];
+      if (!op) continue;
+      const params = [...(item.parameters ?? []), ...(op.parameters ?? [])].filter(
+        (p) => p?.in === "path" && p.schema,
+      );
+      if (params.length > 0) out.push({ tool, method, path, params });
+    }
+  }
+  return out;
+}
+
+test("the path sweep sees a useful number of operations, not zero", () => {
+  const ops = pathOperations();
+  // Measured: well over a hundred tool operations carry a path parameter. A sweep that resolved
+  // nothing would pass in silence, which is the failure mode this file keeps naming.
+  assert.ok(ops.length >= 80, `only ${ops.length} tool operations resolved to path parameters`);
+});
+
+test("no tool refuses a path value the API accepts", () => {
+  const offenders = [];
+  let checked = 0;
+  for (const { tool, method, path, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = tool.inputSchema?.[parameter.name];
+      // Only same-named arguments. A tool whose path id comes from somewhere else — derived
+      // internally, or named for its noun — is a different question, and asserting on a guess about
+      // which argument feeds which placeholder is how a sweep starts accusing the innocent.
+      if (!arg) continue;
+      checked += 1;
+      const schema = parameter.schema;
+      const integer = schema.type === "integer";
+      // `exclusiveMinimum: 0` means "greater than zero" whatever the declared type; every parameter
+      // carrying it here is numeric in content, string-typed years included.
+      const smallestValid =
+        schema.exclusiveMinimum !== undefined
+          ? schema.exclusiveMinimum + 1
+          : schema.minimum !== undefined
+            ? schema.minimum
+            : undefined;
+      if (smallestValid === undefined) continue;
+      // Probe in the shape the ARGUMENT takes: a string-typed year is asked for as a string, and
+      // comparing a number against it would report every string argument as broken.
+      const wantsString = arg.safeParse("2025").success || !arg.safeParse(2025).success;
+      const probe = wantsString ? String(smallestValid) : smallestValid;
+      // A four-digit convention legitimately refuses "1"; that is decision (2) in the comment above.
+      const fourDigitYear = /^(year|fiscalYear)$/i.test(parameter.name);
+      if (fourDigitYear) continue;
+      if (integer && !arg.safeParse(probe).success) {
+        offenders.push(
+          `${tool.name}.${parameter.name} refuses ${JSON.stringify(probe)} on ${method} ${path}, ` +
+            `which the spec allows (exclusiveMinimum ${schema.exclusiveMinimum ?? "-"}, minimum ${schema.minimum ?? "-"})`,
+        );
+      }
+    }
+  }
+  assert.ok(checked >= 40, `expected many same-named path arguments to compare; checked ${checked}`);
+  assert.deepEqual(offenders, [], "these reject input the API would have accepted");
+});
+
+test("a path id below the spec's floor is refused locally", () => {
+  // The other direction, and the one that catches a missing `.positive()`: an id of 0 or -1 is a
+  // plausible agent mistake — an off-by-one, or a sentinel — and every id parameter in this API
+  // declares exclusiveMinimum 0.
+  const offenders = [];
+  let checked = 0;
+  for (const { tool, method, path, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = tool.inputSchema?.[parameter.name];
+      if (!arg || parameter.schema.exclusiveMinimum !== 0 || parameter.schema.type !== "integer") continue;
+      checked += 1;
+      for (const bad of [0, -1]) {
+        if (arg.safeParse(bad).success) {
+          offenders.push(`${tool.name}.${parameter.name} accepts ${bad} on ${method} ${path}`);
+        }
+      }
+    }
+  }
+  assert.ok(checked >= 30, `expected many integer path ids to check; checked ${checked}`);
+  assert.deepEqual(offenders, [], "these accept an id the API declares impossible");
+});
+
+test("every tool taking a fiscal year takes it the same way", () => {
+  // The inconsistency this sweep was written to catch, pinned as a property rather than as three
+  // separate bounds: whatever the convention is, all of them share it.
+  const yearTools = registeredTools.filter((t) => t.inputSchema?.year);
+  assert.ok(yearTools.length >= 3, `expected several tools taking a year; found ${yearTools.length}`);
+  const verdicts = yearTools.map((t) => ({
+    name: t.name,
+    shape: ["2025", "1999", "1", "20255", "", 2025]
+      .map((probe) => (t.inputSchema.year.safeParse(probe).success ? "y" : "n"))
+      .join(""),
+  }));
+  const shapes = new Set(verdicts.map((v) => v.shape));
+  assert.equal(
+    shapes.size,
+    1,
+    `tools disagree about how a fiscal year is passed: ${verdicts.map((v) => `${v.name}=${v.shape}`).join(", ")}`,
+  );
+  // And the shared convention is the four-digit string, which is what the spec declares the type as.
+  assert.equal(verdicts[0].shape, "yynnnn", `unexpected year convention ${verdicts[0].shape}`);
+});
+
+test("the int32 ceiling is deliberately not enforced, and that is recorded here", () => {
+  // Decision (1) above. This test exists so the absence is a choice on the record rather than a gap:
+  // if someone decides the ceilings ARE worth 67 edits, this test is what they have to change, and
+  // the reasoning is one scroll away.
+  const beyondInt32 = [];
+  for (const { tool, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = tool.inputSchema?.[parameter.name];
+      if (!arg || parameter.schema.format !== "int32") continue;
+      if (arg.safeParse(2147483648).success) beyondInt32.push(`${tool.name}.${parameter.name}`);
+    }
+  }
+  // Asserted as a RANGE, not a number, so ordinary tool churn does not fail it while a wholesale
+  // change of policy in either direction does.
+  assert.ok(
+    beyondInt32.length > 20,
+    `int32 ceilings appear to have been added to path ids (${beyondInt32.length} still unbounded) — ` +
+      `if that was deliberate, delete this test and the reasoning above it`,
+  );
+});
+
+test("the manual-reconciliation 404 is recorded as meaning the wrong thing", async () => {
+  // Measured while looking for a manual bank account to build tools against: there is none on either
+  // test tenant, and the endpoint's refusal for a SYNCED account names the wrong problem. Kept in
+  // this file because it is the other thing the path-parameter work turned up.
+  const { quirksFor } = await import("../dist/reai/quirks.js");
+  const quirk = quirksFor("GET", "/api/manual-reconciliations/{bankAccountId}").find(
+    (q) => q.id === "manual-reconciliation-404-means-not-manual-not-missing",
+  );
+  assert.ok(quirk, "the quirk should reach the endpoint it is about");
+  assert.match(quirk.note, /Bankkonto ikke funnet/);
+  assert.match(quirk.note, /does NOT mean the bank account id is wrong/);
+  assert.match(quirk.note, /providerType/);
+
+  // And the tool that sends callers there says so too, since that pointer is where they meet it.
+  const tool = registeredTools.find((t) => t.name === "reai_get_bank_reconciliation");
+  assert.match(tool.description, /Bankkonto ikke funnet/);
+  assert.match(tool.description, /not a manual account/);
+});

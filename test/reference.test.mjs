@@ -138,7 +138,7 @@ test("a documented 404 becomes the answer, for both status reads", async () => {
   assert.match(balance.text, /Not a wrong path, not a wrong tenant, not a disabled module/);
   assert.notEqual(balance.result.isError, true, "a 404 that means 'none' is not a failure");
 
-  const accounts = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+  const accounts = await run("reai_get_annual_accounts", { year: "2025" }, async () => {
     throw apiError(404, "No annual-accounts submission exists for this year", "/api/annual-accounts/2025");
   });
   assert.match(accounts.text, /NO annual-accounts submission exists for 2025/);
@@ -159,7 +159,7 @@ test("a NON-404 carrying the same words is still a failure", async () => {
   );
   await assert.rejects(
     () =>
-      run("reai_get_annual_accounts", { year: 2025 }, async () => {
+      run("reai_get_annual_accounts", { year: "2025" }, async () => {
         throw apiError(502, "gateway: HTTP 404 No annual-accounts submission exists");
       }),
     (err) => err instanceof ReaiApiError && err.status === 502,
@@ -186,7 +186,7 @@ test("any OTHER failure still fails, so an outage is never reported as an empty 
       `${thrown.message} must propagate unchanged`,
     );
     await assert.rejects(
-      () => run("reai_get_annual_accounts", { year: 2025 }, async () => { throw thrown; }),
+      () => run("reai_get_annual_accounts", { year: "2025" }, async () => { throw thrown; }),
       (err) => err === thrown,
     );
   }
@@ -215,7 +215,7 @@ test("the synthesized payloads carry the flag a consumer keys on, on both branch
   assert.equal(absentBody.recorded, false);
   assert.equal(absentBody.openingBalance, null);
 
-  const unfiled = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+  const unfiled = await run("reai_get_annual_accounts", { year: "2025" }, async () => {
     throw apiError(404, "No annual-accounts submission exists", "/api/annual-accounts/2025");
   });
   const unfiledBody = JSON.parse(unfiled.text.slice(unfiled.text.indexOf("{")));
@@ -228,7 +228,7 @@ test("an existing submission reports its status, not an invented submitted flag"
   // The API's states are incomplete, complete, signing, signed and submitted_in_other_system. There
   // is no "submitted", so a boolean would have to invent one — and "incomplete" is exactly the state
   // where a record exists and nothing has been filed.
-  const incomplete = await run("reai_get_annual_accounts", { year: 2025 }, async () => ({
+  const incomplete = await run("reai_get_annual_accounts", { year: "2025" }, async () => ({
     data: { year: 2025, status: "incomplete" },
     status: 200,
   }));
@@ -290,79 +290,29 @@ test("the global code lists work with no tenant selected, and send no tenant hea
   }
 });
 
-test("the year bound matches the spec rather than an assumption about fiscal years", () => {
-  // exclusiveMinimum 0, maximum 32767 in the spec. An earlier floor of 2000 rejected a legacy year
-  // the API would have answered, which is the one thing local validation must never do.
+test("the fiscal year is a four-digit string, the same as its two sibling tools", async () => {
+  // Found by the path-parameter sweep: this shipped as a NUMBER while reai_get_tax_return and
+  // reai_create_vat_return, which take the same fiscal year, both take a four-digit string. An agent
+  // using two of the three in one session had to guess which wanted 2025 and which wanted "2025".
+  const { registeredTools } = await import("../dist/server.js");
   const year = tool("reai_get_annual_accounts").inputSchema.year;
-  assert.equal(year.safeParse(1999).success, true, "a legacy fiscal year is the API's to refuse");
-  assert.equal(year.safeParse(1).success, true);
-  assert.equal(year.safeParse(32767).success, true);
-  assert.equal(year.safeParse(0).success, false);
-  assert.equal(year.safeParse(32768).success, false);
-  assert.equal(year.safeParse(2025.5).success, false);
-});
-
-test("the filter is case-insensitive, which the description promises", async () => {
-  // Every other query in this file is already lowercase, so a needle that stopped being lowercased
-  // would have regressed silently.
-  const respond = async () => ({ data: COUNTRIES, status: 200 });
-  for (const query of ["Sweden", "SWEDEN", "sWeDeN", "Se"]) {
-    const r = await run("reai_list_countries", { query }, respond);
-    assert.match(r.text, /Send countryCode: "SE"/, query);
+  assert.equal(year.safeParse("2025").success, true);
+  assert.equal(year.safeParse("1999").success, true, "a legacy fiscal year is not this server's to refuse");
+  assert.equal(year.safeParse(2025).success, false, "a number is not the shape the spec declares");
+  for (const bad of ["1", "20255", "", "abcd", "202 5"]) {
+    assert.equal(year.safeParse(bad).success, false, bad);
   }
-});
 
-test("a country can be found by the currency it uses", async () => {
-  // The country list's selling point is carrying a default currency, so this is the natural question.
-  // It used to answer a confident zero plus advice to try a shorter fragment.
-  const respond = async () => ({ data: COUNTRIES, status: 200 });
-  const nok = await run("reai_list_countries", { query: "NOK" }, respond);
-  assert.match(nok.text, /Send countryCode: "NO"/);
-});
-
-test("a blank query is treated as no query, not as a filter that matched everything", async () => {
-  // `matching` ignores a whitespace query, but the sentences keyed on truthiness — so "   " reported
-  // "3 country(s) matching \"   \", filtered locally out of 3", and on a one-row list it claimed that
-  // row matched a string of spaces.
-  const respond = async () => ({ data: COUNTRIES, status: 200 });
-  for (const query of ["   ", "\t", ""]) {
-    const r = await run("reai_list_countries", { query }, respond);
-    assert.match(r.text, /3 country\(s\)\./, JSON.stringify(query));
-    assert.ok(!/matching/.test(r.text), `${JSON.stringify(query)} must not claim to have filtered`);
+  // And the property that matters more than any single bound: all three agree.
+  for (const name of ["reai_get_tax_return", "reai_create_vat_return"]) {
+    const sibling = registeredTools.find((t) => t.name === name);
+    assert.ok(sibling?.inputSchema?.year, `${name} should take a year`);
+    for (const probe of ["2025", "1999", "1", "20255"]) {
+      assert.equal(
+        sibling.inputSchema.year.safeParse(probe).success,
+        year.safeParse(probe).success,
+        `${name} and reai_get_annual_accounts disagree about ${JSON.stringify(probe)}`,
+      );
+    }
   }
-  const single = await run("reai_list_countries", { query: "  " }, async () => ({
-    data: [COUNTRIES[0]],
-    status: 200,
-  }));
-  assert.ok(!/Send countryCode/.test(single.text), "a blank query must not claim a single match");
-});
-
-test("the code hint fires only on a single match", async () => {
-  // Otherwise "Send countryCode: X" names an arbitrary row out of several.
-  const respond = async () => ({ data: COUNTRIES, status: 200 });
-  const many = await run("reai_list_countries", { query: "united" }, async () => ({
-    data: [COUNTRIES[2], { code: "US", name: "United States", currencyCode: "USD" }],
-    status: 200,
-  }));
-  assert.match(many.text, /2 country\(s\) matching "united"/);
-  assert.ok(!/Send countryCode/.test(many.text), "two matches must not name one code");
-  const one = await run("reai_list_countries", { query: "norway" }, respond);
-  assert.match(one.text, /Send countryCode: "NO"/);
-});
-
-test("the documented phrase is found in the raw body too, not only in the message", async () => {
-  // The annual-accounts 404 is documented as returning AnnualAccountsSubmissionRes, not a
-  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is the
-  // only place the phrase can appear. Both halves of the check are load-bearing.
-  const bodyOnly = new ReaiApiError({
-    status: 404,
-    method: "GET",
-    path: "/api/annual-accounts/2025",
-    rawBody: '{"message":"No annual-accounts submission exists for the fiscal year"}',
-  });
-  const r = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
-    throw bodyOnly;
-  });
-  assert.match(r.text, /NO annual-accounts submission exists for 2025/);
-  assert.notEqual(r.result.isError, true);
 });

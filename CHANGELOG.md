@@ -13,6 +13,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The bounds sweep gained its third leg — PATH parameters — and the first thing it found
+  was mine.** `reai_get_annual_accounts` shipped taking the fiscal year as a **number**
+  while `reai_get_tax_return` and `reai_create_vat_return`, which take the same fiscal year,
+  both take a four-digit **string**. An agent using two of the three in one session had to
+  guess which wanted `2025` and which wanted `"2025"`. All three agree now, and the test
+  pins the property rather than three separate bounds: whatever the convention is, every tool
+  taking a year shares it.
+  - The synthesized payload carries `year` as a **number on both branches**, matching the
+    API's own `AnnualAccountsSubmissionRes.year`. Echoing the string argument would have made
+    a consumer's field change type with the outcome — the same cross-branch inconsistency
+    `submissionExists` was fixed for.
+  - Both directions are swept: no tool refuses a path value the API accepts, and no tool
+    accepts an id below the spec's floor. Mutation-tested — reverting the year to a number
+    names the disagreeing tool, and dropping `.positive()` from any path id names it with the
+    values it wrongly accepts.
+  - Two things are deliberately **not** enforced, each pinned as a test so the absence is a
+    decision on the record and not a gap nobody noticed. **int32 ceilings**: 67 id arguments
+    accept 2147483648, and adding `.max(2147483647)` to each would be 67 edits for a value no
+    caller reaches by accident, against a clear upstream `400`. Membership of the int32 range
+    is the API's to judge — the same division of labour `reai_list_countries` documents for
+    country codes. **The letter of `exclusiveMinimum: 0` on a string-typed year**, which would
+    admit `"1"` and `"40000"`; four digits is narrower than the spec and different in kind
+    from the floor of 2000 that an earlier version had, which excluded 1999.
+
+- **A 404 that names the wrong problem**, found while looking for a manual bank account to
+  build tools against. `GET /api/manual-reconciliations/{bankAccountId}` answers
+  `404 "Bankkonto ikke funnet"` — *bank account not found* — for a **bank-synced** account
+  that exists and reads perfectly through `reai_get_bank_reconciliation`. Measured on all
+  three of tenant 2634's company banks, every one `providerType "ztl"`. It means "not a
+  manual account". Recorded as a quirk, and said in the description of the tool that sends
+  callers to that endpoint in the first place — which had pointed there with no warning.
+  - Neither test tenant has a manual bank account (2783 has no company banks at all), so the
+    manual-reconciliation endpoints get no curated tools: there is nothing to verify them
+    against, and closing a reconciliation is not something to try blind on a real company.
+
+
 - **Two more tools were reporting "deleted or archived" on endpoints that say which.**
   `reai_delete_product` and `reai_delete_company_bank` returned literally
   `"deleted or archived (HTTP 200)"`. Both endpoints' 200 is documented as

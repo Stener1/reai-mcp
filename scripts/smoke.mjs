@@ -780,7 +780,8 @@ async function main() {
       [
         "the annual-accounts year reads as an answer either way",
         "reai_get_annual_accounts",
-        { year: 2025 },
+        // A four-digit STRING, the convention all three fiscal-year tools now share.
+        { year: "2025" },
         /NO annual-accounts submission exists/,
         /A submission exists for 2025/,
       ],

@@ -199,7 +199,12 @@ const getBankReconciliation = defineTool({
     "This is the view for BANK-SYNCED accounts. If reai_list_company_banks reports " +
     'providerType "manual" for the account, use reai_request GET ' +
     "/api/manual-reconciliations/{bankAccountId}?month=yyyy-MM instead — a manual account has no " +
-    "synced transactions and is reconciled against a statement balance.",
+    "synced transactions and is reconciled against a statement balance.\n\n" +
+    "Check providerType before choosing, because the manual endpoint's refusal is worded " +
+    'misleadingly: for a SYNCED account it answers 404 "Bankkonto ikke funnet" — bank account not ' +
+    "found — about an account that exists and that this tool reads perfectly well. Measured on all " +
+    'three of tenant 2634\'s banks, every one of them providerType "ztl". Read that 404 as "not a ' +
+    'manual account", never as "no such id".',
   risk: "read",
   apiPaths: [["GET", "/api/bank-reconciliations/{bankAccountId}"]],
   inputSchema: {

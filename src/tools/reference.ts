@@ -319,15 +319,20 @@ const getAnnualAccounts = defineTool({
   apiPaths: [["GET", "/api/annual-accounts/{year}"]],
   idempotent: true,
   inputSchema: {
+    // A four-digit STRING, matching reai_get_tax_return and reai_create_vat_return, which take the
+    // same fiscal year the same way. This shipped as a number, and the inconsistency was found by the
+    // path-parameter sweep in test/spec-bounds.test.mjs: an agent that used two of these three tools
+    // in one session had to guess which wanted 2025 and which wanted "2025".
+    //
+    // The spec declares this parameter `type: string` with `exclusiveMinimum: 0, maximum: 32767`,
+    // which four digits satisfies for every year a real company could have books for. It is narrower
+    // than the letter of the spec — year 5 and year 40000 are refused — and that is a deliberate
+    // second-order choice, not the mistake an earlier floor of 2000 was: that one excluded 1999,
+    // a year a real tenant could plausibly ask about.
     year: z
-      .number()
-      .int()
-      // The spec's own bounds: exclusiveMinimum 0, maximum 32767. An earlier floor of 2000 was an
-      // assumption about when ReAI's fiscal years start, and it rejected a legacy year the API would
-      // have answered — this server's rule is not to refuse what the API accepts.
-      .min(1, "The API declares exclusiveMinimum 0 for this parameter.")
-      .max(32767, "The API declares maximum 32767 for this parameter.")
-      .describe("Fiscal year, e.g. 2025. The API accepts 1 to 32767."),
+      .string()
+      .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
+      .describe("Fiscal year, four digits, e.g. \"2025\"."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -335,12 +340,12 @@ const getAnnualAccounts = defineTool({
     try {
       const res = await ctx.client.request<unknown>({
         method: "GET",
-        path: `/api/annual-accounts/${args.year}`,
+        path: `/api/annual-accounts/${encodeURIComponent(args.year)}`,
         tenantId,
       });
       const status = (res.data as { status?: string } | undefined)?.status;
       return ok(
-        { year: args.year, submissionExists: true, status: status ?? null, submission: res.data ?? null },
+        { year: Number(args.year), submissionExists: true, status: status ?? null, submission: res.data ?? null },
         {
           note:
             `A submission record EXISTS for ${args.year} on tenant ${tenantId}, with status ` +
@@ -355,7 +360,11 @@ const getAnnualAccounts = defineTool({
     } catch (err) {
       if (isNotFound(err, /no annual-accounts submission/i)) {
         return ok(
-          { year: args.year, submissionExists: false, status: null, submission: null },
+          // `Number(...)` so both branches agree with the API's own type: AnnualAccountsSubmissionRes
+          // declares year as an integer, and the argument is a four-digit string. Synthesizing a
+          // string here would have made a consumer's `year` field change type with the outcome —
+          // the same cross-branch inconsistency that `submissionExists` was fixed for.
+          { year: Number(args.year), submissionExists: false, status: null, submission: null },
           {
             note:
               `NO annual-accounts submission exists for ${args.year} on tenant ${tenantId}. That is ` +
