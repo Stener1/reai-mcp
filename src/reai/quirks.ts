@@ -608,6 +608,35 @@ export const QUIRKS: readonly Quirk[] = [
       "reversal is expected and means nothing is left to do.",
   },
   {
+    id: "three-roles-are-the-same-role",
+    // /api/users/permissions is here because the last paragraph is specifically about it — the
+    // quirk warned that the catalogue omits the self-scoped codes while not being attached to the
+    // catalogue, so discovery on that endpoint published nothing.
+    paths: ["/api/users", "/api/users/{id}", "/api/users/roles", "/api/users/permissions"],
+    kind: "gotcha",
+    note:
+      "The role NAMES imply a hierarchy the permissions do not implement. Measured on a live tenant " +
+      "by comparing the permission SETS rather than their sizes:\n\n" +
+      "  ROLE_OWNER         51 permissions   NOT assignable\n" +
+      "  ROLE_TENANT_ADMIN  51 permissions   assignable   identical to OWNER (0 missing, 0 extra)\n" +
+      "  ROLE_ACCOUNTANT    51 permissions   assignable   identical to OWNER (0 missing, 0 extra)\n" +
+      "  ROLE_AUDITOR       20 permissions   assignable   read-only\n" +
+      "  ROLE_EMPLOYEE       6 permissions   assignable   self-scoped only\n\n" +
+      "So inviting someone as an ACCOUNTANT grants exactly what the owner has, including " +
+      "tenant:user:write — the permission to invite more people. The only thing ROLE_OWNER has that " +
+      "the other two do not is that it cannot be handed out. Anyone reasoning from the titles will " +
+      "grant more than they meant to.\n\n" +
+      "POST /api/users takes roleCode and mails an invitation, which is why this server treats it as " +
+      "an external send: what leaves the tenant is not data but authority.\n\n" +
+      "Permission codes are scoped by PREFIX, and it decides how much of the company they reach. " +
+      "`self:` covers only the acting user's own records — employee card, expenses, timesheets — " +
+      "and `tenant:` covers the company's. All six of ROLE_EMPLOYEE's are `self:`; the owner holds " +
+      "6 self and 45 tenant.\n\n" +
+      "GET /api/users/permissions does not list the self-scoped ones at all — measured, it returns 45 " +
+      "codes and every one is tenant:, while the owner's effective set is 51. So a code seen on a " +
+      "user that is missing from the catalogue is not evidence that the code is wrong.",
+  },
+  {
     id: "delete-a-parent-and-its-children-become-undeletable",
     paths: ["/api/orders/{id}", "/api/customers/{id}", "/api/products/{id}", "/api/suppliers/{id}"],
     methods: ["DELETE"],

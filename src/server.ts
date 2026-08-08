@@ -22,6 +22,7 @@ import { assetTools } from "./tools/assets.js";
 import { subscriptionTools } from "./tools/subscriptions.js";
 import { warehouseTools } from "./tools/warehouses.js";
 import { agreementTools } from "./tools/agreements.js";
+import { accessTools } from "./tools/access.js";
 import { expenseTools } from "./tools/expenses.js";
 import { salaryTools } from "./tools/salary.js";
 
@@ -38,7 +39,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   sales: salesTools,
   purchase: [...purchaseTools, ...expenseTools],
   bank: bankVatTools,
-  organisation: organisationTools,
+  organisation: [...organisationTools, ...accessTools],
   assets: assetTools,
   subscriptions: subscriptionTools,
   warehouses: warehouseTools,
@@ -313,7 +314,7 @@ const GROUP_BLURBS: Record<string, string> = {
   purchase:
     "the purchase side (suppliers, supplier invoices, the document inbox, EHF parsing, expenses)",
   bank: "bank reconciliation and VAT (company accounts, reconciliation rules, matching, VAT periods)",
-  organisation: "departments and employees, and the employee ledger — the ids that postings and expenses are tagged with",
+  organisation: "departments and employees, the employee ledger, and who has access to the books — the ids that postings and expenses are tagged with, plus the roles and permissions behind them",
   assets: "the fixed-asset register (anleggsmidler): what the company capitalises, and how it depreciates",
   subscriptions: "recurring billing (abonnement): what bills whom, how often, and whether it goes out on its own",
   warehouses: "warehouses and stock on hand (lager), and the adjustments that move it",
