@@ -105,12 +105,16 @@ if (!declaredTestTenants.includes(String(tenantId))) {
   process.exit(2);
 }
 
-const call = async (method, path, body) => {
+const call = async (method, path, body, { omitTenant = false } = {}) => {
   const res = await fetch(baseUrl + path, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
-      "X-Tenant-Id": String(tenantId),
+      // /api/me is asked WITHOUT the tenant header, the way src/auth/oauth.ts asks it. With the header
+      // set to a tenant the token cannot reach, the answer is a 403 about the header rather than the
+      // list of tenants — so the first version of this check reported "could not read /api/me" when
+      // the real and more useful answer was "the token does not reach that tenant".
+      ...(omitTenant ? {} : { "X-Tenant-Id": String(tenantId) }),
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -120,6 +124,41 @@ const call = async (method, path, body) => {
   try { parsed = await res.json(); } catch {}
   return { status: res.status, body: parsed };
 };
+
+/**
+ * The allowlist checks the tenant NUMBER on the command line. It cannot check the one thing that
+ * actually decides where a write lands: which company the TOKEN reaches.
+ *
+ * This repository documents the hazard itself, in the `tenant-header-ignored-single-tenant` quirk —
+ * when a token reaches exactly one tenant, X-Tenant-Id is IGNORED and every value returns that
+ * tenant's data. So `REAI_WRITE_TEST_TENANTS=2783 --tenant 2783` with a token scoped to a different
+ * company writes to that company while every guard passes. Codex caught this on PR #114; no script in
+ * this repository checked it, including the two that post to the ledger.
+ */
+async function assertTokenReachesTenant() {
+  const me = await call("GET", "/api/me", undefined, { omitTenant: true });
+  if (me.status !== 200) {
+    console.error(`Could not read /api/me to confirm the token's tenants (HTTP ${me.status}).`);
+    process.exit(2);
+  }
+  const reachable = (me.body?.tenants ?? []).map((t) => Number(t.id));
+  if (!reachable.includes(tenantId)) {
+    console.error(
+      `Refusing to run: the token does not reach tenant ${tenantId}.\n` +
+        `It reaches ${reachable.join(", ") || "(none)"}.\n\n` +
+        `This matters more than it looks: a token scoped to a SINGLE tenant ignores X-Tenant-Id\n` +
+        `entirely, so every probe below would have run against ${reachable[0] ?? "another company"}\n` +
+        `while --tenant and REAI_WRITE_TEST_TENANTS both said ${tenantId}.`,
+    );
+    process.exit(2);
+  }
+  if (reachable.length === 1) {
+    console.log(
+      `Note: this token reaches only tenant ${reachable[0]}, so X-Tenant-Id is ignored — which is ` +
+        `fine here, because that tenant is the one requested and allowlisted.`,
+    );
+  }
+}
 
 /** Records created, so the `finally` can remove them. The idiom test/smoke-cleanup.test.mjs checks. */
 const created = {};
@@ -173,6 +212,7 @@ const CASES = [
     haystack: "message",
     expectStatus: 400,
     what: "an account that requires a sub-account",
+    undo: (id) => call("DELETE", `/api/vouchers/${id}`),
     run: () =>
       call("POST", "/api/vouchers", {
         date: DATE,
@@ -187,6 +227,7 @@ const CASES = [
     haystack: "message",
     expectStatus: 400,
     what: "an account that requires a bank account",
+    undo: (id) => call("DELETE", `/api/vouchers/${id}`),
     run: () =>
       call("POST", "/api/vouchers", {
         date: DATE,
@@ -214,6 +255,7 @@ const CASES = [
     // Missed entirely by the first version, which only saw `.test(` and this uses `.exec(`. It needs
     // no loan to exist, so "tenant 2783 has no loans" never applied to it.
     what: "the wrong-table diagnosis in translateLoanError",
+    undo: (id) => call("DELETE", `/api/loans/${id}`),
     run: () =>
       call("POST", "/api/loans", {
         reference: "Zz-audit-probe",
@@ -260,16 +302,24 @@ const CASES = [
     haystack: "raw",
     expectStatus: 400,
     what: "an unparseable phone number — only the REFUSAL, not the storage rule",
+    // On the CONTACT-PERSON route, because that is where translateContactError consumes this string.
+    // The first version PATCHed the customer's own phone: the same message today, but if the wording
+    // ever diverged by route the audit would pass while the shipped translation was broken. Codex's
+    // finding on #114. A company customer, since contacts are refused on private ones.
     run: async () => {
       const made = await call("POST", "/api/customers", {
-        name: "Zz Message Audit Phone",
-        privateContact: true,
+        name: "Zz Message Audit Phone As",
+        organizationNumber: "812345680",
+        skipRegistryLookup: true,
       });
       created.phoneCustomer = made.body?.id;
       if (!created.phoneCustomer) {
         return { skip: `could not create the phone probe customer (HTTP ${made.status})` };
       }
-      return call("PATCH", `/api/customers/${created.phoneCustomer}`, { phone: "nonsense" });
+      return call("POST", `/api/customers/${created.phoneCustomer}/contact-persons`, {
+        name: "Zz Phone Probe",
+        phone: "nonsense",
+      });
     },
   },
   {
@@ -315,7 +365,10 @@ let inconclusive = 0;
  * third record-creating script had been written outside a guard that exists precisely because the
  * same cleanup mistake was made three times in three iterations.
  */
+let unexpectedWrites = 0;
+
 async function main() {
+  await assertTokenReachesTenant();
   try {
     for (const probe of CASES) {
       let result;
@@ -332,6 +385,30 @@ async function main() {
         continue;
       }
 
+      // A case is a request that should be REFUSED. If it succeeded, the precondition it relies on has
+      // changed — account 1320 no longer requiring a sub-account, say — and the probe has just written
+      // to real books. That is a safety failure, not a drift: Codex's finding on #114. Undo it if the
+      // record is undoable, and say so loudly either way.
+      if (result.status >= 200 && result.status < 300) {
+        unexpectedWrites += 1;
+        const id = result.body?.id;
+        let undone = "nothing to undo";
+        if (id && probe.undo) {
+          const gone = await probe.undo(id);
+          undone = `undo answered HTTP ${gone.status}`;
+        } else if (id) {
+          undone = `NOT UNDONE — record ${id} remains, and this probe declares no undo`;
+        }
+        console.error(
+          `SAFETY        ${probe.id}\n` +
+            `              expected a refusal and got HTTP ${result.status}. The precondition has ` +
+            `changed and this probe WROTE to tenant ${tenantId}.\n` +
+            `              ${undone}. ${probe.what} no longer refuses — fix the probe before running ` +
+            `this again.`,
+        );
+        continue;
+      }
+
       const detail = String(result.body?.detail ?? "");
       const haystack =
         probe.haystack === "detail"
@@ -340,6 +417,22 @@ async function main() {
             ? rawOf(result.body)
             : messageOf(result.body);
       const matches = probe.pattern.test(haystack);
+
+      // Statuses that mean the request never got as far as the rule: authentication, throttling, a
+      // server fault, or a period lock that refuses the write for an unrelated reason. Reporting any
+      // of these as DRIFT would send someone to rewrite a correct regex — Codex's finding on #114, and
+      // the hard-coded probe date makes the 409 case a matter of time rather than luck.
+      const UNRELATED = [401, 403, 404, 405, 409, 429, 500, 502, 503, 504];
+      if (!matches && result.status !== probe.expectStatus && UNRELATED.includes(result.status)) {
+        inconclusive += 1;
+        console.log(
+          `INCONCLUSIVE  ${probe.id}\n` +
+            `              HTTP ${result.status} — the request did not reach the rule (expected ` +
+            `${probe.expectStatus}): ${detail.slice(0, 90)}\n` +
+            `              Fix the probe or the environment. Do NOT touch ${probe.where}.`,
+        );
+        continue;
+      }
 
       // A shape complaint means the rule was never evaluated — unless the pattern matched anyway, in
       // which case we plainly reached it.
@@ -409,7 +502,7 @@ async function main() {
   if (leaked > 0) {
     console.error(`\n${leaked} record(s) left on tenant ${tenantId}. Remove them.`);
   }
-    process.exit(drift > 0 || leaked > 0 ? 1 : 0);
+    process.exit(drift > 0 || leaked > 0 || unexpectedWrites > 0 ? 1 : 0);
   }
 }
 

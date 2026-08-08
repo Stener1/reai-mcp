@@ -144,6 +144,25 @@ async function main() {
     subscriptionId: undefined,
   };
 
+  // The allowlist checks the tenant NUMBER on the command line. It cannot check the one thing that
+  // decides where a write lands: which company the TOKEN reaches. This repository documents that
+  // hazard itself — when a token reaches exactly ONE tenant, X-Tenant-Id is ignored and every value
+  // returns that tenant's data — so `REAI_WRITE_TEST_TENANTS=2783 --tenant 2783` with a token scoped
+  // to another company posts to that company while every guard here passes. Codex found this on
+  // PR #114, on a script that only refuses writes; it applies with far more force to this one, which
+  // posts to the general ledger. Nothing in this repository checked it.
+  const whoami = await client.callTool({ name: "reai_whoami", arguments: {} });
+  const reachable = [...textOf(whoami).matchAll(/\b(\d{4,})\b/g)].map((m) => Number(m[1]));
+  if (!reachable.includes(tenantId)) {
+    console.error(
+      `Refusing to write: the token does not reach tenant ${tenantId}.\n` +
+        `reai_whoami reports ${reachable.join(", ") || "(none)"}.\n\n` +
+        `A token scoped to a single tenant IGNORES X-Tenant-Id, so this run would have written to\n` +
+        `${reachable[0] ?? "another company"} while --tenant said ${tenantId}.`,
+    );
+    process.exit(2);
+  }
+
   try {
     // 0. Warehouse round-trip. Nothing else depends on it, and it is the cheapest
     //    proof that create/rename/read/delete all agree about the same record.

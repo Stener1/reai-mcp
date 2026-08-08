@@ -272,3 +272,44 @@ test("each case declares which haystack the guarded code actually reads", () => 
   const haystacks = [...src.matchAll(/haystack:\s*"(message|raw|detail)"/g)].length;
   assert.equal(haystacks, cases, "every case must say which text it compares against");
 });
+
+test("every record-creating script verifies the TOKEN's tenant, not just the argument", () => {
+  // The allowlist checks a number on the command line. This repository's own
+  // `tenant-header-ignored-single-tenant` quirk says a token reaching exactly one tenant IGNORES
+  // X-Tenant-Id — so an allowlisted `--tenant 2783` with a token scoped elsewhere writes to that other
+  // company while every guard passes. Codex found it on PR #114 against the audit; nothing in the repo
+  // checked it, including the two scripts that post to the general ledger. Pinned for all three.
+  for (const script of [
+    "scripts/audit-messages.mjs",
+    "scripts/smoke-write.mjs",
+    "scripts/smoke-full-write.mjs",
+  ]) {
+    const src = readFileSync(path.join(ROOT, script), "utf8");
+    assert.match(
+      src,
+      /does not reach tenant/,
+      `${script} does not verify that the token reaches the tenant it was told to use`,
+    );
+    assert.match(src, /IGNORES? X-Tenant-Id/i, `${script} should say why the check matters`);
+  }
+});
+
+test("the audit treats an unexpected SUCCESS as a safety failure", () => {
+  // Every case is a request that should be refused, so a 2xx means the precondition changed and the
+  // probe has written to real books — account 1320 no longer requiring a sub-account, say. Codex's
+  // finding on PR #114: the first version reported that as DRIFT and moved on.
+  const src = readFileSync(AUDIT, "utf8");
+  assert.match(src, /SAFETY/);
+  assert.match(src, /expected a refusal and got HTTP/);
+  assert.match(src, /unexpectedWrites/);
+  assert.match(src, /undo/, "a probe that can undo its own accidental write should declare how");
+});
+
+test("a status that cannot have reached the rule is INCONCLUSIVE, not DRIFT", () => {
+  // 401/403/429/5xx, and a 409 once the probe date falls in a closed period — reporting any of those as
+  // drift sends someone to rewrite a correct regex, which is the one thing this script must never do.
+  const src = readFileSync(AUDIT, "utf8");
+  assert.match(src, /UNRELATED/);
+  assert.match(src, /429/);
+  assert.match(src, /did not reach the rule/);
+});

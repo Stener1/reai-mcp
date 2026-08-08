@@ -50,6 +50,20 @@ All notable changes to `reai-mcp`. Format loosely follows
     loans in this tenant" exemption. It also accepted `pattern.includes(probe)`, so nine probe patterns
     replaced with `/e/` satisfied everything, and floored the population at 9 against 14, so an ordinary
     refactor hoisting regexes into constants dropped five silently. All fixed and each evasion verified.
+  - **Codex found a hole neither I nor the reviewer saw, and it was not confined to this script.** The
+    allowlist checks the tenant NUMBER on the command line; it cannot check which company the TOKEN
+    reaches. This repository's own `tenant-header-ignored-single-tenant` quirk says a token reaching
+    exactly one tenant **ignores** `X-Tenant-Id` — so `REAI_WRITE_TEST_TENANTS=2783 --tenant 2783` with a
+    token scoped to another company writes to that company while every guard passes. **Nothing in the
+    repository checked it, including the two scripts that post to the general ledger.** All three now
+    verify the token's reachable tenants first and refuse otherwise, and a test pins it for each.
+  - Also from Codex: a probe that unexpectedly **succeeds** is a safety failure, not a drift. Every case
+    is supposed to be refused, so a 2xx means the precondition changed — account 1320 no longer requiring
+    a sub-account, say — and the probe has written to real books. It now undoes what it can, reports
+    `SAFETY`, and fails the run. And a status that cannot have reached the rule (401/403/429/5xx, or a 409
+    once the probe date falls in a closed period) is INCONCLUSIVE rather than DRIFT, which is the one
+    thing this script must never get wrong. The phone probe also moved to the **contact-person** route,
+    which is where the translation is actually consumed.
   - **What it cannot catch is now part of the contract**, in the script, the docs and here: every case is
     a refusal, so nothing observes what the API accepts, normalises or stores. Two of the five motivating
     failures remain out of reach — `skipRegistryLookup` drifts on a `201`, and the phone rule is a storage
