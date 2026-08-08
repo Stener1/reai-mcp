@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { registeredTools } from "../dist/server.js";
+import { ok } from "../dist/tools/registry.js";
 import { classifyRequest } from "../dist/policy.js";
 import { quirksFor } from "../dist/reai/quirks.js";
 
@@ -152,5 +153,231 @@ test("the archive-visibility quirk names the filter that works and the one that 
   // The list tools already expose it, which is what makes the quirk actionable.
   for (const name of ["reai_list_customers", "reai_list_suppliers"]) {
     assert.ok(tool(name).inputSchema.archived, `${name} should take an archived filter`);
+  }
+});
+
+/**
+ * Every curated tool on an endpoint documented to answer `{outcome}` must read it.
+ *
+ * This repo has fixed the same bug five separate times, one endpoint at a time: customers, suppliers,
+ * salary runs, expense vouchers, expenses. Each fix reported "deleted or archived" until someone
+ * noticed, and each was found by hand. The spec has said which all along — `ApiLifecycleOutcomeRes`
+ * is `{outcome: deleted|archived|reversed}` and **nineteen** operations declare it as their 200 — so
+ * the sixth instance was always going to be found the same slow way.
+ *
+ * It was: an audit against the spec turned up reai_delete_product and reai_delete_company_bank, both
+ * still answering "deleted or archived (HTTP 200)". The product one is the worst of the set, since a
+ * deleted product is what strands orders permanently and products have no unarchive endpoint.
+ *
+ * Driven from the spec rather than from a list, so a new tool on any of the nineteen inherits the
+ * requirement, and a twentieth endpoint gaining the envelope is covered the day it does.
+ */
+test("a curated tool on an {outcome} endpoint reports which outcome happened", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const spec = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../spec/reai-openapi.json", import.meta.url)), "utf8"),
+  );
+
+  // The operations whose success response is the lifecycle envelope. Read from every content type:
+  // this spec declares 368 of its responses under the wildcard, and only 12 under application/json.
+  const outcomeOps = new Set();
+  for (const [path, item] of Object.entries(spec.paths ?? {})) {
+    for (const [method, op] of Object.entries(item)) {
+      const ok = op?.responses?.["200"] ?? op?.responses?.["201"];
+      const schema = Object.values(ok?.content ?? {}).find((c) => c?.schema)?.schema;
+      if (schema?.$ref?.endsWith("ApiLifecycleOutcomeRes")) outcomeOps.add(`${method.toUpperCase()} ${path}`);
+    }
+  }
+  assert.ok(outcomeOps.size >= 15, `expected the lifecycle envelope on many endpoints, saw ${outcomeOps.size}`);
+
+  // What the handler DOES, not what its description says.
+  //
+  // The observable went through two wrong versions before this one, both worth recording because both
+  // passed while the bug was present.
+  //
+  //  1. Comparing each tool's WHOLE output. ok() echoes the response body underneath, and that body
+  //     is the outcome envelope — so `{"outcome":"deleted"}` and `{"outcome":"archived"}` differed
+  //     without the tool having said anything, and the pre-fix handlers passed.
+  //  2. Comparing the output with the echoed body sliced off at the first line starting with `{`.
+  //     That fails whenever the body is not pretty-printed JSON: `ok("some string")` returns the
+  //     string raw, so nothing starts a line with a brace, the whole text counts as the note, and a
+  //     handler saying literally "deleted or archived (HTTP 200)" passed again as soon as it
+  //     interpolated the body. `ok(res.data ?? \`…\`)` is house style in four handlers, so that is
+  //     not a hypothetical shape.
+  //
+  // So: compare the tool's OWN WORDS, with the echoed body subtracted EXACTLY rather than guessed at.
+  // `ok(data)` with no note renders precisely the body a handler passing that same data would emit —
+  // same code path, so it works for pretty-printed JSON and for a raw string alike — and any leftover
+  // `"outcome": "value"` pair is stripped too, for handlers that embed the envelope inside a string
+  // they build themselves.
+  //
+  // A positive per-outcome assertion was tried first and was wrong: it required every tool to name
+  // every outcome, but the enum is shared across all 19 endpoints and each uses a subset. A voucher
+  // cannot be archived, a customer cannot be reversed, and reporting an impossible value as "no
+  // recognised outcome" is the honest answer rather than a defect.
+  const noteOf = (text, outcome) => {
+    const bodyText = ok({ outcome }).content.find((c) => c.type === "text")?.text ?? "";
+    let note = bodyText ? text.split(bodyText).join(" ") : text;
+    note = note.replace(new RegExp(`"outcome"\\s*:\\s*"${outcome}"`, "g"), " ");
+    return note.replace(/\s+/g, " ").trim();
+  };
+
+  const sentinelFor = (name, schema) => {
+    const def = schema?._def?.innerType?._def ?? schema?._def ?? {};
+    if (Array.isArray(def.values) && def.values.length > 0) return def.values[0];
+    if (def.typeName === "ZodBoolean") return true;
+    if (def.typeName === "ZodNumber") return 7;
+    if (/date/i.test(name)) return "2026-03-04";
+    return `Zz ${name}`;
+  };
+
+  const offenders = [];
+  const unexercised = [];
+  let checked = 0;
+  const coveredOps = new Set();
+  for (const t of registeredTools) {
+    const hits = (t.apiPaths ?? []).filter(([method, path]) => outcomeOps.has(`${method} ${path}`));
+    if (hits.length === 0) continue;
+    checked += 1;
+    for (const [method, path] of hits) coveredOps.add(`${method} ${path}`);
+
+    const args = { tenantId: 2783 };
+    for (const [field, schema] of Object.entries(t.inputSchema ?? {})) {
+      if (field === "tenantId") continue;
+      args[field] = sentinelFor(field, schema);
+    }
+
+    const results = new Map();
+    const problems = [];
+    for (const outcome of ["deleted", "archived", "reversed"]) {
+      const requests = [];
+      try {
+        const validated = z.object(t.inputSchema).parse(args);
+        const result = await t.handler(validated, {
+          client: {
+            request: async (req) => {
+              requests.push(req);
+              return {
+                data:
+                  req.method === "DELETE"
+                    ? { outcome }
+                    : { id: 7, name: "Zz", status: "under_process", archived: false },
+                status: 200,
+              };
+            },
+            deepLink: () => "link",
+          },
+          config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+          session: {},
+        });
+        const text = result.content.find((c) => c.type === "text")?.text ?? "";
+        // A handler that never reached its DELETE, or that refused, was not exercised — it was not
+        // observed ignoring anything. The earlier version only handled a THROWN error, so a tool
+        // whose precondition the mock happens not to satisfy returned fail() three times and was
+        // accused of reporting the same thing either way. reai_delete_salary_run, which reads the
+        // outcome perfectly, is one bad mock field away from being that tool.
+        if (result.isError === true) problems.push(`${outcome}: tool refused — ${text.slice(0, 90)}`);
+        else if (!requests.some((r) => r.method === "DELETE")) problems.push(`${outcome}: no DELETE issued`);
+        else results.set(outcome, noteOf(text, outcome));
+      } catch (err) {
+        problems.push(`${outcome}: threw — ${err?.message ?? err}`);
+      }
+    }
+
+    if (results.size < 3) {
+      unexercised.push(`${t.name} — ${problems.join(" | ").slice(0, 220)}`);
+      continue;
+    }
+    // Pairwise: all three, because the harness drives all three. A tool folding a reversal into its
+    // archived branch would otherwise pass, and on vouchers, expenses and salary runs a reversal
+    // POSTS to the ledger.
+    const pairs = [
+      ["deleted", "archived"],
+      ["deleted", "reversed"],
+      ["archived", "reversed"],
+    ];
+    const collided = pairs.filter(([a, b]) => results.get(a) === results.get(b));
+    if (collided.length > 0) {
+      offenders.push(
+        `${t.name} (${hits.map(([m, p]) => `${m} ${p}`).join(", ")}) — same words for ` +
+          collided.map(([a, b]) => `${a}/${b}`).join(" and "),
+      );
+    }
+  }
+
+  // Offenders FIRST: asserting unexercised first meant one broken-harness tool hid every real
+  // finding in the other ten.
+  assert.deepEqual(
+    offenders,
+    [],
+    "these call an endpoint that says whether it deleted, archived or reversed, and do not report which",
+  );
+  assert.deepEqual(
+    unexercised,
+    [],
+    "these could not be driven at all, so this test proves nothing about them — fix the harness",
+  );
+
+  // Coverage is pinned, not floored. `apiPaths: []` removes a tool from this audit silently — no
+  // other test requires the list to be COMPLETE, only present — so a floor of 8 left three tools'
+  // worth of slack to disappear into. Both halves are stated: how many tools, and which operations
+  // deliberately have none.
+  assert.equal(
+    checked,
+    11,
+    `expected exactly 11 curated tools on the ${outcomeOps.size} lifecycle endpoints; found ${checked}. ` +
+      `A new tool on one of them, or an apiPaths entry going missing, both land here — update this ` +
+      `number on purpose.`,
+  );
+  const uncovered = [...outcomeOps].filter((op) => !coveredOps.has(op)).sort();
+  assert.deepEqual(
+    uncovered,
+    [
+      "DELETE /api/agreements/{id}/sign-requests/{signRequestId}",
+      "DELETE /api/documents/{id}",
+      "DELETE /api/invoices/{id}/manual-credit-note-applications/{creditNoteInvoiceId}",
+      "DELETE /api/invoices/{id}/payments/{paymentId}",
+      "DELETE /api/opening-balances",
+      "DELETE /api/projects/{id}",
+      "DELETE /api/supplier-invoices/{id}",
+      "DELETE /api/supplier-invoices/{invoiceId}/payments/{paymentId}",
+    ],
+    "these lifecycle endpoints have no curated tool; add one here when that changes",
+  );
+});
+
+test("the two tools this audit caught name the consequence, not just the outcome", async () => {
+  // The first version of this test asserted the absence of "deleted or archived" from each tool's
+  // DESCRIPTION — and passed on main, because this change never touched a description. The
+  // consequence lives in the note the handler builds, so drive the handler.
+  const cases = [
+    [
+      "reai_delete_product",
+      { id: 7 },
+      {
+        deleted: [/never be deleted through the API/, /500 "Referenced record is not accessible"/],
+        archived: [/no archived filter/, /cannot be listed through this API at all/],
+      },
+    ],
+    [
+      "reai_delete_company_bank",
+      { id: 7 },
+      {
+        deleted: [/nothing can unarchive it/],
+        archived: [/no archived filter/, /not evidence that any payment was/],
+      },
+    ],
+  ];
+
+  for (const [name, args, expectations] of cases) {
+    for (const [outcome, patterns] of Object.entries(expectations)) {
+      const { text } = await run(name, args, { outcome });
+      for (const pattern of patterns) {
+        assert.match(text, pattern, `${name} on "${outcome}" should explain the consequence`);
+      }
+      // And the hedge this whole audit exists to remove must be gone.
+      assert.ok(!/deleted or archived/i.test(text), `${name} on "${outcome}" still hedges`);
+    }
   }
 });

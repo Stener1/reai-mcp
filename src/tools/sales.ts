@@ -450,7 +450,38 @@ const deleteProduct = defineTool({
       path: `/api/products/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Product ${args.id} deleted or archived (HTTP ${res.status}).`);
+    // "deleted or archived" was what this said, and the endpoint tells you which: its 200 is
+    // documented as ApiLifecycleOutcomeRes, `{outcome: deleted|archived|reversed}`. The difference
+    // matters more here than almost anywhere else in this API, because a product is the reference
+    // that strands other records — eight orders on the test tenant are permanently undeletable
+    // because the PRODUCT their lines name was deleted first, and products have no unarchive
+    // endpoint at all. Archived is the recoverable-looking outcome that is not recoverable.
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    // `outcome: null` rather than a bare record, following reai_delete_voucher — see the comment
+    // there: a synthesized outcome beside an "unknown" note tells a structured reader the opposite
+    // of the prose.
+    return ok(res.data ?? { outcome: null, productId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Product ${args.id} was DELETED outright. Any ORDER whose lines still name it can now ` +
+            `never be deleted through the API: every DELETE on one answers 500 "Referenced record ` +
+            `is not accessible", and there is no product unarchive endpoint to restore the ` +
+            `reference with. Remove dependents BEFORE their master data. (Invoices are not part of ` +
+            `this: the API has no invoice DELETE at all, so an invoice was never deletable and ` +
+            `crediting it with reai_credit_invoice is the only route regardless.)`
+          : outcome === "archived"
+            ? `Product ${args.id} was ARCHIVED, not deleted: something references it, so the audit ` +
+              `trail is kept and those references still resolve. Two things follow, and neither is ` +
+              `good news. Products have NO unarchive endpoint, so this is not a state you can ` +
+              `reverse through the API. And GET /api/products takes no archived filter — measured, ` +
+              `its only parameter is the tenant header — so an archived product cannot be listed ` +
+              `through this API at all. reai_list_products will simply not show it.`
+            : `Product ${args.id}: the DELETE returned HTTP ${res.status} with no recognised outcome ` +
+              `(${JSON.stringify(outcome)}). Whether it was deleted or archived is NOT established, ` +
+              `and this API gives you no way to settle it: there is no archived filter on the ` +
+              `product list, so an absent product is either gone or archived and the two look the ` +
+              `same. Check in the ReAI UI if it matters.`,
+    });
   },
 });
 

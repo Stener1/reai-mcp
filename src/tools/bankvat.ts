@@ -152,7 +152,36 @@ const deleteCompanyBank = defineTool({
       path: `/api/company-banks/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Company bank account ${args.id} deleted or archived (HTTP ${res.status}).`);
+    // Same as the counterparty deletes: the endpoint's 200 is ApiLifecycleOutcomeRes and says which
+    // happened. It matters here because a company bank is where money moves FROM, and because this
+    // is one of the endpoints where the two outcomes cannot be told apart afterwards: unlike
+    // /api/warehouses and /api/customers, GET /api/company-banks takes no `archived` parameter —
+    // measured, its only parameter is the tenant header — so an archived bank is as invisible as a
+    // deleted one. The response is the only chance to learn which happened.
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    // `outcome: null` in the fallback rather than a bare record, following reai_delete_voucher: an
+    // earlier version of that tool synthesized `{outcome: "deleted"}` beside a note saying the
+    // outcome was unknown, so anything reading the structured value concluded the opposite of the
+    // prose. An explicit null says "there was none" to a consumer that keys on the field.
+    return ok(res.data ?? { outcome: null, companyBankId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Company bank ${args.id} was DELETED outright — the record is gone, and nothing can ` +
+            `unarchive it.`
+          : outcome === "archived"
+            ? `Company bank ${args.id} was ARCHIVED, not deleted: something still references it — a ` +
+              `payment, a posting or a reconciliation — so the audit trail is kept. Which of those ` +
+              `it is, this response does not say, and archival is not evidence that any payment was ` +
+              `ever made through the account.\n\n` +
+              `You cannot confirm any of this afterwards: GET /api/company-banks takes no archived ` +
+              `filter, so reai_list_company_banks shows an archived account exactly as it shows a ` +
+              `deleted one — not at all. This response is the only place that distinction exists.`
+            : `Company bank ${args.id}: the DELETE returned HTTP ${res.status} with no recognised ` +
+              `outcome (${JSON.stringify(outcome)}). Which of the two happened is NOT established, ` +
+              `and this API cannot settle it: there is no archived filter on the company-bank list, ` +
+              `so an absent account is either gone or archived and the two look identical. Check in ` +
+              `the ReAI UI if it matters.`,
+    });
   },
 });
 

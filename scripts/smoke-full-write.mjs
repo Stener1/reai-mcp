@@ -1531,10 +1531,14 @@ async function main() {
     // reported and stepped over, not allowed to propagate.
     console.log("\n  Cleanup:");
 
-    const attempt = async (label, call, describe) => {
+    // `passed` is optional and defaults to "the call did not error". Without it, a cleanup check could
+    // only ever assert that something was sent: review caught the outcome check below returning a
+    // "NO OUTCOME REPORTED" detail string while still counting as a pass, which is the shape where a
+    // regression shows up in the log and not in the exit code.
+    const attempt = async (label, call, describe, passed = (r) => !r.isError) => {
       try {
         const r = await call();
-        report(label, !r.isError, describe(r));
+        report(label, passed(r), describe(r));
         return r;
       } catch (err) {
         report(label, false, `CLEANUP REQUEST THREW — ${err?.message ?? err}`);
@@ -1736,14 +1740,19 @@ async function main() {
       );
     }
     if (created.bankId) {
+      // Through the CURATED tool, so its reading of the {outcome} envelope is exercised against the
+      // live API rather than only in a unit test. It used to go through reai_request, which is why
+      // this check's own label said "deleted or archived" — the thing the endpoint tells you.
       await attempt(
-        "company bank deleted or archived",
-        () =>
-          client.callTool({
-            name: "reai_request",
-            arguments: { method: "DELETE", path: `/api/company-banks/${created.bankId}`, tenantId },
-          }),
-        (r) => textOf(r).slice(0, 90),
+        "company bank deleted, and which happened is reported",
+        () => client.callTool({ name: "reai_delete_company_bank", arguments: { id: created.bankId, tenantId } }),
+        (r) => {
+          const text = textOf(r);
+          return /was (DELETED|ARCHIVED)/.test(text)
+            ? firstLineOf(text)
+            : `NO OUTCOME REPORTED — ${firstLineOf(text)}`;
+        },
+        (r) => !r.isError && /was (DELETED|ARCHIVED)/.test(textOf(r)),
       );
     }
     if (created.voucherId) {

@@ -13,6 +13,76 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Two more tools were reporting "deleted or archived" on endpoints that say which.**
+  `reai_delete_product` and `reai_delete_company_bank` returned literally
+  `"deleted or archived (HTTP 200)"`. Both endpoints' 200 is documented as
+  `ApiLifecycleOutcomeRes` — `{outcome: deleted | archived | reversed}` — and **19
+  operations declare it**. This repo had already fixed the same bug five separate times,
+  one endpoint at a time, each found by hand: customers, suppliers, salary runs, expense
+  vouchers, expenses.
+  - The product one is the sharpest of the set. A deleted product is what strands other
+    records permanently — eight orders on the test tenant can never be deleted because the
+    product their lines name was deleted first — and products have **no unarchive
+    endpoint**, so "archived" is the recoverable-looking outcome that is not recoverable.
+    Both tools now say which happened and what it means.
+  - **A spec-driven audit replaces finding these by hand.** `test/archive.test.mjs` reads
+    every operation whose `200`/`201` schema is the lifecycle envelope, drives every curated
+    tool on one three times — once per outcome value — and requires all three pairs to produce
+    different words from the tool itself. What it enforces is *distinguishable*, not
+    *explained*: a note reading `outcome "deleted"` and nothing else would satisfy it. That
+    the two tools fixed here explain the consequence is a separate, per-tool test, and it
+    catches exactly that say-nothing shape.
+  - Coverage is **pinned, not floored**: exactly 11 curated tools on the 19 endpoints, and
+    the 8 endpoints with no curated tool are listed by name. `apiPaths: []` would otherwise
+    remove a tool from the audit in silence — no other test requires that list to be
+    complete, only present — and a floor left three tools' worth of slack to vanish into.
+  - The audit went through **four wrong observables** before this one, every one of which
+    passed while the bug was present, and they are recorded because each is a general trap:
+    1. Comparing the tool's **whole output** — which includes the echoed body, and that body
+       *is* the outcome envelope, so the pre-fix handlers "differed" without having said
+       anything.
+    2. Slicing the body off at the first line starting with `{`. That fails whenever the body
+       is not pretty-printed JSON: `ok("a string")` renders raw, so a handler saying literally
+       "deleted or archived (HTTP 200)" passed again as soon as it interpolated the response —
+       and `ok(res.data ?? \`…\`)` is house style in four handlers. The body is now subtracted
+       *exactly*, by rendering it through `ok()` itself.
+    3. Asserting each outcome **positively** ("given `archived`, say ARCHIVED"). Wrong,
+       because the enum is shared across all 19 endpoints and each uses a subset: a voucher
+       cannot be archived and a customer cannot be reversed, and calling an impossible value
+       "no recognised outcome" is the honest answer, not a defect.
+    4. Building arguments as `{id}`, so three tools taking `departmentId`, `assetId` and
+       `warehouseId` threw identically and were reported as ignoring the outcome **when they
+       were reading it correctly**.
+    A tool that refuses, or that never reaches its `DELETE`, is now "could not exercise" — its
+    own assertion — because a test that accuses the innocent is worse than no test.
+  - The full-write suite deletes the company bank through the curated tool now rather than
+    `reai_request`, so the fix is exercised live. Its own label had said "deleted or
+    archived" for the same reason the tools did — and its `attempt()` helper gained an
+    optional pass predicate, because the first version returned a `NO OUTCOME REPORTED`
+    detail string while still counting as a pass: a regression visible in the log and not in
+    the exit code.
+  - The audit compares all **three** outcomes pairwise, not just deleted against archived.
+    The harness was already driving `reversed` and ignoring what came back, so a tool folding
+    a reversal into its archived or unknown branch would have passed — on vouchers, expenses
+    and salary runs, where a reversal POSTS to the ledger and is the most consequential of
+    the three to misreport.
+  - `reai_delete_company_bank` gave the same unfollowable advice the product note had, and it
+    was missed the first time: `GET /api/company-banks` takes **no** `archived` parameter
+    (measured — its only parameter is the tenant header), unlike `/api/warehouses` and
+    `/api/customers` which do. So "stays out of the default view" implied a non-default view
+    that does not exist, and "check `reai_list_company_banks`" could not tell deleted from
+    archived, the record being absent either way. Both notes now say the response is the only
+    place that distinction exists.
+  - Three further claims in the new notes were wrong and are corrected. There is **no invoice DELETE
+    endpoint at all**, so "a dependent invoice can no longer be deleted" attributed an
+    impossible operation to product deletion — crediting was always the only route.
+    `GET /api/products` takes **no archived filter** (measured: its only parameter is the
+    tenant header), so the advice to list archived products was unfollowable — and the real
+    fact is worse and now stated: an archived product cannot be listed through this API at
+    all. And archival of a company bank is not evidence that any payment was ever made
+    through it; any retained posting or reconciliation will do.
+
+
 - **The invoice-delivery gate read only one direction, and the other one was reachable
   through a curated tool.** `invoiceEmail: "attacker@example.com"` escalated to
   `irreversible` and needed `full` mode; `invoiceEmail: ""` on the same endpoint stayed
