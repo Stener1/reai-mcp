@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ReaiApiError } from "../reai/errors.js";
 import {
   defineTool,
+  fiscalYear,
   ok,
   okList,
   requireTenantId,
@@ -319,20 +320,10 @@ const getAnnualAccounts = defineTool({
   apiPaths: [["GET", "/api/annual-accounts/{year}"]],
   idempotent: true,
   inputSchema: {
-    // A four-digit STRING, matching reai_get_tax_return and reai_create_vat_return, which take the
-    // same fiscal year the same way. This shipped as a number, and the inconsistency was found by the
-    // path-parameter sweep in test/spec-bounds.test.mjs: an agent that used two of these three tools
-    // in one session had to guess which wanted 2025 and which wanted "2025".
-    //
-    // The spec declares this parameter `type: string` with `exclusiveMinimum: 0, maximum: 32767`,
-    // which four digits satisfies for every year a real company could have books for. It is narrower
-    // than the letter of the spec — year 5 and year 40000 are refused — and that is a deliberate
-    // second-order choice, not the mistake an earlier floor of 2000 was: that one excluded 1999,
-    // a year a real tenant could plausibly ask about.
-    year: z
-      .string()
-      .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
-      .describe("Fiscal year, four digits, e.g. \"2025\"."),
+    // The SHARED fiscal-year schema, so this cannot drift from its two sibling tools again. It
+    // shipped here as a number while they took a four-digit string, which the path-parameter sweep
+    // in test/spec-bounds.test.mjs found.
+    year: fiscalYear.describe('Fiscal year, four digits, e.g. "2025".'),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

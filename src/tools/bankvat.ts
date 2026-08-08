@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   defineTool,
   fail,
+  fiscalYear,
   isoDate,
   mergeForReplacement,
   ok,
@@ -200,11 +201,12 @@ const getBankReconciliation = defineTool({
     'providerType "manual" for the account, use reai_request GET ' +
     "/api/manual-reconciliations/{bankAccountId}?month=yyyy-MM instead — a manual account has no " +
     "synced transactions and is reconciled against a statement balance.\n\n" +
-    "Check providerType before choosing, because the manual endpoint's refusal is worded " +
-    'misleadingly: for a SYNCED account it answers 404 "Bankkonto ikke funnet" — bank account not ' +
+    "Check providerType before choosing, because the manual endpoint's refusal cannot be read " +
+    'literally: for a SYNCED account it answers 404 "Bankkonto ikke funnet" — bank account not ' +
     "found — about an account that exists and that this tool reads perfectly well. Measured on all " +
-    'three of tenant 2634\'s banks, every one of them providerType "ztl". Read that 404 as "not a ' +
-    'manual account", never as "no such id".',
+    'three of tenant 2634\'s banks, every one providerType "ztl". That 404 is ambiguous: it also ' +
+    "means what it says when an id is genuinely wrong, so settle it against " +
+    "reai_list_company_banks rather than assuming either reading.",
   risk: "read",
   apiPaths: [["GET", "/api/bank-reconciliations/{bankAccountId}"]],
   inputSchema: {
@@ -636,10 +638,7 @@ const createVatReturn = defineTool({
   risk: "irreversible",
   apiPaths: [["POST", "/api/vat-returns"]],
   inputSchema: {
-    year: z
-      .string()
-      .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
-      .describe("Fiscal year."),
+    year: fiscalYear.describe("Fiscal year."),
     period: z
       .enum(["1", "2", "3", "4", "5", "6"])
       .describe(
@@ -675,10 +674,7 @@ const getTaxReturn = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/tax-returns/{year}"]],
   inputSchema: {
-    year: z
-      .string()
-      .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
-      .describe("Fiscal year."),
+    year: fiscalYear.describe("Fiscal year."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

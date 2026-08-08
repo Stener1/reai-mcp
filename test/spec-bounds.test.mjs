@@ -628,9 +628,23 @@ test("no tool refuses a path value the API accepts", () => {
       // comparing a number against it would report every string argument as broken.
       const wantsString = arg.safeParse("2025").success || !arg.safeParse(2025).success;
       const probe = wantsString ? String(smallestValid) : smallestValid;
-      // A four-digit convention legitimately refuses "1"; that is decision (2) in the comment above.
-      const fourDigitYear = /^(year|fiscalYear)$/i.test(parameter.name);
-      if (fourDigitYear) continue;
+      // A four-digit convention legitimately refuses "1", so a year is not compared against the
+      // spec's floor directly — decision (2) in the comment above. It is NOT skipped outright,
+      // though, which is what an earlier version did: review found that `"0000"` slipped through all
+      // three fiscal-year tools precisely because this branch stopped looking. The floor still has to
+      // bite somewhere, so a year argument is required to refuse year zero and to accept a real one.
+      if (/^(year|fiscalYear)$/i.test(parameter.name)) {
+        if (arg.safeParse("0000").success) {
+          offenders.push(
+            `${tool.name}.${parameter.name} accepts "0000" on ${method} ${path}, and the spec ` +
+              `declares exclusiveMinimum 0`,
+          );
+        }
+        if (!arg.safeParse("2025").success) {
+          offenders.push(`${tool.name}.${parameter.name} refuses "2025" on ${method} ${path}`);
+        }
+        continue;
+      }
       if (integer && !arg.safeParse(probe).success) {
         offenders.push(
           `${tool.name}.${parameter.name} refuses ${JSON.stringify(probe)} on ${method} ${path}, ` +
@@ -684,6 +698,14 @@ test("every tool taking a fiscal year takes it the same way", () => {
   );
   // And the shared convention is the four-digit string, which is what the spec declares the type as.
   assert.equal(verdicts[0].shape, "yynnnn", `unexpected year convention ${verdicts[0].shape}`);
+
+  // Year zero is refused by all of them. Four digits alone admitted "0000" — the spec declares
+  // exclusiveMinimum 0 on every one of these parameters — and the shared `fiscalYear` schema in
+  // registry.ts is what fixes it in one place rather than three.
+  for (const t of yearTools) {
+    assert.equal(t.inputSchema.year.safeParse("0000").success, false, `${t.name} accepts year 0000`);
+    assert.equal(t.inputSchema.year.safeParse("0001").success, true, `${t.name} refuses year 0001`);
+  }
 });
 
 test("the int32 ceiling is deliberately not enforced, and that is recorded here", () => {
@@ -707,7 +729,7 @@ test("the int32 ceiling is deliberately not enforced, and that is recorded here"
   );
 });
 
-test("the manual-reconciliation 404 is recorded as meaning the wrong thing", async () => {
+test("the manual-reconciliation 404 is recorded as ambiguous, not as a verdict", async () => {
   // Measured while looking for a manual bank account to build tools against: there is none on either
   // test tenant, and the endpoint's refusal for a SYNCED account names the wrong problem. Kept in
   // this file because it is the other thing the path-parameter work turned up.
@@ -717,11 +739,21 @@ test("the manual-reconciliation 404 is recorded as meaning the wrong thing", asy
   );
   assert.ok(quirk, "the quirk should reach the endpoint it is about");
   assert.match(quirk.note, /Bankkonto ikke funnet/);
-  assert.match(quirk.note, /does NOT mean the bank account id is wrong/);
+  // Ambiguous, not decided. The first version of this quirk said the 404 means "not manual", which
+  // would send a caller with a stale or foreign id to the synced endpoint instead of fixing the id.
+  // Both readings have to be named, and so does the way to tell them apart.
+  assert.match(quirk.note, /AMBIGUOUS/);
+  assert.match(quirk.note, /genuinely does not exist, or belongs to another tenant/);
+  assert.match(quirk.note, /reai_list_company_banks/);
   assert.match(quirk.note, /providerType/);
+  assert.ok(
+    !/It means the account is not a MANUAL one/.test(quirk.note),
+    "the quirk must not state one reading as the answer",
+  );
 
   // And the tool that sends callers there says so too, since that pointer is where they meet it.
   const tool = registeredTools.find((t) => t.name === "reai_get_bank_reconciliation");
   assert.match(tool.description, /Bankkonto ikke funnet/);
-  assert.match(tool.description, /not a manual account/);
+  assert.match(tool.description, /ambiguous/);
+  assert.match(tool.description, /reai_list_company_banks/);
 });

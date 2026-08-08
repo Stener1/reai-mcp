@@ -515,6 +515,28 @@ export function requireTenantId(explicit: number | undefined, ctx: ToolContext):
  * a subscription's service recipients — got a bare `z.string()` instead, so `"no"` was
  * accepted there and rejected by the API.
  */
+/**
+ * A fiscal year as this API takes it: four digits, and greater than zero.
+ *
+ * Shared rather than copied, which is the point. Three tools read the same fiscal year —
+ * reai_get_tax_return, reai_create_vat_return and reai_get_annual_accounts — and they disagreed:
+ * two took a four-digit string and the third, added later, took a number. An agent using two of them
+ * in one session had to guess. A test can compare three copies and did, but one definition cannot
+ * diverge in the first place.
+ *
+ * `"0000"` is refused. The spec declares `exclusiveMinimum: 0` on every one of these parameters, so
+ * year zero is a value the API rejects, and four digits alone admitted it — review caught that: the
+ * numeric schema the annual-accounts tool started with had refused 0, and the move to a string
+ * quietly let it back in on all three.
+ *
+ * Declared as a string because that is the type the spec gives these path parameters, and it removes
+ * the 2025-versus-"2025" question an agent otherwise has to answer per tool.
+ */
+export const fiscalYear = z
+  .string()
+  .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
+  .refine((value) => Number(value) > 0, "Year 0000 is not a fiscal year; the API declares year > 0.");
+
 export const COUNTRY_CODE = z
   .string()
   .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');

@@ -41,9 +41,15 @@ All notable changes to `reai-mcp`. Format loosely follows
   build tools against. `GET /api/manual-reconciliations/{bankAccountId}` answers
   `404 "Bankkonto ikke funnet"` — *bank account not found* — for a **bank-synced** account
   that exists and reads perfectly through `reai_get_bank_reconciliation`. Measured on all
-  three of tenant 2634's company banks, every one `providerType "ztl"`. It means "not a
-  manual account". Recorded as a quirk, and said in the description of the tool that sends
-  callers to that endpoint in the first place — which had pointed there with no warning.
+  three of tenant 2634's company banks, every one `providerType "ztl"`.
+  - The 404 is **ambiguous**, and the obvious reading is the less likely one: it also means
+    what it says when an id is stale, foreign to the tenant, or genuinely wrong. So the quirk
+    names both readings and how to tell them apart — if the id appears in
+    `reai_list_company_banks` the account exists and simply is not manual; if it does not, the
+    id really is wrong. An earlier draft stated the "not manual" reading as *the* answer, which
+    would have sent a caller with a bad id to the synced endpoint instead of correcting it.
+    Said in the description of the tool that sends callers there, which had pointed at that
+    endpoint with no warning at all.
   - Neither test tenant has a manual bank account (2783 has no company banks at all), so the
     manual-reconciliation endpoints get no curated tools: there is nothing to verify them
     against, and closing a reconciliation is not something to try blind on a real company.
