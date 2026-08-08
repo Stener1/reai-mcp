@@ -608,8 +608,12 @@ export const QUIRKS: readonly Quirk[] = [
       "reversal is expected and means nothing is left to do.",
   },
   {
+    // Vouchers only. ReconciliationRuleMutationReq has subAccountId and NO companyBankId, so
+    // telling a rule caller that a bank account may be mandatory would send them into a second
+    // rejection for an unknown field. The sub-account half that DOES apply to rules is the entry
+    // below.
     id: "some-accounts-demand-a-dimension",
-    paths: ["/api/vouchers", "/api/reconciliation-rules"],
+    paths: ["/api/vouchers"],
     methods: ["POST"],
     kind: "validation",
     statuses: [400],
@@ -630,6 +634,20 @@ export const QUIRKS: readonly Quirk[] = [
       "Note the selector has THREE answers, not two: a list, an empty list, or " +
       '400 "accountNumber 3000 does not support general sub-accounts" for an account that cannot ' +
       "have them at all. The 400 is a clear no rather than a failure to work around.",
+  },
+  {
+    id: "reconciliation-rules-take-a-sub-account",
+    paths: ["/api/reconciliation-rules", "/api/reconciliation-rules/{id}"],
+    methods: ["POST", "PUT"],
+    kind: "validation",
+    note:
+      "A reconciliation rule carries `subAccountId`, and the same rule applies as for a voucher " +
+      "posting: an account that has ANY general sub-account requires one, including an account whose " +
+      'only sub-account is called "Default". Find the ids with ' +
+      "GET /api/general-sub-accounts/accounts/{accountNumber}.\n\n" +
+      "Unlike a voucher posting, ReconciliationRuleMutationReq has NO companyBankId — sending one " +
+      "would be rejected as an unknown field — so the bank-account requirement documented on " +
+      "/api/vouchers does not apply here.",
   },
   {
     id: "a-sub-account-cannot-be-removed",

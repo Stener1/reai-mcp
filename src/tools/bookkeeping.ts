@@ -479,7 +479,10 @@ const createVoucher = defineTool({
     //
     // A failed lookup does NOT block the write: this spec has under-stated requirements before, and
     // refusing a voucher because a helper read failed would be the check doing harm. The API remains
-    // the authority, and its 400 is enriched by the quirk registry either way.
+    // the authority — but its 400 is NOT enriched by the quirk registry on a curated tool, which an
+    // earlier version of this comment claimed. server.ts turns a thrown ReaiApiError into a plain
+    // tool error, so the caller would have received exactly the bare Norwegian message this
+    // preflight exists to replace. The catch below supplies the advice instead.
     const needSubAccount: Array<{ line: number; accountNumber: string; choices: string }> = [];
     try {
       const subs = await ctx.client.request<
@@ -544,12 +547,38 @@ const createVoucher = defineTool({
       })),
     };
 
-    const res = await ctx.client.request<{ id?: number; number?: string }>({
-      method: "POST",
-      path: "/api/vouchers",
-      body,
-      tenantId,
-    });
+    let res;
+    try {
+      res = await ctx.client.request<{ id?: number; number?: string }>({
+        method: "POST",
+        path: "/api/vouchers",
+        body,
+        tenantId,
+      });
+    } catch (err) {
+      // The two dimension rules again, this time on the way back. When the preflight's own lookup
+      // failed we let the call through on purpose — but a curated tool's thrown error is turned into
+      // a plain tool error by server.ts and never meets the quirk registry, so the caller would have
+      // received the bare Norwegian message the preflight exists to replace. Translated here.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/må posteres med underkonto/i.test(message)) {
+        throw new Error(
+          `${message}\n\n` +
+            `That means: the account on the line named requires a general sub-account (underkonto), ` +
+            `and the posting did not carry one. Every posting to an account that has ANY sub-account ` +
+            `needs a subAccountId, including an account whose only one is called "Default". List the ` +
+            `choices with reai_sub_accounts_for_account for that account number.`,
+        );
+      }
+      if (/må posteres med bankkonto/i.test(message)) {
+        throw new Error(
+          `${message}\n\n` +
+            `That means: the account on the line named is a bank account, and a posting to it must ` +
+            `say WHICH company bank with companyBankId. List them with reai_list_company_banks.`,
+        );
+      }
+      throw err;
+    }
 
     const id = res.data?.id;
     return ok(res.data, {

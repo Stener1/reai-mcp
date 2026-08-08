@@ -1876,6 +1876,11 @@ async function main() {
       ["warehouses", "reai_list_warehouses", "id", ["name"], [{}, { archived: true }]],
       ["agreements", "reai_list_agreements", "agreementId", ["clientName"], [{}]],
       ["reconciliation rules", "reai_list_reconciliation_rules", "id", ["matchText", "description"], [{}]],
+      // Added after review pointed out that KNOWN_UNRECOVERABLE carried a "sub-accounts" key that
+      // nothing consulted — so the permanent record was neither verified as present nor reported if
+      // it went, and a future test-named sub-account would never have been noticed. They cannot be
+      // deleted, so noticing is the only thing available.
+      ["sub-accounts", "reai_list_sub_accounts", "id", ["name"], [{}]],
     ];
     for (const [label, toolName, idField, fields, variants] of SWEPT) {
       try {

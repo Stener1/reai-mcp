@@ -197,3 +197,99 @@ test("both posting fields say they are conditionally required, and the quirks ca
       .includes("a-sub-account-cannot-be-removed"),
   );
 });
+
+// Review found four inconsistencies with care taken elsewhere in the same change, and two claims
+// that were not true. These pin them.
+
+test("the create tool's informational pre-read cannot block the create", async () => {
+  const { calls, result, text } = await run(
+    "reai_create_sub_account",
+    { accountNumber: "3000", name: "Zz Part" },
+    (req) => {
+      if (req.method === "GET") throw new Error("selector unavailable");
+      return { id: 9999, accountNumber: "3000", name: "Zz Part" };
+    },
+  );
+  assert.equal(result.isError, undefined, "a failed helper read must not stop the write");
+  assert.ok(calls.some((c) => c.method === "POST"));
+  assert.match(text, /could not be read/);
+});
+
+test("both tools declare the GET they perform", () => {
+  assert.deepEqual(tool("reai_create_sub_account").apiPaths, [
+    ["GET", "/api/general-sub-accounts/accounts/{accountNumber}"],
+    ["POST", "/api/general-sub-accounts"],
+  ]);
+  assert.ok(
+    tool("reai_create_voucher").apiPaths.some(
+      ([m, p]) => m === "GET" && p === "/api/general-sub-accounts",
+    ),
+  );
+});
+
+test("an account that cannot have sub-accounts is a successful answer, not an error", async () => {
+  const { result, text } = await run("reai_sub_accounts_for_account", { accountNumber: "3000" }, () => {
+    throw new Error('ReAI GET /api/general-sub-accounts/accounts/3000 failed with HTTP 400: accountNumber 3000 does not support general sub-accounts');
+  });
+  assert.equal(result.isError, undefined, "the documented third outcome is an answer");
+  assert.match(text, /does not support general sub-accounts at all/);
+  assert.match(text, /clear NO rather than a problem/);
+  assert.match(text, /"supportsSubAccounts": false/);
+});
+
+test("any other failure from the selector still surfaces as a failure", async () => {
+  await assert.rejects(
+    () => run("reai_sub_accounts_for_account", { accountNumber: "3000" }, () => {
+      throw new Error("HTTP 500: upstream exploded");
+    }),
+    /upstream exploded/,
+  );
+});
+
+// The preflight lets the write through when its own lookup failed — so the API's Norwegian 400 has
+// to be translated on the way back, which the original comment claimed happened via the quirk
+// registry. It does not: server.ts turns a curated tool's thrown error into a plain tool error.
+test("the API's dimension errors are explained even when the preflight could not run", async () => {
+  for (const [message, needle] of [
+    ["ReAI POST /api/vouchers failed with HTTP 400: Linje 1: Konto 1320 må posteres med underkonto.", /reai_sub_accounts_for_account/],
+    ["ReAI POST /api/vouchers failed with HTTP 400: Linje 2: Konto 1920 må posteres med bankkonto.", /reai_list_company_banks/],
+  ]) {
+    await assert.rejects(
+      () =>
+        run(
+          "reai_create_voucher",
+          {
+            date: "2026-08-08",
+            description: "Zz",
+            postings: [
+              { accountNumber: "1320", amount: 50 },
+              { accountNumber: "3000", amount: -50 },
+            ],
+          },
+          (req) => {
+            if (req.method === "GET") throw new Error("lookup unavailable");
+            throw new Error(message);
+          },
+        ),
+      needle,
+    );
+  }
+});
+
+test("the reconciliation-rule quirk does not mention companyBankId", () => {
+  // ReconciliationRuleMutationReq has subAccountId and no companyBankId, so advising a bank account
+  // there would send the caller into a second rejection for an unknown field.
+  const rule = quirksFor("POST", "/api/reconciliation-rules").find(
+    (q) => q.id === "reconciliation-rules-take-a-sub-account",
+  );
+  assert.ok(rule, "rules need the sub-account half of the guidance");
+  assert.match(rule.note, /NO companyBankId/);
+  const voucherOnly = quirksFor("POST", "/api/reconciliation-rules").map((q) => q.id);
+  assert.ok(!voucherOnly.includes("some-accounts-demand-a-dimension"));
+  // And the voucher keeps the full version.
+  assert.ok(
+    quirksFor("POST", "/api/vouchers")
+      .map((q) => q.id)
+      .includes("some-accounts-demand-a-dimension"),
+  );
+});

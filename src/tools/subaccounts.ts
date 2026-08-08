@@ -90,11 +90,32 @@ const subAccountsForAccount = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request<SubAccount[]>({
-      method: "GET",
-      path: `/api/general-sub-accounts/accounts/${encodeURIComponent(args.accountNumber)}`,
-      tenantId: requireTenantId(args.tenantId, ctx),
-    });
+    let res;
+    try {
+      res = await ctx.client.request<SubAccount[]>({
+        method: "GET",
+        path: `/api/general-sub-accounts/accounts/${encodeURIComponent(args.accountNumber)}`,
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+    } catch (err) {
+      // The documented third outcome, delivered as an ANSWER rather than a failure. An account that
+      // cannot have sub-accounts replies 400 "accountNumber 3000 does not support general
+      // sub-accounts", and letting that surface as an error result contradicted this tool's own
+      // description and invited a caller to retry a normal capability check.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/does not support general sub-accounts/i.test(message)) {
+        return ok(
+          { accountNumber: args.accountNumber, supportsSubAccounts: false, subAccounts: [] },
+          {
+            note:
+              `Account ${args.accountNumber} does not support general sub-accounts at all — the API ` +
+              `says so with a 400, which is a clear NO rather than a problem. Postings to it need no ` +
+              `subAccountId.`,
+          },
+        );
+      }
+      throw err;
+    }
     const rows = Array.isArray(res.data) ? res.data : undefined;
     return okList(res.data, {
       noun: "sub-account",
@@ -122,7 +143,10 @@ const createSubAccount = defineTool({
     "posts to it without a subAccountId — measured, those postings answer " +
     '400 "må posteres med underkonto".',
   risk: "irreversible",
-  apiPaths: [["POST", "/api/general-sub-accounts"]],
+  apiPaths: [
+    ["GET", "/api/general-sub-accounts/accounts/{accountNumber}"],
+    ["POST", "/api/general-sub-accounts"],
+  ],
   inputSchema: {
     accountNumber: z
       .string()
@@ -141,12 +165,20 @@ const createSubAccount = defineTool({
     const resolved = requireTenantId(tenantId, ctx);
     // Read first, so the note can say whether this is the FIRST sub-account on the account — which
     // is the case that changes the account's posting rules for everyone.
-    const before = await ctx.client.request<SubAccount[]>({
-      method: "GET",
-      path: `/api/general-sub-accounts/accounts/${encodeURIComponent(args.accountNumber)}`,
-      tenantId: resolved,
-    });
-    const existing = Array.isArray(before.data) ? before.data.length : undefined;
+    // Informational only, so a failure here must not stop the create. The `existing === undefined`
+    // branch below was written for an unreadable response and was unreachable for a THROWN one —
+    // the same care the voucher preflight takes, missing two hundred lines away in the same change.
+    let existing: number | undefined;
+    try {
+      const before = await ctx.client.request<SubAccount[]>({
+        method: "GET",
+        path: `/api/general-sub-accounts/accounts/${encodeURIComponent(args.accountNumber)}`,
+        tenantId: resolved,
+      });
+      existing = Array.isArray(before.data) ? before.data.length : undefined;
+    } catch {
+      existing = undefined;
+    }
     const res = await ctx.client.request<SubAccount>({
       method: "POST",
       path: "/api/general-sub-accounts",
