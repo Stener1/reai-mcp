@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyRequest, classifyPaymentRouting, paymentRoutingFieldNames } from "../dist/policy.js";
-import { getSpecIndex } from "../dist/reai/spec.js";
+import { getSpecIndex, omittedReplacementFields, resolveOperation } from "../dist/reai/spec.js";
 import { quirksFor } from "../dist/reai/quirks.js";
 import { allTools } from "../dist/server.js";
 
@@ -205,7 +205,7 @@ test("the invoice-delivery axis has the same omission blindness, and it is known
 });
 
 /** Drives reai_request with a client that makes any HTTP attempt loud. */
-async function raw(method, path, body, writeMode) {
+async function raw(method, path, body, writeMode, extra = {}) {
   let called = false;
   const ctx = {
     config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode, allowExternalSend: false },
@@ -219,7 +219,7 @@ async function raw(method, path, body, writeMode) {
     },
   };
   try {
-    const res = await rawRequest().handler({ method, path, body }, ctx);
+    const res = await rawRequest().handler({ method, path, body, ...extra }, ctx);
     return { called, text: res.content.map((c) => c.text).join("\n"), refused: res.isError === true };
   } catch (err) {
     return { called, text: err?.message ?? String(err), refused: true };
@@ -247,8 +247,15 @@ test("a SUCCESSFUL raw write carries the quirk, since a 200 is the only other si
   // quirksFor was consulted only when the request FAILED. That is right for notes explaining an
   // error and useless for the ones whose whole point is that the call succeeds and does something
   // unexpected — which is exactly this endpoint.
-  const ok = await raw("PUT", "/api/company-banks/7", { name: "x" }, "full");
-  assert.equal(ok.called, true, "in full mode the write proceeds");
+  //
+  // clearOmittedFields is passed because the omission gate now refuses this body outright, which
+  // is a better answer than a note on a completed clobber. The property under test here is the one
+  // that still matters once a caller has deliberately acknowledged the clearing: the quirk has to
+  // be attached to the SUCCESS, since the 200 is otherwise the only thing they see.
+  const ok = await raw("PUT", "/api/company-banks/7", { name: "x" }, "full", {
+    clearOmittedFields: true,
+  });
+  assert.equal(ok.called, true, "in full mode, with the clearing acknowledged, the write proceeds");
   assert.match(ok.text, /Known quirk/);
   assert.match(ok.text, /CLEARS it/);
 
@@ -396,4 +403,117 @@ test("only the parts this endpoint accepts are sent back", async () => {
     ["addressPart1", "addressPart2", "city", "countryCode", "postalCode", "province"],
     "an unknown field would be rejected by the API",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The omission gate: refuse a PUT that would clear what it does not mention
+// ---------------------------------------------------------------------------
+//
+// Sixteen of the thirty-one replacement endpoints in this document have no curated tool, so they
+// are reached through reai_request — which cannot merge on the caller's behalf. Every instance of
+// this bug in this repo was found AFTER the write, on a live tenant, so the gate refuses rather
+// than reports.
+
+test("a PUT that omits documented optional fields is refused, naming them", async () => {
+  const r = await raw("PUT", "/api/company-banks/7", { name: "Renamed AS" }, "full");
+  assert.equal(r.called, false, "nothing may be sent");
+  assert.match(r.text, /REPLACES the record, and this body leaves out/);
+  assert.match(r.text, /bban/, "the account number is the field that matters here");
+  assert.match(r.text, /Nothing was sent/);
+  assert.match(r.text, /clearOmittedFields: true/);
+  // And it points at the merge, which is the answer most of the time.
+  assert.match(r.text, /GET the record first/);
+});
+
+test("the gate covers the replacement endpoints that have no curated tool", async () => {
+  // These are the ones the curated set does not reach, so the hatch is the only route to them.
+  for (const [path, field] of [
+    ["/api/loans/7", "maturityDate"],
+    ["/api/orders/7", "invoiceEmail"],
+    ["/api/products/7", "description"],
+    ["/api/offers/7", "comment"],
+    ["/api/share-investments/7", "isin"],
+  ]) {
+    const r = await raw("PUT", path, { name: "x" }, "full");
+    assert.equal(r.called, false, `${path} must not be sent`);
+    assert.match(r.text, new RegExp(field), `${path} should name ${field}`);
+  }
+});
+
+test("acknowledging the clearing lets the exact call through", async () => {
+  const r = await raw("PUT", "/api/company-banks/7", { name: "x" }, "full", {
+    clearOmittedFields: true,
+  });
+  assert.equal(r.called, true);
+});
+
+test("a complete body is not flagged, so the gate costs nothing when nothing is omitted", async () => {
+  const index = getSpecIndex();
+  const op = index.operations.find((o) => o.method === "PUT" && o.path === "/api/company-banks/{id}");
+  const body = Object.fromEntries(Object.keys(op.body?.fields ?? {}).map((f) => [f, "x"]));
+  const r = await raw("PUT", "/api/company-banks/7", body, "full");
+  assert.equal(r.called, true, "every documented field was supplied");
+});
+
+test("PATCH is never flagged, because PATCH on this API really patches", async () => {
+  // Measured: a PATCH carrying only `phone` left an employee's address, bank account, start date
+  // and employment lines untouched. Gating PATCH would refuse ordinary partial updates.
+  const r = await raw("PATCH", "/api/employees/7", { phone: "22334455" }, "full");
+  assert.equal(r.called, true);
+  assert.doesNotMatch(r.text, /REPLACES the record/);
+});
+
+test("a single-field PUT is not flagged, and neither is a body the gate cannot read", async () => {
+  const rename = await raw("PUT", "/api/warehouses/7", { name: "x" }, "full");
+  assert.equal(rename.called, true, "one required field, nothing optional to lose");
+
+  // A malformed body is the API's to reject. Listing every documented field here would read as
+  // this server's rule rather than as the body being the wrong shape.
+  //
+  // Asserted on a GATE-specific phrase, not on "REPLACES the record": that sentence also appears
+  // in the company-bank quirk, which is attached to successful writes on this very path, so the
+  // looser match passed for the wrong reason and then failed for the right one.
+  for (const body of [undefined, "nope", [1, 2]]) {
+    const r = await raw("PUT", "/api/company-banks/7", body, "full");
+    assert.doesNotMatch(r.text, /Nothing was sent/, JSON.stringify(body ?? null));
+    assert.equal(r.called, true, `${JSON.stringify(body ?? null)} is the API's to reject`);
+  }
+});
+
+test("the write policy still speaks first when it would refuse anyway", async () => {
+  // A call the write mode forbids must be refused for THAT reason: telling an agent to acknowledge
+  // a field clearing, when the real answer is that this deployment does not permit the write at
+  // all, sends it after the wrong permission.
+  const r = await raw("PUT", "/api/company-banks/7", { name: "x" }, "read-only");
+  assert.equal(r.refused, true);
+  assert.equal(r.called, false);
+  assert.doesNotMatch(r.text, /clearOmittedFields/);
+});
+
+test("a missing REQUIRED field is not the gate's business, and is not listed as omitted", async () => {
+  // Required fields are excluded on purpose: the API rejects a body missing one, missingRequired
+  // already explains that, and naming it here would bury the fields that get silently dropped —
+  // which are the only ones a caller cannot find out about any other way.
+  //
+  // Every OPTIONAL field supplied, `name` (required) left out. The gate must stay silent and let
+  // the API answer, and the refusal text must not mention the required field.
+  const r = await raw(
+    "PUT",
+    "/api/company-banks/7",
+    { countryCode: "NO", currency: "NOK", bban: "15201353103", swiftCode: "DNBANOKK", excludeFromReconciliationTodos: false },
+    "full",
+  );
+  assert.equal(r.called, true, "a missing required field is the API's to reject");
+  assert.doesNotMatch(r.text, /Nothing was sent/);
+  assert.doesNotMatch(r.text, /leaves out 1 of its 6/);
+});
+
+test("the omitted list is exactly the optional fields, for a body that omits both kinds", async () => {
+  // Directly on the helper, since through the tool the required-field case is indistinguishable
+  // from the optional one in the refusal text.
+  const op = resolveOperation("PUT", "/api/company-banks/7");
+  const { fields, documented } = omittedReplacementFields(op, { currency: "NOK" });
+  assert.equal(documented, 6);
+  // name and countryCode are required and omitted; they must NOT appear.
+  assert.deepEqual(fields.sort(), ["bban", "excludeFromReconciliationTodos", "swiftCode"]);
 });

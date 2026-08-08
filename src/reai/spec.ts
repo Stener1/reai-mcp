@@ -367,6 +367,55 @@ export function resolveOperation(method: string, concretePath: string): SpecOper
  * could block one that would have worked, so this is used to explain a failure
  * after the fact rather than to prevent the request.
  */
+/**
+ * The documented body fields a full-replacement write LEAVES OUT — the ones it will clear.
+ *
+ * `missingRequired` answers "what does this call lack that the API demands". This answers the
+ * opposite and more dangerous question: what does the caller not mention, on an endpoint that
+ * replaces rather than patches, so the API stores nothing for it.
+ *
+ * Written because that bug class has now been found five times by hand, each time on a live
+ * tenant and each time after the damage: a company bank whose account number was emptied by a
+ * rename, a creditor the same way, a lease whose rent and deposit went null while GET /pdf still
+ * answered 200, a subscription that lost its delivery address and half its lines, and a wage line
+ * whose comment disappeared. Every one was a PUT where the intent was to change one field.
+ *
+ * The curated tools that wrap those endpoints now read-merge-write. The other sixteen replacement
+ * endpoints in this document have no tool at all and are reached through `reai_request`, which
+ * cannot merge on the caller's behalf — so the honest thing is to refuse and name what would go.
+ *
+ * Only PUT. Measured, PATCH on this API really patches: a PATCH carrying only `phone` left an
+ * employee's address, bank account, start date and employment lines untouched, and the customer
+ * and supplier PATCHes say so in their own descriptions. Applying this to PATCH would refuse
+ * ordinary partial updates on the strength of a rule that does not hold there.
+ *
+ * Required fields are excluded deliberately: the API rejects a body missing one, so `missingRequired`
+ * already explains it and naming it twice would bury the fields that get silently dropped.
+ */
+export function omittedReplacementFields(
+  op: SpecOperation,
+  body: unknown,
+): { fields: string[]; documented: number } {
+  if (op.method !== "PUT") return { fields: [], documented: 0 };
+  const documented = Object.keys(op.body?.fields ?? {});
+  if (documented.length === 0) return { fields: [], documented: 0 };
+  // A non-object body cannot be compared field by field. Reported as nothing omitted rather than
+  // as everything omitted: the API will reject a malformed body on its own, and a refusal listing
+  // every documented field would read as this server's rule rather than as the shape being wrong.
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { fields: [], documented: documented.length };
+  }
+  const required = new Set(op.body?.required ?? []);
+  // Case-insensitively, for the same reason missingRequired compares that way: a mis-cased key
+  // does not bind, so it is not "supplied". Reporting it as omitted is right — it will be cleared —
+  // and the near-miss is what the caller needs to see.
+  const supplied = new Set(Object.keys(body as Record<string, unknown>).map((k) => k.toLowerCase()));
+  const fields = documented.filter(
+    (field) => !required.has(field) && !supplied.has(field.toLowerCase()),
+  );
+  return { fields, documented: documented.length };
+}
+
 export function missingRequired(
   op: SpecOperation,
   query: Record<string, unknown> | undefined,
