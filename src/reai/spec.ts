@@ -809,10 +809,13 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
     // and still lost to three GETs because nothing said a write was wanted. Only unambiguous
     // imperatives — the verbal nouns stay out, since "hvilke venter på godkjenning" is a question and
     // "avsluttet" is a participle that appears in one.
-    "godkjenn", "godkjenne", "lever", "levere", "lukk", "lukke", "avslutt", "avslutte",
+    // `lever`/`levere` are out for the same reason they are out of TERM_SYNONYMS: filing a return is
+    // the commoner sense. `aktiver` is out because it is the noun for assets. `avslutt` is out
+    // because it means terminate. Each of those would imply a write on a read question.
+    "godkjenn", "godkjenne", "lukk", "lukke",
     "gjenapne", "gjenåpne", "gjenopprett", "gjenopprette", "dearkiver",
     "avskriv", "avskrive", "utranger", "utrangere", "konverter", "konvertere",
-    "aktiver", "aktivere", "deaktiver", "deaktivere",
+    "aktivere", "deaktiver", "deaktivere",
     "fullfor", "fullfore", "fullfør", "fullføre", "ferdigstill", "ferdigstille",
     "generer", "generere", "valider", "validere", "krediter", "kreditere", "innsend"], ["POST"]],
   [["update", "change", "edit", "modify", "rename",
@@ -849,10 +852,12 @@ const WRITE_INTENT_VERBS = new Set([
   "bokfor", "bokfore", "bokfør", "bokføre",
   // Kept in step with METHOD_INTENT, as the comment there requires. Same exclusions: imperatives
   // only, no verbal nouns and no participles.
-  "godkjenn", "godkjenne", "lever", "levere", "lukk", "lukke", "avslutt", "avslutte",
+  // Same exclusions as METHOD_INTENT: `lever`/`levere` (filing), `aktiver` (assets), `avslutt`
+  // (terminate) are homographs that would imply a write on a read.
+  "godkjenn", "godkjenne", "lukk", "lukke",
   "gjenapne", "gjenåpne", "gjenopprett", "gjenopprette", "dearkiver",
   "avskriv", "avskrive", "utranger", "utrangere", "konverter", "konvertere",
-  "aktiver", "aktivere", "deaktiver", "deaktivere",
+  "aktivere", "deaktiver", "deaktivere",
   "fullfor", "fullfore", "fullfør", "fullføre", "ferdigstill", "ferdigstille",
   "generer", "generere", "valider", "validere", "krediter", "kreditere", "innsend",
 ]);
@@ -896,6 +901,9 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // Who owes whom. The verb "skylde" is neutral and these two phrasings point at opposite sides of
   // the books: "hvem skylder oss" is the customer ledger, "hva skylder vi" the supplier ledger.
   [/\bskylder\s+oss\b/g, "customer ledger"],
+  // "Levere" means file-a-return far more often than it means hand in an expense claim, so the
+  // expense sense is recognised only when the object says so. Bare `lever` maps to nothing.
+  [/\b(lever|levere)\s+(en\s+)?(reiseregning|utlegg|reiseregninger)/g, "deliver expense"],
   [/\bskylder\s+vi\b/g, "supplier ledger"],
   // Maps to the resource only. Injecting "depreciation" here made the nested
   // write endpoint dominate: even "create fixed asset" ranked
@@ -1039,11 +1047,18 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
 
   // --- Norwegian ACTION words, enumerated from the API's own action segments ---------
   //
-  // Everything above is nouns. The table had no verbs at all, while the API has 65 segments hanging
-  // off a resource instance — /{id}/approve, /{id}/deliver, /{id}/depreciation, /{id}/close and so
-  // on. A Norwegian asking for one of those names the ACTION ("godkjenn utlegg", "avskriv
-  // anleggsmiddel"), that word matched nothing, and the resource collection outranked the endpoint
-  // that actually does the thing: /api/expenses ahead of /api/expenses/{id}/approve.
+  // Almost everything above is nouns. Review corrected two claims that stood here: the table was not
+  // verbless — `avstemme`, `reconcile`, `reconciling`, `signing`, `owe` and `owes` were already in it,
+  // and `skylder` below is a Norwegian translation of `owes` rather than a new category — and the API
+  // does not have 65 ACTION segments. It has 65 distinct trailing segments after a path placeholder
+  // among public operations, of which perhaps 25 to 30 are actions; the rest are sub-resources like
+  // address, attachments, pdf, notes and contact-persons. About a dozen real actions still have no
+  // Norwegian word here (send, unmatch, matches, apply-rules, follow-up, use-credit-note,
+  // register-payment, registration, sign-request).
+  //
+  // What is true and was the point: a Norwegian asking for one of those actions names it ("godkjenn
+  // utlegg", "avskriv anleggsmiddel"), the word matched nothing, and the resource collection outranked
+  // the endpoint that does the thing — /api/expenses ahead of /api/expenses/{id}/approve.
   //
   // Enumerated from the spec's action segments rather than from a benchmark's phrasings, which is
   // the difference between covering a category and fitting a score. The cost is stated plainly in
@@ -1061,13 +1076,20 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // "returns an APPROVED expense to for_approval so it can be corrected again" and is refused for an
   // expense that is not approved. Rejecting a pending claim has no endpoint at all, so mapping the
   // word would answer a question the API cannot answer, confidently.
-  lever: ["deliver"],
-  levere: ["deliver"],
-  levering: ["deliver"],
+  // `lever`/`levere`/`levering` are deliberately ABSENT as bare words, and this was a real
+  // regression before review caught it. "Levere" is how Skatteetaten and every Norwegian bookkeeper
+  // says FILE a return — "lever mva-meldingen", "levere skattemeldingen", "lever årsregnskapet" —
+  // while `deliver` exists on exactly one endpoint in this API, POST /api/expenses/{id}/deliver. So
+  // the mapping took three filing queries that main answered correctly and pointed them all at an
+  // expense claim. The expense sense is real too, so it lives in PHRASE_SYNONYMS where the object of
+  // the verb can be seen.
   lukk: ["close"],
   lukke: ["close"],
-  avslutt: ["close"],
-  avslutte: ["close"],
+  // `avslutt`/`avslutte` are NOT here. In Norwegian business language they mean TERMINATE — an
+  // employment, a lease, a subscription — and `close` in this API is a reconciliation period. So
+  // "avslutt arbeidsforholdet" and "avslutt leiekontrakten" both ranked the bank and manual
+  // reconciliation close endpoints, with nothing about agreements or employment anywhere in the
+  // results. `lukk`/`lukke` carry the period sense without the collision.
   gjenapne: ["reopen"],
   // `apne`/`åpne` alone is NOT here: it is an adjective as often as an imperative, and "åpne poster"
   // — open items, i.e. unpaid — is a read. Mapped unconditionally it put the three mutating
@@ -1088,8 +1110,14 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   utrangere: ["write-off"],
   konverter: ["convert"],
   konvertere: ["convert"],
-  aktiver: ["activate"],
+  // `aktiver` alone is NOT here: in Norwegian it is the balance-sheet noun for ASSETS — "aktiver og
+  // passiver", "sum aktiver i balansen" — as well as the imperative "activate". Mapped
+  // unconditionally it ranked POST /api/subscriptions/{id}/activate first for every one of those
+  // questions, with /api/assets absent from the results. `aktivere` is unambiguously the verb.
   aktivere: ["activate"],
+  //  IS unambiguous — it is only the balance-sheet noun, never the verb — so the assets sense
+  // that  cannot safely carry is available under the word that has no second meaning.
+  aktiva: ["asset", "assets"],
   deaktiver: ["deactivate"],
   deaktivere: ["deactivate"],
   fullfor: ["complete"],

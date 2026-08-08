@@ -346,14 +346,23 @@ test("the second corpus holds its measured score of 26 in the top 3", () => {
 // no result. An existence check cannot catch this class — the path existed, it just meant something
 // else.
 //
-//   first measurement                                            16 of 28 in the top 3, 21 in the top 10
-//   after fixing only the two queries that returned NOTHING      18 of 28, 23 in the top 10
-//   after review made the action words reach the METHOD tables   20 of 27, 23 in the top 10
+// The honest sequence, corrected after review pointed out that my "first measurement" was not one —
+// I took it with the action vocabulary already applied, so it was never a baseline:
 //
-// That third line is not tuning against this corpus: the change was routing the action vocabulary
-// through METHOD_INTENT and WRITE_INTENT_VERBS, which review pointed out I had missed — the words
-// expanded to the right segment and then lost to three GETs because nothing said a write was wanted.
-// It moved the TUNED corpus from 36 to 39 as well, which is the shape a general improvement has.
+//   main, before any of this work                                14 of 28 in the top 3, 20 in the top 10
+//   with the action vocabulary                                   16 of 28, 21 in the top 10
+//   after fixing the queries that returned NOTHING               18 of 28, 23 in the top 10
+//   once the action words reached the METHOD tables              20 of 27, 23 in the top 10
+//   after removing three homograph collisions review found       19 of 27, 23 in the top 10
+//
+// So what the action vocabulary generalises to is +2 of 28 on a corpus it was not fitted to — the
+// same +2 it bought on the corpus whose failures I had read. That is the number worth quoting, and
+// the PR did not state it until review worked it out.
+//
+// The last line is a LOSS of one case, taken deliberately: `aktiver` also means assets, `lever` means
+// filing a return, and `avslutt` means terminating a contract. Keeping them would have held this
+// corpus one case higher while answering "lever mva-meldingen" with an expense claim. A corpus is a
+// proxy; those are real questions.
 //
 // The two empties were `land` (the plainest way to ask which countries the API accepts — the country
 // list only became a tool last iteration and its vocabulary was never added with it) and `skylder`
@@ -405,7 +414,7 @@ test("no query in the third corpus returns nothing at all", () => {
   assert.deepEqual(empty, [], "these queries found no endpoint at all");
 });
 
-test("the third corpus holds its measured score of 20 in the top 3", () => {
+test("the third corpus holds its measured score of 19 in the top 3", () => {
   const hits = EVERYDAY.filter(([q, want]) => {
     const at = searchOperations({ query: q, limit: 10 })
       .map((h) => h.path)
@@ -413,8 +422,8 @@ test("the third corpus holds its measured score of 20 in the top 3", () => {
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 20,
-    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 20`,
+    hits.length >= 19,
+    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 19`,
   );
 });
 

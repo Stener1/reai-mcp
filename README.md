@@ -608,17 +608,21 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-A third cause, found later: the table was **all nouns**. The API has 65 segments hanging off a resource instance — `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close` — and not one of them had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses` first and the endpoint that approves the claim fifth. The action vocabulary is enumerated from those segments rather than from any benchmark's phrasing, and covers both the imperative and the verbal noun, since a Norwegian query uses either.
+A third cause, found later: the table was **almost all nouns** — it held a handful of verbs (`avstemme`, `reconcile`, `signing`, `owes`) and none for any action endpoint. Of the 65 distinct trailing segments after a path placeholder, roughly 25–30 are actions — `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close` — and not one had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses` first and the endpoint that approves the claim fifth.
+
+Three of the words had to come back out, all homographs and all found by review: `aktiver` is the balance-sheet noun for **assets** as well as "activate", `avslutt` means **terminate** a contract rather than close a period, and `levere` is how a Norwegian **files a return** — that one took three filing queries the ranker had answered correctly and pointed them all at an expense claim. The expense sense survives as a phrase mapping, where the object of the verb can be seen. The action vocabulary is enumerated from those segments rather than from any benchmark's phrasing, and covers both the imperative and the verbal noun, since a Norwegian query uses either.
 
 **Three corpora, each measured once before being tuned against, and each retired to a regression floor afterwards** — because a benchmark you have read the failures of is no longer measuring anything:
 
-| corpus | first measurement | after fixing only the queries that returned NOTHING | now |
-|---|---|---|---|
-| first (`discovery-norwegian`) | 17/45 | — | **39/41** top-3 |
-| second (`FRESH`) | 19/28 | 23/28 | **26/28** |
-| third (`EVERYDAY`) | 16/28 | 18/28 | **20/27**, 23 within the top ten |
+All three live in `test/discovery-heldout.test.mjs` (`CASES`, `FRESH`, `EVERYDAY`); `test/discovery-norwegian.test.mjs` holds a separate 31-case set, 28 of them top-3, which asserts English **ranks** and word-order stability.
 
-The action words alone moved the second corpus 23 → 25. What moved all three was routing them through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
+| corpus | before this work | after fixing only the queries that returned NOTHING | now |
+|---|---|---|---|
+| first (`CASES`, 41) | 17 | — | **39** top-3, 41 top-10 |
+| second (`FRESH`, 28) | 19 | 23 | **26** top-3 |
+| third (`EVERYDAY`, 27) | 14 | 18 | **19** top-3, 23 top-10 |
+
+What the action vocabulary generalises to is **+2 of 28 on the corpus it was not fitted to** — the same +2 it bought on the one whose failures I had read, which is the comparison worth quoting. What moved all three further was routing the words through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
 
 The rule held across all three: a query that returns **nothing** strands an agent and is worth fixing; a query that returns the right endpoint at rank five is not worth tuning for. Five of the third corpus's thirty targets named endpoints that do not exist — the fourth time in this work that a "ranking failure" was really a wrong assumption about the API.
 
