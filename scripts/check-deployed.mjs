@@ -235,11 +235,26 @@ function main() {
     process.exit(dirty ? 1 : 0);
   }
 
+  // `--no-renames`, because with rename detection `--name-only` prints only the DESTINATION path. Moving
+  // src/tools/foo.ts out of tools/ would therefore drop the agent-facing path entirely and classify the
+  // commit as behavioural. Codex's finding on PR #117; with --no-renames a rename shows as delete + add,
+  // so both paths are seen.
   const commits = range.split("\n").map((line) => {
     const sha = line.split(" ")[0];
-    const files = git("show", "--name-only", "--format=", sha).split("\n").filter(Boolean);
+    const files = git("show", "--name-only", "--no-renames", "--format=", sha).split("\n").filter(Boolean);
     return { line, ...classify(files) };
   });
+
+  // The VERDICT comes from the net diff, not from the union of the commits.
+  //
+  // Codex's other finding: an agent-facing change followed by a complete revert marks both commits
+  // agent-facing and exits 1, when the deployed revision and HEAD in fact contain identical agent-facing
+  // content and no deploy is required. The per-commit list stays, because it is what tells a reader WHY —
+  // but what is served is decided by what differs, and nothing else.
+  const netFiles = git("diff", "--name-only", "--no-renames", `${deployedSha}..HEAD`)
+    .split("\n")
+    .filter(Boolean);
+  const net = classify(netFiles);
 
   const groups = {
     "agent-facing": commits.filter((c) => c.kind === "agent-facing"),
@@ -273,9 +288,10 @@ function main() {
     process.exit(1);
   }
 
-  if (groups["agent-facing"].length > 0) {
+  if (net.kind === "agent-facing") {
     console.error(
-      `\n${groups["agent-facing"].length} commit(s) changed text or behaviour an agent reads, and the\n` +
+      `\n${net.agentFacing.length} file(s) an agent reads differ between the deployment and HEAD:\n` +
+        `  ${net.agentFacing.join("\n  ")}\n` +
         `deployment does not have them. Revision 00135 was in that state for 31 minutes while serving two\n` +
         `quirks already measured false — agents were told a "+47" prefix is rejected on a supplier phone,\n` +
         `and that foreign numbers are stored exactly as sent. Neither is true. It was 31 minutes because\n` +
@@ -284,6 +300,15 @@ function main() {
         `    --service ${service} --write-mode reversible`,
     );
     process.exit(1);
+  }
+
+  if (groups["agent-facing"].length > 0) {
+    console.log(
+      `\n${groups["agent-facing"].length} commit(s) touched agent-facing files, but the NET difference\n` +
+        `between the deployment and HEAD does not — a change and its revert, or a file returned to its\n` +
+        `deployed content. No deploy is required for correctness.`,
+    );
+    process.exit(0);
   }
 
   console.log("\nNothing an agent reads has changed, so no deploy is required for correctness.");

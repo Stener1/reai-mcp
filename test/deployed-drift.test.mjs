@@ -149,3 +149,52 @@ test("importing this module does not shell out", async () => {
   assert.equal(typeof mod.classify, "function");
   assert.ok(mod.AGENT_FACING instanceof RegExp);
 });
+
+test("the verdict comes from the net diff, and renames do not hide a path", () => {
+  // Two findings from Codex on PR #117, both about the difference between "what the commits touched" and
+  // "what actually differs":
+  //   - an agent-facing change followed by a complete revert made both commits agent-facing and exited 1,
+  //     although the deployment and HEAD then hold identical agent-facing content;
+  //   - `git show --name-only` prints only the DESTINATION of a rename, so moving a file out of
+  //     src/tools/ dropped the agent-facing path and the commit read as behavioural.
+  const src = readFileSync(path.join(ROOT, "scripts/check-deployed.mjs"), "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+    .join("\n");
+  // The verdict is taken from a diff between the two points, not from the union of the commits.
+  assert.match(src, /git\("diff", "--name-only", "--no-renames", `\$\{deployedSha\}\.\.HEAD`\)/);
+  assert.match(src, /net\.kind === "agent-facing"/);
+  // And every listing that feeds classification disables rename detection.
+  const nameOnly = [...src.matchAll(/"--name-only"[^)]*/g)].map((m) => m[0]);
+  assert.ok(nameOnly.length >= 2, `expected at least two --name-only calls, found ${nameOnly.length}`);
+  for (const call of nameOnly) {
+    assert.match(call, /--no-renames/, `a --name-only call without --no-renames hides a rename: ${call}`);
+  }
+});
+
+test("the label is read from the revision serving traffic, not the service", () => {
+  // The service label records the last deploy ATTEMPT. A deploy whose revision never becomes ready stamps
+  // it while traffic stays on the old revision, so the check would report "current" while agents read the
+  // old text — this script's own failure mode, inverted. Found by the review of PR #117.
+  const src = readFileSync(path.join(ROOT, "scripts/check-deployed.mjs"), "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+    .join("\n");
+  assert.match(src, /status\?\.traffic/);
+  assert.match(src, /"revisions",\s*\n?\s*"describe"/);
+  assert.doesNotMatch(
+    src,
+    /"services",\s*\n?\s*"describe",[\s\S]{0,200}metadata\.labels\.commit/,
+    "the service's own label must not be the source of truth",
+  );
+});
+
+test("ancestry is asked, not inferred from a throw", () => {
+  // `git log A..HEAD` succeeds for any known commit, so the old "not an ancestor" branch was unreachable
+  // in the case that matters: a deployment built from a diverged branch reported "no deploy required"
+  // while running agent-facing code absent from HEAD. This repo squash-merges and deploys from the
+  // feature branch, so that is the normal case rather than an edge one.
+  const src = readFileSync(path.join(ROOT, "scripts/check-deployed.mjs"), "utf8");
+  assert.match(src, /merge-base", "--is-ancestor/);
+  assert.match(src, /Only in the DEPLOYMENT/);
+});
