@@ -9,9 +9,60 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**123 tools**: 116 across ten accounting domains, plus 7 always-on.
+**125 tools**: 118 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **A stray sweep in the write suite**, and the reason it was needed. Eight orders
+  had been sitting on the test tenant since an ad-hoc subscription-billing probe,
+  along with the subscription that generated them, and nothing noticed for weeks.
+  The existing sweep only looks for records carrying *this run's* stamp, so it
+  could not have: the litter came from a different run.
+  - The new sweep matches the naming convention every test record here uses
+    (`Zz…`, `reai-mcp…`, `smoke…`, `probe…`) across the eleven domains the suite
+    touches, and **reports rather than deletes** — it is looking at records it did
+    not create, and removing those quietly would be a worse habit than leaving them.
+  - Records that genuinely cannot be removed are listed in `KNOWN_UNRECOVERABLE`
+    with the reason, and printed every run so they stay visible instead of becoming
+    background noise. Proven to fail: emptying that list turns the run red with
+    `LEFTOVER ORDERS 4105, 4104, …`.
+  - The first version of the sweep was **vacuous in six separate ways**, all caught
+    in review and each of which made a domain report clean unconditionally: products
+    are labelled `title` not `name`; orders expose `internalComment` not `comment`;
+    agreements are keyed `agreementId` and labelled `clientName`, while
+    `signerEmail` is absent from the list and `templateType` is a fixed enum; orders
+    default to a **one-year** window and expenses to the current year, so old leaks
+    age out of view; archived rows are hidden unless asked for; and a **truncated**
+    list was being read as exhaustive.
+  - Fixing the last two is what made it work. It now sweeps **per test-name prefix**
+    where a `name` filter exists, because 69 archived suppliers do not fit the result
+    budget and a truncated list cannot support a claim of cleanliness — and that
+    change immediately surfaced **four strays hidden past the cut** (`Payprobe-…`,
+    `Signprobe-…`, `Vat Basis Probe As`, `Reversal Probe As`), all unremovable, now
+    recorded by id.
+- **The write suite reuses one supplier instead of creating a new one each run.**
+  It posts a real supplier invoice, and `DELETE` on a supplier invoice *reverses* it,
+  so the supplier keeps a transaction and its own delete can only archive — 64
+  archived `Reai-mcp Fullwrite …` suppliers had accumulated, one per run. It now
+  finds its supplier by name and **unarchives** it, which is where
+  `reai_unarchive_supplier` earns its place, and leaves it archived for the next run.
+  Verified live across two runs: created on the first, `unarchived from the last run`
+  on the second.
+- **`reai_unarchive_customer` and `reai_unarchive_supplier`** — two uncovered
+  endpoints that are the documented recovery for a counterparty archived too
+  eagerly. The customer path was measured end to end (a customer reading
+  `archived: true` answered 200 and read back `archived: false`); the supplier path
+  is exercised by the write suite against the supplier it archives, then restored
+  and re-archived so the tenant is left as found.
+
+### Fixed
+
+- **`reai_delete_customer` and `reai_delete_supplier` said "deleted or archived"
+  without reading which.** Both endpoints answer `{"outcome":"deleted"}` or
+  `{"outcome":"archived"}`, and the difference is between an unrecoverable state and
+  a recoverable one. They now report it, name `archived: true` as the way to see an
+  archived record again, and point at the matching unarchive tool. An unrecognised
+  outcome is reported as unknown.
 
 - **Expense claims** (9 tools) — the whole state machine, which was 1 of 10 operations
   covered. `reai_get_expense`, `reai_create_expense`, `reai_update_expense`,

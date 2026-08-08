@@ -608,6 +608,41 @@ export const QUIRKS: readonly Quirk[] = [
       "reversal is expected and means nothing is left to do.",
   },
   {
+    id: "delete-a-parent-and-its-children-become-undeletable",
+    paths: ["/api/orders/{id}", "/api/customers/{id}", "/api/products/{id}", "/api/suppliers/{id}"],
+    methods: ["DELETE"],
+    kind: "irreversible",
+    note:
+      'DELETE answering 500 "Referenced record is not accessible" means this record points at ' +
+      "something that has already been removed, and it is NOT recoverable. Found the slow way: eight " +
+      "orders on the test tenant cannot be deleted through the API at all, because the PRODUCT their " +
+      "lines name was deleted first. Every DELETE on them answers that 500, and there is no product " +
+      "unarchive endpoint to restore the reference with.\n\n" +
+      "So the ordering rule is: remove dependents BEFORE the master data they point at. Orders " +
+      "before products and customers, invoices before either.\n\n" +
+      "What recovery exists is narrow. /api/customers/{id}/unarchive and /api/suppliers/{id}/unarchive " +
+      "exist and work — a customer reading archived: true came back archived: false, measured — but " +
+      "unarchiving the customer does NOT rescue an order blocked this way; that was tried and the 500 " +
+      "persisted, because the customer was never the missing reference. Products, warehouses and " +
+      "employees have no unarchive at all.\n\n" +
+      "One consequence worth planning for: a subscription that generated such orders cannot be " +
+      'deleted either — 409 "Kan ikke slette et abonnement som har generert faktureringshistorikk" — ' +
+      "so an undeletable order takes its subscription with it.",
+  },
+  {
+    id: "archived-records-need-an-explicit-filter-to-see",
+    paths: ["/api/customers", "/api/suppliers"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "DELETE on a customer or supplier with transactions ARCHIVES it rather than deleting, and an " +
+      "archived record is absent from the plain list. The filter that shows them is `archived=true`; " +
+      "`includeArchived=true` is NOT it and returns nothing — measured, 0 rows against 57 for " +
+      "`archived=true` on the same tenant. So \"the customer is gone\" read off the default list is " +
+      "not evidence that it was deleted, and a name collision on create can come from a record you " +
+      "cannot see.",
+  },
+  {
     id: "expense-status-never-says-booked-or-reversed",
     paths: ["/api/expenses/{id}", "/api/expenses"],
     methods: ["GET"],

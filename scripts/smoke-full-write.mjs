@@ -798,13 +798,63 @@ async function main() {
     // cost lines deliberately do NOT follow the voucher sign convention, so this
     // is the only place that difference is exercised against live books.
     console.log("\n  Supplier-invoice chain (posts to the ledger and the reskontro):");
-    const supRes = await client.callTool({
-      name: "reai_create_supplier",
-      arguments: { name: `${STAMP} supplier`, privateContact: true, skipRegistryLookup: true },
-    });
-    const supplier = supRes.isError ? undefined : jsonOf(supRes);
-    if (Number.isInteger(supplier?.id)) created.supplierId = supplier.id;
-    report("a supplier is created", !supRes.isError && Number.isInteger(created.supplierId), `id=${created.supplierId}`);
+    // ONE supplier, reused across runs, rather than a fresh one each time.
+    //
+    // This section posts a real supplier invoice, and DELETE on a supplier invoice REVERSES it —
+    // the entries are permanent. A supplier with transactions cannot be deleted, only archived, so
+    // every previous run left an archived supplier behind and they accumulated: 64 of them named
+    // "Reai-mcp Fullwrite …" were sitting on the test tenant when the stray sweep below finally
+    // looked. Nothing was wrong with the cleanup; the residue is inherent to what this section
+    // tests. Reusing one supplier is what stops it growing, and unarchiving is how it comes back.
+    const SUITE_SUPPLIER = "reai-mcp fullwrite suite supplier";
+    const findSuiteSupplier = async () => {
+      for (const args of [{ name: SUITE_SUPPLIER }, { name: SUITE_SUPPLIER, archived: true }]) {
+        const res = await client.callTool({ name: "reai_list_suppliers", arguments: args });
+        if (res.isError) continue;
+        const hit = (listOf(res) ?? []).find(
+          (row) => String(row?.name ?? "").toLowerCase() === SUITE_SUPPLIER,
+        );
+        if (hit) return { id: hit.id, archived: hit.archived === true };
+      }
+      return undefined;
+    };
+    const existing = await findSuiteSupplier();
+    if (existing === undefined) {
+      const supRes = await client.callTool({
+        name: "reai_create_supplier",
+        arguments: { name: SUITE_SUPPLIER, privateContact: true, skipRegistryLookup: true },
+      });
+      const supplier = supRes.isError ? undefined : jsonOf(supRes);
+      if (Number.isInteger(supplier?.id)) created.supplierId = supplier.id;
+      report(
+        "the suite's supplier is created (first run on this tenant)",
+        !supRes.isError && Number.isInteger(created.supplierId),
+        `id=${created.supplierId}`,
+      );
+    } else {
+      created.supplierId = existing.id;
+      if (existing.archived) {
+        // Where reai_unarchive_supplier earns its place: the previous run archived this supplier
+        // because it had an invoice, and this is what brings it back.
+        const restored = await client.callTool({
+          name: "reai_unarchive_supplier",
+          arguments: { id: existing.id },
+        });
+        report(
+          "the suite's supplier is reused, unarchived from the last run",
+          !restored.isError && /is active again/.test(textOf(restored)),
+          firstLineOf(textOf(restored)),
+        );
+      } else {
+        report("the suite's supplier is reused, already active", true, `id=${existing.id}`);
+      }
+    }
+    // Whichever branch ran, the invoice chain below needs it usable.
+    report(
+      "a supplier is available to book against",
+      Number.isInteger(created.supplierId),
+      `id=${created.supplierId}`,
+    );
 
     const acctRes = await client.callTool({ name: "reai_list_accounts", arguments: { accountNumberPrefix: "67" } });
     const costAccount = /"accountNumber":\s*"(\d+)"/.exec(textOf(acctRes))?.[1];
@@ -1647,10 +1697,20 @@ async function main() {
       );
     }
     if (created.supplierId) {
-      await attempt(
-        "supplier deleted or archived",
+      // Archived, not deleted — it has an invoice, and a supplier invoice can only be reversed. That
+      // is where this supplier is left, and the next run unarchives the same one rather than
+      // creating another.
+      const supplierOutcome = await attempt(
+        "the suite's supplier is archived again, ready for the next run",
         () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
         (r) => textOf(r).slice(0, 90),
+      );
+      report(
+        "and the outcome really was 'archived', not 'deleted'",
+        supplierOutcome !== undefined &&
+          !supplierOutcome.isError &&
+          jsonOf(supplierOutcome)?.outcome === "archived",
+        `outcome=${JSON.stringify(jsonOf(supplierOutcome ?? {})?.outcome ?? null)}`,
       );
     }
     if (created.creditorId) {
@@ -1720,6 +1780,190 @@ async function main() {
           false,
           `COULD NOT VERIFY — check voucher ${created.voucherId} by hand: ${err?.message ?? err}`,
         );
+      }
+    }
+
+    // --- A sweep for test records this run did NOT create -------------------
+    //
+    // The stamp sweep below catches leaks from THIS run. It cannot catch leaks from any other, and
+    // that is the gap that actually bit: eight orders sat on this tenant from an ad-hoc probe until
+    // they were noticed by hand weeks later, along with the subscription that generated them. A
+    // stamp-based check would never have mentioned them.
+    //
+    // So this one matches on the naming convention every test record here uses instead, across the
+    // domains this suite touches. It REPORTS and never deletes: it is looking at records it did not
+    // create, and quietly removing those would be a worse habit than leaving them.
+    const KNOWN_UNRECOVERABLE = {
+      // Measured, and there is no way back: these orders were generated from subscription 223 by a
+      // subscription-billing probe, and their line references a PRODUCT that was later deleted.
+      // DELETE now answers 500 "Referenced record is not accessible". Unarchiving the customer does
+      // NOT help — tried, the 500 persists — and products have no unarchive endpoint at all (only
+      // customers and suppliers do). Subscription 223 in turn answers 409 "Kan ikke slette et
+      // abonnement som har generert faktureringshistorikk" because of those very orders, so neither
+      // can go. They need removing through the ReAI web UI, or they stay.
+      orders: [4098, 4099, 4100, 4101, 4102, 4103, 4104, 4105],
+      subscriptions: [223],
+      // Archived test customers from earlier runs. Archiving is what a delete does to a customer
+      // with transactions, so these are the expected residue rather than a leak — and 5941 is the
+      // one the eight stranded orders point at, which is why it cannot go.
+      customers: [5922, 5941],
+      // Four suppliers from ad-hoc probes before this sweep existed: Payprobe-…, Signprobe-…,
+      // "Vat Basis Probe As" and "Reversal Probe As". Each carries a reversed supplier invoice, so
+      // DELETE archives rather than deletes and always will — unarchiving and deleting again just
+      // re-archives, measured. They were hidden past the truncation cut of the whole-list query
+      // until the sweep started asking per name prefix, which is what found them.
+      suppliers: [5631, 5632, 5642, 5645],
+    };
+    // Deliberately mixed anchoring, which the first version had by accident: `^` bound only to the
+    // `zz` alternative and everything else matched anywhere. Review flagged that as a false-positive
+    // risk, and it is — but making them all prefixes would have been wrong too, because the API's
+    // own `name` filter matches on SUBSTRING, and that is exactly how the four strays this sweep
+    // found were found: "Payprobe-…" and "Signprobe-…" contain "probe" without starting with it.
+    //
+    // So: `zz` is anchored, because as a substring it matches buzz, pizza and puzzle. The other four
+    // are distinctive enough to match anywhere, and on a tenant declared safe to write to a false
+    // positive costs one message asking a human to look, while a false negative is litter that hides
+    // forever — which is the failure this exists to prevent.
+    const TEST_NAME = /(?:^zz|reai-mcp|smoke|probe|walkthrough)/i;
+    // Residue this suite CANNOT avoid, matched by name rather than id because the id differs per
+    // tenant. The supplier invoice this suite posts can only be reversed, so its supplier keeps a
+    // transaction and its delete archives — one archived supplier is the permanent, expected state.
+    // The 64 older ones are the same thing before the suite started reusing a single supplier;
+    // they are counted and named here rather than allowlisted away, so the number stays visible.
+    const EXPECTED_RESIDUE = {
+      // The suite's own marker IS the residue marker here, and deliberately the whole prefix rather
+      // than "reai-mcp fullwrite": every supplier this repo has ever named that way carries a
+      // reversed supplier invoice, so its DELETE archives and always will. Counting them keeps the
+      // number visible without the whole-list query truncating — 65 of them do not fit the result
+      // budget, and a truncated list cannot support a claim of cleanliness.
+      suppliers: /^reai-mcp/i,
+    };
+    // Every entry states the ID FIELD, the fields that can actually carry a test marker, and the
+    // query variants needed to see everything. All three were wrong in the first version, and each
+    // wrong one made a domain report clean unconditionally — a sweep that cannot fail is worse than
+    // no sweep, because it is evidence of an absence it never checked. Review caught all of it:
+    //
+    //  - products are labelled `title`, not `name` (ProductRes), and the suite stamps `title`;
+    //  - orders expose `internalComment`, not `comment` (OrderOverviewRes);
+    //  - agreements are keyed `agreementId` and labelled `clientName` — `signerEmail` is not in the
+    //    list at all and `templateType` is a fixed enum, so nothing could ever match;
+    //  - orders default to a ONE YEAR window and expenses to the current year, so old leaks age out
+    //    of view and the sweep turns green on its own;
+    //  - customers, suppliers and warehouses hide ARCHIVED rows, which is exactly what a delete
+    //    leaves behind when the record has transactions.
+    const FLOOR = "2000-01-01";
+    const CEILING = `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`;
+    // Where a list supports a `name` filter, the sweep asks per test PREFIX instead of for the whole
+    // list. That is what keeps it exhaustive: 69 archived suppliers do not fit the result budget, so
+    // the whole-list query truncates and can prove nothing, while each prefix query returns a
+    // handful. The residue prefix is counted rather than listed — every row it can match is
+    // residue by definition, so truncation there is harmless.
+    const TEST_PREFIXES = ["zz", "smoke", "probe", "walkthrough", "reai-mcp"];
+    const SWEPT = [
+      ["orders", "reai_list_orders", "id", ["customerName", "internalComment"], [{ startDate: FLOOR, endDate: CEILING }]],
+      ["customers", "reai_list_customers", "id", ["name"], "byName"],
+      ["suppliers", "reai_list_suppliers", "id", ["name"], "byName"],
+      ["products", "reai_list_products", "id", ["title", "description"], [{}]],
+      ["employees", "reai_list_employees", "id", ["name"], [{}]],
+      ["expenses", "reai_list_expenses", "id", ["title"], [{ startDate: FLOOR, endDate: CEILING }]],
+      ["subscriptions", "reai_list_subscriptions", "id", ["customerName"], [{}]],
+      ["company banks", "reai_list_company_banks", "id", ["name"], [{}]],
+      ["warehouses", "reai_list_warehouses", "id", ["name"], [{}, { archived: true }]],
+      ["agreements", "reai_list_agreements", "agreementId", ["clientName"], [{}]],
+      ["reconciliation rules", "reai_list_reconciliation_rules", "id", ["matchText", "description"], [{}]],
+    ];
+    for (const [label, toolName, idField, fields, variants] of SWEPT) {
+      try {
+        const allowed = new Set(KNOWN_UNRECOVERABLE[label] ?? []);
+        const residuePattern = EXPECTED_RESIDUE[label];
+        const strays = new Map();
+        const seen = new Set();
+        let explained = 0;
+        let truncated;
+        // "byName" expands to one query per test prefix, in both the active and archived views.
+        // Prefixes wholly covered by the residue pattern are COUNTED, not listed: the filter itself
+        // guarantees every row matches, so a truncated answer there hides nothing.
+        let queries = variants;
+        if (variants === "byName") {
+          queries = [];
+          for (const prefix of TEST_PREFIXES) {
+            const covered = residuePattern !== undefined && residuePattern.test(prefix);
+            for (const archived of [false, true]) {
+              queries.push({ name: prefix, ...(archived ? { archived: true } : {}), ...(covered ? { countOnly: true } : {}) });
+            }
+          }
+        }
+        for (const query of queries) {
+          const { countOnly, ...args } = query;
+          if (countOnly === true) {
+            const res = await client.callTool({ name: toolName, arguments: args });
+            if (!res.isError) explained += countOf(res) ?? (listOf(res) ?? []).length;
+            continue;
+          }
+          const res = await client.callTool({ name: toolName, arguments: args });
+          if (res.isError) {
+            truncated = `could not be listed with ${JSON.stringify(args)} — ${firstLineOf(textOf(res))}`;
+            break;
+          }
+          // A truncated list cannot support a claim of cleanliness: ok() trims at an item boundary
+          // and the remainder is simply not there. The suite already learned this for voucher
+          // counts; the sweep has to refuse rather than read the visible part as the whole.
+          const cut = /showing the first (\d+) of (\d+) items/.exec(textOf(res));
+          if (cut) {
+            // A truncated list cannot prove cleanliness, and saying otherwise is the vacuity this
+            // sweep exists to avoid. It is reported with the real total from the note, which is
+            // information even when the rows are not all visible.
+            truncated = `the ${label} list came back TRUNCATED (${cut[1]} of ${cut[2]}), so what is ` +
+              `past the cut was not examined — narrow the query, or clear the backlog so the whole ` +
+              `list fits`;
+          }
+          for (const row of listOf(res) ?? []) {
+            const id = row?.[idField];
+            if (allowed.has(id)) {
+              // Counted as SEEN, so the summary reports what is actually still there. Printing the
+              // static list meant that after someone cleaned a record in the ReAI UI, the sweep would
+              // go on announcing it as live tenant state indefinitely.
+              seen.add(id);
+              continue;
+            }
+            const residue = EXPECTED_RESIDUE[label];
+            if (residue && fields.some((field) => residue.test(String(row?.[field] ?? "")))) {
+              explained += 1;
+              continue;
+            }
+            if (fields.some((field) => TEST_NAME.test(String(row?.[field] ?? "")))) strays.set(id, row);
+          }
+        }
+        report(
+          `sweep: no unexplained test ${label} left behind`,
+          truncated === undefined && strays.size === 0,
+          strays.size > 0
+            ? `LEFTOVER ${label.toUpperCase()} ${[...strays.keys()].join(", ")} — not created by this ` +
+              `run and not explained. Identify what made them and remove them, or record why they stay.`
+            : truncated !== undefined
+              ? truncated
+              : strays.size === 0
+              ? [
+                  "clean",
+                  seen.size > 0
+                    ? `${seen.size} known-unrecoverable record(s) still present: ${[...seen].join(", ")}`
+                    : "",
+                  // Named rather than silently dropped: an allowlist entry that no longer exists is
+                  // either a record someone cleaned up by hand, or an id that was wrong all along,
+                  // and both are worth one line so the list does not rot.
+                  truncated === undefined && allowed.size > seen.size
+                    ? `${allowed.size - seen.size} allowlisted id(s) no longer present ` +
+                      `(${[...allowed].filter((id) => !seen.has(id)).join(", ")}) — remove them from ` +
+                      `KNOWN_UNRECOVERABLE`
+                    : "",
+                  explained > 0 ? `${explained} expected residue row(s)` : "",
+                ]
+                  .filter(Boolean)
+                  .join("; ")
+                : "",
+        );
+      } catch (err) {
+        report(`sweep: ${label}`, false, `sweep threw — ${err?.message ?? err}`);
       }
     }
 
