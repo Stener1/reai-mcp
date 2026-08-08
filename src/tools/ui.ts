@@ -60,8 +60,10 @@ function fitToBudget(data: ReconcileData): ReconcileData {
  * already takes two id arrays.
  *
  * Everything else here is computable and belongs in a sentence. A revenue chart or a
- * voucher list would be decoration, and each additional view is another surface to keep
- * in step with 63 tools.
+ * voucher list would be decoration, and each additional view is another surface to keep in step
+ * with every curated tool that touches the same data. (This once said "in step with 63 tools",
+ * which was true when it was written and is now less than half the real number — a count in a
+ * comment that nothing checks is a fact with an expiry date, so it is stated without one.)
  */
 const reconcileUi = defineTool({
   name: "reai_reconcile_ui",
@@ -74,8 +76,11 @@ const reconcileUi = defineTool({
     "reai_match_bank_transactions and the same write policy — which classifies it irreversible, " +
     "because a match writes reconciliation state and can book a discrepancy.\n\n" +
     "Only meaningful for a bank account with a real feed. For providerType 'manual' this " +
-    "endpoint is not the working view — use reai_list_bank_transactions instead, or the view " +
-    "will look reconciled when nothing has been reconciled.\n\n" +
+    "endpoint is not the working view, or it will look reconciled when nothing has been " +
+    "reconciled — a manual account reconciles against a statement balance through " +
+    "`reai_request GET /api/manual-reconciliations/{bankAccountId}?month=yyyy-MM`. Read that " +
+    "endpoint's quirk first: its 404 says \"Bankkonto ikke funnet\" for an account that exists " +
+    "and simply is not manual, so it cannot be read literally.\n\n" +
     "Prefer reai_get_bank_reconciliation when you only need to read the state or answer a " +
     "question about it; this exists for the case where a person has to choose.",
   risk: "read",
@@ -143,9 +148,9 @@ const reconcileUi = defineTool({
             : "The ledger side was not";
       note +=
         ` ${which} reported by the endpoint, so this is NOT an established reconciliation — ` +
-        `unreported is not the same as nothing unmatched. Check the account has a bank feed ` +
-        `(providerType 'manual' has no reconciliation view), then read ` +
-        `reai_list_bank_transactions directly.`;
+        `unreported is not the same as nothing unmatched. Check the account has a bank feed with ` +
+        `reai_list_company_banks: providerType 'manual' has no reconciliation view here, and ` +
+        `reconciles through reai_request on /api/manual-reconciliations/{bankAccountId} instead.`;
     } else if (tx.rowsMissing || post.rowsMissing) {
       note +=
         ` The endpoint gave counts without the corresponding list, so the view cannot show ` +
