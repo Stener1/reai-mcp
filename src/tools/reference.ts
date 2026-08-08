@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { defineTool, ok, okList, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import { ReaiApiError } from "../reai/errors.js";
+import {
+  defineTool,
+  ok,
+  okList,
+  requireTenantId,
+  resolveTenantId,
+  tenantIdArg,
+  type ToolDef,
+} from "./registry.js";
 
 /**
  * Reference data and company-level financial state — four reads, three of them for questions this
@@ -49,6 +58,21 @@ function matching<T extends { code?: string; name?: string }>(rows: T[], query: 
   );
 }
 
+/**
+ * A 404 from ReAI whose problem detail says the thing simply is not there.
+ *
+ * Both conditions matter and neither is enough alone. The STATUS has to come from the typed error
+ * rather than from its rendered message: a 500 relaying a downstream body could contain the string
+ * "HTTP 404", and a text-matched guard would report that outage as "no opening balance recorded" —
+ * an outage turned into a fact about someone's accounts. The PHRASE then separates "there is nothing
+ * recorded" from every other 404 the same path can produce, a mistyped path above all, which must
+ * stay an error because it means the caller is not asking what they think they are.
+ */
+function isNotFound(err: unknown, phrase: RegExp): boolean {
+  if (!(err instanceof ReaiApiError) || err.status !== 404) return false;
+  return phrase.test(err.message) || phrase.test(err.rawBody ?? "");
+}
+
 const listCountries = defineTool({
   name: "reai_list_countries",
   title: "List the country codes this API accepts",
@@ -80,7 +104,12 @@ const listCountries = defineTool({
     const res = await ctx.client.request<Country[]>({
       method: "GET",
       path: "/api/countries",
-      tenantId: requireTenantId(args.tenantId, ctx),
+      // GLOBAL data: the spec declares no X-Tenant-Id parameter for this endpoint, so requiring a
+      // tenant would have made "what country codes does this API take" unanswerable until a company
+      // was selected — and it is one of the first questions worth asking, right after authenticating.
+      // `omitTenant` is how the meta tools already handle the same situation.
+      tenantId: resolveTenantId(args.tenantId, ctx),
+      omitTenant: args.tenantId === undefined,
     });
     const all = res.data;
     if (!Array.isArray(all)) {
@@ -141,7 +170,9 @@ const listCurrencies = defineTool({
     const res = await ctx.client.request<Currency[]>({
       method: "GET",
       path: "/api/currencies",
-      tenantId: requireTenantId(args.tenantId, ctx),
+      // Global, like the country list: no X-Tenant-Id parameter in the spec, so no tenant needed.
+      tenantId: resolveTenantId(args.tenantId, ctx),
+      omitTenant: args.tenantId === undefined,
     });
     const all = res.data;
     if (!Array.isArray(all)) {
@@ -210,8 +241,12 @@ const getOpeningBalance = defineTool({
       // Only the documented "not found" case becomes an answer. Anything else is still a failure,
       // because turning every error into "nothing recorded" is how a 403 on a module or an expired
       // token gets reported as a fact about the books.
-      const message = err instanceof Error ? err.message : String(err);
-      if (/HTTP 404/.test(message) && /opening balance not found/i.test(message)) {
+      //
+      // Matched on the STRUCTURED status, not on the message. Review's point, and it is right: a 500
+      // from a gateway relaying a downstream body could carry both "HTTP 404" and the phrase, and a
+      // text search would have called that outage an empty set of books. ReaiApiError already knows
+      // its own status; the phrase is then a second condition rather than the only one.
+      if (isNotFound(err, /opening balance not found/i)) {
         return ok(
           { openingBalance: null, recorded: false },
           {
@@ -249,9 +284,12 @@ const getAnnualAccounts = defineTool({
     year: z
       .number()
       .int()
-      .min(2000, "ReAI's fiscal years start well after this.")
-      .max(2100)
-      .describe("Fiscal year, e.g. 2025."),
+      // The spec's own bounds: exclusiveMinimum 0, maximum 32767. An earlier floor of 2000 was an
+      // assumption about when ReAI's fiscal years start, and it rejected a legacy year the API would
+      // have answered — this server's rule is not to refuse what the API accepts.
+      .min(1, "The API declares exclusiveMinimum 0 for this parameter.")
+      .max(32767, "The API declares maximum 32767 for this parameter.")
+      .describe("Fiscal year, e.g. 2025. The API accepts 1 to 32767."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -266,8 +304,7 @@ const getAnnualAccounts = defineTool({
         note: `A submission exists for ${args.year} on tenant ${tenantId}. Its state is in the body below.`,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/HTTP 404/.test(message) && /no annual-accounts submission/i.test(message)) {
+      if (isNotFound(err, /no annual-accounts submission/i)) {
         return ok(
           { year: args.year, submission: null, submitted: false },
           {

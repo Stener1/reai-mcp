@@ -726,8 +726,8 @@ Unit tests cover the write-policy classifier and spec search/describe, and need 
 ### Reference data and company state
 | Tool | Purpose | Risk |
 |---|---|---|
-| `reai_list_countries` | The country codes this API accepts, each with its default `currencyCode`. `query` filters **locally** — the endpoint takes no parameters | read |
-| `reai_list_currencies` | The currency codes this API accepts. Same local filter | read |
+| `reai_list_countries` | The country codes this API accepts, each with its default `currencyCode`. `query` filters **locally** — the endpoint takes no parameters. Needs no tenant | read |
+| `reai_list_currencies` | The currency codes this API accepts. Same local filter, also tenant-free | read |
 | `reai_get_opening_balance` | The ledger position the books start from, or a plain answer that none is recorded | read |
 | `reai_get_annual_accounts` | Whether annual accounts were submitted for a fiscal year | read |
 
@@ -736,6 +736,8 @@ Unit tests cover the write-policy classifier and spec search/describe, and need 
 Neither documents a response schema. Almost nothing here does: measured, **12 of 430 operations** in this spec declare one, which is the reason this project's method is to measure a live response rather than to trust a shape. What the API returned is `{code, name, currencyCode}` for a country and `{code, name}` for a currency.
 
 **Two 404s that are answers, not failures.** `GET /api/opening-balances` answers `404 "Opening balance not found"` and `GET /api/annual-accounts/{year}` answers `404 "No annual-accounts submission exists"` when there is nothing recorded — measured on both test tenants. A 404 from a collection-shaped path is otherwise indistinguishable from a wrong path, a wrong tenant, or a switched-off module, and this server has watched all three conclusions get drawn from one. Both tools report the real answer, and *only* for the documented message: a 403, a 401 or a 500 still fails, because a tool that calls every error "nothing recorded" will report an outage as a fact about someone's books.
+
+Both 404 conversions turn on the typed error's `status`, not on its message text: a gateway `500` relaying a downstream body can contain "HTTP 404" and the documented phrase together, and a text match would have called that outage an empty set of books. The country and currency lists need **no tenant** — the spec declares no `X-Tenant-Id` for either, so asking what codes exist works immediately after authentication.
 
 Writing an opening balance is left to `reai_request` on purpose. It is ledger position, so setting one restates every comparative figure the books produce, and `DELETE /api/opening-balances` is documented as **"delete OR reverse"** — the family this repo has been caught by five times, where a reversal *posts* rather than removes. Neither test tenant has an opening balance to watch those endpoints on, so no curated tool here claims to know what they do.
 

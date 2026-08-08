@@ -88,6 +88,18 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Opening-balance **writes stay on `reai_request`** and the tool says why: it is ledger
     position, `DELETE` is documented "delete OR reverse", and neither test tenant has one to
     watch those endpoints on.
+  - The 404 conversion is decided on the typed `ReaiApiError.status`, not on the rendered
+    message. A gateway `500` relaying a downstream body can carry both "HTTP 404" and the
+    documented phrase, and a text-matched guard would have reported that outage as an empty
+    set of books. The phrase is a second condition, not the only one.
+  - The two code lists need **no tenant at all** — the spec declares no `X-Tenant-Id`
+    parameter for either, so they now send none and answer immediately after authentication,
+    which is when "what country codes does this API take" is actually asked. Verified live
+    with no tenant selected: both answer, while the tenant-scoped opening-balance read still
+    refuses.
+  - `year` accepts what the API accepts: the spec says `exclusiveMinimum 0, maximum 32767`,
+    and an earlier floor of 2000 was an assumption about when ReAI's fiscal years start that
+    would have rejected a legacy year the API would have answered.
 
 - **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,
   `reai_update_lead`, `reai_log_lead_contact`, `reai_convert_lead`, `reai_delete_lead`.

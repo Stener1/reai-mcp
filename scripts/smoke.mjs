@@ -761,17 +761,43 @@ async function main() {
       report("reference currency list", false, String(err));
     }
 
-    for (const [label, name, args, expected] of [
-      ["an absent opening balance reads as an answer, not an error", "reai_get_opening_balance", {}, /NO opening balance recorded/],
-      ["an unfiled year reads as an answer, not an error", "reai_get_annual_accounts", { year: 2025 }, /NO annual-accounts submission exists/],
+    // Either state counts, and that is review's correction: asserting ABSENCE made the run fail on
+    // any tenant that legitimately has an opening balance or a filed year — a check that breaks when
+    // the data changes rather than when the code does. What is checked here is that the tool answers
+    // COHERENTLY on live data: not an error result, and one of the two states it knows how to report.
+    //
+    // The narrowness — that a 403 or a 500 is NOT reported as "nothing recorded" — cannot be checked
+    // against a live tenant that answers normally, so it lives in test/reference.test.mjs, where the
+    // failure can be forced.
+    for (const [label, name, args, absent, present] of [
+      [
+        "the opening balance reads as an answer either way",
+        "reai_get_opening_balance",
+        {},
+        /NO opening balance recorded/,
+        /HAS an opening balance recorded/,
+      ],
+      [
+        "the annual-accounts year reads as an answer either way",
+        "reai_get_annual_accounts",
+        { year: 2025 },
+        /NO annual-accounts submission exists/,
+        /A submission exists for 2025/,
+      ],
     ]) {
       try {
         const res = await client.callTool({ name, arguments: { tenantId, ...args } });
         const text = textOf(res);
-        // Both halves: it must not be an error result, AND it must say the specific thing. A tool
-        // that swallowed a 403 would satisfy the first alone.
-        const answered = res.isError !== true && expected.test(text);
-        report(label, answered, answered ? "reported as the answer" : firstLine(text));
+        const answered = res.isError !== true && (absent.test(text) || present.test(text));
+        report(
+          label,
+          answered,
+          answered
+            ? absent.test(text)
+              ? "nothing recorded, reported as the answer"
+              : "recorded, reported as the answer"
+            : firstLine(text),
+        );
       } catch (err) {
         report(label, false, String(err));
       }
