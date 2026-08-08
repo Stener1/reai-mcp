@@ -9,6 +9,37 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Added
+
+- **A guard for the other direction of spec drift: a tool enum that has fallen behind the document.**
+  `test/spec-bounds.test.mjs` has always guarded looseness — a tool accepting what the API will reject, so
+  the caller gets a bare 400 instead of a reason. The mirror was unguarded and is quieter: a hardcoded
+  `z.enum` that no longer matches the document REFUSES a value the API accepts, locally, with a validation
+  error that reads like the caller's own mistake. Nothing upstream is consulted, so nothing ever corrects
+  it.
+  - There are eighteen such lists across the curated tools, seven of them added by this repository in a
+    single day: loan types, perspectives, repayment types, day-count conventions, interest treatments,
+    instrument types, event types. Each is a copy of something the document states, and a copy is a claim
+    with a shelf life — the same shape as the operation count that had to be fixed three times.
+  - **No drift today**, which is the point of adding it now rather than after a spec refresh has quietly
+    broken a domain. It reads parameters as well as bodies, following `$ref`s into
+    `components.parameters` too, since several query enums live there.
+  - Mutation-verified: dropping `company_loan_to_employee` from the loan types and `BOND`/`OTHER` from the
+    instrument types each fail with the refused values named.
+  - **Then review found the first version weaker than its own claim, in three ways.** It iterated top-level
+    arguments only, so every enum inside an array of objects was invisible —
+    `reai_create_expense.perDiems[].tripType` and `costs[].category` among them, both backed by documented
+    enums. It is keyed on dotted LOCATIONS now, the way `constraintsOf` already does it for bounds and for
+    the same recorded reason, and shortening a nested list fails where before it passed silently.
+  - The exemption map held argument names, so one entry suppressed the comparison for **every** value of
+    that argument — the day the document gained another, that drift would hide behind an exemption written
+    for something else. It holds specific values now, verified: exempting `other` still catches
+    `intercompany` going missing.
+  - And the vacuity floor of eight was far too low: it let the sweep lose most of its comparisons and stay
+    green, while counting operation occurrences rather than distinct locations made it easier still, since a
+    create and an update sharing an argument both counted. The complete set of **39** comparisons is pinned,
+    so losing one fails and gaining one fails with a nudge to record it.
+
 ### Fixed
 
 - **A number that has now been wrong three times is computed instead of maintained.** How many operations
