@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { assertTransmitAllowed } from "../policy.js";
 import {
+  fail,
+  mergeForReplacement,
+  optionalShape,
+  readableRecord,
   CURRENCY_CODE,
   COUNTRY_CODE,
   defineTool,
@@ -87,6 +91,76 @@ const subscriptionLine = z
   .describe("One recurring line.");
 
 /** The fields the API requires on every write, shared by create and update. */
+/** Exactly what SubscriptionWriteReq accepts. The response carries ten more. */
+const SUBSCRIPTION_SETTABLE = [
+  "customerId",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "periodAlignment",
+  "outputMode",
+  "automaticBillingGeneration",
+  "daysUntilDue",
+  "currencyCode",
+  "invoiceEmail",
+  "invoiceComment",
+  "internalComment",
+  "sendEhf",
+  "agreementId",
+  "projectId",
+  "serviceRecipients",
+  "subscriptionLines",
+] as const;
+
+/** What the API refuses to do without. Everything else the stored subscription can supply. */
+const SUBSCRIPTION_REQUIRED = [
+  "customerId",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "outputMode",
+  "automaticBillingGeneration",
+  "currencyCode",
+  "subscriptionLines",
+] as const;
+
+/**
+ * Changes that alter what an unattended invoice SAYS or who RECEIVES it.
+ *
+ * Used only when the stored subscription is already armed: editing these on a machine that
+ * invoices by itself reaches a third party as surely as arming it does, and the argument gate
+ * cannot see it, because the arming is on the record rather than in the call.
+ *
+ * Deliberately not every field. A comment, a due-day or an unlinked project changes nothing
+ * anybody receives, and gating those would make ordinary maintenance need the send flag.
+ */
+const BILLING_SUBSTANCE = [
+  "customerId",
+  "serviceRecipients",
+  "subscriptionLines",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "currencyCode",
+] as const;
+
+/**
+ * What SubscriptionLineReq accepts, of the eleven a response line carries.
+ *
+ * vatTitle, vatRate and amounts are computed and have no place in a write — which is the trap in
+ * "read it first and send back what you do not intend to change".
+ */
+const SUBSCRIPTION_LINE_SETTABLE = [
+  "rowNumber",
+  "itemName",
+  "comment",
+  "quantity",
+  "unitPrice",
+  "discount",
+  "vatCode",
+  "variantId",
+] as const;
+
 const writeFields = {
   customerId: z.number().int().positive().describe("Who is billed, from reai_list_customers."),
   startDate: isoDate.describe("First period start, yyyy-MM-dd."),
@@ -143,8 +217,11 @@ const writeFields = {
     .boolean()
     .optional()
     .describe(
-      "Arms EHF/Peppol transmission of what this subscription produces. Needs full mode and " +
-        "external send enabled; an EHF document cannot be recalled.",
+      "Arms EHF/Peppol transmission of what this subscription produces. Setting it to TRUE needs " +
+        "full mode and external send enabled; an EHF document cannot be recalled. Setting it to " +
+        "false needs neither — turning a send off is not a send — which is how the arming is " +
+        "removed. (automaticBillingGeneration's description already scopes its claim this way; " +
+        "this one read as though both directions were gated.)",
     ),
   projectId: z.number().int().positive().optional().describe("Tag billing to a project."),
   agreementId: z.number().int().positive().optional().describe("Link to an agreement."),
@@ -352,29 +429,239 @@ const createSubscription = defineTool({
 
 const updateSubscription = defineTool({
   name: "reai_update_subscription",
-  title: "Replace a subscription",
+  title: "Change a subscription",
   description:
-    "Update a subscription. This is a full REPLACEMENT, not a patch: every field the API " +
-    "requires must be sent, and the lines you send become the lines it has.\n\n" +
-    "So read it with reai_get_subscription first and send back what you do not intend to " +
-    "change. Omitting a value does not leave it alone — and the fields most dangerous to get " +
-    "wrong by omission are the three that decide whether it acts on its own.",
+    "Change one or more things about a subscription, leaving the rest alone.\n\n" +
+    "The call underneath is a full REPLACEMENT, and its own advice — read it first and send back " +
+    "what you do not intend to change — is harder to follow than it sounds, because the read and " +
+    "the write disagree about shape. The response puts the lines under `lines` and the request " +
+    "wants them under `subscriptionLines`; a response line carries eleven fields and the request " +
+    "accepts eight (vatTitle, vatRate and amounts are computed); and a service recipient reads " +
+    "back as `companyName` and writes as `name`. A caller echoing the response verbatim gets none " +
+    "of that right.\n\n" +
+    "Measured on a live subscription: a PUT that carried the eight required fields and one line " +
+    "answered 200 and left invoiceEmail, invoiceComment and internalComment all null, with the " +
+    "second line gone. So this tool reads the subscription, maps it, merges your changes over it " +
+    "and writes the whole thing back. The mapped round-trip was verified lossless — read, map, " +
+    "write, and nothing changed, discounts included.\n\n" +
+    "IT DOES NOT DISARM ANYTHING. outputMode, automaticBillingGeneration and sendEhf are carried " +
+    "over as they are, so a subscription that was invoicing on its own still is after an ordinary " +
+    "edit. Pass those fields explicitly to change them: sendEhf: false, " +
+    'automaticBillingGeneration: false and outputMode: "create_order" are the three ways to stop ' +
+    "it, and none of them needs REAI_ALLOW_EXTERNAL_SEND, because turning a send OFF is not a " +
+    "send.\n\n" +
+    "What DOES need it: changing who or what an ARMED subscription bills. When the stored " +
+    "subscription already arms a send, a change to customerId, serviceRecipients, " +
+    "subscriptionLines, startDate, intervalMonths, billingTiming or currencyCode is refused " +
+    "without REAI_ALLOW_EXTERNAL_SEND — it alters what an unattended invoice will say and who " +
+    "receives it, and the write ladder cannot see that on its own, because the arming is on the " +
+    "record rather than in the call. Comments, due-days and project links are not gated: they " +
+    "reach nobody.\n\n" +
+    "Between the read and the write an edit made in the ReAI UI is silently reverted; there is no " +
+    "version field to prevent it.",
   risk: "reversible",
-  apiPaths: [["PUT", "/api/subscriptions/{id}"]],
+  apiPaths: [
+    ["GET", "/api/subscriptions/{id}"],
+    ["PUT", "/api/subscriptions/{id}"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Subscription id."),
-    ...writeFields,
+    // Every field optional: the stored subscription supplies whatever the caller does not. The
+    // create tool keeps the required versions, which is where they belong.
+    ...optionalShape(writeFields),
+    // Omission now means "carry the stored value over", so null is the only way left to UNLINK
+    // something — and optionalShape adds only `.optional()`, which left no way at all to detach a
+    // subscription from its project or agreement. A capability this change removed by accident.
+    //
+    // These five because they are the OPTIONAL fields the document types as nullable. Twelve of
+    // the seventeen are nullable there — the other seven are all REQUIRED, where the merge treats
+    // null as missing and refuses, so making them nullable would buy nothing and read as
+    // permission. (An earlier version of this comment said "exactly the five the document types as
+    // nullable", which was simply wrong about the document.) daysUntilDue, periodAlignment,
+    // sendEhf and serviceRecipients are optional and NOT nullable, so null stays rejected for
+    // them; recipients are cleared with an empty array, which the merge lets win.
+    agreementId: writeFields.agreementId.nullable().optional(),
+    projectId: writeFields.projectId.nullable().optional(),
+    invoiceEmail: writeFields.invoiceEmail.nullable().optional(),
+    invoiceComment: writeFields.invoiceComment.nullable().optional(),
+    internalComment: writeFields.internalComment.nullable().optional(),
+    // Overridden to ALLOW an empty array, which the create tool's .min(1) rejects. Not because
+    // the API accepts one — it does not — but because "empty the lines to stop the billing" is a
+    // plausible wrong idea, and the handler answers it by naming reai_deactivate_subscription.
+    // With .min(1) here the caller got "Invalid arguments for tool reai_update_subscription" and
+    // no idea what to do instead. Same trade as reai_update_company_bank's bban: accept what the
+    // API would refuse, in the one place where doing so buys a better answer.
+    subscriptionLines: z
+      .array(subscriptionLine)
+      .optional()
+      .describe(
+        "What is billed each period. These REPLACE the existing lines — send them all, or leave " +
+          "the field out and the stored ones are carried over.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const { tenantId, id, ...body } = args;
-    const res = await ctx.client.request({
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const given = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (given.length === 0) {
+      return fail(
+        "No changes were given, so nothing was written. Rewriting a subscription with its own " +
+          "current values is a pointless write to something that bills a customer.",
+      );
+    }
+
+    const current = await ctx.client.request<Record<string, unknown>>({
+      method: "GET",
+      path: `/api/subscriptions/${id}`,
+      tenantId: resolved,
+    });
+    const { record, problem } = readableRecord(current.data, undefined, SUBSCRIPTION_SETTABLE);
+    if (!record) {
+      return fail(
+        `Could not read subscription ${id}: ${problem}. Nothing was written — this endpoint ` +
+          `REPLACES the subscription, so the fields and lines you did not pass would have been ` +
+          `erased, and its billing schedule with them.`,
+      );
+    }
+
+    // The two shapes the read and the write disagree about. Done before the merge so the
+    // caller's own `subscriptionLines` / `serviceRecipients`, if given, simply win.
+    const storedLines = Array.isArray(record.lines)
+      ? (record.lines as Array<Record<string, unknown>>).map((line) =>
+          Object.fromEntries(
+            SUBSCRIPTION_LINE_SETTABLE.filter((k) => line[k] !== undefined && line[k] !== null).map(
+              (k) => [k, line[k]],
+            ),
+          ),
+        )
+      : undefined;
+    // Four differences between the shapes, not three: `companyName` becomes `name`, and
+    // `companyId` is response-only. Absent values are filtered like the lines are — every
+    // SubscriptionServiceRecipientRes property is optional, so echoing an undefined through would
+    // build a recipient with no organizationNumber, which the API refuses with
+    // "400 serviceRecipients[0].organizationNumber". Measured.
+    const storedRecipients = Array.isArray(record.serviceRecipients)
+      ? (record.serviceRecipients as Array<Record<string, unknown>>).map((r) => {
+          const mapped: Record<string, unknown> = {};
+          const name = r.companyName ?? r.name;
+          if (r.organizationNumber !== undefined && r.organizationNumber !== null) {
+            mapped.organizationNumber = r.organizationNumber;
+          }
+          if (name !== undefined && name !== null) mapped.name = name;
+          if (r.countryCode !== undefined && r.countryCode !== null) mapped.countryCode = r.countryCode;
+          return mapped;
+        })
+      : undefined;
+    // organizationNumber is required on a recipient, so one that cannot supply it cannot be
+    // carried back — better to say so than to send a body the API will refuse.
+    const unwritable = storedRecipients?.find((r) => r.organizationNumber === undefined);
+    if (unwritable && !Object.hasOwn(changes, "serviceRecipients")) {
+      return fail(
+        `Subscription ${id} has a service recipient with no organizationNumber ` +
+          `(${JSON.stringify(unwritable.name ?? "unnamed")}), and the API requires one on every ` +
+          `recipient sent. Nothing was written, because carrying it back would be refused. Pass ` +
+          `serviceRecipients explicitly to say what the list should be.`,
+      );
+    }
+
+    const { merged, kept, missing, given: givenKeys } = mergeForReplacement({
+      existing: {
+        ...record,
+        ...(storedLines ? { subscriptionLines: storedLines } : {}),
+        ...(storedRecipients ? { serviceRecipients: storedRecipients } : {}),
+      },
+      changes,
+      settable: SUBSCRIPTION_SETTABLE,
+      required: SUBSCRIPTION_REQUIRED,
+    });
+    if (missing.length > 0) {
+      return fail(
+        `The API requires ${missing.join(", ")} on a subscription, and neither your change nor ` +
+          `the stored one supplies ${missing.length === 1 ? "it" : "them"}. Nothing was written.`,
+      );
+    }
+
+    // The API wants at least one line, and `missing` only catches undefined/null/"" — an empty
+    // array would have gone through and replaced a billing subscription with one that bills for
+    // nothing. Checked here rather than coerced into a count of zero further down.
+    const lines = merged.subscriptionLines;
+    if (!Array.isArray(lines) || lines.length === 0) {
+      return fail(
+        `Subscription ${id} would be left with no billing lines, and the API requires at least ` +
+          `one. Nothing was written. ${
+            Array.isArray(lines)
+              ? "An empty subscriptionLines array is not a way to pause billing — " +
+                "reai_deactivate_subscription is."
+              : "The stored subscription's lines could not be read, so there was nothing to carry over."
+          }`,
+      );
+    }
+    const lineCount = lines.length;
+
+    // The arming lives on the RECORD, and the argument gate only sees this CALL — so preserving an
+    // armed state through a merge is invisible to it. reai_activate_subscription below closes
+    // exactly this gap for exactly this reason, and it applies here too.
+    //
+    // What changed: before this tool merged, outputMode and automaticBillingGeneration were
+    // REQUIRED arguments, so every update that succeeded with sending off had necessarily
+    // DISARMED the subscription — preserving the arming was refused. Now preservation is the
+    // default, which means an unattended invoicing machine could be repointed at a different
+    // customer, given a different amount, or backdated, in the default mode with
+    // REAI_ALLOW_EXTERNAL_SEND unset. The booleans are unchanged; who is billed, how much and on
+    // what schedule are not, and those are what actually reach a third party.
+    //
+    // Scoped to the substance of the billing: editing an internal comment on an armed
+    // subscription changes nothing anyone receives, and refusing that would make the tool
+    // unusable for the benign edits it exists for.
+    const storedArmed: string[] = [];
+    if (record.automaticBillingGeneration === true) storedArmed.push("automaticBillingGeneration");
+    if (record.outputMode === "create_invoice") storedArmed.push('outputMode="create_invoice"');
+    if (record.sendEhf === true) storedArmed.push("sendEhf");
+    const billingSubstance = givenKeys.filter((k) => (BILLING_SUBSTANCE as readonly string[]).includes(k));
+    if (storedArmed.length > 0 && billingSubstance.length > 0) {
+      assertTransmitAllowed(
+        "external",
+        ctx.config.allowExternalSend,
+        `changing ${billingSubstance.join(", ")} on subscription ${id}, which carries ` +
+          `${storedArmed.join(", ")} and bills on its own — this changes what an unattended ` +
+          `invoice will say and who receives it`,
+      );
+    }
+
+    const res = await ctx.client.request<Record<string, unknown>>({
       method: "PUT",
       path: `/api/subscriptions/${id}`,
-      body,
-      tenantId: requireTenantId(tenantId, ctx),
+      body: merged,
+      tenantId: resolved,
     });
-    return ok(res.data, { note: `Subscription ${id} replaced with the body sent.` });
+
+    const notes = [
+      `Changed ${givenKeys.join(", ")} on subscription ${id}; the other ${kept.length} field(s) ` +
+        `were read first and written back unchanged, because this endpoint replaces rather than ` +
+        `patches.` +
+        (givenKeys.includes("subscriptionLines")
+          ? ` The ${lineCount} line(s) you sent are now the lines it has.`
+          : ` Its ${lineCount} line(s) were carried over.`),
+    ];
+    const armed: string[] = [];
+    if (merged.outputMode === "create_invoice") armed.push('outputMode="create_invoice"');
+    if (merged.automaticBillingGeneration === true) armed.push("automaticBillingGeneration");
+    if (merged.sendEhf === true) armed.push("sendEhf");
+    if (armed.length > 0) {
+      notes.push(
+        `Still armed: ${armed.join(", ")}. This edit did not change that — it carries over what ` +
+          `was already set. ` +
+          // "goes on billing" is false for a stopped subscription, and reai_list_subscriptions is
+          // careful about that distinction. Measured: a replacement does NOT reactivate one.
+          (record.active === false
+            ? `The subscription is INACTIVE, so it is not billing; if it is activated again it will ` +
+              `bill on its own. Editing it does not reactivate it — measured.`
+            : `So it goes on billing as it was.`) +
+          ` Pass those fields explicitly to change them.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
   },
 });
 

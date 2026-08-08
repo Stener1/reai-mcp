@@ -222,6 +222,76 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`reai_update_subscription` passed a partial body straight through**, and its
+  own description told the caller to "read it first and send back what you do not
+  intend to change" — advice that could not be followed, because the read and the
+  write disagree about shape in three ways: the response puts the lines under
+  `lines` and the request wants `subscriptionLines`; a response line carries eleven
+  fields where `SubscriptionLineReq` accepts eight (`vatTitle`, `vatRate` and
+  `amounts` are computed); and a service recipient reads back as `companyName` and
+  writes as `name`. A caller echoing the response verbatim gets none of it right.
+
+  Measured on a live subscription: a `PUT` carrying the eight required fields and
+  one line answered `200` and left `invoiceEmail`, `invoiceComment` and
+  `internalComment` all null, with the second line gone. Mapped properly the
+  round-trip is lossless, discounts included — verified before relying on it.
+
+  The tool now reads, maps and merges, with every field optional because the stored
+  subscription supplies the rest. It deliberately does **not** disarm: `outputMode`,
+  `automaticBillingGeneration` and `sendEhf` are carried over, so an ordinary edit
+  leaves a self-invoicing subscription self-invoicing — and the result says so,
+  because silence there would read as "the edit made it safe". The write gate reads
+  the caller's ARGUMENTS, not the merged body, so carrying an armed value over does
+  not misfire, and passing `sendEhf: false` still needs nothing: turning a send off
+  is not a send.
+
+  **What that costs, stated plainly because the first version of this entry did not.**
+  Before the merge, `outputMode` and `automaticBillingGeneration` were REQUIRED
+  arguments, so every update that succeeded with sending off had necessarily
+  DISARMED the subscription — preserving the arming was refused. Making
+  preservation the default therefore created a new capability: an unattended
+  invoicing machine could be repointed at another customer, given another amount,
+  or backdated, in the default mode with `REAI_ALLOW_EXTERNAL_SEND` unset. The
+  booleans were unchanged; who is billed, how much and on what schedule were not,
+  and those are what reach a third party. Found by the independent review, which
+  also pointed at `reai_activate_subscription` forty lines below closing the
+  identical gap for the identical reason.
+
+  So when the STORED subscription is armed, a change to `customerId`,
+  `serviceRecipients`, `subscriptionLines`, `startDate`, `intervalMonths`,
+  `billingTiming` or `currencyCode` now needs `REAI_ALLOW_EXTERNAL_SEND`. Scoped
+  deliberately: a comment, a due-day or a project link reaches nobody, and gating
+  those would make ordinary maintenance on a live subscription need the send flag.
+  Both directions are tested, and both directions of the mutation fail.
+
+  Not coverable live, and the attempt is the finding: creating an armed
+  subscription requires the same switch, so neither write suite can construct the
+  precondition without enabling what those runs exist to keep off. The state is
+  reachable in practice — somebody arms it in the ReAI UI and an agent edits it
+  later — just not from here.
+  It also refuses to leave a subscription with no billing lines, naming
+  `reai_deactivate_subscription` as the way to pause billing. That refusal needed
+  the schema loosened to accept `[]` — with `.min(1)` it was unreachable and the
+  caller got a bare validation error, the same trap found in
+  `reai_update_company_bank`'s `bban` check one iteration ago. The create tool keeps
+  the stricter rule, since it has no stored record to fall back on.
+- `null` now unlinks. Omission means "carry over", which left no way at all to
+  detach a subscription from its project or agreement — `optionalShape` adds only
+  `.optional()`. Fixed for the five OPTIONAL fields the document types as nullable;
+  the other four optional fields are not nullable upstream, so `null` stays refused
+  for them rather than passing local validation and failing at the API.
+- The service-recipient mapping is the **fourth** shape difference, not one of
+  three: `companyName` becomes `name`, and `companyId` is response-only. It also
+  now filters absent values like the line mapping does — every
+  `SubscriptionServiceRecipientRes` property is optional while the write REQUIRES
+  `organizationNumber`, so a recipient without one is refused locally with an
+  explanation instead of producing a body the API answers `400` to. Measured.
+- Subscriptions had **no live write coverage at all** — the one domain in this API
+  that invoices real people unattended. The reversible suite now creates one, edits
+  a field and asserts the lines, the discount and both comments survived, then
+  asserts that emptying the lines is refused with the right alternative and that
+  changing the delivery address is still refused in the default mode.
+
 - **A full-replacement write can erase a payment destination by omitting it, and
   the routing guard could not see that.** Found by sweeping the document for the
   shape that bit on agreements and asking which full-replacement writes the
