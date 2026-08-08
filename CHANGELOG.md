@@ -9,9 +9,51 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**114 tools**: 107 across ten accounting domains, plus 7 always-on.
+**123 tools**: 116 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Expense claims** (9 tools) — the whole state machine, which was 1 of 10 operations
+  covered. `reai_get_expense`, `reai_create_expense`, `reai_update_expense`,
+  `reai_deliver_expense`, `reai_approve_expense`, `reai_unapprove_expense`,
+  `reai_book_expense_voucher`, `reai_delete_expense_voucher`,
+  `reai_reverse_expense`. It is also the other half of payroll: a salary run
+  arrives pre-populated with wage lines derived from expense postings, so what is
+  approved here is what gets paid there.
+  - Driven end to end on the test tenant: `open → deliver → for_approval →
+    approve → approved → voucher`, and back down by deleting the voucher and
+    unapproving. Booking is where the ledger moves — the voucher count went up by
+    one and came back as `{expenseId, voucherId, voucherNumber: "EX1-2026",
+    voucherDate}`, its own number series.
+  - **`status` never says "booked".** A posted expense still reads `approved`;
+    `voucherId` is the only thing that says it is in the ledger. And **booking
+    approves a `for_approval` expense as part of the same call**, so it can skip
+    `/approve` entirely — which also means it is not a safe way to "check" anything.
+  - **`status` never says "reversed" either, and that one hides.** `DELETE` answers
+    `{"outcome":"reversed"}`, the expense vanishes from the list, and the detail read
+    still returns it with whatever status it had before — no visible field changes.
+    `?status=reversed` is rejected with a `400`, so the API cannot be asked. The only
+    positive signal is a failed transition (`409 "is reversed and can no longer be
+    delivered"`). `reai_get_expense` spends one filtered list call and answers it
+    properly; a failed check reports *unknown* rather than implying the claim is live.
+  - **`category` is optional to create and required to deliver**, and the API's
+    `400 "Kategori må velges for kostnadsrad."` names no row. It is an enum of 28
+    values driving account mapping, so the tools take it as one and count the rows
+    missing it at create time, before delivery fails.
+  - **The line arrays are complete lists** while the scalars patch, in the same
+    request: two cost rows updated with one came back with one and the total fell
+    from 300 to 100. Omitting an array preserves it (measured), so the tools report
+    which list was replaced and the resulting row counts.
+  - `reai_unapprove_expense` reads first and refuses while a voucher exists, naming
+    the voucher to delete rather than relaying
+    `409 "har allerede et bilag og kan ikke lenger avvises"`. Per-diems and mileage
+    on a non-travel claim are refused locally. `reai_delete_expense_voucher` reads
+    the `{"outcome":…}` rather than trusting the 200, and says plainly when a
+    reversal posted instead.
+  - The write suite covers all of it (16 checks), including both halves of the
+    reversal finding: that the API returns the old status, and that the read tool
+    detects it anyway. Expense cleanup runs before the employee's, since a record
+    referencing an employee is what makes their `DELETE` answer `409`.
 
 - **`reai_request` refuses a `PUT` that would clear the fields it does not mention.**
   Naming the worst instances of the full-replacement class was never the same as
