@@ -1562,6 +1562,16 @@ function lookupForms(token: string): string[] {
     // not words this table knows.
     definite("en");
     definite("et");
+    // The English plural, and the one derivation here with NO known-stem gate. Raised as an
+    // asymmetry worth a deliberate decision rather than an accident, so it was measured: gating it on
+    // `known` changes no corpus score at all, and over 34 plural queries it moves only the THIRD
+    // result, six times, never the first or second (`customers` swaps contact-persons for
+    // POST /api/customers; `warehouses` is arguably improved). Removing the rule entirely changes
+    // exactly the same six. So the gate is left off, with the reason rather than by omission: a
+    // Norwegian definite stem is only useful if it is a synonym key, since that is the table it is
+    // reaching for, while an English plural stem is matched against ENDPOINT path tokens — `warehouse`
+    // earns its keep against `/api/warehouses` whether or not the synonym table has heard of it.
+    // Gating it would silently narrow it to the table.
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];
