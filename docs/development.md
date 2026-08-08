@@ -159,9 +159,16 @@ go through `PATCH` now, and a test pins that.
 Each case names the **constant** that makes its claim, a marker phrase from it, and — the part a marker
 cannot do — the **value that text predicts**. A phrase survives a rewrite that reverses its meaning: the
 review of PR #115 replaced `PHONE_RULE` with text saying the *opposite* of every phone claim while keeping
-all four markers, and the guard passed 4/4. Text that predicts `+46701234567` cannot simultaneously claim
-foreign numbers are rewritten to `+47`, so each probe pins the literal too, and markers must be at least
-twelve characters (`marker: "e"` passed the first version).
+all four markers, and the guard passed 4/4. So each probe pins the literal too, and markers
+must be at least twelve characters (`marker: "e"` passed the first version).
+
+**What that guard cannot do, stated plainly because two rounds of prose here overclaimed it.** The check
+is `text.includes(...)`, which is blind to direction: the review of PR #116 rewrote both constants to
+assert the *opposite* of all seventeen claims while retaining every marker and every predicted literal,
+and the test passed 6/6. A unit test reading prose for meaning would be pretending. So the honest job of
+this guard is narrow — stop a probe outliving the sentence it verifies — and **the live audit is the only
+authority on whether a claim is true.** That is why `INCONCLUSIVE` now exits non-zero: a claim nobody
+checked is not a claim that held.
 
 **On completeness, the first version was a cop-out.** It said the population "cannot be measured
 mechanically" because a storage claim is prose. It can be measured, roughly: the claims live in exactly
