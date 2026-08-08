@@ -184,16 +184,30 @@ test("the definite article does not change the answer", () => {
     // The -e noun class, which is where the gap was: a single -n leaves nothing for the compound rule.
     ["endre kunde", "endre kunden", "PATCH /api/customers/{id}"],
     ["vis ordre", "vis ordren", "GET /api/orders"],
-    ["si opp leieavtale", "si opp leieavtalen", "POST /api/agreements/rent-agreement"],
+    // Two rounds of review on this one row, and both were right. It first asserted
+    // "si opp leieavtalen" — terminate — against POST /api/agreements/rent-agreement, which CREATES
+    // one. Rephrasing the question was not enough: the target was still a create, so a read question
+    // was pinned to a mutating endpoint. It asserts the READ now, which the ranker does reach.
+    ["hva står i leieavtale", "hva står i leieavtalen", "GET /api/agreements/{id}"],
     // And forms that already worked, so the test would notice the rule breaking them.
     ["slett bilag", "slett bilaget", "DELETE /api/vouchers/{id}"],
     ["godkjenn reiseregning", "godkjenn reiseregningen", "POST /api/expenses/{id}/approve"],
-    // `anleggsmidlet` is deliberately NOT here. Its definite form drops a vowel from the stem —
-    // anleggsmiddel becomes anleggsmidlet — and no suffix rule reaches a stem change. That is a real
-    // limit of this approach, stated rather than hidden: the -n and -ne rules cover the -e noun class,
-    // the compound-stem rule covers -et and -en where two characters remain, and stem-changing
-    // definites are not covered at all.
-    ["opprett anleggsmiddel", "opprett anleggsmidler", "POST /api/assets"],
+    // The -en consonant-stem class, which the first version of this work left out entirely.
+    ["godkjenn reiseregning", "godkjenn reiseregningen", "POST /api/expenses/{id}/approve"],
+    ["hvor mye beholdning", "hvor mye beholdningen", "GET /api/warehouses/inventory"],
+    // And the -et half of the same class, which otherwise had no test at all: measured, removing the
+    // -et rule left every other case passing.
+    //
+    // POST, not GET. This row first asserted the GET, which review caught: "last opp" is explicitly an
+    // upload and the spec's POST /api/documents is summarised "Upload one or more documents". The
+    // fixture was locking in the wrong method — see the phrase-intent test below for the fix.
+    ["last opp dokument", "last opp dokumentet", "POST /api/documents"],
+    ["vis vedlegg", "vis vedlegget", "GET /api/attachments/{id}"],
+    // `anleggsmidlet` is NOT here, and the row that used to stand in for it was worse than nothing:
+    // it asserted `anleggsmidler`, which is the indefinite PLURAL and its own synonym key, so it
+    // passed on main and exercised neither rule while reading as if the class were covered. Review
+    // caught that. The real limit is unchanged and stated: a stem-CHANGING definite —
+    // anleggsmiddel becomes anleggsmidlet, dropping a vowel — is out of reach of any suffix rule.
   ]) {
     const bare = rankOf(indefinite, want);
     const suffixed = rankOf(definite, want);
@@ -202,10 +216,14 @@ test("the definite article does not change the answer", () => {
       suffixed >= 0,
       `"${definite}" found nothing for ${want} — the definite form is how this is actually said`,
     );
-    // Not equality: adding a suffix legitimately shifts a rank by one or two as other terms
-    // re-weight. What must not happen is the definite form dropping out of reach.
-    assert.ok(
-      suffixed < 5,
+    // EQUALITY, as the word-order test above uses. `suffixed < 5` was the first version and review
+    // measured that it does no work: every row ranks its target #1 in both forms, so the threshold
+    // had four ranks of slack and would have passed with the answer pushed behind three GETs — which
+    // is precisely the regression a test called "the definite article does not change the answer"
+    // exists to catch.
+    assert.equal(
+      suffixed,
+      bare,
       `"${definite}" ranks ${want} at ${suffixed + 1} while "${indefinite}" ranks it at ${bare + 1}`,
     );
   }
@@ -252,9 +270,49 @@ test("a suffix rule only fires on a stem the table knows", () => {
   // the mechanism rather than a safeguard.
   for (const [query, want] of [
     ["product documentation", "GET /api/products"],
-    ["subscription", "GET /api/subscriptions"],
+    // Two more that the ungated rule broke, measured: it ranked GET /api/tax-returns/{year} first for
+    // both — the annual income-tax return displacing the product resource and the annual accounts.
+    // The `subscription` row that used to sit here was inert: identical top-3 with and without the
+    // rule, so only one of the two cases was live.
+    ["annual return", "GET /api/annual-accounts/{year}"],
+    ["transaction product", "GET /api/products"],
   ]) {
     const at = rankOf(query, want);
     assert.ok(at >= 0 && at < 3, `"${query}" should rank ${want} in the top 3, got ${at + 1}`);
+  }
+});
+
+test("intent can come from a phrase, not only from a word", () => {
+  // "Last opp" is upload and "last ned" is download — opposite methods sharing a verb that means
+  // neither alone. `last` is also the noun for a load and an English word, so neither the method table
+  // nor the write-intent set can hold it: the direction is in the particle and only the pair says
+  // anything. Review found the consequence — "last opp dokumentet" ranked GET /api/documents while the
+  // spec's POST is summarised "Upload one or more documents".
+  for (const [query, want] of [
+    ["last opp dokument", "POST /api/documents"],
+    ["last opp dokumentet", "POST /api/documents"],
+    ["laste opp et dokument", "POST /api/documents"],
+  ]) {
+    const at = rankOf(query, want);
+    assert.ok(at >= 0 && at < 3, `"${query}" should rank ${want} in the top 3, got ${at + 1}`);
+  }
+
+  // And the other direction must NOT be read as a write. This is the case that makes the phrase rule
+  // necessary rather than just adding `laste` to the verb tables — "laste ned" is a download.
+  //
+  // Asserted on the FIRST result, which is what the mechanism actually promises: implied methods bias
+  // the ranking, they do not filter by method, so a write can still appear further down. A first
+  // version demanded zero writes in the top five and failed on "last ned rapporten", where
+  // POST /api/documents sits at rank four behind three GETs — the intent was respected and the
+  // assertion was simply describing something the rule does not do.
+  for (const query of ["last ned rapporten", "last ned pdf"]) {
+    const top = searchOperations({ query, limit: 1 })[0];
+    assert.ok(top, `"${query}" should find something`);
+    assert.equal(top.method, "GET", `"${query}" is a download but ranked ${top.method} ${top.path} first`);
+  }
+  // The upload direction, conversely, must put a write first.
+  for (const query of ["last opp dokumentet", "laste opp et dokument"]) {
+    const top = searchOperations({ query, limit: 1 })[0];
+    assert.equal(top.method, "POST", `"${query}" is an upload but ranked ${top.method} ${top.path} first`);
   }
 });

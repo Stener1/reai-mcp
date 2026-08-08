@@ -132,8 +132,17 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   const { terms, resourceCount } = expandQuery(opts.query ?? "");
   // An explicit method filter already narrows the results, so the verb hint would
   // only add noise on top of it.
-  const impliedMethods = wantMethod ? undefined : impliedMethodsFor(rawTerms);
-  const writeIntent = !wantMethod && hasWriteIntent(rawTerms);
+  // A phrase wins over the token tables when both speak, because it is the more specific statement:
+  // "last opp" is an upload whatever `last` means alone.
+  const phraseMethods = wantMethod ? undefined : phraseMethodsFor(opts.query ?? "");
+  const impliedMethods = phraseMethods ?? (wantMethod ? undefined : impliedMethodsFor(rawTerms));
+  const writeIntent =
+    !wantMethod &&
+    (hasWriteIntent(rawTerms) ||
+      // A phrase that implies a writing method is a write intent, or the endpoint it names gets only
+      // the weak generic bonus and a GET on the same resource still wins — the failure METHOD_INTENT's
+      // own comment describes.
+      [...(phraseMethods ?? [])].some((m) => m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE"));
 
   const hits: SearchHit[] = [];
   for (const op of index.operations) {
@@ -829,6 +838,32 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
 ];
 
 /**
+ * Intent carried by a PHRASE rather than by a word.
+ *
+ * "Last opp" is upload and "last ned" is download — opposite methods, sharing a verb that means
+ * neither on its own. `last` is also the noun for a load, and an English word. So neither table above
+ * can hold it: the direction lives in the particle, and only the pair says anything.
+ *
+ * Matched against the raw query text, not the token set, because a token set has no adjacency. Same
+ * reasoning as PHRASE_SYNONYMS, which exists because "skylder oss" and "skylder vi" point at opposite
+ * sides of the books while sharing a verb.
+ */
+const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
+  [/\blast(e|er)?\s+opp\b/, ["POST"]],
+  [/\blast(e|er)?\s+ned\b/, ["GET"]],
+];
+
+function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
+  const text = query.toLowerCase();
+  const matched = PHRASE_INTENT.filter(([pattern]) => pattern.test(text));
+  // One phrase only. Two competing phrases say the user asked for two things, and guessing between
+  // them is how the verb heuristic got worse than none — the same rule impliedMethodsFor applies to
+  // its groups.
+  const only = matched.length === 1 ? matched[0] : undefined;
+  return only ? new Set(only[1]) : undefined;
+}
+
+/**
  * Verbs that unambiguously ask to CHANGE something.
  *
  * Deliberately much narrower than VERB_TERMS. Every word left out was left out for
@@ -1482,9 +1517,12 @@ function lookupForms(token: string): string[] {
     // to NOTHING, a quarter of the keys in the table below. Measured: "endre kunden" and "vis ordren"
     // returned no endpoint at all while their indefinite forms ranked correctly.
     //
-    // Both the singular -n and the plural -ne, on a stem long enough that stripping cannot make a
-    // short word disappear: `lan` (loan) is 3 characters and must survive, and the guard is what
-    // keeps it.
+    // Both the singular -n and the plural -ne. The length guards are cheap sanity and nothing more —
+    // review verified that removing them entirely leaves all tests green, because the GATE below is
+    // what protects a short word like `lan` (loan): stripping it would give `la`, which is not a key,
+    // so no form is derived either way. An earlier version of this comment claimed the length was
+    // what kept `lan`, which was the same mistake a previous review caught in this repo: a comment
+    // asserting that something is load-bearing when it cannot be reached.
     // Only when the stem is a word this table KNOWS. Stripping -n from anything long enough was the
     // first version and it double-counted: `documentation` also produced `documentatio`, which
     // matchStrength then matched against the same endpoint token twice, and "product documentation"
@@ -1494,6 +1532,17 @@ function lookupForms(token: string): string[] {
     const known = (stem: string) => Object.prototype.hasOwnProperty.call(TERM_SYNONYMS, stem);
     if (base.endsWith("ne") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
     if (base.endsWith("n") && base.length > 4 && known(base.slice(0, -1))) add(base.slice(0, -1));
+    // The consonant-stem definites, -en and -et, which are the BIGGER class and were left out of the
+    // first version: `reiseregningen`, `beholdningen`, `kontoen`, `utgiften`, `dokumentet` and
+    // `vedlegget` all returned nothing at all. Some definite forms of this class already resolved
+    // because the compound-stem rule finds the stem inside them, but only where that stem happens to
+    // be a compound element; a plain noun like `utgift` is not one.
+    //
+    // Safe by the same gate, which is what makes extending cheap: the stem has to be a key, so
+    // `token`, `given`, `budget` and `asset` derive nothing because `tok`, `giv`, `budg` and `ass` are
+    // not words this table knows.
+    if (base.endsWith("en") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
+    if (base.endsWith("et") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];
