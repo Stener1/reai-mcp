@@ -756,6 +756,15 @@ const VERB_TERMS = new Set([
   "delete", "remove", "cancel",
   "list", "show", "find", "search", "fetch", "read", "view", "see", "look",
   "set", "run", "send", "start", "book", "record", "enter", "submit",
+  // The Norwegian actions belong here too — a third table I missed, and the one that decides
+  // WEIGHT. Left out, they scored as full resource words: "registrer dokumenter" ranked
+  // POST /api/receipt-reception-documents/{id}/registration first, because `registrer` matched
+  // that operation's registration prose instead of being discounted as the action it is.
+  "opprett", "opprette", "registrer", "registrere",
+  "slett", "slette", "fjern", "fjerne",
+  "endre", "oppdater", "oppdatere", "rediger",
+  "bokfor", "bokfore", "bokfør", "bokføre",
+  "vis", "hent", "finn",
 ]);
 const VERB_WEIGHT = 0.25;
 
@@ -777,10 +786,27 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
   // say which method, or the write it asked for gets only the weak generic bonus
   // and a GET on the same resource still wins ("post a voucher" returned
   // GET /api/vouchers).
-  [["register", "registered", "create", "created", "add", "new", "make", "submit", "start", "post", "book", "enter", "record", "close", "pay", "issue", "upload", "file", "settle"], ["POST"]],
-  [["update", "change", "edit", "modify", "rename"], ["PUT", "PATCH"]],
-  [["delete", "remove", "cancel"], ["DELETE"]],
-  [["list", "show", "find", "search", "fetch", "read", "view", "see", "which", "what"], ["GET"]],
+  [["register", "registered", "create", "created", "add", "new", "make", "submit", "start", "post", "book", "enter", "record", "close", "pay", "issue", "upload", "file", "settle",
+    // Norwegian. This table had none at all, although WRITE_INTENT_VERBS already held four — so
+    // "opprett kreditnota" licensed a write and then implied no method, leaving it the weak generic
+    // bonus the comment above warns about. Measured: "opprett kreditnota" ranked the endpoint first
+    // while "lag kreditnota" did not find it at all, and `lag` is the commoner verb of the two.
+    // Both spellings, because these tables are consulted with RAW tokens rather than the
+    // ASCII-folded ones TERM_SYNONYMS uses: measured, "oppdater" matched and "bokfør" did not.
+    // `lag` and `lage` are NOT here, although "lag en kreditnota" is the commonest phrasing:
+    // `lag` is also the everyday noun for a team, so "ansatte per lag" was being read as a create
+    // and ranked POST /api/employees first. An unconditional token cannot tell the two apart, and a
+    // wrongly-implied write is worse than a create verb this table happens not to know.
+    "opprett", "opprette", "registrer", "registrere",
+    "bokfor", "bokfore", "bokfør", "bokføre"], ["POST"]],
+  [["update", "change", "edit", "modify", "rename",
+    "endre", "oppdater", "oppdatere", "rediger"], ["PUT", "PATCH"]],
+  [["delete", "remove", "cancel", "slett", "slette", "fjern", "fjerne"], ["DELETE"]],
+  [["list", "show", "find", "search", "fetch", "read", "view", "see", "which", "what",
+    // Left OUT deliberately: "betal"/"betale" (pay). A stemmer that strips -ing turns the READ
+    // phrasing "hvilke betalinger" into "betal", which would license a write on a question about
+    // payments — the exact false positive the note below this table was written about.
+    "vis", "hent", "finn", "hvilke", "hva"], ["GET"]],
 ];
 
 /**
@@ -799,7 +825,12 @@ const WRITE_INTENT_VERBS = new Set([
   // Safe as exact tokens: "postings" and "submission" tokenize to themselves, so
   // these do not fire on the read phrasings that broke the earlier heuristic.
   "post", "book", "close", "enter", "record", "submit",
-  "opprett", "slett", "endre", "registrer",
+  // Kept in step with METHOD_INTENT above, which is what the comment there asks for.
+  // See METHOD_INTENT: `lag`/`lage` are excluded as ambiguous with the noun for a team.
+  "opprett", "opprette", "registrer", "registrere",
+  "slett", "slette", "fjern", "fjerne",
+  "endre", "oppdater", "oppdatere", "rediger",
+  "bokfor", "bokfore", "bokfør", "bokføre",
 ]);
 
 function hasWriteIntent(tokens: readonly string[]): boolean {
@@ -842,7 +873,10 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // write endpoint dominate: even "create fixed asset" ranked
   // PUT /api/assets/{id}/depreciation above POST /api/assets. A user who means
   // depreciation says so, and that word matches on its own.
-  [/\bfixed\s+assets?\b/g, "asset"],
+  // Both forms, now that a matched phrase is consumed rather than annotated: with only the
+  // singular left, "fixed assets" ranked GET /api/ledger/asset — whose final segment IS "asset" —
+  // above the resource itself. The plural restores the exact-segment bonus on /api/assets.
+  [/\bfixed\s+assets?\b/g, "asset assets"],
   [/\b(recurring|repeating)\b[^.]{0,24}\b(invoice|billing)/g, "subscription"],
   [/\bcredit\s+notes?\b/g, "credit invoice"],
   [/\bopening\s+balances?\b/g, "opening-balances"],
@@ -851,6 +885,16 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\btrial\s+balance\b/g, "ledger balance"],
   [/\bchart\s+of\s+accounts\b/g, "chart-of-accounts"],
   [/\bcash\s+register\b/g, "kassasystem"],
+  // Hyphenated Norwegian terms, which tokenise into halves that mean something else. "a-melding"
+  // became "a" + "melding", and `melding` maps to return/returns — so the payroll filing that goes
+  // to Skatteetaten ranked the TAX RETURN first. Measured; it is the sharpest instance because the
+  // two are different filings to the same authority.
+  // "salary-payments complete" and NOT "amelding": the literal word only matches
+  // GET /amelding/{id}/feedback-raw, which reads a submission's raw feedback rather than filing
+  // one, and it took the top slot away from the operation that does the filing.
+  [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments complete"],
+  [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
+  [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
 ];
 
 const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
@@ -903,6 +947,92 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // receives Norwegian words. A handful were already here; these are the rest of the
   // everyday vocabulary, measured against queries a bookkeeper would actually ask.
   // Keys are ASCII-folded because lookupForms folds before looking up: "lonn", not "lønn".
+  // --- Measured against a HELD-OUT set of Norwegian queries ---------------------
+  //
+  // The vocabulary above was tuned against the queries in test/discovery-norwegian.test.mjs,
+  // which I wrote. Scored against 45 fresh queries built from bookkeeping vocabulary instead,
+  // the ranker managed 17 in the top 3 — and a dozen returned NOTHING AT ALL, which is the
+  // outcome that leaves an agent stuck rather than merely misdirected. These are the terms that
+  // found nothing, each mapped to the endpoint that answers it.
+  //
+  // Expense claims. "reiseregning" (travel claim) and "utlegg" (out-of-pocket) are the two words
+  // a Norwegian actually uses for /api/expenses; the endpoint's own name matches neither.
+  produkt: ["product", "products"],
+  produkter: ["product", "products"],
+  // Neither `vare` nor `varer` is here, and removing the plural alone was not enough: the suffix
+  // rules fold "varer" back to "vare", so the mapping fired anyway and "hvor lenge varer
+  // abonnementet" — a question about duration — still ranked products first through third. The
+  // product queries are served by `produkt`/`produkter`, measured, so this pair buys nothing and
+  // costs a confident wrong answer on a common phrasing.
+  valuta: ["currency", "currencies"],
+  // `valutakurs` (exchange RATE) is deliberately absent. CurrencyRes carries only `code` and
+  // `name`, so pointing this at /api/currencies would rank an endpoint that cannot answer the
+  // question — a confident wrong answer, which is worse than no result.
+  kontoutskrift: ["ledger", "postings"],
+  // A second, genuinely untouched corpus scored 19 of 30 in the top 3 where the tuned one scored
+  // 37 of 41 — the honest measure of what unseen vocabulary gets. These are the terms from it that
+  // returned NOTHING, fixed because a stranded agent is the failure that matters, not because the
+  // benchmark asked.
+  eier: ["owner", "user", "users"],
+  eierrolle: ["owner", "role", "roles", "user"],
+  kassesystem: ["kassasystem"],
+  kassaapparat: ["kassasystem"],
+  ansettelsesavtale: ["employee-contract", "agreement", "employment"],
+  arbeidsavtale: ["employee-contract", "agreement", "employment"],
+  arbeidskontrakt: ["employee-contract", "agreement", "employment"],
+  leiekontrakt: ["rent-agreement", "agreement", "rent"],
+  husleie: ["rent-agreement", "rent"],
+  leieavtale: ["rent-agreement", "agreement", "rent"],
+  feriepengegrunnlag: ["salary", "salary-payments", "holiday"],
+  reiseregning: ["expense", "expenses", "travel"],
+  utlegg: ["expense", "expenses"],
+  utleggsrefusjon: ["expense", "expenses"],
+  kjoregodtgjorelse: ["expense", "mileage", "expenses"],
+  kilometergodtgjorelse: ["expense", "mileage", "expenses"],
+  diett: ["expense", "per-diem", "expenses"],
+  diettgodtgjorelse: ["expense", "per-diem", "expenses"],
+  godtgjorelse: ["expense", "allowance"],
+  // Payroll vocabulary that is not the word "salary".
+  feriepenger: ["salary", "wage-specs", "holiday"],
+  // No generic "tax" on either: it ranked GET /api/tax-returns/{year} — the annual INCOME-tax
+  // return — ahead of every salary operation, which is the same wrong-filing confusion the
+  // a-melding rule exists to prevent. Withholding and employer's contribution are handled by the
+  // salary completion flow.
+  forskuddstrekk: ["salary", "salary-payments", "complete"],
+  arbeidsgiveravgift: ["salary", "salary-payments", "complete"],
+  amelding: ["salary", "complete", "amelding"],
+  // Time.
+  timeforing: ["timesheet"],
+  // Documents and attachments — both returned nothing, and both are real endpoints.
+  vedlegg: ["attachment", "attachments"],
+  dokument: ["document", "documents"],
+  dokumenter: ["document", "documents"],
+  // Access control, added with the tools that read it.
+  tilgang: ["user", "users", "permission", "role"],
+  tilganger: ["user", "users", "permission", "role"],
+  // `bruker` alone is NOT here: it is equally the verb "uses", and "hvilken konto bruker
+  // fakturaen" filled the results with /api/users instead of accounts or invoices. The
+  // unambiguous plural stays.
+  brukere: ["user", "users"],
+  rolle: ["role", "roles", "user"],
+  roller: ["role", "roles", "user"],
+  rettighet: ["permission", "permissions", "user"],
+  rettigheter: ["permission", "permissions", "user"],
+  // Counterparty detail.
+  kontaktperson: ["contact-persons", "contact", "customer"],
+  kontaktpersoner: ["contact-persons", "contact", "customer"],
+  organisasjonsnummer: ["organization", "organisation", "customer", "supplier"],
+  orgnummer: ["organization", "organisation", "customer", "supplier"],
+  stillingsprosent: ["employee", "employment", "percentage"],
+  // Invoice sub-operations. "kreditnota" ranked the SUPPLIER credit-note lookup first, which is
+  // a different thing from crediting a customer invoice.
+  betalingspaminnelse: ["reminders", "reminder", "dunning"],
+  purregebyr: ["reminders", "reminder"],
+  inkasso: ["reminders", "debt-collection"],
+  // Transport.
+  peppol: ["peppol", "ehf"],
+  ehf: ["ehf", "peppol"],
+
   lager: ["warehouse", "inventory"],
   varelager: ["warehouse", "inventory"],
   beholdning: ["warehouse", "inventory"],
@@ -921,7 +1051,7 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   tilbud: ["offer"],
   ordre: ["order"],
   purring: ["reminders", "dunning"],
-  kreditnota: ["credit", "invoice"],
+  kreditnota: ["credit", "invoice", "invoices"],
   innbetaling: ["payment", "customer"],
   utbetaling: ["payment", "supplier"],
   betaling: ["payment"],
@@ -1006,9 +1136,22 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
   // Without that, "invoice" in the query kept /api/invoices and the reception inbox
   // above /api/subscriptions.
   const phraseTerms: string[] = [];
+  // A matched phrase is CONSUMED, not merely annotated. Previously the replacement terms were added
+  // while the phrase's own words stayed in the text and scored on their own, so a mapping could be
+  // outvoted by the thing it exists to override: "a-melding" tokenised to `a` + `melding`, `melding`
+  // maps to return/returns, and GET /api/tax-returns/{year} — the annual INCOME-tax return — ranked
+  // above the payroll filing the phrase points at. Two different filings to the same authority.
+  //
+  // Removing the matched text is what makes a phrase mapping mean what its comment says: a
+  // deliberate, high-confidence statement about the user's words.
+  let remaining = text;
   for (const [pattern, replacement] of PHRASE_SYNONYMS) {
     pattern.lastIndex = 0;
-    if (pattern.test(text)) phraseTerms.push(...replacement.split(" "));
+    if (pattern.test(remaining)) {
+      phraseTerms.push(...replacement.split(" "));
+      pattern.lastIndex = 0;
+      remaining = remaining.replace(pattern, " ");
+    }
     pattern.lastIndex = 0;
   }
 
@@ -1037,7 +1180,7 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
   };
 
   for (const term of phraseTerms) push(term, PHRASE_WEIGHT);
-  for (const token of tokenize(text)) {
+  for (const token of tokenize(remaining)) {
     const isVerb = VERB_TERMS.has(token);
     const weight = isVerb ? VERB_WEIGHT : 1;
     push(token, weight);

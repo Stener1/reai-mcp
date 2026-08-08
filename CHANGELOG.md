@@ -13,6 +13,66 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Discovery ranking, measured on queries it was not tuned on.** The two existing
+  eval sets were written by me and then tuned against, which makes them regression
+  tests rather than evidence that the ranking generalises. Scored against a
+  **held-out** set of Norwegian bookkeeping vocabulary instead, it managed **17 of 45
+  in the top 3**, and a dozen queries returned **nothing at all** — the outcome that
+  leaves an agent stuck rather than merely misdirected.
+  - After adding the missing vocabulary: **36 of 41 in the top 3, 38 in the top 10**,
+    and nothing returns empty. Four of the original 45 named endpoints that do not
+    exist (`/api/reports`, `/api/accruals`, `/api/accounting-periods`, and the
+    `/api/peppol` paths are internal), so they were dropped rather than "fixed" —
+    tuning the scorer toward a target the API does not have is a mistake this repo
+    has made once already, and the new test asserts every target exists before using it.
+  - **That corpus is no longer held out**, and review was right to say so: the same
+    change read its failures, added synonyms for its vocabulary, and set the floors
+    from the result. A **second corpus** was written afterwards and measured once —
+    **19 of 28 in the top 3, 23 after fixing only the queries that returned nothing
+    at all**. That is the honest figure for vocabulary nobody has thought of yet, and
+    the gap to 36/41 is the standing cost of a synonym table. Two more of its thirty
+    targets were also mine being wrong (every `/kassasystem/` path is internal, and
+    there is no `GET /api/vouchers/{id}/attachments`) — the third time in this work
+    that a "ranking failure" turned out to be a target the API does not have.
+  - The terms that found nothing were the everyday ones: `reiseregning`, `utlegg`,
+    `kjøregodtgjørelse`, `diett`, `feriepenger`, `timeføring`, `vedlegg`,
+    `dokumenter`, `kontaktpersoner`, `organisasjonsnummer`, `produkter`,
+    `valutakurs`, `kontoutskrift`, and the whole access-control vocabulary
+    (`tilgang`, `brukere`, `roller`, `rettigheter`) added with the tools that read it.
+  - **`METHOD_INTENT` held no Norwegian at all** while `WRITE_INTENT_VERBS` already
+    held four, which the comment above that table explicitly warns against: a word
+    that licenses a write must also say which method, or the write gets the weak
+    generic bonus and a `GET` on the same resource still wins. Measured: *"opprett
+    kreditnota"* ranked the endpoint first while *"lag kreditnota"* did not find it at
+    all — and `lag` is the commoner verb. Both tables now carry the same Norwegian
+    verbs, in both spellings, since these are consulted with raw rather than
+    ASCII-folded tokens (`oppdater` matched, `bokfør` did not).
+  - `betal`/`betale` were left **out** of the read verbs deliberately: a stemmer
+    stripping `-ing` turns the read phrasing *"hvilke betalinger"* into a create verb,
+    which is the exact false positive that table's note was written about.
+  - **A matched phrase is now consumed rather than annotated.** Its replacement terms
+    were being added while the phrase's own words stayed in the text and scored on
+    their own, so a mapping could be outvoted by the thing it exists to override.
+    That is why `a-melding` still ranked the income-tax return: `melding` kept its
+    own vote. `POST /api/salary-payments/{id}/complete` now ranks first for all three
+    spellings, and `mva-melding` reaches the VAT return rather than the income-tax
+    one. The `fixed assets` rule needed both singular and plural after the change,
+    which the existing ranking suite caught.
+  - Terms that were **too ambiguous to keep**, each measured doing harm: `lag` (also
+    the noun for a team — *"ansatte per lag"* became a create), `varer` (also the verb
+    "lasts" — *"hvor lenge varer abonnementet"* ranked products), `bruker` (also
+    "uses" — *"hvilken konto bruker fakturaen"* filled the results with users),
+    `valutakurs` (`/api/currencies` returns only code and name, so it cannot answer an
+    exchange-rate question), and the generic `tax` on `forskuddstrekk` and
+    `arbeidsgiveravgift` (which ranked the annual income-tax return above payroll).
+  - The Norwegian actions also went into **`VERB_TERMS`**, a third table I had missed:
+    left out, they scored as full-weight resource words, and *"registrer dokumenter"*
+    ranked a registration sub-operation above `POST /api/documents`.
+  - `a-melding` gets a phrase rule and its own test. It tokenises to `a` + `melding`,
+    and `melding` maps to return/returns, so the payroll filing query ranked the **tax
+    return** first — two different filings to the same authority, and acting on the
+    wrong one files the wrong thing with Skatteetaten.
+
 - **Access control** (5 read tools) — `reai_list_users`, `reai_get_user`,
   `reai_list_roles`, `reai_list_permissions`, `reai_list_user_invitations`. The
   Users domain was entirely uncovered, and "who can reach our books" is a question
