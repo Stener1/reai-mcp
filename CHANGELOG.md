@@ -13,6 +13,26 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The bounds sweep now covers QUERY parameters, not just write bodies.** Review of
+  the lead search caught three unenforced maxima by reading, and the reason nothing
+  caught them automatically is that `writeOperations()` walks request **bodies** — so a
+  read tool's filters had never been checked by anything, and a guard that only covers
+  write bodies cannot claim to cover "arguments the API rejects".
+  - Ten tool operations carry documented query bounds; three of them a `maxLength`.
+    The sweep found **three real violations** and they are fixed:
+    `reai_list_customers.organizationNumber` (36), `reai_list_customers.email` (255),
+    `reai_list_orders.externalReference` (100).
+  - It includes writes and `DELETE` too, since a `POST` or `PATCH` can carry query
+    parameters and `DELETE` has no body for the other sweep to walk.
+  - Two tests guard the guard: one asserts it resolves a useful number of operations
+    rather than passing on zero, and one asserts it would catch the case that prompted
+    it (`reai_search_leads.query` at 200). Removing any of the three bounds from the
+    source fails it — verified by mutation, not assumed.
+  - `RENAMED_QUERY_ARGS` records the sweep's own blind spot: it matches by name, so an
+    argument exposed under a different name than the spec's is invisible to it. "The
+    sweep found nothing" must not be read as "there is nothing" for a parameter it never
+    looked at.
+
 - **Leads** (2 read tools) — `reai_search_leads` and `reai_get_lead`. The last
   substantial uncovered domain with real data on it, and it is not what the name
   suggests: `GET /api/leads` searches the Norwegian company register (Brønnøysund)

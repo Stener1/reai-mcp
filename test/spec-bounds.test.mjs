@@ -190,6 +190,99 @@ function writeOperations() {
   return out;
 }
 
+/**
+ * Every operation a tool declares, paired with the spec's constraints on its QUERY parameters.
+ *
+ * `writeOperations` walks request BODIES, so a read tool's filters had never been checked by
+ * anything — which is how `reai_search_leads` shipped accepting a 300-character `query` against a
+ * documented cap of 200. Codex found that by reading, and a guard that only covers write bodies
+ * cannot claim to cover "arguments the API rejects".
+ *
+ * Includes writes, since a POST or PATCH can carry query parameters too, and DELETE, which
+ * `writeOperations` skips because it has no body.
+ */
+function queryOperations() {
+  const out = [];
+  for (const tool of registeredTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      const op = SPEC.paths[path]?.[method.toLowerCase()];
+      if (!op) continue;
+      const constraints = {};
+      for (const parameter of op.parameters ?? []) {
+        if (parameter.in !== "query" || !parameter.schema) continue;
+        const bound = scalarConstraints(parameter.schema);
+        if (bound && Object.keys(bound).length > 0) constraints[parameter.name] = bound;
+      }
+      if (Object.keys(constraints).length > 0) out.push({ tool, method, path, constraints });
+    }
+  }
+  return out;
+}
+
+/**
+ * Query parameters a tool exposes under a DIFFERENT name than the spec uses.
+ *
+ * The sweep matches by name, so a renamed argument is invisible to it — the same limitation the
+ * body sweep has. Recorded rather than left implicit, because "the sweep found nothing" should not
+ * be read as "there is nothing" for a parameter it never looked at.
+ */
+const RENAMED_QUERY_ARGS = {
+  "reai_list_accounts.query": "exposed as `query`, matching the spec — listed to show this map is not empty by accident",
+};
+
+test("the query sweep sees a useful number of operations, not zero", () => {
+  // A sweep that resolves nothing passes silently, which is the failure mode this repo keeps
+  // naming. Measured: ten tool operations carry documented query bounds, three of them a maxLength.
+  const ops = queryOperations();
+  assert.ok(ops.length >= 10, `only ${ops.length} tool operations resolved to query constraints`);
+  const withMaxLength = ops.filter((o) =>
+    Object.values(o.constraints).some((c) => typeof c.maxLength === "number"),
+  );
+  assert.ok(withMaxLength.length >= 3, `only ${withMaxLength.length} carry a maxLength to check`);
+});
+
+test("no tool accepts a QUERY argument the API's schema rejects", () => {
+  const problems = [];
+  for (const { tool, constraints } of queryOperations()) {
+    for (const [name, bound] of Object.entries(constraints)) {
+      const schema = resolveInput(tool.inputSchema, name);
+      if (!schema) continue; // not exposed, or exposed under another name — see RENAMED_QUERY_ARGS
+      for (const [label, value] of violationsOf(bound)) {
+        if (schema.safeParse?.(value)?.success === true) {
+          problems.push(`${tool.name}.${name}: accepts a value ${label}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    problems.sort(),
+    [],
+    "these query arguments would be rejected by the API with a bare 400 — bound them locally so the " +
+      "caller gets the reason",
+  );
+});
+
+test("the query sweep would catch the case that prompted it", () => {
+  // reai_search_leads.query is capped at 200 in the document. Asserted directly, so that removing
+  // the bound fails here as well as in the leads suite — a sweep whose motivating case it cannot
+  // see is not a sweep.
+  const leads = queryOperations().find((o) => o.tool.name === "reai_search_leads");
+  assert.ok(leads, "reai_search_leads should resolve query constraints");
+  assert.equal(leads.constraints.query?.maxLength, 200);
+  const schema = resolveInput(leads.tool.inputSchema, "query");
+  assert.equal(schema.safeParse("x".repeat(201)).success, false);
+});
+
+test("every RENAMED_QUERY_ARGS entry names a real tool and argument", () => {
+  for (const [key, reason] of Object.entries(RENAMED_QUERY_ARGS)) {
+    const [name, ...rest] = key.split(".");
+    const tool = registeredTools.find((t) => t.name === name);
+    assert.ok(tool, `unknown tool: ${name}`);
+    assert.ok(resolveInput(tool.inputSchema, rest.join(".")), `${key} is not an argument`);
+    assert.ok(String(reason).length > 25, `${key} needs a reason`);
+  }
+});
+
 test("the sweep reaches inside arrays, which is where the motivating bug lived", () => {
   const ops = writeOperations();
   assert.ok(ops.length >= 20, `only ${ops.length} tool write operations resolved to a request schema`);
