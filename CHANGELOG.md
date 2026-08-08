@@ -50,6 +50,29 @@ All notable changes to `reai-mcp`. Format loosely follows
     after) and `DELETE` answers 204 then 404. Not relaxed: the measurement came from a company with no
     loan history, says nothing about deleting a loan with repayments against it, and the record is the
     basis for postings rather than reference data. The two reads are unaffected.
+  - **Six review findings, all accepted, two of them data-integrity bugs in the merge — which is
+    exactly where the risk was said to be.**
+    - *Reclassifying carried the old classification's accounts.* Accounts are derived at creation only,
+      so moving a borrower loan from `bank_loan` to `owner_loan_to_company` kept 2220/8150 where the API
+      would have derived 2255/8159 — a loan filed against the wrong balance-sheet line by an edit that
+      reads like a relabelling. The merge cannot tell a derived number from a deliberate one, so the
+      tool now refuses a reclassification that names no accounts, and quotes what the API would have
+      derived for the new combination so the caller can accept or override.
+    - *The same edit bypassed the `relatedParty` inference*, which ran only on create: changing a
+      `bank_loan` to `intercompany` carried the stored `false` into the write and left note disclosure
+      understating a related party — the exact harm the create-side inference exists to prevent,
+      reachable by an edit instead of a creation.
+    - *An idempotent restatement was refused.* `{ perspective: "borrower", … }` on a loan that was
+      already borrower demanded a redundant `counterpartyId` for a table change that was not happening.
+      Keyed on the value changing now, not on the field being present.
+    - *`companyBankId` could not be cleared*, though `LoanReq` permits null and omission means "keep"
+      under the merge — so a supported edit was unreachable. Now nullable.
+    - *The local filter did not search `description`*, which both the tool description and the argument
+      description promised it did.
+    - *The update tool declared only its `PUT`*, not the `GET` it always performs first — understating
+      what it touches, and excluding it from the merge-tool invariant that finds read-merge-write tools
+      by exactly that pair.
+    - Each of the four behavioural fixes is mutation-verified on its own.
   - Two new quirks (108 total) so the escape hatch warns as well, and both hazards were verified live
     through the real tools: the direction rule and duplicate reference are refused before anything is
     sent, a partial edit keeps all nine untouched fields, and reaching the unwired state at all

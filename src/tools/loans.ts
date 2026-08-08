@@ -81,6 +81,20 @@ import {
  * and the field feeds note disclosure, so the create tool says so rather than leaving a filed record
  * quietly wrong.
  *
+ * ## Reclassifying is not relabelling
+ *
+ * Because the accounts are derived at creation only, changing `loanType` or `perspective` on an
+ * existing loan would keep the accounts of the classification it is leaving — a borrower loan moved
+ * from `bank_loan` to `owner_loan_to_company` keeps 2220/8150 where the API would have derived
+ * 2255/8159, which is a loan filed against the wrong balance-sheet line by an edit that reads like a
+ * relabelling. The merge cannot fix that: it has no way to tell a derived number from one the caller
+ * chose deliberately. So `reai_update_loan` refuses a reclassification that does not name accounts,
+ * and names what the API would have derived (DERIVED_ACCOUNTS) so the caller can accept or override.
+ *
+ * The same edit also bypassed the `relatedParty` inference, which only ran on create: changing a
+ * `bank_loan` to `intercompany` carried the stored `false` into the write and left note disclosure
+ * understating a related party. The inference runs on update now, and says when it fired.
+ *
  * ## Deleting
  *
  * `DELETE /api/loans/{id}` answers `204` and the id then reads `404` — a real delete, no archive, no
@@ -169,6 +183,24 @@ const ALLOWED_PERSPECTIVES: Record<string, readonly string[]> = {
   other: ["borrower", "lender"],
 };
 
+/**
+ * The accounts the API derived for each combination, as principal / interest / accrued.
+ *
+ * Recorded so a refusal can name the right numbers instead of only saying that the stored ones are
+ * wrong. It is a measurement, not a rule this server enforces: the API derives these at creation and
+ * never again, so on a reclassification the caller has to pass them and these are what to pass.
+ */
+const DERIVED_ACCOUNTS: Record<string, { principal: string; interest: string; accrued: string }> = {
+  "bank_loan/borrower": { principal: "2220", interest: "8150", accrued: "2950" },
+  "owner_loan_to_company/borrower": { principal: "2255", interest: "8159", accrued: "2950" },
+  "company_loan_to_owner/lender": { principal: "1370", interest: "8050", accrued: "1760" },
+  "company_loan_to_employee/lender": { principal: "1572", interest: "8050", accrued: "1760" },
+  "intercompany/borrower": { principal: "2260", interest: "8130", accrued: "2950" },
+  "intercompany/lender": { principal: "1320", interest: "8030", accrued: "1760" },
+  "other/borrower": { principal: "2220", interest: "8159", accrued: "2950" },
+  "other/lender": { principal: "1320", interest: "8050", accrued: "1760" },
+};
+
 /** What the name says the direction is, for a refusal that explains rather than quotes a 400. */
 const DIRECTION_REASON: Record<string, string> = {
   bank_loan: "a bank loan is money the company borrowed, so the company is the borrower",
@@ -188,6 +220,7 @@ const INHERENTLY_RELATED: readonly string[] = [
 type LoanRecord = {
   id?: number;
   reference?: string;
+  description?: string | null;
   loanType?: string;
   perspective?: string;
   status?: string;
@@ -278,7 +311,9 @@ const listLoans = defineTool({
     const needle = args.query?.trim().toLowerCase();
     const rows = needle
       ? all.filter((loan) =>
-          [loan.reference, loan.counterpartyName, loan.loanType, loan.perspective, loan.status]
+          // `description` belongs here: both this tool's description and the `query` argument's promise
+          // it, and leaving it out made the tool quietly contradict its own documentation.
+          [loan.reference, loan.description, loan.counterpartyName, loan.loanType, loan.perspective, loan.status]
             .filter((v): v is string => typeof v === "string")
             .some((v) => v.toLowerCase().includes(needle)),
         )
@@ -519,7 +554,14 @@ const updateLoan = defineTool({
     "**Changing `perspective` re-points `counterpartyId` at a different table** — creditors for " +
     "borrower, debtors for lender — so an unchanged id means a different party, or a 404.",
   risk: "irreversible",
-  apiPaths: [["PUT", "/api/loans/{id}"]],
+  // The GET is declared as well as the PUT, because the handler really performs both: the merge cannot
+  // work without reading first. Understating that hides an operation the tool touches, and the
+  // repository's merge-tool invariant discovers read-merge-write tools BY this pair, so omitting the
+  // GET also excluded this tool from the check written for exactly its shape.
+  apiPaths: [
+    ["GET", "/api/loans/{id}"],
+    ["PUT", "/api/loans/{id}"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Loan id."),
     reference: z.string().min(1).max(30).optional().describe("The API caps this at 30 characters."),
@@ -540,7 +582,10 @@ const updateLoan = defineTool({
     interestExpenseAccountNumber: z.string().optional().describe("Pass this to restore an account a raw PUT cleared."),
     interestIncomeAccountNumber: z.string().optional().describe("Pass this to restore an account a raw PUT cleared."),
     accruedInterestAccountNumber: z.string().optional().describe("Pass this to restore an account a raw PUT cleared."),
-    companyBankId: z.number().int().positive().optional(),
+    // Nullable, because `LoanReq` says so and detaching a loan from its bank account is a real edit.
+    // With `.optional()` alone the only way to express it was omission, which the merge turns into
+    // "keep the old id" -- so the supported change was unreachable through this tool.
+    companyBankId: z.number().int().positive().nullable().optional(),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -601,7 +646,14 @@ const updateLoan = defineTool({
 
     // A perspective flip with the id carried over from the record is the one merge that is
     // dangerous BECAUSE it succeeds: the number is valid, it just now means a different party.
-    if (given.includes("perspective") && !given.includes("counterpartyId")) {
+    //
+    // Keyed on the perspective actually CHANGING, not on the field being present. The first version
+    // refused `{ perspective: "borrower", interestRateAnnual: 6 }` on a loan that was already
+    // borrower — an idempotent restatement, which is exactly what a caller echoing a record back
+    // sends — and demanded a redundant counterpartyId for a table change that was not happening.
+    const perspectiveChanged =
+      given.includes("perspective") && changes.perspective !== existing.perspective;
+    if (perspectiveChanged && !given.includes("counterpartyId")) {
       const table = changes.perspective === "lender" ? "DEBTOR" : "CREDITOR";
       return fail(
         `Refusing to change perspective on loan ${id} without a counterpartyId. perspective ` +
@@ -610,6 +662,54 @@ const updateLoan = defineTool({
           `404 if it does not. Nothing was written. Pass counterpartyId with the new perspective.`,
       );
     }
+
+    // Reclassifying a loan changes which accounts it SHOULD post to, and the API derives accounts only
+    // at creation — so the merge, doing its job, would carry the old classification's accounts into the
+    // new one. A borrower loan moved from bank_loan to owner_loan_to_company would keep 2220/8150 where
+    // the API would have derived 2255/8159: a loan filed against the wrong balance-sheet line, from an
+    // edit that looked like a relabelling. The merge cannot fix this, because it has no way to know
+    // whether the stored numbers were derived or deliberately chosen. So it refuses and says what the
+    // API would have picked.
+    const typeChanged = given.includes("loanType") && changes.loanType !== existing.loanType;
+    const accountFields = [
+      "principalAccountNumber",
+      "interestExpenseAccountNumber",
+      "interestIncomeAccountNumber",
+      "accruedInterestAccountNumber",
+    ];
+    if ((typeChanged || perspectiveChanged) && !accountFields.some((f) => given.includes(f))) {
+      const derived = DERIVED_ACCOUNTS[`${mergedType}/${mergedPerspective}`];
+      const wants = mergedPerspective === "borrower" ? "interestExpenseAccountNumber" : "interestIncomeAccountNumber";
+      return fail(
+        `Refusing to reclassify loan ${id} as ${mergedType}/${mergedPerspective} without saying which ` +
+          `ledger accounts it should use. The API derives accounts once, at CREATION, and never ` +
+          `re-derives them — so this edit would keep ` +
+          `${JSON.stringify(existing.principalAccountNumber ?? null)}/` +
+          `${JSON.stringify(existing.interestExpenseAccountNumber ?? existing.interestIncomeAccountNumber ?? null)}, ` +
+          `which belong to the old classification. Nothing was written.\n\n` +
+          (derived
+            ? `Measured, the API derives principal ${derived.principal}, ${wants} ${derived.interest} ` +
+              `and accruedInterestAccountNumber ${derived.accrued} for ${mergedType}/${mergedPerspective}. ` +
+              `Pass those to accept them, or your own numbers to override.`
+            : `Pass principalAccountNumber, ${wants} and accruedInterestAccountNumber explicitly.`) +
+          `\n\nIf the classification was the mistake and the accounts are right, delete this loan and ` +
+          `record it again — creation is the only thing that derives them.`,
+      );
+    }
+
+    // relatedParty is inferred on create for the types that are related by construction, and the merge
+    // would have quietly bypassed that: change a bank_loan to intercompany and the stored `false` gets
+    // carried into the write, leaving note disclosure understating a related party — the exact harm the
+    // create-side inference exists to prevent, reachable by an edit instead of a creation.
+    if (
+      typeChanged &&
+      !given.includes("relatedParty") &&
+      INHERENTLY_RELATED.includes(mergedType) &&
+      merged.relatedParty !== true
+    ) {
+      merged.relatedParty = true;
+    }
+    const inferredOnUpdate = typeChanged && !given.includes("relatedParty") && INHERENTLY_RELATED.includes(mergedType);
 
     const res = await ctx.client.request<LoanRecord>({
       method: "PUT",
@@ -635,6 +735,14 @@ const updateLoan = defineTool({
           `loan was edited through reai_request or in the ReAI UI. ` +
           `Nothing re-derives an account, so pass ${missingAccounts.join(" and ")} explicitly to ` +
           `put ${missingAccounts.length === 1 ? "it" : "them"} back.`,
+      );
+    }
+    if (inferredOnUpdate) {
+      notes.push(
+        `relatedParty was set to true because the loan is now a ${mergedType}, which is a related ` +
+          `party by construction. The stored value was ${JSON.stringify(existing.relatedParty ?? null)} ` +
+          `and the API does not infer this. Pass relatedParty: false explicitly if this really is at ` +
+          `arm's length.`,
       );
     }
     if (unknown.length > 0) {

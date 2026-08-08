@@ -166,14 +166,129 @@ test("update refuses a perspective flip that would re-point the counterparty", a
   assert.match(textOf(second), /DEBTOR/);
   assert.equal(open.sent.length, 1, "nothing may be written");
 
-  // With an explicit counterpartyId it goes through.
+  // With an explicit counterpartyId AND the accounts for the new classification it goes through. Both
+  // are required, and by different guards: the counterparty because the id would mean another party,
+  // the accounts because a perspective change changes which accounts the API would have derived.
   const ok = ctxFor([
     { status: 200, data: both },
     { status: 200, data: { ...both, perspective: "lender", debtorId: 16, creditorId: null } },
   ]);
-  const third = await tool("reai_update_loan").handler({ id: 13, perspective: "lender", counterpartyId: 16 }, ok.ctx);
+  const third = await tool("reai_update_loan").handler(
+    {
+      id: 13,
+      perspective: "lender",
+      counterpartyId: 16,
+      principalAccountNumber: "1320",
+      interestIncomeAccountNumber: "8050",
+      accruedInterestAccountNumber: "1760",
+    },
+    ok.ctx,
+  );
   assert.notEqual(third.isError, true, textOf(third));
   assert.equal(ok.sent[1].body.counterpartyId, 16);
+});
+
+test("restating the perspective it already has is not a change", async () => {
+  // `{ perspective: "borrower", interestRateAnnual: 6 }` on a borrower loan is an idempotent
+  // restatement — what a caller echoing a record back sends — and demanding a redundant counterpartyId
+  // for a table change that is not happening was wrong.
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: LOAN },
+    { status: 200, data: { ...LOAN, interestRateAnnual: 6 } },
+  ]);
+  const res = await tool("reai_update_loan").handler({ id: 13, perspective: "borrower", interestRateAnnual: 6 }, ctx);
+  assert.notEqual(res.isError, true, textOf(res));
+  assert.equal(sent.length, 2, "the write should have happened");
+});
+
+test("reclassifying a loan will not carry the old classification's accounts", async () => {
+  // The merge doing its job is the hazard here: accounts are derived at CREATION only, so moving a
+  // bank_loan to owner_loan_to_company would keep 2220/8150 where the API would have derived
+  // 2255/8159 — a loan filed against the wrong balance-sheet line by an edit that looks like a
+  // relabelling. The tool cannot tell a derived number from a deliberate one, so it refuses and names
+  // what the API would have picked.
+  const { ctx, sent } = ctxFor([{ status: 200, data: LOAN }]);
+  const res = await tool("reai_update_loan").handler({ id: 13, loanType: "owner_loan_to_company" }, ctx);
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /2255/, "the refusal must name the accounts the API would derive");
+  assert.match(textOf(res), /8159/);
+  assert.match(textOf(res), /2950/);
+  assert.equal(sent.length, 1, "nothing may be written");
+
+  // Supplying any account field is the caller taking the decision, so it proceeds.
+  const ok = ctxFor([
+    { status: 200, data: LOAN },
+    { status: 200, data: { ...LOAN, loanType: "owner_loan_to_company", principalAccountNumber: "2255" } },
+  ]);
+  const second = await ok.ctx
+    ? await tool("reai_update_loan").handler(
+        { id: 13, loanType: "owner_loan_to_company", principalAccountNumber: "2255", interestExpenseAccountNumber: "8159" },
+        ok.ctx,
+      )
+    : undefined;
+  assert.notEqual(second.isError, true, textOf(second));
+  assert.equal(ok.sent[1].body.principalAccountNumber, "2255");
+});
+
+test("reclassifying into a related-party type sets relatedParty, as create does", async () => {
+  // Reachable by an edit rather than a creation, which is how it bypassed the create-side inference:
+  // change a bank_loan to intercompany and the stored `false` was carried into the write, leaving note
+  // disclosure understating a related party.
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: LOAN },
+    { status: 200, data: { ...LOAN, loanType: "intercompany", relatedParty: true } },
+  ]);
+  const res = await tool("reai_update_loan").handler(
+    { id: 13, loanType: "intercompany", principalAccountNumber: "2260" },
+    ctx,
+  );
+  assert.notEqual(res.isError, true, textOf(res));
+  assert.equal(sent[1].body.relatedParty, true, "the API does not infer this — measured");
+  assert.match(textOf(res), /relatedParty was set to true/);
+
+  // And an explicit false still wins: the inference must not overrule the caller.
+  const explicit = ctxFor([
+    { status: 200, data: LOAN },
+    { status: 200, data: { ...LOAN, loanType: "intercompany", relatedParty: false } },
+  ]);
+  await tool("reai_update_loan").handler(
+    { id: 13, loanType: "intercompany", relatedParty: false, principalAccountNumber: "2260" },
+    explicit.ctx,
+  );
+  assert.equal(explicit.sent[1].body.relatedParty, false);
+});
+
+test("a loan's bank association can be detached", async () => {
+  // LoanReq permits companyBankId: null, and omission means "keep" under the merge — so without a
+  // nullable argument the supported edit was unreachable.
+  const withBank = { ...LOAN, companyBankId: 99 };
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: withBank },
+    { status: 200, data: { ...withBank, companyBankId: null } },
+  ]);
+  const res = await tool("reai_update_loan").handler({ id: 13, companyBankId: null }, ctx);
+  assert.notEqual(res.isError, true, textOf(res));
+  assert.equal(sent[1].body.companyBankId, null);
+});
+
+test("the local filter searches the description it promises to search", async () => {
+  const rows = [
+    { ...LOAN, id: 1, reference: "A-1", description: "refinancing the warehouse" },
+    { ...LOAN, id: 2, reference: "B-2", description: "car" },
+  ];
+  const { ctx } = ctxFor([{ status: 200, data: rows }]);
+  const res = await tool("reai_list_loans").handler({ query: "warehouse" }, ctx);
+  assert.match(textOf(res), /1 loan\(s\)/);
+  assert.match(textOf(res), /A-1/);
+  assert.doesNotMatch(textOf(res), /B-2/);
+});
+
+test("the update tool declares the read it performs", () => {
+  // The handler always GETs before it PUTs. Declaring only the write understates what the tool
+  // touches, and the merge-tool invariant finds read-merge-write tools by exactly this pair.
+  const paths = tool("reai_update_loan").apiPaths ?? [];
+  assert.ok(paths.some(([m, p]) => m === "GET" && p === "/api/loans/{id}"), "the pre-read must be declared");
+  assert.ok(paths.some(([m]) => m === "PUT"));
 });
 
 test("the loanType and perspective pair is checked before anything is sent", async () => {
