@@ -13,8 +13,8 @@ All notable changes to `reai-mcp`. Format loosely follows
   checks the wording of refusals, and its own contract admits every case is a request built to fail, so
   nothing there observes what the API *accepts, normalises or stores*. Two of the five false claims that
   motivated it live in exactly that gap: `skipRegistryLookup` drifts on a `201`, and the phone rule was
-  wrong three separate times about what gets **stored**. Eight claims now checked against the live API;
-  first run **8 of 8 verified**, including the evidence that the `skipRegistryLookup` override comes from
+  wrong three separate times about what gets **stored**. Eleven claims now checked against the live API;
+  first run **11 of 11 verified**, including the evidence that the `skipRegistryLookup` override comes from
   a stale internal directory rather than the registry (`971648198` stores as "Statens Innkrevingssentral",
   a superseded name).
   - It writes, which is the whole difference. Only customers — reversible, and they delete cleanly.
@@ -23,17 +23,33 @@ All notable changes to `reai-mcp`. Format loosely follows
     token ignores `X-Tenant-Id`; and a test asserts it never touches `/api/vouchers`,
     `/api/share-investments` or `/api/general-sub-accounts`, the three paths the message audit had to have
     removed from it.
+  - **Every case reads the record back** — three of the first eight compared the POST echo, in the family
+    whose own constant ends "read the created record back whenever the name or address matters". And the
+    staleness case asks Brønnøysundregistrene live instead of hardcoding a name: hardcoded, it would report
+    OK if the registry ever converged on that name, and DRIFT if ReAI merely updated its directory — which
+    would confirm the account rather than refute it.
+  - **A create that succeeds on the server and fails on the way back left a record behind.** The review
+    reproduced it with a proxy returning 502 after forwarding the create: the id never reached `created`, so
+    the `finally` had nothing to delete and the run still exited 0. There is a baseline and an orphan sweep
+    now, which is the pattern `smoke-full-write.mjs` already used and this script had declined to copy, plus
+    SIGINT/SIGTERM handlers that report what an interrupted run left.
   - **It reads the record back instead of trusting the write.** Not caution for its own sake: `phone` is
     not a create field, which `reai_create_customer` already documents, and the first version of these
     probes sent it to `POST /api/customers` and reported **four DRIFTs against `PHONE_RULE`, all
     `stored null`** — when the value had never been written. The phone claims go through `PATCH` now and a
     test pins that. Counting both audits, that is the fourth time the three-outcome design has pointed at
     a broken probe instead of a correct description.
-  - Each case names the **constant** making its claim plus a marker phrase, and `test/storage-drift.test.mjs`
-    asserts the marker is still present — so editing `PHONE_RULE` fails the suite until the probe is
-    revisited. Verified by mutation. What that test deliberately does not do is claim every storage claim
-    has a probe: the population is prose and cannot be measured, and asserting completeness one cannot
-    measure is what three earlier PRs here were spent unwinding.
+  - Each case names the **constant** making its claim, a marker phrase, and the **value that text
+    predicts**. The marker alone was theatre: the review of PR #115 rewrote `PHONE_RULE` to say the
+    OPPOSITE of every phone claim while keeping all four markers, and the guard passed 4/4 — markers sit in
+    the opening sentences while the measured content is further down. A predicted literal cannot survive
+    that. Markers must also be ≥12 characters; `marker: "e"` and `marker: " "` both passed before.
+  - **The completeness bound was a cop-out and is now a number.** The first version said the population
+    "cannot be measured mechanically" because a storage claim is prose. The review enumerated it anyway,
+    from the two places it lives. `npm run audit:census` now prints it: **129 agent-facing literals assert
+    something about what is stored, 11 probed.** Printed rather than asserted, since a keyword sweep is a
+    lower bound — but hiding the ratio made 11-of-many read as coverage. The cheap unprobed ones are named,
+    including `reai_create_customer`'s flagship "the name you send is then DISCARDED" on the DEFAULT path.
   - `test/smoke-cleanup.test.mjs` learned a second cleanup shape for it: fixtures recorded under
     **computed** keys with a `for (… of Object.entries(created))` sweep, which cannot forget a key.
     Accepted only when the sweep really deletes — verified by making it report-only and watching the guard

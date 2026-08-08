@@ -49,7 +49,8 @@
     "prepack": "npm run build",
     "smoke": "node scripts/smoke.mjs",
     "audit:messages": "node scripts/audit-messages.mjs",
-    "audit:storage": "node scripts/audit-storage.mjs"
+    "audit:storage": "node scripts/audit-storage.mjs",
+    "audit:census": "node scripts/storage-census.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

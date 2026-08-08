@@ -146,7 +146,9 @@ export const QUIRKS: readonly Quirk[] = [
       "The phone number is NORMALISED, not merely validated: 90123456, 004790123456 and " +
       "+4790123456 are all stored as +4790123456, so a Norwegian value does not come back as it was " +
       "sent. But the field really is international — +46701234567, +14155552671, +447911123456 and " +
-      "+4915112345678 were all accepted and stored EXACTLY as sent.\n" +
+      "+4915112345678 are all accepted rather than refused. NOT \"exactly as sent\", which this note " +
+      "claimed until 2026-08-09: a foreign number is canonicalised too, measured on this very field — " +
+      "\"+46 70 123 45 67\" is stored \"+46701234567\".\n" +
       "Bare digits are interpreted as NORWEGIAN, and that has two outcomes rather than one. An " +
       "earlier version of this note said a bare foreign number is simply refused; it is not. If the " +
       "digits are valid Norwegian they are stored under +47 SILENTLY — measured, the Danish mobile " +
@@ -1005,8 +1007,12 @@ export const QUIRKS: readonly Quirk[] = [
       "answers 200, and says nothing. Measured: \"nonsense\" replaced a stored \"+4722334455\" " +
       "with null. So a phone write can destroy the number that was there with no error at all; " +
       "read the field back rather than trusting the status.\n\n" +
-      "Note this differs from suppliers, where a \"+47\" prefix is REJECTED outright. Same-looking " +
-      "field, opposite handling.",
+      "This note claimed until 2026-08-09 that suppliers differ, \"where a +47 prefix is REJECTED " +
+      "outright\". That is false and was known to be false: PR #112 measured PATCH /api/suppliers/{id} " +
+      "answering 200 to \"+4722334455\" and storing it, and corrected the claim in registry.ts while " +
+      "leaving this sentence standing. Re-measured 2026-08-09, same result. One rule applies to every " +
+      "phone field — see PHONE_RULE — and the employee field's only difference is the silent null " +
+      "above, not the prefix.",
   },
   {
     id: "employee-create-is-not-a-blank-record",

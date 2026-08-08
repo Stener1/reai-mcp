@@ -129,9 +129,55 @@ for (const path of SUITES) {
       const sweeps = /for\s*\(\s*const\s*\[[^\]]+\]\s*of\s*Object\.entries\(\s*created\s*\)\s*\)\s*\{([\s\S]{0,600})/.exec(
         finallyHalf,
       );
+      assert.ok(sweeps, `${path} records fixtures under computed keys but its finally never sweeps them`);
+      const body = sweeps[1];
+
+      // An AWAITED delete call, not the string "DELETE" anywhere in the block. The first version matched
+      // the bare literal, and the review of PR #115 passed all sixteen assertions with a sweep whose only
+      // content was `console.log(\`would send "DELETE", /api/customers/${id}\`)` and a commented-out
+      // check — a guard named "really deletes" satisfied by a log line.
+      assert.match(
+        body,
+        /await\s+(?:\w+\.)*(?:call|callTool|request)\s*\(\s*(?:\{[^}]*)?["'`]?DELETE/,
+        `${path}'s sweep does not AWAIT a delete call — a log line mentioning DELETE is not a cleanup`,
+      );
+      // The delete's own OUTCOME has to be inspected, not merely a leak counter touched somewhere in the
+      // block: `DELETE /api/customers/{id}` legitimately answers `{"outcome":"archived"}`, which is not a
+      // deletion, and an archived customer is invisible to the default list. The first version accepted
+      // `/leaked|outcome/`, which the `catch` branch satisfies on its own — so replacing the entire
+      // outcome check with `void gone;` still passed.
+      assert.match(
+        body,
+        /outcome/,
+        `${path}'s sweep deletes but never inspects the outcome, so an "archived" answer would pass ` +
+          `as a deletion`,
+      );
+      // No early exit that can skip a key. EVERY `continue` must be the `if (!x) continue;` form —
+      // counted, not merely present. The first version asked only whether a guarded skip existed
+      // ANYWHERE in the body, so the review's `if (serial % 2 === 0) continue;` rode along beside the
+      // legitimate `if (!id) continue;` and half the fixtures leaked.
+      const earlyExits = [...body.matchAll(/\b(continue|break|return)\b/g)].map((m) => m[1]);
+      const guardedSkips = [...body.matchAll(/if\s*\(\s*!\s*\w+\s*\)\s*continue;/g)].length;
       assert.ok(
-        sweeps && /(?:name:\s*"reai_delete_[a-z_]+"|method:\s*"DELETE"|"DELETE",)/.test(sweeps[1]),
-        `${path} records fixtures under computed keys but its finally does not sweep them with a delete`,
+        earlyExits.length === guardedSkips && earlyExits.every((e) => e === "continue"),
+        `${path}'s sweep has ${earlyExits.length} early exit(s) but only ${guardedSkips} of the ` +
+          `allowed \`if (!x) continue;\` form — anything else can skip a key`,
+      );
+
+      // And it must delete the resource it CREATED. The review's sweep issued a real, awaited, checked
+      // DELETE — against /api/suppliers, while every fixture was a customer — and passed. So the swept
+      // path has to be one the try half posts to.
+      const sweptPaths = [...body.matchAll(/["'`]DELETE["'`]\s*,\s*[`"]([^`"$]+)/g)].map(([, p]) => p);
+      const createdPaths = [...tryHalf.matchAll(/["'`]POST["'`]\s*,\s*[`"]([^`"$]+)/g)].map(([, p]) => p);
+      assert.ok(sweptPaths.length > 0, `${path}'s sweep has no recognisable delete path`);
+      const mismatched = sweptPaths.filter(
+        (swept) => !createdPaths.some((made) => made.startsWith(swept) || swept.startsWith(made)),
+      );
+      assert.deepEqual(
+        mismatched,
+        [],
+        `${path}'s sweep deletes ${mismatched.join(", ")}, which it never created — the fixtures leak ` +
+          `while the cleanup looks real. Created: ${[...new Set(createdPaths)].join(", ")}`,
       );
       return;
     }
