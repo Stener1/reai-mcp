@@ -9,9 +9,41 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**130 tools**: 123 across ten accounting domains, plus 7 always-on.
+**134 tools**: 127 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **General sub-accounts** (4 tools) — `reai_list_sub_accounts`,
+  `reai_sub_accounts_for_account`, `reai_create_sub_account`,
+  `reai_rename_sub_account`. A sub-account (*underkonto*) splits one ledger account
+  into named parts: on a live tenant, account 1579 carries both `Default` and
+  `Shopify sales`.
+  - This existed as a **field before it existed as a tool**. `reai_create_voucher`
+    and `reai_create_reconciliation_rule` already accepted `subAccountId`, described
+    as *"Optional general sub-account id"*, with no way to discover a valid value —
+    and the description was wrong. Measured, an account that has **any** sub-account
+    requires one on **every** posting, including an account whose only sub-account is
+    called `Default`, which is the usual case:
+    `400 "Linje 1: Konto 1320 må posteres med underkonto."`
+  - So the field read as optional precisely for the accounts where omitting it cannot
+    work, and the API's refusal is a bare Norwegian message naming only the line.
+  - **`reai_create_voucher` now pre-checks it**, with one read of the sub-account list
+    however many postings the voucher has, and refuses with the actual choices:
+    `line 1, account 1320 → subAccountId 6230 (Default)`. A **failed** lookup does not
+    block the write — this document has understated requirements before, and refusing
+    a ledger write because a helper read failed would be the check doing harm.
+  - `companyBankId` is the same shape of rule (`400 "Konto 1920 må posteres med
+    bankkonto."`) and is documented rather than pre-checked, because nothing in the
+    company-bank response says which ledger account each bank belongs to.
+  - Sub-accounts are **permanent**: `DELETE` answers `405` and `PUT` accepts only
+    `name` (`accountNumber` → `400 "Unknown field: accountNumber"`), so one can be
+    neither removed nor moved. Creating the *first* one on an account changes that
+    account's rules for everyone posting to it, and the create tool says so when that
+    is what is about to happen. `POST /api/general-sub-accounts` is therefore
+    classified **irreversible** in the policy, not merely reversible.
+  - The per-account selector has **three** answers, not two: a list, an empty list, or
+    `400 "accountNumber 3000 does not support general sub-accounts"` for an account
+    that cannot have them at all.
 
 - **Discovery ranking, measured on queries it was not tuned on.** The two existing
   eval sets were written by me and then tuned against, which makes them regression

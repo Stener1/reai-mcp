@@ -1,5 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+
+/**
+ * The voucher POST among the requests a handler made.
+ *
+ * reai_create_voucher now reads /api/general-sub-accounts before writing — an account that has
+ * sub-accounts requires one on every posting — so `sent[0]` is a GET and indexing by position
+ * broke. Selecting by method says what these assertions actually mean.
+ */
+const postsOf = (sent) => sent.filter((r) => r.method === "POST");
+const postOf = (sent) => {
+  const hit = postsOf(sent)[0];
+  assert.ok(hit, `no POST was sent; got ${sent.map((r) => `${r.method} ${r.path}`).join(", ")}`);
+  return hit;
+};
 import {
   classifyRequest,
   isAllowed,
@@ -713,7 +727,7 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     },
     ctx,
   );
-  let rows = sent[0].body.postings.map((p) => p.rowNumber);
+  let rows = postOf(sent).body.postings.map((p) => p.rowNumber);
   assert.equal(rows[0], rows[1], "a matched pair must share a row");
 
   // ...and a three-posting purchase voucher gets a row per posting, so no row holds
@@ -730,7 +744,7 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     },
     ctx,
   );
-  rows = sent[0].body.postings.map((p) => p.rowNumber);
+  rows = postOf(sent).body.postings.map((p) => p.rowNumber);
   assert.equal(new Set(rows).size, 3, `expected three rows, got ${rows.join(",")}`);
 
   // A matched pair whose descriptions differ is given SEPARATE rows and sent. It used
@@ -749,8 +763,8 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     ctx,
   );
   assert.equal(split.isError, undefined, "differing descriptions are not an error on their own");
-  assert.equal(sent.length, 1, "it should be sent, in two rows");
-  const splitRows = sent[0].body.postings.map((p) => p.rowNumber);
+  assert.equal(postsOf(sent).length, 1, "it should be sent, in two rows");
+  const splitRows = postOf(sent).body.postings.map((p) => p.rowNumber);
   assert.notEqual(splitRows[0], splitRows[1], `expected two rows, got ${splitRows.join(",")}`);
 
   // But when the CALLER pins both to one row, that is a request the API will reject —
@@ -768,7 +782,7 @@ test("voucher rows follow the API's pairing rule, not description grouping", asy
     },
     ctx,
   );
-  assert.equal(sent.length, 0, "nothing should be sent when the caller pins a conflicting row");
+  assert.equal(postsOf(sent).length, 0, "nothing should be sent when the caller pins a conflicting row");
   const text = conflict.content.map((c) => c.text).join("\n");
   assert.match(text, /must share a description/);
   assert.match(text, /Nothing was sent to ReAI/);
@@ -970,7 +984,13 @@ test("voucher amounts finer than øre are refused, as are all-zero vouchers", as
   const run = async (postings) => {
     sent.length = 0;
     const res = await tool.handler({ date: "2026-08-06", postings }, ctx);
-    return { sent: sent.length, text: res.content.map((c) => c.text).join("\n"), isError: res.isError };
+    // WRITES, not requests: reai_create_voucher reads /api/general-sub-accounts before writing, so
+    // a refused voucher still shows one GET.
+    return {
+      sent: postsOf(sent).length,
+      text: res.content.map((c) => c.text).join("\n"),
+      isError: res.isError,
+    };
   };
 
   const subOre = await run([

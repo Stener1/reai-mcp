@@ -327,6 +327,16 @@ function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
     return "irreversible";
   }
 
+  // Creating a general sub-account cannot be undone and changes how its ACCOUNT behaves for
+  // everyone. Measured: DELETE /api/general-sub-accounts/{id} answers 405, PUT accepts only `name`
+  // (accountNumber answers 400 "Unknown field: accountNumber"), and once an account has ANY
+  // sub-account every posting to it must name one — so adding the first one to an account breaks
+  // whatever was posting to it without a subAccountId. A create with no delete and a side effect on
+  // other people's writes is not "reversible" in the sense the default mode means.
+  if (method === "POST" && /^\/api\/general-sub-accounts$/i.test(normalized)) {
+    return "irreversible";
+  }
+
   // A full-replacement PUT on a record that CARRIES a payment destination can erase that
   // destination by leaving it out, and both of these were measured doing exactly that on a live
   // tenant:

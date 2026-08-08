@@ -227,9 +227,29 @@ const postingInput = z.object({
   projectId: z.number().int().optional().describe("Link the posting to a project."),
   departmentId: z.number().int().optional().describe("Link the posting to a department."),
   employeeId: z.number().int().optional().describe("Link the posting to an employee."),
-  companyBankId: z.number().int().optional().describe("Link the posting to a company bank account."),
+  companyBankId: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "Company bank account id, from reai_list_company_banks. Conditionally REQUIRED in the same way " +
+        "subAccountId is: a posting to a bank account in the chart answers " +
+        '400 "Linje 1: Konto 1920 må posteres med bankkonto." without it — measured. This tool does ' +
+        "not pre-check that one, because nothing in the company-bank response says which ledger " +
+        "account each bank belongs to, so which accounts demand it cannot be established here.",
+    ),
   assetId: z.number().int().optional().describe("Link the posting to an asset."),
-  subAccountId: z.number().int().optional().describe("Optional general sub-account id."),
+  subAccountId: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "General sub-account (underkonto) id, from reai_sub_accounts_for_account. NOT optional in the " +
+        "way this reads: an account that HAS sub-accounts REQUIRES one on every posting, even when " +
+        'it has only a single "Default" — measured, omitting it answers ' +
+        '400 "Linje 1: Konto 1320 må posteres med underkonto." naming the line and nothing else. ' +
+        "This tool checks before sending and names the choices.",
+    ),
 });
 
 /**
@@ -399,7 +419,10 @@ const createVoucher = defineTool({
     "This posts to the general ledger and is NOT freely reversible — under Norwegian bookkeeping " +
     "rules a voucher in a closed period cannot be deleted. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
-  apiPaths: [["POST", "/api/vouchers"]],
+  apiPaths: [
+    ["GET", "/api/general-sub-accounts"],
+    ["POST", "/api/vouchers"],
+  ],
   inputSchema: {
     date: isoDate.describe("Voucher date. Determines the accounting period."),
     description: z
@@ -448,6 +471,56 @@ const createVoucher = defineTool({
       );
     }
 
+    // A sub-account is mandatory on any account that HAS them, including an account with only a
+    // single "Default" — measured, and the API's refusal is
+    // 400 "Linje 1: Konto 1320 må posteres med underkonto.", which names the line and nothing a
+    // caller can act on. One read of the whole sub-account list turns that into the actual choices,
+    // and costs one call however many postings the voucher has.
+    //
+    // A failed lookup does NOT block the write: this spec has under-stated requirements before, and
+    // refusing a voucher because a helper read failed would be the check doing harm. The API remains
+    // the authority — but its 400 is NOT enriched by the quirk registry on a curated tool, which an
+    // earlier version of this comment claimed. server.ts turns a thrown ReaiApiError into a plain
+    // tool error, so the caller would have received exactly the bare Norwegian message this
+    // preflight exists to replace. The catch below supplies the advice instead.
+    const needSubAccount: Array<{ line: number; accountNumber: string; choices: string }> = [];
+    try {
+      const subs = await ctx.client.request<
+        Array<{ id?: number; accountNumber?: string; name?: string }>
+      >({ method: "GET", path: "/api/general-sub-accounts", tenantId });
+      if (Array.isArray(subs.data)) {
+        const byAccount = new Map<string, Array<{ id?: number; name?: string }>>();
+        for (const row of subs.data) {
+          if (typeof row.accountNumber !== "string") continue;
+          byAccount.set(row.accountNumber, [...(byAccount.get(row.accountNumber) ?? []), row]);
+        }
+        args.postings.forEach((posting, index) => {
+          if (posting.subAccountId !== undefined) return;
+          const choices = byAccount.get(posting.accountNumber);
+          if (choices === undefined || choices.length === 0) return;
+          needSubAccount.push({
+            line: index + 1,
+            accountNumber: posting.accountNumber,
+            choices: choices.map((c) => `${c.id} (${c.name ?? "?"})`).join(", "),
+          });
+        });
+      }
+    } catch {
+      // Left to the API, deliberately — see above.
+    }
+    if (needSubAccount.length > 0) {
+      return fail(
+        `Nothing was sent. ${needSubAccount.length} posting(s) are on an account that requires a ` +
+          `general sub-account (underkonto), and none was given:\n\n` +
+          needSubAccount
+            .map((n) => `  line ${n.line}, account ${n.accountNumber} → subAccountId ${n.choices}`)
+            .join("\n") +
+          `\n\nAn account that has ANY sub-account requires one on every posting, even when the only ` +
+          `one is called "Default" — the API answers 400 "må posteres med underkonto" and names just ` +
+          `the line. Pick from the ids above, or list them with reai_sub_accounts_for_account.`,
+      );
+    }
+
     const withRows = assignRowNumbers(args.postings);
 
     // A voucher row carries ONE description, so a matched debit/credit pair sharing a
@@ -474,12 +547,38 @@ const createVoucher = defineTool({
       })),
     };
 
-    const res = await ctx.client.request<{ id?: number; number?: string }>({
-      method: "POST",
-      path: "/api/vouchers",
-      body,
-      tenantId,
-    });
+    let res;
+    try {
+      res = await ctx.client.request<{ id?: number; number?: string }>({
+        method: "POST",
+        path: "/api/vouchers",
+        body,
+        tenantId,
+      });
+    } catch (err) {
+      // The two dimension rules again, this time on the way back. When the preflight's own lookup
+      // failed we let the call through on purpose — but a curated tool's thrown error is turned into
+      // a plain tool error by server.ts and never meets the quirk registry, so the caller would have
+      // received the bare Norwegian message the preflight exists to replace. Translated here.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/må posteres med underkonto/i.test(message)) {
+        throw new Error(
+          `${message}\n\n` +
+            `That means: the account on the line named requires a general sub-account (underkonto), ` +
+            `and the posting did not carry one. Every posting to an account that has ANY sub-account ` +
+            `needs a subAccountId, including an account whose only one is called "Default". List the ` +
+            `choices with reai_sub_accounts_for_account for that account number.`,
+        );
+      }
+      if (/må posteres med bankkonto/i.test(message)) {
+        throw new Error(
+          `${message}\n\n` +
+            `That means: the account on the line named is a bank account, and a posting to it must ` +
+            `say WHICH company bank with companyBankId. List them with reai_list_company_banks.`,
+        );
+      }
+      throw err;
+    }
 
     const id = res.data?.id;
     return ok(res.data, {
