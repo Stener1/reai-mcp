@@ -345,7 +345,7 @@ test("an array body is inspected element by element", () => {
     "irreversible",
   );
   assert.equal(
-    classifyInvoiceDelivery("reversible", "POST", "/api/orders", [{ invoiceEmail: "a@evil.example" }]),
+    classifyInvoiceDelivery("reversible", "/api/orders", [{ invoiceEmail: "a@evil.example" }], false),
     "irreversible",
   );
   // And the error messages still name the fields, deduplicated across elements.
@@ -1040,20 +1040,20 @@ test("redirecting invoice delivery is irreversible wherever the field is accepte
     "/api/subscriptions/3",
   ]) {
     assert.equal(
-      classifyInvoiceDelivery("reversible", "PUT", path, evil),
+      classifyInvoiceDelivery("reversible", path, evil, false),
       "irreversible",
       `${path} should escalate on invoiceEmail`,
     );
   }
   // Unrelated paths and unrelated fields are untouched.
-  assert.equal(classifyInvoiceDelivery("reversible", "PUT", "/api/orders", { customerId: 1 }), "reversible");
-  assert.equal(classifyInvoiceDelivery("reversible", "PUT", "/api/vouchers", evil), "reversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/orders", { customerId: 1 }, false), "reversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/vouchers", evil, false), "reversible");
   // A whitespace-only address is not a NEW address, so it does not escalate as one — but naming the
   // field with a value that empties it is a delivery change in its own right, and on a method that
   // can overwrite what is stored it escalates for that reason instead. Measured: the API answers 400
   // to a space, so the call fails either way; the classification just says which risk it carried.
-  assert.equal(classifyInvoiceDelivery("reversible", "POST", "/api/customers", { invoiceEmail: "  " }), "reversible");
-  assert.equal(classifyInvoiceDelivery("reversible", "PATCH", "/api/customers/5", { invoiceEmail: "  " }), "irreversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/customers", { invoiceEmail: "  " }, false), "reversible");
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/customers/5", { invoiceEmail: "  " }, true), "irreversible");
 });
 
 test("payment routing and invoice delivery give different reasons", async () => {
@@ -1179,7 +1179,7 @@ test("normalizing a path never lowers its risk", () => {
     "irreversible",
   );
   assert.equal(
-    classifyInvoiceDelivery("reversible", "PUT", "/api/orders;x", { invoiceEmail: "a@evil.example" }),
+    classifyInvoiceDelivery("reversible", "/api/orders;x", { invoiceEmail: "a@evil.example" }, false),
     "irreversible",
   );
 });
@@ -1205,86 +1205,100 @@ test("an action that undoes a risk is not gated like the risk itself", () => {
   // last pending one can complete the agreement.
   assert.equal(classifyRequest("DELETE", "/api/agreements/1/sign-requests/2"), "irreversible");
 });
-
 /**
- * Emptying an invoice-delivery address is the same axis as setting one.
+ * Emptying an invoice-delivery address is the same axis as setting one — in a PARTIAL body.
  *
- * The gate was presence-based, so it read only one direction: `invoiceEmail: "attacker@evil.example"`
- * escalated to irreversible and needed `full` mode, while `invoiceEmail: ""` on the same endpoint
- * stayed `reversible` and went through in the default mode. Same field, same disclosure axis, and
- * both decide which human receives the next invoice.
+ * The gate was presence-based, so it read one direction only: `invoiceEmail: "attacker@evil.example"`
+ * escalated and needed `full` mode, while `invoiceEmail: ""` stayed `reversible` and went through in
+ * the default mode. It was reachable through a CURATED tool, not just the escape hatch:
+ * reai_update_customer is declared reversible, accepts invoiceEmail as a plain string, forwards ""
+ * unchanged, and "" is the form measured to clear the stored address on PATCH /api/customers/{id}.
  *
- * It was reachable through a CURATED tool, not only the escape hatch: `reai_update_customer` is
- * declared `reversible`, accepts `invoiceEmail` as a plain string, and forwards `""` unchanged —
- * which, measured on tenant 2783 against `PATCH /api/customers/{id}`, clears the stored address.
+ * The `partialBody` distinction is not decoration. Without it, every possible body for
+ * PUT /api/orders/{id} escalated — omit the optional field and a replacement empties it, name it and
+ * it is either a new address or an empty one — which left an agent in the default mode no way to edit
+ * an order at all, there being no curated order-update tool. Review caught that.
  */
-test("emptying an invoice-delivery address escalates exactly as setting one does", async () => {
+test("emptying an invoice-delivery address escalates when the body is partial", async () => {
   const { classifyInvoiceDelivery } = await import("../dist/policy.js");
   for (const path of ["/api/customers/5", "/api/orders/9", "/api/subscriptions/3"]) {
-    for (const method of ["PUT", "PATCH"]) {
-      for (const value of ["", null, "   "]) {
-        assert.equal(
-          classifyInvoiceDelivery("reversible", method, path, { name: "X", invoiceEmail: value }),
-          "irreversible",
-          `${method} ${path} with ${JSON.stringify(value)}`,
-        );
-      }
+    for (const value of ["", null, "   "]) {
+      assert.equal(
+        classifyInvoiceDelivery("reversible", path, { name: "X", invoiceEmail: value }, true),
+        "irreversible",
+        `${path} with ${JSON.stringify(value)}`,
+      );
     }
   }
 });
 
-test("a body that leaves a delivery field OUT of a replacement escalates too", async () => {
+test("a value that stringifies blank counts as emptying, whatever its type", async () => {
+  const { classifyInvoiceDelivery, invoiceDeliveryClearedFields } = await import("../dist/policy.js");
+  // The two halves of the axis have to be complementary, or a value falls between them and the gate
+  // calls it neither direction. presentFields excludes anything blank once stringified, so "cleared"
+  // must admit everything else a present key can hold. Review found the gap with these two.
+  // Not `{}` — that stringifies to "[object Object]", so presentFields already counts it as a value
+  // being SET and the axis escalates on the other branch. Complementary, which is the property.
+  for (const value of [[], [""], ["  "]]) {
+    assert.deepEqual(invoiceDeliveryClearedFields({ invoiceEmail: value }), ["invoiceEmail"], JSON.stringify(value));
+    assert.equal(
+      classifyInvoiceDelivery("reversible", "/api/customers/5", { invoiceEmail: value }, true),
+      "irreversible",
+      JSON.stringify(value),
+    );
+  }
+});
+
+test("a REPLACEMENT body that names an empty address does not escalate, and that is deliberate", async () => {
   const { classifyInvoiceDelivery } = await import("../dist/policy.js");
-  // A PUT stores what the body omits as empty, so omitting the address empties it exactly as sending
-  // an empty string would — the same consequence with less to see. The caller supplies the omitted
-  // list because working it out needs the spec.
+  const order = { customerId: 1, currencyCode: "NOK", daysUntilDue: 14, issueDate: "2026-01-01", orderLines: [] };
+  // In a whole-record body an empty invoiceEmail cannot be told apart from faithfully carrying back
+  // an address that is already empty — the common case, and exactly what reai_request tells callers
+  // to do. Escalating it made PUT /api/orders/{id} refuse EVERY possible body in the default mode.
+  for (const body of [order, { ...order, invoiceEmail: null }, { ...order, invoiceEmail: "" }]) {
+    assert.equal(
+      classifyInvoiceDelivery("reversible", "/api/orders/9", body, false),
+      "reversible",
+      JSON.stringify(body).slice(0, 60),
+    );
+  }
+  // Setting a NEW address in the same body still escalates, which is the pre-existing half.
   assert.equal(
-    classifyInvoiceDelivery("reversible", "PUT", "/api/orders/9", { customerId: 1 }, ["invoiceEmail", "sendEhf"]),
+    classifyInvoiceDelivery("reversible", "/api/orders/9", { ...order, invoiceEmail: "new@example.com" }, false),
     "irreversible",
-  );
-  // PATCH really does patch on this API — measured — so an omitted field is not a change there.
-  assert.equal(
-    classifyInvoiceDelivery("reversible", "PATCH", "/api/customers/5", { name: "X" }, ["invoiceEmail"]),
-    "reversible",
-  );
-  // An omitted field that is not about delivery is not this axis's business.
-  assert.equal(
-    classifyInvoiceDelivery("reversible", "PUT", "/api/orders/9", { customerId: 1 }, ["deliveryDate", "ourReference"]),
-    "reversible",
   );
 });
 
 test("the clearing rule does not fire where there is nothing to redirect", async () => {
   const { classifyInvoiceDelivery } = await import("../dist/policy.js");
-  // A create cannot redirect an existing address, so an explicit empty value on POST is not a
-  // delivery change. Refusing it would be the false positive this file records fixing twice: a safe
-  // call blocked in the mode people point at a live business.
+  // A create cannot redirect an existing address. Its body is not partial either, so both readings
+  // agree here — asserted anyway, because a POST naming an empty address is the case a caller would
+  // most reasonably expect to be ordinary work.
   for (const value of ["", null]) {
     assert.equal(
-      classifyInvoiceDelivery("reversible", "POST", "/api/orders", { customerId: 1, invoiceEmail: value }),
+      classifyInvoiceDelivery("reversible", "/api/orders", { customerId: 1, invoiceEmail: value }, false),
       "reversible",
       JSON.stringify(value),
     );
   }
-  // Nor on a read that happens to carry the field, nor on a DELETE.
-  assert.equal(classifyInvoiceDelivery("read", "GET", "/api/customers", { invoiceEmail: "" }), "read");
-  assert.equal(
-    classifyInvoiceDelivery("reversible", "DELETE", "/api/customers/5", { invoiceEmail: "" }),
-    "reversible",
-  );
+  // Out of scope entirely: the field is only about delivery on customers, orders and subscriptions.
+  assert.equal(classifyInvoiceDelivery("reversible", "/api/vouchers", { invoiceEmail: "" }, true), "reversible");
+  // And an already-irreversible path is returned untouched, so nothing below can weaken it.
+  assert.equal(classifyInvoiceDelivery("irreversible", "/api/customers/5", { invoiceEmail: "" }, true), "irreversible");
 });
 
 test("the refusal says which direction the delivery change goes", async () => {
   const { invoiceDeliveryChanges } = await import("../dist/policy.js");
-  assert.deepEqual(invoiceDeliveryChanges("PATCH", { invoiceEmail: "new@example.com" }), [
+  assert.deepEqual(invoiceDeliveryChanges({ invoiceEmail: "new@example.com" }, true), [
     "invoiceEmail set to a new address",
   ]);
-  assert.deepEqual(invoiceDeliveryChanges("PATCH", { invoiceEmail: "" }), ["invoiceEmail emptied"]);
-  assert.deepEqual(invoiceDeliveryChanges("PUT", { customerId: 1 }, ["invoiceEmail"]), [
-    "invoiceEmail left out of a body that replaces the record, which empties it",
+  assert.deepEqual(invoiceDeliveryChanges({ invoiceEmail: "" }, true), ["invoiceEmail emptied"]);
+  // In a replacement body an empty value is not reported as a change, because it is not known to be
+  // one — the same reason it does not escalate.
+  assert.deepEqual(invoiceDeliveryChanges({ invoiceEmail: "" }, false), []);
+  assert.deepEqual(invoiceDeliveryChanges({ invoiceEmail: "new@example.com" }, false), [
+    "invoiceEmail set to a new address",
   ]);
-  // A create that names an empty address changes nothing, so there is nothing to report.
-  assert.deepEqual(invoiceDeliveryChanges("POST", { invoiceEmail: "" }), []);
 });
 
 test("the curated tool that could clear a delivery address in the default mode no longer can", async () => {
@@ -1297,6 +1311,7 @@ test("the curated tool that could clear a delivery address in the default mode n
   assert.equal(tool.risk, "reversible");
 
   const cleared = curatedArgsEscalate(tool.apiPaths, { invoiceEmail: "" });
+  assert.ok(cleared, "clearing through a curated tool must escalate");
   assert.ok(cleared, "clearing an address must escalate");
   assert.equal(cleared.risk, "irreversible");
   assert.deepEqual(cleared.fields, ["invoiceEmail"]);
@@ -1308,7 +1323,13 @@ test("the curated tool that could clear a delivery address in the default mode n
   assert.match(set.consequence, /every future invoice goes to that address/);
   assert.ok(!/empties/.test(set.consequence));
 
-  // And a create tool is untouched, because it has no stored address to redirect.
+  // A curated tool's arguments are always partial, whatever HTTP method it uses underneath — so
+  // reai_update_subscription escalates too, even though its endpoint is a PUT.
+  const subscription = registeredTools.find((t) => t.name === "reai_update_subscription");
+  assert.deepEqual(subscription.apiPaths.map(([m]) => m).includes("PUT"), true, "it is a PUT underneath");
+  assert.ok(curatedArgsEscalate(subscription.apiPaths, { invoiceEmail: "" }), "still escalates on args");
+
+  // But a create tool is untouched, because it has no stored address to redirect.
   const create = registeredTools.find((t) => t.name === "reai_create_subscription");
   assert.equal(curatedArgsEscalate(create.apiPaths, { invoiceEmail: "" }), undefined);
   assert.ok(curatedArgsEscalate(create.apiPaths, { invoiceEmail: "x@y.no" }), "setting one still escalates");

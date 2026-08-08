@@ -1526,12 +1526,15 @@ export const QUIRKS: readonly Quirk[] = [
       "To remove a customer's invoice email, send an EMPTY STRING. Measured on tenant 2783, seeding " +
       'an address and sending each form: `invoiceEmail: ""` cleared it, `invoiceEmail: null` was a ' +
       'no-op that left the address in place, and `invoiceEmail: " "` answered 400 "Validation ' +
-      'failed". Omitting the field keeps it, since PATCH really does patch here. So the value that ' +
-      "empties a billing address is the one that looks like a typo, and the deliberate-looking one " +
-      "does nothing. Either way this server treats naming the field with an empty value as intent " +
-      "to redirect delivery: it needs REAI_WRITE_MODE=full, exactly as setting a new address does, " +
-      "because future invoices stop reaching the address someone chose and go wherever the API " +
-      "falls back to instead — which is not visible until one is issued.",
+      'failed". Omitting the field keeps it, since PATCH really does patch here. The null behaviour ' +
+      'is the documented one — the schema says "Omit or null to leave unchanged" — so the surprise ' +
+      "is the other half: the value that empties a billing address is the one that looks like a " +
+      'typo. Worth knowing that `""` is also the schema\'s declared DEFAULT for this field, so a ' +
+      "client that fills defaults in rather than omitting them clears the address without meaning " +
+      "to. Either way this server treats naming the field with an empty value as intent to change " +
+      "delivery and asks for REAI_WRITE_MODE=full, exactly as setting a new address does: the " +
+      "address someone deliberately chose stops receiving invoices, and nobody finds out until one " +
+      "is issued. Where they go instead is not something this server has measured.",
   },
   {
     id: "lead-patch-cannot-clear-a-field-only-the-put-setters-can",

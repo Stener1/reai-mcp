@@ -429,9 +429,14 @@ export function omittedReplacementFields(
     return { fields: [], documented: documented.length };
   }
   const required = new Set(op.body?.required ?? []);
-  // Case-insensitively, for the same reason missingRequired compares that way: a mis-cased key
-  // does not bind, so it is not "supplied". Reporting it as omitted is right — it will be cleared —
-  // and the near-miss is what the caller needs to see.
+  // Case-insensitively, and the comment here used to say the opposite of what the code does: it
+  // claimed a mis-cased key is NOT supplied and should be reported as omitted. The code lowercases
+  // both sides, so a mis-cased key counts as supplied and is not reported — which is the right
+  // behaviour, for the reason missingRequired states 50 lines down: this is Jackson, and a mis-cased
+  // body field is REJECTED with a 400 rather than silently ignored. The call never reaches the
+  // record, so nothing is cleared and a warning listing the field would be a false alarm about a
+  // request that cannot happen. Review caught the contradiction; the code was right, the comment was
+  // describing a rule nobody implemented.
   const supplied = new Set(Object.keys(body as Record<string, unknown>).map((k) => k.toLowerCase()));
   const fields = documented.filter(
     (field) => !required.has(field) && !supplied.has(field.toLowerCase()),

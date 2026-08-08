@@ -721,35 +721,16 @@ async function main() {
       report("sendEhf escalation", false, String(err));
     }
 
-    // Emptying an invoice-delivery address, which used to be the ungated direction of the same axis:
-    // setting one has always needed `full`, while clearing one stayed `reversible` and went through
-    // in the mode this deployment runs in. Only the escape-hatch form is checked here, because this
-    // suite runs READ-ONLY and the curated write tools are not registered in that mode.
+    // Emptying an invoice-delivery address is the other direction of the same axis, and it is
+    // deliberately NOT checked here. It cannot be: this suite runs read-only, where every write is
+    // refused for being a write, so a refusal proves nothing about which rule fired — and the
+    // curated tools that carry the exposure are not even registered in that mode. An earlier version
+    // of this check asserted the refusal without the reason and passed for the wrong one.
     //
-    // The curated half is covered in test/writes.test.mjs instead, deliberately and not for
-    // convenience: reai_update_customer would need a reversible-mode server to be refused by, and a
-    // live check whose failure mode is a write reaching tenant 2634 is not a check worth having.
-    try {
-      const res = await client.callTool({
-        name: "reai_request",
-        arguments: {
-          tenantId,
-          method: "PUT",
-          path: "/api/orders/1",
-          clearOmittedFields: true,
-          body: { customerId: 1, currencyCode: "NOK", daysUntilDue: 14, issueDate: "2026-01-01", orderLines: [] },
-        },
-      });
-      const text = textOf(res);
-      const blocked = res.isError === true && /write policy/i.test(text) && /invoiceEmail/.test(text);
-      report(
-        "dropping the address from a body that REPLACES an order is refused",
-        blocked,
-        blocked ? "refused before anything was sent" : `NOT BLOCKED: ${text.slice(0, 220)}`,
-      );
-    } catch (err) {
-      report("delivery omission escalation", false, String(err));
-    }
+    // It lives in test/policy.test.mjs and test/writes.test.mjs instead, with the path-shape cases in
+    // test/replacement-clears.test.mjs. Not for convenience: making it live would mean pointing a
+    // reversible-mode server at tenant 2634, and a check whose failure mode is a write reaching real
+    // books is not a check worth having.
   }
 
   await client.close();

@@ -16,30 +16,50 @@ All notable changes to `reai-mcp`. Format loosely follows
 - **The invoice-delivery gate read only one direction, and the other one was reachable
   through a curated tool.** `invoiceEmail: "attacker@example.com"` escalated to
   `irreversible` and needed `full` mode; `invoiceEmail: ""` on the same endpoint stayed
-  `reversible` and went through in the default mode. Same field, same disclosure axis, and
-  both decide which human receives the next invoice — one a chosen address, the other
-  whatever the API falls back to.
+  `reversible` and went through in the default mode. Same field, same disclosure axis:
+  one sends invoices to a chosen address, the other stops them reaching the address
+  someone chose.
   - Reachable, not theoretical: `reai_update_customer` is declared `reversible`, accepts
     `invoiceEmail` as a plain string, and forwards `""` unchanged. Measured against
     `PATCH /api/customers/{id}` on tenant 2783, `""` cleared the stored address, `null` was
-    a **no-op** that left it in place, and `" "` answered `400 "Validation failed"`. So the
-    value that empties a billing address is the one that looks like a typo, and the
-    deliberate-looking one does nothing. Both forms escalate now, because the gate is about
-    what the caller asked for and the endpoints do not agree about which form works — the
-    same divergence the lead endpoints show.
-  - **Omission counts on a replacement.** `PUT /api/orders/{id}` stores what the body leaves
-    out as empty, so dropping `invoiceEmail` empties it exactly as sending `""` would, with
-    less to see. The omitted-field set is now computed before the write policy runs rather
-    than only inside the warning gate below it, so waiving the warning with
-    `clearOmittedFields` no longer waives the escalation.
-  - No new false positives: a `POST` that names an empty address is not a redirect and stays
-    `reversible`, an omitted field on a `PATCH` changes nothing (PATCH really patches here),
-    and an unrelated omitted field is not this axis's business. `classifyInvoiceDelivery`
-    takes the method as a required parameter so the compiler names every call site that has
-    to decide, rather than a default deciding wrong for one of them.
-  - The parity sweep in `test/writes.test.mjs` — "a curated tool cannot do what
-    `reai_request` would refuse" — now runs in the clearing direction too, so the next tool
-    to accept one of these fields inherits the guard.
+    the documented **no-op**, and `" "` answered `400 "Validation failed"`. So the value
+    that empties a billing address is the one that looks like a typo — and `""` is also the
+    schema's declared *default*, so a client that fills defaults in rather than omitting
+    them clears the address without meaning to.
+  - **Only in a partial body**, and that qualifier took a false positive to find. In a
+    whole-record `PUT`, an empty `invoiceEmail` cannot be told apart from faithfully
+    carrying back an address that is already empty — which is exactly what `reai_request`
+    tells callers to do. Escalating it made **every possible body** for
+    `PUT /api/orders/{id}` irreversible (omit the optional field and a replacement empties
+    it; name it and it is either a new address or an empty one), leaving an agent in the
+    default mode no way to edit an order at all, there being no curated order-update tool.
+    So: a `PATCH`, or any curated tool's arguments — which are always partial, because those
+    tools read and merge — escalate; a replacement body does not, and the
+    replacement-omission gate remains the mechanism there. A `POST` never escalates on
+    clearing, since it has no stored address to redirect.
+  - The residual, stated rather than glossed: someone who deliberately empties a set address
+    through a replacement `PUT` is not escalated. Distinguishing that from the round-trip
+    would mean reading the record inside the policy check and comparing, which makes an
+    allow/refuse decision depend on a second network call and on what to do when it fails.
+  - `invoiceDeliveryClearedFields` is now exactly complementary to `presentFields`, so no
+    value falls between "set" and "emptied" — `invoiceEmail: []` and `[""]` both stringify
+    blank and used to be neither.
+
+- **Operation-keyed gates now see the path a router would see.** The risk classifiers read
+  every form of a request (matrix parameters stripped, doubled slashes collapsed, a trailing
+  dot dropped); anything resolving an OPERATION read only the raw and percent-decoded forms.
+  So `PUT /api/orders/1;x=1`, `/api/orders/1;`, `/api/orders//1` and `/api/orders/1.` each
+  resolved to nothing, and the replacement-omission gate — which lists the fields a body
+  would empty — had nothing to list and let the call through unremarked, while the same call
+  spelled plainly was refused. Not exploitable against ReAI today (measured: its
+  StrictHttpFirewall answers 400 to the matrix parameter and the doubled slash, 404 to the
+  trailing dot), which is the reason to fix it rather than a reason not to.
+
+- **`reai_request` names every reason a call was refused, not the first one.** A body
+  carrying both an `iban` and an emptied `invoiceEmail` was refused for the `iban` alone, so
+  dropping that field earned a second refusal for a reason never mentioned.
+  `curatedArgsEscalate` already fixed exactly this on the curated side; the escape hatch
+  kept the shape its comment was written about.
 
 ### Added
 

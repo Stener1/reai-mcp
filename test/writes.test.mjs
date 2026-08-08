@@ -316,7 +316,10 @@ test("a curated tool cannot EMPTY what reai_request would refuse to empty", asyn
           ([method, path]) =>
             strictestRisk(
               classifyPaymentRouting("reversible", path, args, method),
-              classifyInvoiceDelivery("reversible", method, path, args),
+              // A curated tool's arguments are partial by nature — the tool merges — except on a
+              // POST, where there is no stored value to empty. Same reading curatedArgsEscalate uses,
+              // which is what makes this parity rather than two rules that happen to agree.
+              classifyInvoiceDelivery("reversible", path, args, method.toUpperCase() !== "POST"),
             ) === "irreversible",
         );
         if (!viaEscapeHatch) continue;
@@ -336,7 +339,13 @@ test("a curated tool cannot EMPTY what reai_request would refuse to empty", asyn
       }
     }
   }
-  // reai_update_customer and reai_update_subscription both take invoiceEmail, in two forms each.
+  // Four hits: reai_update_customer and reai_update_subscription, each in both clearing forms.
+  //
+  // Two of the four are unreachable through the tool itself — reai_update_customer's schema is
+  // `z.string()`, so `null` never gets past validation. That is deliberate and worth stating rather
+  // than trimming: parity is a property of the POLICY layer, which does not know what a schema will
+  // accept, and a rule that only held for the values today's schemas happen to allow would come apart
+  // the first time one of them became nullable. Reachability is asserted separately, below.
   assert.ok(checked >= 4, `expected curated tools that can empty a gated field, found ${checked}`);
 });
 
