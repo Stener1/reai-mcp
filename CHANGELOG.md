@@ -39,16 +39,37 @@ All notable changes to `reai-mcp`. Format loosely follows
   - The helper was module-private in `src/http.ts`, a file that exports nothing and is spawned as a
     process, so reaching it meant starting a real server. It now lives in `policy.ts` as
     `narrowerWriteMode`, beside `strictestRisk`, which is the same idea for risks.
-  - Three guards, each mutation-tested. The arithmetic, in both directions and symmetrically.
-    The composition — tightening the deployment really does remove the irreversible tools a wider
-    grant could otherwise see. And, end to end through `/mcp`, a grant claiming `full` against a
-    `read-only` server: dropping the re-clamp at the call site made the arithmetic tests stay green
-    and this one fail with *"a read-only server served writing tools to a grant claiming full"*.
-    That is the mutation an ordinary refactor could make.
-  - Checked and found already correct, recorded so it is not re-litigated: a **refresh** cannot widen
-    a narrowed grant (it reissues the sealed grant unchanged), a refresh is bound to its client, an
-    untenanted grant cannot be refreshed at all, and the refresh chain is bounded by an absolute TTL
-    measured from the original authorization rather than from the last refresh.
+  - Two guards end to end through `/mcp`, both mutation-tested against the same mutation — dropping
+    the re-clamp at the call site, which is the mutation an ordinary refactor could make and which
+    leaves every arithmetic test green. A grant claiming `full` against a `read-only` server is
+    served *no writing tool* (discovery), and its `reai_request` write is *refused and never reaches
+    the API* (enforcement). The second matters because `reai_request` is visible at `read-only` by
+    design, so hiding tools was never the whole boundary.
+  - The listing guard originally filtered names by a verb regex. That is a vocabulary and it had
+    already drifted: it misses `reai_deliver_expense`, `reai_unapprove_expense`, the three
+    subscription tools and `reai_reconcile_ui`. It now also pins the served list to the exact
+    read-only set, and asserts `full` is genuinely larger so the comparison cannot pass vacuously.
+  - The arithmetic is asserted in both directions and symmetrically, and now fails closed: `indexOf`
+    answers -1 for a mode outside the vocabulary, which would rank an unrecognised value as the
+    *narrowest* and return it — so a stray `undefined` would reach `isAllowed` and 500 the request.
+    Unreachable today, spelled out because this is exported policy now. A third test composes the
+    ceiling with the visibility pipeline; it is labelled in the file as documenting a seam rather
+    than guarding it, because no mutation was found that it alone catches.
+  - **One claim this made about the refresh path was wrong, and the suite was what made it look
+    right.** Three of four held on inspection: a refresh cannot widen a narrowed grant (it reissues
+    the sealed grant unchanged), an untenanted grant cannot be refreshed at all, and the chain is
+    bounded by an absolute TTL — from the original authorization for any grant carrying `authTime`,
+    though for a *legacy* grant the fallback is the redeemed token's own `iat`, so a chain already
+    rolled forward under the old code is bounded from its last refresh instead: a one-time extension
+    of up to the TTL. The fourth was false. The check read `if (clientId && clientId !== …)`, so
+    **omitting `client_id` skipped it entirely** and a refresh token could be redeemed as any client
+    — the identical shape the `authorization_code` branch twenty lines above was fixed for, with a
+    comment there saying why. `client_id` is not a secret for a public client, and every client here
+    is public, so whoever holds the refresh token already holds the grant; this is conformance
+    (RFC 6749 §6, and `client_id` is REQUIRED on a public-client token request) and a blast-radius
+    boundary between registered clients, not a credential check. It now requires the parameter and
+    compares it. The test asserting the absent case returned **200** was the reason this read as
+    intended behaviour; it now asserts absent, empty and mismatched are all refused.
 
 - **Three documentation assertions pinned the docs architecture to one file.** They exist to
   guarantee that something is *documented* — that all 146 tools are listed where a reader will

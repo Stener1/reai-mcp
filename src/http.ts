@@ -416,7 +416,6 @@ async function handleMcp(
   await transport.handleRequest(req, res, parsedBody);
 }
 
-/** The more restrictive of two write modes. */
 /**
  * The canonical public URL. A configured PUBLIC_URL always wins; otherwise it is
  * inferred from forwarding headers, which is what a platform like Cloud Run

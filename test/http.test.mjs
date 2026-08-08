@@ -355,14 +355,9 @@ test("raw-token passthrough still works with no tenant configured", async () => 
 // make.
 //
 // This server runs REAI_WRITE_MODE=read-only, so a grant claiming `full` must still see no writing tool.
-test("a grant claiming a wider mode than the server does not get it", async () => {
-  const wide = accessToken({ ...TENANTED, writeMode: "full" });
-  const res = await mcpPost({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, wide);
-  const text = await res.text();
-  assert.equal(res.status, 200, "tools/list should be accepted: " + text.slice(0, 200));
-
-  // The transport answers as JSON or as SSE frames; take whichever carries the result.
-  const payloads = text
+/** The transport answers as JSON or as SSE frames; take whichever carries the result. */
+function rpcPayloads(text) {
+  return text
     .split("\n")
     .map((line) => (line.startsWith("data:") ? line.slice(5).trim() : line.trim()))
     .filter((line) => line.startsWith("{") || line.startsWith("["))
@@ -374,7 +369,15 @@ test("a grant claiming a wider mode than the server does not get it", async () =
         return [];
       }
     });
-  const listed = payloads.find((p) => p.result && Array.isArray(p.result.tools));
+}
+
+test("a grant claiming a wider mode than the server does not get it", async () => {
+  const wide = accessToken({ ...TENANTED, writeMode: "full" });
+  const res = await mcpPost({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, wide);
+  const text = await res.text();
+  assert.equal(res.status, 200, "tools/list should be accepted: " + text.slice(0, 200));
+
+  const listed = rpcPayloads(text).find((p) => p.result && Array.isArray(p.result.tools));
   assert.ok(listed, "no tools/list result in the response: " + text.slice(0, 300));
 
   const names = listed.result.tools.map((t) => t.name);
@@ -383,4 +386,60 @@ test("a grant claiming a wider mode than the server does not get it", async () =
     /^reai_(create|update|delete|set|add|book|match|reverse|unarchive|convert|approve|log|save|register|apply|adjust|rename|credit|write)/.test(n),
   );
   assert.deepEqual(writers, [], "a read-only server served writing tools to a grant claiming full");
+
+  // The regex above is a verb vocabulary, and a vocabulary drifts: it misses
+  // reai_deliver_expense, reai_unapprove_expense, the three subscription tools and
+  // reai_reconcile_ui, all of which are writes above read-only. So also pin the exact
+  // set the served list must equal, which needs no vocabulary at all.
+  const { visibleTools } = await import("../dist/server.js");
+  const expected = visibleTools({
+    toolsets: [],
+    enableUi: false,
+    writeMode: "read-only",
+    allowExternalSend: false,
+  }).visible.map((t) => t.name);
+  assert.deepEqual(names.slice().sort(), expected.slice().sort(), "the served list is not the read-only list");
+  // And the clamp did something rather than nothing: `full` genuinely has more.
+  const atFull = visibleTools({
+    toolsets: [],
+    enableUi: false,
+    writeMode: "full",
+    allowExternalSend: false,
+  }).visible.length;
+  assert.ok(atFull > expected.length, "read-only and full expose the same tools, so this proves nothing");
+});
+
+test("a read-only server refuses the write, not just the tool listing", async () => {
+  // Hiding a tool is discovery; refusing the call is enforcement. reai_request is
+  // visible at read-only by design -- it is the reads' escape hatch -- so it is the one
+  // path a client with a `full` grant could try to write through anyway. The upstream
+  // assertion is the part that cannot be faked by a friendly-looking error message.
+  const before = upstreamHits.length;
+  const wide = accessToken({ ...TENANTED, writeMode: "full" });
+  const res = await mcpPost(
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "reai_request",
+        arguments: { method: "POST", path: "/api/vouchers", body: { description: "should never exist" } },
+      },
+    },
+    wide,
+  );
+  const text = await res.text();
+  const answer = rpcPayloads(text).find((p) => p.id === 3);
+  assert.ok(answer, "no answer to the tools/call: " + text.slice(0, 300));
+
+  const refused =
+    answer.error !== undefined ||
+    (answer.result?.isError === true &&
+      /read-only|not allowed|write mode|refus/i.test(JSON.stringify(answer.result)));
+  assert.ok(refused, "a read-only server accepted a write: " + JSON.stringify(answer).slice(0, 400));
+  assert.deepEqual(
+    upstreamHits.slice(before).filter((h) => h.startsWith("POST")),
+    [],
+    "the write reached the upstream API despite the server running read-only",
+  );
 });

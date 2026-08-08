@@ -645,7 +645,15 @@ const RISK_SEVERITY: Record<Risk, number> = { read: 0, reversible: 1, irreversib
  * never widened back by a permissive server.
  */
 export function narrowerWriteMode(a: WriteMode, b: WriteMode): WriteMode {
-  return WRITE_MODES.indexOf(a) <= WRITE_MODES.indexOf(b) ? a : b;
+  const ra = WRITE_MODES.indexOf(a);
+  const rb = WRITE_MODES.indexOf(b);
+  // Both inputs are validated upstream, so this is unreachable today. It is spelled out
+  // because indexOf answers -1 for a value outside the vocabulary, which would make an
+  // unrecognised mode the *narrowest* one and return it -- so `narrowerWriteMode(undefined,
+  // "read-only")` would hand back undefined and isAllowed would throw on it. A policy
+  // primitive fails closed, like narrowWriteMode on the consent page does.
+  if (ra < 0 || rb < 0) return "read-only";
+  return ra <= rb ? a : b;
 }
 
 /** The more severe of two readings of the same request. */

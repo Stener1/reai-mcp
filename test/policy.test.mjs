@@ -1395,9 +1395,14 @@ test("the effective write ceiling is the narrower of the grant and the operator'
 });
 
 test("tightening the deployment actually removes the tools a wider grant could see", async () => {
-  // The property end to end, rather than the arithmetic: compose the ceiling decision with the
-  // visibility pipeline and check an irreversible tool really disappears. A `full` grant against a
-  // server redeployed as `reversible` must see exactly what a `reversible` grant sees.
+  // The property at the seam: compose the ceiling decision with the visibility pipeline and check
+  // an irreversible tool really disappears. A `full` grant against a server redeployed as
+  // `reversible` must see exactly what a `reversible` grant sees. Worth stating, but honestly
+  // labelled -- review could construct no mutation this catches alone. It follows from the
+  // arithmetic (visibility is a pure function of the one mode), the write-mode filter is already
+  // asserted over the whole set in test/ui.test.mjs, and POST /api/vouchers being irreversible is
+  // asserted in test/toolsets.test.mjs. The composition that is actually load-bearing runs over
+  // HTTP in test/http.test.mjs, because only that exercises the real call site.
   const { narrowerWriteMode } = await import("../dist/policy.js");
   const { visibleTools } = await import("../dist/server.js");
   const seen = (grantMode, serverMode) =>
@@ -1416,4 +1421,17 @@ test("tightening the deployment actually removes the tools a wider grant could s
   );
   // And the ceiling is a floor in neither direction: a read-only grant stays read-only on a full server.
   assert.deepEqual(seen("read-only", "full"), seen("read-only", "read-only"));
+});
+
+test("narrowerWriteMode fails closed on a mode it does not recognise", async () => {
+  // Unreachable through the running server -- both inputs are parsed upstream. It is
+  // asserted because the helper is now exported policy, and indexOf answers -1 for an
+  // unknown value, which would rank it *narrower* than every real mode and hand it back.
+  // `undefined` returned from here reaches isAllowed, which reads `.has` on it and 500s
+  // the request. Its sibling narrowWriteMode on the consent page already fails closed.
+  const { narrowerWriteMode } = await import("../dist/policy.js");
+  assert.equal(narrowerWriteMode(undefined, "full"), "read-only");
+  assert.equal(narrowerWriteMode("full", undefined), "read-only");
+  assert.equal(narrowerWriteMode("readonly", "full"), "read-only");
+  assert.equal(narrowerWriteMode("READ-ONLY", "reversible"), "read-only");
 });
