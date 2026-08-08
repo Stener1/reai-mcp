@@ -474,7 +474,7 @@ test("the README's payment-routing table matches the classifier", async () => {
 
   // Invoice delivery is the second row, and its scope is wider than customers.
   for (const path of ["/api/customers/5", "/api/orders", "/api/subscriptions/3"]) {
-    assert.equal(classifyInvoiceDelivery("reversible", path, { invoiceEmail: "a@b.c" }), "irreversible", path);
+    assert.equal(classifyInvoiceDelivery("reversible", path, { invoiceEmail: "a@b.c" }, false), "irreversible", path);
   }
   assert.match(readme, /`invoiceEmail` \| customers, orders, subscriptions/);
 });

@@ -720,6 +720,17 @@ async function main() {
     } catch (err) {
       report("sendEhf escalation", false, String(err));
     }
+
+    // Emptying an invoice-delivery address is the other direction of the same axis, and it is
+    // deliberately NOT checked here. It cannot be: this suite runs read-only, where every write is
+    // refused for being a write, so a refusal proves nothing about which rule fired — and the
+    // curated tools that carry the exposure are not even registered in that mode. An earlier version
+    // of this check asserted the refusal without the reason and passed for the wrong one.
+    //
+    // It lives in test/policy.test.mjs and test/writes.test.mjs instead, with the path-shape cases in
+    // test/replacement-clears.test.mjs. Not for convenience: making it live would mean pointing a
+    // reversible-mode server at tenant 2634, and a check whose failure mode is a write reaching real
+    // books is not a check worth having.
   }
 
   await client.close();

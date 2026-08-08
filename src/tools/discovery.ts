@@ -20,7 +20,9 @@ import {
   classifyPaymentRouting,
   inPaymentRoutingScope,
   classifyInvoiceDelivery,
-  invoiceDeliveryFields,
+  inInvoiceDeliveryScope,
+  invoiceDeliveryChanges,
+  routedPathForms,
   escalatingBodyFields,
   paymentRoutingFields,
   transmittingBodyFields,
@@ -489,10 +491,21 @@ const request = defineTool({
     // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
     // happens later when a human pays the invoice in the ReAI UI.
     const routingRisk = classifyPaymentRouting(bodyRisk, decoded, args.body, args.method);
+    // The operation this call will actually reach, resolved once and reused by the omission gate
+    // further down. Every path form, because the API decodes and normalises before routing and this
+    // server does not: a form that resolves to no operation is a form every gate keyed on the
+    // operation silently stops covering.
+    const routedOp = resolveRoutedOperation(method, ...routedPathForms(path, decoded));
     // And invoice delivery, which is the same shape of harm with a different
     // consequence: reversible as a record, permanent as a disclosure. Kept apart so
     // the refusal names the right thing to go and check.
-    const risk = classifyInvoiceDelivery(routingRisk, decoded, args.body);
+    //
+    // `partialBody` is true only for PATCH. A PUT body is the whole record, so an empty
+    // `invoiceEmail` in one cannot be told apart from faithfully carrying back an address that is
+    // already empty — which is what this hatch tells callers to do a few lines down. Escalating it
+    // made PUT /api/orders/{id} refuse every possible body in the default mode, with no curated
+    // order-update tool to fall back to. The omission gate below is the mechanism for a replacement.
+    const risk = classifyInvoiceDelivery(routingRisk, decoded, args.body, method === "PATCH");
     // Named whenever the call actually repoints a destination, not only when doing so is
     // what escalated it. On a path that is ALREADY irreversible — creating a supplier
     // invoice, say — classifyPaymentRouting returns before it looks at the body, so
@@ -502,15 +515,28 @@ const request = defineTool({
     const routing = paymentRoutingFields(args.body).length > 0 && inPaymentRoutingScope(decoded, args.method)
       ? paymentRoutingFields(args.body)
       : [];
-    const delivery = risk !== routingRisk ? invoiceDeliveryFields(args.body) : [];
-    const escalated =
-      routing.length > 0
-        ? [`${routing.join(", ")} (this changes where a payment will go)`]
-        : delivery.length > 0
-          ? [`${delivery.join(", ")} (this changes where invoices are delivered)`]
-          : bodyRisk !== pathRisk
-            ? escalatingBodyFields(args.body)
-            : [];
+    // Computed by presence and scope, like `routing` above, rather than only when it is what
+    // escalated the call — same reason: in `full` mode the call goes through, and a note that does
+    // not mention the address it emptied hides the more permanent half of what it did.
+    const delivery = inInvoiceDeliveryScope(decoded)
+      ? invoiceDeliveryChanges(args.body, method === "PATCH")
+      : [];
+    // EVERY reason, accumulated. This was a ternary, so a body carrying both `iban` and an emptied
+    // `invoiceEmail` was refused for the iban alone: drop that field and the same call earns a second
+    // refusal for a reason never mentioned, with a contradictory explanation. curatedArgsEscalate
+    // already fixed exactly this on the curated side, with a comment saying so, and the escape hatch
+    // kept the shape that comment was written about.
+    const escalated: string[] = [];
+    if (routing.length > 0) {
+      escalated.push(`${routing.join(", ")} (this changes where a payment will go)`);
+    }
+    if (delivery.length > 0) {
+      escalated.push(`${delivery.join("; ")} (this changes where invoices are delivered)`);
+    }
+    if (bodyRisk !== pathRisk) {
+      const arming = escalatingBodyFields(args.body);
+      if (arming.length > 0) escalated.push(`${arming.join(", ")} (this arms an external send)`);
+    }
     // When nothing in the BODY escalated, the reason lives in the path rule — and the generic
     // explanation is worst exactly there. If the endpoint has a quirk written about why it is
     // irreversible, name it, so a refusal for "this PUT replaces the record" does not read as
@@ -518,7 +544,7 @@ const request = defineTool({
     const pathReason =
       escalated.length === 0 && risk === "irreversible"
         ? (() => {
-            const op = resolveRoutedOperation(method, path, decoded);
+            const op = routedOp;
             const q = op
               ? quirksFor(method, op.path).find((entry) => entry.kind === "irreversible")
               : undefined;
@@ -529,12 +555,11 @@ const request = defineTool({
       risk,
       ctx.config.writeMode,
       escalated.length > 0
-        ? // The reason is carried in the entry itself now: a body can escalate because it
-          // arms a send, or because it repoints a payment, and calling the second one an
-          // external send would be simply untrue.
-          `${method} ${path} with ${escalated.join(", ")}${
-            routing.length > 0 || delivery.length > 0 ? "" : " (this arms an external send)"
-          }`
+        ? // Every reason carries its own explanation, so the list joins without a suffix that would
+          // be wrong for all but one of them: a body can escalate because it arms a send, because it
+          // repoints a payment, or because it empties a delivery address, and calling any of those
+          // the others would be simply untrue.
+          `${method} ${path} with ${escalated.join("; also ")}`
         : `${method} ${path}${pathReason}`,
     );
 
@@ -558,11 +583,9 @@ const request = defineTool({
     // After the policy checks: a call that write mode already refuses should be refused for that
     // reason, which is the more fundamental one.
     if (args.clearOmittedFields !== true) {
-      // Both forms, because the API decodes before routing and this server does not: an encoded
-      // path resolves to no operation, and a gate that resolves nothing refuses nothing. Same
-      // reasoning as the write policy two blocks up, which takes the stricter of the two risks.
-      const op = resolveRoutedOperation(method, path, decoded);
-      const omitted = op ? omittedReplacementFields(op, args.body) : { fields: [], documented: 0 };
+      const omitted = routedOp
+        ? omittedReplacementFields(routedOp, args.body)
+        : { fields: [], documented: 0 };
       if (omitted.fields.length > 0) {
         return okText(
           `${method} ${path} REPLACES the record, and this body leaves out ` +
@@ -672,7 +695,7 @@ const request = defineTool({
       // Both path forms here too. An encoded path resolved to nothing, so a write that reached a
       // quirked endpoint by that route got the bare 200 and none of the warning — the same blind
       // spot as the omission gate, with a quieter consequence.
-      const op = resolveRoutedOperation(method, path, decoded);
+      const op = routedOp;
       const always = op ? quirksFor(method, op.path).filter((q) => q.statuses === undefined) : [];
       for (const q of always) notes.push(`Known quirk [${q.kind}]: ${q.note}`);
     }

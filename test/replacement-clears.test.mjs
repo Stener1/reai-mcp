@@ -543,3 +543,46 @@ test("the encoded form still reaches the quirk on a write that DOES go through",
   assert.equal(r.called, true);
   assert.match(r.text, /Known quirk/);
 });
+
+/**
+ * The gate has to see the path the ROUTER will see, not only the one it was handed.
+ *
+ * Review found four shapes that resolved to no operation, so the gate that lists the fields a
+ * replacement empties had nothing to list and the call went out unremarked — while the identical call
+ * spelled plainly was refused. The risk classifiers in policy.ts already read every form
+ * (`pathForms`, which strips matrix parameters, collapses doubled slashes and drops a trailing dot);
+ * anything keyed on a resolved OPERATION was reading only the raw and percent-decoded forms.
+ *
+ * Not exploitable against ReAI today — measured, its StrictHttpFirewall answers 400 to the matrix
+ * parameter and the doubled slash and 404 to the trailing dot. That is the reason to fix it rather
+ * than a reason not to: a guarantee that depends on another server rejecting malformed input is
+ * borrowed, not held, and policy.ts says so about the classifiers in its own comments.
+ */
+test("the omission gate sees through matrix parameters, doubled slashes and a trailing dot", async () => {
+  for (const path of [
+    "/api/company-banks/7",
+    "/api/company-banks/7;x=1",
+    "/api/company-banks/7;",
+    "/api/company-banks//7",
+    "/api/company-banks/7.",
+    // Percent-encoding was already covered; kept here so all four readings sit together.
+    "/api/company%2Dbanks/7",
+  ]) {
+    const r = await raw("PUT", path, { name: "x" }, "full");
+    assert.equal(r.called, false, `${path} must not be sent`);
+    assert.match(r.text, /REPLACES the record/, path);
+    assert.match(r.text, /bban/, `${path} should name the account number it would empty`);
+  }
+});
+
+test("a shape no operation matches is still classified as a write, not as a read", async () => {
+  // The classifiers do not depend on resolving an operation, which is what keeps a novel path shape
+  // from becoming a free pass. What that does NOT mean is that an unmatched path is refused: an
+  // unknown sub-path inherits its prefix's class, so this one is `reversible` and goes through in the
+  // default mode — it would simply 404 upstream. Asserted as it is rather than as one might hope,
+  // because the useful property is the floor: it is never downgraded to a read.
+  const { classifyRequest, isAllowed } = await import("../dist/policy.js");
+  const risk = classifyRequest("PUT", "/api/company-banks/7/unknown-segment");
+  assert.notEqual(risk, "read", "an unmatched write path must not be classified as a read");
+  assert.equal(isAllowed(risk, "read-only"), false, "and read-only mode must still refuse it");
+});

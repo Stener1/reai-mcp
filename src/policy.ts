@@ -567,7 +567,7 @@ function normalize(path: string): string {
  * emptying `...` shortens the path and can drop a pattern match entirely
  * (`/api/invoices/.../email` lost its transmission match).
  */
-function routedForm(path: string): string {
+function routedPath(path: string): string {
   const withoutQuery = path.split("?")[0] ?? path;
   const routed = withoutQuery
     .split("/")
@@ -581,7 +581,38 @@ function routedForm(path: string): string {
     .filter((segment, index) => segment !== "" || index === 0)
     .join("/");
   const trimmed = routed.replace(/\/+$/, "") || "/";
-  return trimmed.startsWith("/") ? trimmed.toLowerCase() : "/" + trimmed.toLowerCase();
+  return trimmed.startsWith("/") ? trimmed : "/" + trimmed;
+}
+
+function routedForm(path: string): string {
+  return routedPath(path).toLowerCase();
+}
+
+/**
+ * The same request as paths an OPERATION LOOKUP can use: case preserved, one entry per reading.
+ *
+ * Exported because the risk classifiers and the spec-driven gates were reading the request
+ * differently. `pathForms` gives every guard in this file the routed reading, but anything keyed on a
+ * resolved OPERATION — the replacement-omission gate in reai_request, for one — resolved only the
+ * raw and percent-decoded forms. Review demonstrated the consequence with four shapes:
+ * `PUT /api/orders/1;x=1`, `/api/orders/1;`, `/api/orders//1` and `/api/orders/1.` each resolved to
+ * no operation, so the gate that lists the fields a replacement would empty had nothing to list and
+ * the call went out unremarked, while the identical call as `/api/orders/1` was refused.
+ *
+ * Not exploitable against ReAI today: measured, its StrictHttpFirewall answers 400 to the matrix
+ * parameter and the doubled slash and 404 to the trailing dot. That is exactly why it is worth
+ * fixing anyway — a guarantee that depends on another server rejecting malformed input is borrowed,
+ * not held, and this file already says so about the risk classifiers.
+ */
+export function routedPathForms(...paths: ReadonlyArray<string | undefined>): string[] {
+  const forms: string[] = [];
+  for (const path of paths) {
+    if (path === undefined) continue;
+    for (const form of [path, routedPath(path)]) {
+      if (!forms.includes(form)) forms.push(form);
+    }
+  }
+  return forms;
 }
 
 /**
@@ -841,13 +872,106 @@ const INVOICE_DELIVERY_PATHS: readonly RegExp[] = [
   /^\/api\/subscriptions(\/|$)/,
 ];
 
-/** Invoice-delivery fields present in a body, for use in error messages. */
+/** Invoice-delivery fields present in a body with a value, for use in error messages. */
 export function invoiceDeliveryFields(body: unknown): string[] {
   return presentFields(inspectableObjects(body), INVOICE_DELIVERY_FIELDS);
 }
 
-/** Escalate a call that redirects where invoices are delivered. */
-export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
+/**
+ * Delivery fields a body EMPTIES: named, but with null or a blank string.
+ *
+ * Split out because the axis was blind in one direction. `presentFields` requires a non-empty
+ * value, so `invoiceEmail: "attacker@example.com"` escalated and needed `full` mode, while
+ * `invoiceEmail: null` on the same endpoint stayed `reversible` and went through in the default
+ * mode. Same field, same axis, and both change which human receives the next invoice — one to a
+ * chosen address, the other to whatever the API falls back to. Only one of them was gated.
+ *
+ * `undefined` deliberately does not count, and the reason is narrower than it looks: JSON cannot
+ * carry it, so a key with an undefined value never survives the wire and never reaches a handler
+ * from a real client. It is not that absence is handled elsewhere — `omittedReplacementFields`
+ * treats a present-but-undefined key as SUPPLIED, so it would not appear there either.
+ *
+ * Both null and the empty string count, even though only one of them clears anything. Measured
+ * against `PATCH /api/customers/{id}` on tenant 2783, seeding an address and sending each form:
+ * `invoiceEmail: ""` cleared it, `invoiceEmail: null` was a no-op that left the address in place,
+ * and `invoiceEmail: " "` answered 400 "Validation failed". So the value that empties a billing
+ * address is the one that looks like a mistake, and the deliberate-looking one does nothing.
+ *
+ * This gate is about the CALLER'S INTENT, which is why both are escalated. Someone who wants the
+ * address left alone omits the field; someone who names it with an empty value is asking for it to
+ * go. Whether this API honours that differs by endpoint — the same divergence the lead endpoints
+ * show, where PATCH ignores null and the PUT setters clear on it — and a guard that only covered the
+ * form that happens to work today would reopen the moment another endpoint honoured the other one.
+ */
+export function invoiceDeliveryClearedFields(body: unknown): string[] {
+  return [
+    ...new Set(
+      inspectableObjects(body).flatMap((candidate) =>
+        Object.entries(candidate)
+          .filter(
+            ([key, value]) =>
+              INVOICE_DELIVERY_FIELDS.has(key.toLowerCase()) &&
+              // Exactly complementary to presentFields, which is the point: it counts a field as
+              // SET when the value is neither undefined, nor null, nor blank once stringified. So
+              // "cleared" has to be everything else a present key can hold, or a value falls
+              // between the two and the axis calls it neither direction. Review found the gap with
+              // `invoiceEmail: []` and `invoiceEmail: [""]` — both stringify blank, neither is a
+              // string, so both went through as an ordinary write. The API would almost certainly
+              // reject them, but "the server upstream will refuse it" is a borrowed guarantee.
+              value !== undefined &&
+              (value === null || String(value).trim() === ""),
+          )
+          .map(([key]) => key),
+      ),
+    ),
+  ];
+}
+
+/** Whether a path is one where an invoiceEmail decides delivery. Mirrors inPaymentRoutingScope. */
+export function inInvoiceDeliveryScope(path: string): boolean {
+  return pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)));
+}
+
+/**
+ * Escalate a call that changes where invoices are delivered — in either direction.
+ *
+ * `partialBody` is what makes the clearing half safe to have, and it took a false positive to work
+ * out. The rule started as "naming a delivery field with an empty value escalates, on any method
+ * that can overwrite what is stored". On `PUT /api/orders/{id}` that made EVERY possible body
+ * irreversible: `invoiceEmail` is a documented optional field there, so a body either omits it —
+ * which a replacement stores as empty — or names it, and naming it is either a new address or an
+ * empty one. All four cases escalated, there is no curated order-update tool, and so an agent in the
+ * default mode asked to change an order's due date had no legal move left except delete and
+ * recreate. That is worse than the edit being guarded.
+ *
+ * The distinguishing question is not the method, it is whether the body is the WHOLE RECORD:
+ *
+ *   - In a PARTIAL body — a PATCH, or a curated tool's arguments, which are always partial because
+ *     the tool reads and merges — naming `invoiceEmail` with an empty value can only mean "make it
+ *     empty". Someone who wants it left alone omits it. So it escalates.
+ *   - In a REPLACEMENT body, an empty `invoiceEmail` is indistinguishable from faithfully carrying
+ *     back an address that is already empty, which is the common case and exactly what this server
+ *     tells callers to do ("GET the record first, merge your changes over it, and send the whole
+ *     thing"). So it does not escalate, and the replacement-omission gate in reai_request is the
+ *     mechanism there instead: it lists every field the body leaves out, refuses by default, and
+ *     needs an explicit opt-in.
+ *
+ * What that leaves uncovered, stated rather than glossed: a caller who deliberately empties a set
+ * address through a replacement PUT is not escalated, because nothing in the request distinguishes
+ * them from the round-trip above. Closing it would mean reading the record inside the policy check
+ * and comparing — which makes an allow/refuse decision depend on a second network call and on what
+ * to do when that call fails. Not worth it here: the curated tools carry the intent-bearing path,
+ * and the omission gate covers the silent one.
+ */
+export function classifyInvoiceDelivery(
+  pathRisk: Risk,
+  path: string,
+  body: unknown,
+  // Required, with no default, for the same reason the method used to be: this is the parameter that
+  // decides whether the clearing half applies, and a default would decide it silently for whichever
+  // call site forgot. The compiler names them instead.
+  partialBody: boolean,
+): Risk {
   // Only a reversible write can be escalated, the same rule classifyWithBody applies
   // and states: "blocking a read because a stray field was passed alongside it would be
   // a false positive". These two guarded on irreversible alone, so a GET carrying an
@@ -855,8 +979,28 @@ export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unkn
   // mode people point at a live business. reai_request accepts a body on any method, so
   // it was reachable, and it blocked exactly the safe operation.
   if (pathRisk !== "reversible") return pathRisk;
-  if (!pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)))) return pathRisk;
-  return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
+  if (!inInvoiceDeliveryScope(path)) return pathRisk;
+  if (invoiceDeliveryFields(body).length > 0) return "irreversible";
+  if (!partialBody) return pathRisk;
+  return invoiceDeliveryClearedFields(body).length > 0 ? "irreversible" : pathRisk;
+}
+
+/**
+ * Every way a call can change invoice delivery, with the direction, for error messages.
+ *
+ * One function rather than three call sites assembling their own lists, because the message and the
+ * classification disagreeing about WHY a call was refused is a bug this repo has already shipped
+ * once — a refusal naming `iban` for a body that also armed a send.
+ */
+export function invoiceDeliveryChanges(body: unknown, partialBody: boolean): string[] {
+  const changes: string[] = [];
+  const set = invoiceDeliveryFields(body);
+  if (set.length > 0) changes.push(`${set.join(", ")} set to a new address`);
+  if (partialBody) {
+    const cleared = invoiceDeliveryClearedFields(body);
+    if (cleared.length > 0) changes.push(`${cleared.join(", ")} emptied`);
+  }
+  return changes;
 }
 
 function presentFields(
@@ -1016,12 +1160,32 @@ export function curatedArgsEscalate(
         "confirm the new bank details against something outside this conversation",
       );
     }
-    if (classifyInvoiceDelivery("reversible", path, args) === "irreversible") {
+    // A curated tool's arguments are always PARTIAL, whatever HTTP method it uses underneath: every
+    // one of these tools reads the record and merges, so a caller who wants a field left alone
+    // leaves the argument out. That makes naming it with an empty value unambiguous intent to empty
+    // it — including for reai_update_subscription, whose endpoint is a whole-record PUT.
+    //
+    // Except on a POST, where there is no stored address to redirect. Without that exception
+    // reai_create_subscription refused `invoiceEmail: ""` in the default mode, which is the same
+    // false positive the classifier's own docstring records fixing for PUT /api/orders/{id}: a call
+    // that changes nothing, blocked in the mode people point at a live business.
+    if (
+      classifyInvoiceDelivery("reversible", path, args, method.toUpperCase() !== "POST") ===
+      "irreversible"
+    ) {
+      const cleared = invoiceDeliveryClearedFields(args);
+      const isClearing = invoiceDeliveryFields(args).length === 0 && cleared.length > 0;
       add(
-        invoiceDeliveryFields(args),
-        "this changes where invoices are delivered — every future invoice goes to that " +
-          "address, and the disclosure happens later, when someone issues one normally",
-        "confirm the address with the customer through a channel you already trust",
+        isClearing ? cleared : invoiceDeliveryFields(args),
+        isClearing
+          ? "this empties where invoices are delivered — future invoices stop going to the " +
+            "address someone chose, and where they go instead is not something this server has " +
+            "measured; either way nobody finds out until one is issued"
+          : "this changes where invoices are delivered — every future invoice goes to that " +
+            "address, and the disclosure happens later, when someone issues one normally",
+        isClearing
+          ? "check with whoever set that address why it is there before removing it"
+          : "confirm the address with the customer through a channel you already trust",
       );
     }
     // The same body fields the escape hatch escalates on. This helper checked payment

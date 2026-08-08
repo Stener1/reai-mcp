@@ -1518,6 +1518,25 @@ export const QUIRKS: readonly Quirk[] = [
       "a repeated key. This server handles that for you.",
   },
   {
+    id: "invoice-email-is-cleared-by-an-empty-string-not-by-null",
+    paths: ["/api/customers/{id}"],
+    methods: ["PATCH"],
+    kind: "gotcha",
+    note:
+      "To remove a customer's invoice email, send an EMPTY STRING. Measured on tenant 2783, seeding " +
+      'an address and sending each form: `invoiceEmail: ""` cleared it, `invoiceEmail: null` was a ' +
+      'no-op that left the address in place, and `invoiceEmail: " "` answered 400 "Validation ' +
+      'failed". Omitting the field keeps it, since PATCH really does patch here. The null behaviour ' +
+      'is the documented one — the schema says "Omit or null to leave unchanged" — so the surprise ' +
+      "is the other half: the value that empties a billing address is the one that looks like a " +
+      'typo. Worth knowing that `""` is also the schema\'s declared DEFAULT for this field, so a ' +
+      "client that fills defaults in rather than omitting them clears the address without meaning " +
+      "to. Either way this server treats naming the field with an empty value as intent to change " +
+      "delivery and asks for REAI_WRITE_MODE=full, exactly as setting a new address does: the " +
+      "address someone deliberately chose stops receiving invoices, and nobody finds out until one " +
+      "is issued. Where they go instead is not something this server has measured.",
+  },
+  {
     id: "lead-patch-cannot-clear-a-field-only-the-put-setters-can",
     paths: ["/api/leads/{id}", "/api/leads/org/{orgNumber}"],
     methods: ["PATCH"],
