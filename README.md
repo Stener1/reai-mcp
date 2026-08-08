@@ -378,6 +378,11 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_unarchive_customer` | Bring an archived customer back. An archived one is invisible to the list unless you pass `archived: true` | reversible |
 | `reai_search_leads` | Prospecting: search the Norwegian company register (Brønnøysund) with this tenant's lead state on top — filter by legal form, industry, city, registration date, whether Brreg lists an accountant, whether an email or phone is on file | read |
 | `reai_get_lead` | One company by **organisation number**, with its lead state if any | read |
+| `reai_save_lead` | Start tracking a register company as a lead, with no state on it yet | reversible |
+| `reai_update_lead` | Set **or clear** status, notes, email, phone, follow-up — omit to keep, null to clear, routed to whichever endpoint actually does that | reversible |
+| `reai_log_lead_contact` | Record that contact happened (date, channel, short note). Sends nothing | reversible |
+| `reai_convert_lead` | Convert a lead into a customer, saving it first because the endpoint is id-only | reversible |
+| `reai_delete_lead` | Forget a company: status, notes, contact details and every contact event | reversible |
 | `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
 | `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
 | `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
@@ -469,7 +474,20 @@ The writes on these paths stay with `reai_request`, and are already gated: `POST
 
 Two addressing schemes exist and only one always works. An unsaved company has no id, so `GET /api/leads/null` answers `400 "Failed to convert 'id' with value: 'null'"` — the organisation number is on every row either way, which is why `reai_get_lead` takes that. And the envelope is `{items, page, hasPrevious, hasNext}` with **no total**, so "how many companies match" is not a question one call answers; the tool reports what it received and whether more exists rather than implying a figure. `pageSize` is capped at 200, above which the API answers a bare `400 "Validation failed"` naming no field, so the tool bounds it locally.
 
-Nothing in either tool contacts anybody. Placing a call is a separate internal endpoint, already classified as an external send.
+Nothing in these tools contacts anybody. Placing a call is a separate internal endpoint, already classified as an external send. `reai_log_lead_contact` *records* contact that already happened.
+
+**Writing lead state: `null` means two opposite things depending on which endpoint you use.** `PATCH /api/leads/org/{orgNumber}` documents null as "leave unchanged" and does exactly that — measured, `{notes: null, email: null, phone: null, followUpAt: null}` against a lead holding all four returned `200` and changed nothing. The `PUT` setters (`/notes`, `/follow-up`, `/contact`) clear on the same null. So the endpoint that looks like the general update is the one that cannot clear a field, and the one that clears looks like a replacement. `reai_update_lead` presents a single rule — **omit to keep, null to clear** — and sends each field wherever that intent is honoured, then says which calls it made.
+
+Four more, all measured on tenant 2783:
+
+- **`PUT .../contact` needs both of its fields in the body, every time.** A single-key body does not have one behaviour: on a lead holding an email and a phone, `{phone: null}` sent on its own was a complete **no-op** — four trials out of four, re-read after four seconds, with the phone it named still in place — while the identical body sent straight after `PUT /notes` and `PUT /follow-up` behaved as a **full replacement** and cleared the omitted email. Nothing in the request accounted for the difference. `reai_update_lead` therefore reads the lead and carries over whichever field you did not mention, so the outcome is the same under either reading.
+- **`PUT .../contact` answers `200` on an unsaved company and stores nothing.** Nearly every write materialises the lead row on first use — PATCH, `/status`, `/notes`, `/follow-up` and a contact event each turned `lead.id: null` into a real id. Contact left it null, so the email and phone were accepted and discarded. `reai_update_lead` saves the lead first before writing to a company nobody has touched.
+- **A status cannot be unset once set**, and the spec claims otherwise: `PatchLeadReq.status` says to clear it via `PUT /status` with an explicit null, which answers `400 "Validation failed"` with the old status still in place. `active` ↔ `disqualified`, or delete the lead. Passing null is refused locally with that explanation rather than forwarded.
+- **`convert` is addressable by id only** — the `/org/{orgNumber}` form answers `404 "No static resource"` — so an unsaved company cannot be converted until it has been saved. `reai_convert_lead` does that, then reads the new customer id back from the lead's `convertedCustomerId`, because the convert response body is the *company* record, not the customer. Converting twice is harmless: a repeat call, and a fresh lead for an org that already has a customer, each returned `200` without creating a second one.
+
+Undoing a conversion has an order, and it is not the obvious one: **delete the lead first, the customer second.** Deleting the customer while the converted lead still points at it *archives* it instead, reported as `"it had transactions"` — on a customer minutes old with no ledger entry, no order and no invoice, where the lead reference is the transaction. With the lead gone, the same customer deletes outright, so nothing is permanently stuck; the wrong order just leaves an archived counterparty behind.
+
+Deleting a lead is `destructive` in the sense that matters: contact events have **no delete of their own**, so `reai_delete_lead` is the only way to remove one and it takes the notes and every other event with it. A customer created by conversion survives — deleting the lead only forgets where it came from.
 
 Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
 
@@ -566,11 +584,11 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 136 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 141 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
-REAI_TOOLSETS=bookkeeping,sales    # 44 tools
+REAI_TOOLSETS=bookkeeping,sales    # 49 tools
 REAI_TOOLSETS=purchase             # 33 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
@@ -578,7 +596,7 @@ REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 136
+(unset)                            # all 141
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -589,7 +607,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **98 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **103 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
