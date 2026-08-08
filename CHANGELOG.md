@@ -7,6 +7,68 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **`scripts/audit-messages.mjs` — does the API still produce the refusal strings this repository
+  matches on?** Five consecutive iterations found a false *measured* claim in shipped guidance (the phone
+  rule three times, `skipRegistryLookup`, a quirk telling agents to strip a correct `+47`, a 404
+  translation blaming the wrong record). Every one was found by accident or by review; none by the suite.
+  The reason is structural: nineteen places in `src/` match on the **text** of a ReAI error, the unit
+  tests stub that text, and so they keep passing against a string the API no longer produces. This
+  repository shipped exactly that once — a quirk quoting `"…kan skrives uten +"` against a live
+  `"…kan skrives uten +47."`. First run: **9 of 9 triggerable messages unchanged, 0 drifted.**
+  - Every case is a request built to be **refused**, so nothing is created. The first version got that
+    claim wrong twice, and the independent review caught it: two probes issued calls this repo's own
+    `classifyRequest` calls **irreversible** — `DELETE /api/share-investments/{first row}` with no check
+    that the position had transactions (it passed only because the one position in the test tenant
+    happened to be undeletable; a clean one would have been destroyed) and `POST /api/general-sub-accounts`,
+    which was also the **wrong endpoint**, since that string is caught from a read-only GET.
+  - It reports **three** outcomes, and `INCONCLUSIVE` earned its place three times over: probes reported
+    drift because the voucher body was missing `postings[].postingDate`, then `postings[].currency`, then
+    because the loan body was missing `currency` and `interestRateAnnual`. Each time the API was
+    complaining about the *request* and never evaluated the rule, so the result names the probe as the
+    thing to fix and says `Do NOT touch` the source file. Both shapes of shape-error are recognised now —
+    `Validation failed` with `fieldErrors`, **and** `{"detail":"Failed to read request"}` with none, which
+    the first version misread as drift. Worse, that version made `DRIFT` **unreachable** whenever
+    `fieldErrors` was present, hiding the likeliest drift of all: a message moving from `detail` into
+    `fieldErrors`.
+  - Each case declares which **haystack** it compares against, because `err.message` never includes
+    `fieldErrors` while the `sales.ts` translations deliberately search the raw body — a wider haystack
+    than production's reports `OK` for a match the shipped code would miss. Each also declares the
+    **status** it expects: six sites gate on the status, so a 404 becoming a 400 kills a translation that
+    a text-only check calls fine.
+  - Cleanup is part of the result. A record that cannot be confirmed deleted **fails the run**, because
+    `DELETE /api/customers/{id}` can answer `{"outcome":"archived"}` and an archived customer is invisible
+    to the default list. The script is now in `test/smoke-cleanup.test.mjs`'s SUITES — the review pointed
+    out a third record-creating script had been written outside a guard that exists because the same
+    mistake was made three times. That guard now also recognises a `for (… of Object.entries(created))`
+    sweep, which covers every key by construction, but only when the loop really issues a delete.
+  - `test/message-drift.test.mjs` keeps the audit complete. The first version covered exactly one shape,
+    `/prose/.test(`, and the review proved it blind to `.includes`, `.exec`, `.startsWith`, a `switch`
+    over a message, and single-word Norwegian compounds — six real dependencies invisible, including
+    `loans.ts`'s wrong-table diagnosis, which needed no test data and so was never covered by the "no
+    loans in this tenant" exemption. It also accepted `pattern.includes(probe)`, so nine probe patterns
+    replaced with `/e/` satisfied everything, and floored the population at 9 against 14, so an ordinary
+    refactor hoisting regexes into constants dropped five silently. All fixed and each evasion verified.
+  - **Codex found a hole neither I nor the reviewer saw, and it was not confined to this script.** The
+    allowlist checks the tenant NUMBER on the command line; it cannot check which company the TOKEN
+    reaches. This repository's own `tenant-header-ignored-single-tenant` quirk says a token reaching
+    exactly one tenant **ignores** `X-Tenant-Id` — so `REAI_WRITE_TEST_TENANTS=2783 --tenant 2783` with a
+    token scoped to another company writes to that company while every guard passes. **Nothing in the
+    repository checked it, including the two scripts that post to the general ledger.** All three now
+    verify the token's reachable tenants first and refuse otherwise, and a test pins it for each.
+  - Also from Codex: a probe that unexpectedly **succeeds** is a safety failure, not a drift. Every case
+    is supposed to be refused, so a 2xx means the precondition changed — account 1320 no longer requiring
+    a sub-account, say — and the probe has written to real books. It now undoes what it can, reports
+    `SAFETY`, and fails the run. And a status that cannot have reached the rule (401/403/429/5xx, or a 409
+    once the probe date falls in a closed period) is INCONCLUSIVE rather than DRIFT, which is the one
+    thing this script must never get wrong. The phone probe also moved to the **contact-person** route,
+    which is where the translation is actually consumed.
+  - **What it cannot catch is now part of the contract**, in the script, the docs and here: every case is
+    a refusal, so nothing observes what the API accepts, normalises or stores. Two of the five motivating
+    failures remain out of reach — `skipRegistryLookup` drifts on a `201`, and the phone rule is a storage
+    claim.
+
 ### Fixed
 
 - **One phone rule, measured, replacing three accounts of it — one of which was false and told agents
