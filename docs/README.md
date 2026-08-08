@@ -6,7 +6,7 @@ hit something, not before you start.
 
 | Page | What is in it |
 |---|---|
-| [safety.md](safety.md) | The write policy in detail: the two places an apparently reversible call destroys something, the `PUT` omission gate, and the payment-destination field set |
+| [safety.md](safety.md) | The write policy in detail: the two places an apparently reversible call destroys something, the `PUT` omission gate, the payment-destination field set, and how a remote deployment's write ceiling composes with a sealed grant's |
 | [tools.md](tools.md) | Measured behaviour per domain — the state machines that do not report their state, the fields that replace when they look like they patch, and the `200`s that mean nothing happened |
 | [api-quirks.md](api-quirks.md) | The 105-entry quirk registry as prose: shapes that are not what their name suggests, constraints the schema omits, empty states that look like errors |
 | [discovery.md](discovery.md) | Why search has to work in Norwegian, and the three query corpora it is measured against |

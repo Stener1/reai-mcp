@@ -8,19 +8,23 @@ npm run typecheck
 npm run smoke        # read-only, end-to-end against the live API (needs a token)
 ```
 
-The suite is 760 unit tests over the write-policy classifier, the discovery ranker, spec
-search/describe, the OAuth server and every curated tool's request shaping. None of it needs network
-access or credentials: the ReAI client is faked, and the OpenAPI snapshot in `spec/` is the fixture.
+The suite covers the write-policy classifier, the discovery ranker, spec search/describe, the OAuth
+server and every curated tool's request shaping. `npm test` prints the count on the last line; it moves
+with almost every PR, which is why no figure is written down here. None of it needs network access or
+credentials: the ReAI client is faked, and the OpenAPI snapshot in `spec/` is the fixture.
 
 ## Adding a curated tool
 
 1. Add a `defineTool({...})` in the relevant `src/tools/*.ts`, declaring its `risk`.
 2. Export it from that module's array.
-3. Add it to `allTools` in `src/server.ts` if you created a new module.
+3. Add that array to the right `TOOL_GROUPS` entry in `src/server.ts` if you created a new module.
+   `allTools` is derived from `TOOL_GROUPS` plus the always-on tools, so the group is what you edit —
+   and the group is also what `REAI_TOOLSETS` selects on.
 
 Declaring `risk` correctly is the part that matters — it is what gates the tool behind
-`REAI_WRITE_MODE`. `test/docs.test.mjs` then requires the tool to appear in a README table with a
-risk column that agrees with the code, so an undocumented or mis-labelled tool fails the build.
+`REAI_WRITE_MODE`. `test/docs.test.mjs` then requires the tool to be named somewhere in the README or
+a page under `docs/`, and separately requires that no README table row mentioning it contradicts the
+code's `risk` — so an undocumented or mis-labelled tool fails the build.
 
 ## How the API surface is kept current
 

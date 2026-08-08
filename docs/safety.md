@@ -63,6 +63,33 @@ This was a real gap rather than a hypothetical: `reai_update_supplier` is declar
 
 The same re-gating now covers the fields that **arm a send**, not only the ones that redirect money. `sendEhf`, `automaticBillingGeneration` and `outputMode: "create_invoice"` escalate a curated tool exactly as they already did through `reai_request`. No shipped tool accepts one of them, so nothing was ever reachable — the gap was found while designing a subscription tool that would have been the first, which is a better moment to find it than after shipping. A test checks the mechanism against a tool of that shape rather than only sweeping today's tools, because a guard that passes vacuously is not a guard.
 
+## The remote write ceiling is the narrower of two
+
+In local stdio mode `REAI_WRITE_MODE` is the whole answer: one process, one setting. On a remote
+connector there are **two** ceilings and neither one is authoritative on its own, so every request
+takes the narrower of them.
+
+- The **grant** carries a write mode, sealed into the access token at authorization time. The consent
+  page lets the user pick one, and it can only *tighten* what the operator already allows — an
+  unparseable or unrecognised value falls back to `read-only` rather than to the ceiling, because a
+  policy primitive that fails open is worse than one that refuses.
+- The **server** carries the operator's current `REAI_WRITE_MODE`, which can change under a grant's
+  feet. Tokens are sealed and unforgeable but they are minted once and refreshable for weeks.
+
+`narrowerWriteMode(grant.writeMode, config.writeMode)` runs on every `/mcp` request, and it matters in
+both directions:
+
+- **Tightening the deployment binds tokens already issued.** Without the re-clamp, an operator who
+  redeployed from `full` to `reversible` would keep serving `full` to every outstanding token, and
+  rotating `REAI_ENCRYPTION_KEY` — which invalidates *everyone's* authorization — would be the only
+  real remedy.
+- **A permissive server never widens a grant somebody narrowed.** A user who chose `read-only` on the
+  consent page keeps `read-only` even if the deployment later moves to `full`.
+
+This lived as a module-private helper in `src/http.ts`, which exports nothing and is spawned as a
+process — so the most consequential decision in remote mode could only be reached by starting a real
+server, and nothing tested it. It is a policy primitive now, tested as one.
+
 ## The three curated merge tools
 
 Each of these wraps a PUT that replaces rather than patches, on a record carrying a payment destination that the schema does not require — so the body a rename produces is accepted and empties the account. Measured: `PUT /api/company-banks/{id} {name, countryCode, currency}` → `200`, `bban` emptied; `PUT /api/creditors/{id} {name}` → `200`, `bankAccountNumber` null. All three read the record first and merge. For the company bank the question that matters is not whether the six settable fields survive being written back — they are what is sent — but whether omitting the other twelve resets them. Measured: after a rename, `manual`, `active`, `providerType`, `eligibleForPaymentCreation` and the rest came back unchanged, and only the derived `displayName` moved. `defaultForOutgoingPayment` was false throughout and no endpoint sets it, so that one is unverified.
