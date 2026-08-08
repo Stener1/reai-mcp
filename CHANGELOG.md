@@ -9,6 +9,26 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Added
+
+- **A guard for the other direction of spec drift: a tool enum that has fallen behind the document.**
+  `test/spec-bounds.test.mjs` has always guarded looseness — a tool accepting what the API will reject, so
+  the caller gets a bare 400 instead of a reason. The mirror was unguarded and is quieter: a hardcoded
+  `z.enum` that no longer matches the document REFUSES a value the API accepts, locally, with a validation
+  error that reads like the caller's own mistake. Nothing upstream is consulted, so nothing ever corrects
+  it.
+  - There are eighteen such lists across the curated tools, seven of them added by this repository in a
+    single day: loan types, perspectives, repayment types, day-count conventions, interest treatments,
+    instrument types, event types. Each is a copy of something the document states, and a copy is a claim
+    with a shelf life — the same shape as the operation count that had to be fixed three times.
+  - **No drift today**, which is the point of adding it now rather than after a spec refresh has quietly
+    broken a domain. It reads parameters as well as bodies, following `$ref`s into
+    `components.parameters` too, since several query enums live there.
+  - Mutation-verified three ways: dropping `company_loan_to_employee` from the loan types and
+    `BOND`/`OTHER` from the instrument types each fail with the refused values named, and breaking the zod
+    unwrapping fails on a vacuity floor rather than passing on an empty set — which is precisely how the
+    documentation guard was caught one iteration ago.
+
 ### Fixed
 
 - **A number that has now been wrong three times is computed instead of maintained.** How many operations
