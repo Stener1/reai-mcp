@@ -401,3 +401,66 @@ test("intent can come from a phrase, not only from a word", () => {
     assert.equal(top.method, "POST", `"${query}" is an upload but ranked ${top.method} ${top.path} first`);
   }
 });
+
+/**
+ * Loans and the words around them, which were almost entirely unreachable.
+ *
+ * `/api/loans` answered to `lån` and `loan` and to very little else. Measured before this: `gjeld`,
+ * `avdrag`, `aksjonærlån`, `hovedstol` and `borrowing` returned NOTHING at all, and `banklån` and
+ * `ansattlån` — ordinary Norwegian compounds — ranked company-banks and the employee ledger instead.
+ * A domain nobody can name is a domain nobody can use, whatever tools it has.
+ *
+ * `renter` is the one that was actively WRONG rather than missing, and it is the reason this test
+ * exists as a named case rather than a list. It is Norwegian for interest, and it ranked
+ * `/api/agreements/rent-agreement` first: the -er rule strips it to `rent`, which matches that path
+ * segment. Norwegian for rent is `leie`, so the collision is with English, and a user asking about the
+ * interest on a loan was pointed at rent agreements — a confident wrong answer, which this repository
+ * has repeatedly found to be worse than no answer.
+ */
+test("the loan vocabulary reaches the loan endpoints", () => {
+  for (const query of [
+    "gjeld",
+    "avdrag",
+    "nedbetaling",
+    "hovedstol",
+    "borrowing",
+    "banklån",
+    "ansattlån",
+    "aksjonærlån",
+    "renter",
+    "rentesats",
+  ]) {
+    const at = rankOf(query, "GET /api/loans");
+    assert.ok(at >= 0 && at < 3, `"${query}" should reach GET /api/loans in the top 3, got ${at + 1}`);
+  }
+});
+
+test("the counterparty ledgers answer to their Norwegian names", () => {
+  // A loan's counterparty is a creditor or a debtor depending on its perspective, so these are the
+  // endpoints a caller needs next. They answered to the English words only: `creditor` found
+  // /api/creditors while `kreditor` found nothing, and `debitor` ranked a supplier-invoice cost-line.
+  for (const [query, want] of [
+    ["kreditor", "GET /api/creditors"],
+    ["kreditorer", "GET /api/creditors"],
+    ["debitor", "GET /api/debtors"],
+    ["debitorer", "GET /api/debtors"],
+  ]) {
+    const at = rankOf(query, want);
+    assert.ok(at >= 0 && at < 3, `"${query}" should reach ${want} in the top 3, got ${at + 1}`);
+  }
+});
+
+test("teaching it interest did not cost it rent", () => {
+  // The other half of a homograph fix. `renter` now means interest, and `leie` still has to mean rent
+  // — otherwise this trades one confident wrong answer for another.
+  for (const query of ["husleie", "leiekontrakt", "leieavtalen", "si opp leieavtale"]) {
+    const hits = searchOperations({ query, limit: 3 }).map((h) => `${h.method} ${h.path}`);
+    assert.ok(
+      hits.some((h) => /\/api\/agreements/.test(h)),
+      `"${query}" should still reach the agreements: ${hits.join(", ")}`,
+    );
+  }
+  // And interest must not reach the rent agreement FIRST, which is the state this fixed.
+  const first = searchOperations({ query: "renter", limit: 1 }).map((h) => h.path)[0];
+  assert.doesNotMatch(String(first), /rent-agreement/, "renter is interest, not rent");
+});
