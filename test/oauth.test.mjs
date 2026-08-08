@@ -370,6 +370,22 @@ test("a refresh token is only usable by the client it was issued to", async () =
   assert.equal(wrongClient.status, 400);
   assert.equal(wrongClient.json.error, "invalid_grant");
 
+  // Absent, not merely wrong. This is what the check missed: it read
+  // `if (clientId && clientId !== ...)`, so omitting the parameter skipped it and any
+  // holder of the token refreshed it as whatever client it liked. The
+  // authorization_code branch had the identical shape and was fixed; this one was not,
+  // and the test below asserted the 200 as if it were the intended behaviour.
+  const noClient = await provider.handleToken(
+    new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh }),
+  );
+  assert.equal(noClient.status, 400, "omitting client_id skipped the client binding");
+  assert.equal(noClient.json.error, "invalid_request");
+
+  const empty = await provider.handleToken(
+    new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: "" }),
+  );
+  assert.equal(empty.status, 400, "an empty client_id skipped the client binding");
+
   const rightClient = await provider.handleToken(
     new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: "client-1" }),
   );
@@ -442,7 +458,7 @@ test("refresh_token grant issues a fresh access token", async () => {
   const { provider, sealer } = makeProvider();
   const refresh = sealer.seal("refresh", { grant: GRANT }, 600);
   const res = await provider.handleToken(
-    new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh }),
+    new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: "client-1" }),
   );
   assert.equal(res.status, 200);
   assert.ok(res.json.access_token.startsWith("reaimcp_at."));

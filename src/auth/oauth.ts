@@ -513,8 +513,18 @@ export class OAuthProvider {
       if (!payload) {
         return err(400, "invalid_grant", "The refresh token is invalid or has expired.");
       }
-      // A refresh token is only usable by the client it was issued to.
-      if (clientId && clientId !== payload.grant.clientId) {
+      // A refresh token is only usable by the client it was issued to. Comparing the two
+      // only when client_id was present let a caller skip the check by omitting it --
+      // exactly the shape the authorization_code branch above was fixed for, kept here.
+      // RFC 6749 6 requires the check, and since every client here is public
+      // (token_endpoint_auth_methods_supported is ["none"]) client_id is REQUIRED on the
+      // request. It is not a secret, so this is a conformance and blast-radius boundary
+      // rather than a credential: whoever holds the refresh token already holds the
+      // grant. What it stops is one registered client redeeming another's token.
+      if (!clientId) {
+        return err(400, "invalid_request", "client_id is required.");
+      }
+      if (clientId !== payload.grant.clientId) {
         return err(400, "invalid_grant", "client_id does not match the refresh token.");
       }
       // A grant with no bound tenant has no tenant boundary, and /mcp now refuses it.
