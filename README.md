@@ -498,7 +498,7 @@ Most of what this server knows about ReAI was learned from a rejected request ra
 reading the spec. Rather than leave that in commit messages, it lives in
 [`src/reai/quirks.ts`](src/reai/quirks.ts) as **116 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
-170 public operations no curated tool covers. A test asserts every quirk still matches a real
+152 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
 
 Four to give the flavour: an invoice is created from an *order*, not from line items; there is no

@@ -91,7 +91,7 @@ const rankOf = (query, want) =>
 
 test("no held-out query returns nothing at all", () => {
   // The floor, and the one that matters most: a query with no results is the difference between
-  // an agent that reaches the 170 uncovered operations and one that gives up. Twelve of these
+  // an agent that reaches the 152 uncovered operations and one that gives up. Twelve of these
   // returned nothing before the vocabulary was added.
   const empty = CASES.filter(([q]) => searchOperations({ query: q, limit: 5 }).length === 0).map(
     ([q]) => q,

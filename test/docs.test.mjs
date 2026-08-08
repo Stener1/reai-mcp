@@ -175,29 +175,84 @@ test("no documentation table calls an irreversible tool reversible", () => {
 });
 
 /**
- * The number of operations no curated tool covers, which is what `reai_request` exists for.
+ * Every sentence that states how many operations no curated tool covers, checked against the number.
  *
- * Asserted because it was WRONG in two test comments — both said "the ~250 uncovered operations"
- * while the real figure is 170 — and a number nothing computes is a claim with no owner. 250
- * overstated the case by 47%, in the comments explaining why discovery matters, which is the one
- * place an inflated figure flatters the work it justifies.
+ * This is the third time that figure has been wrong. It was "~256" when the registry was small, then
+ * "~250" in two test comments while the truth was 170 — corrected once — and by the time three more
+ * toolsets had shipped the truth was 152 while **seven** places still said 170 or ~256. Each correction
+ * was accurate on the day it was written and rotted the moment curated coverage grew, which is what a
+ * hand-maintained number does.
  *
- * A band rather than an equality: the point is that the gap stays large enough to need discovery, and
- * that a curated-tool spree cannot silently make the prose wrong again. Adding curated tools moves it
- * down and that is progress, not a failure — until it leaves the band, at which point the prose needs
- * rewriting anyway.
+ * A band was the previous attempt and it was the wrong instrument: 152 sits inside 150–190, so the test
+ * stayed green while the README's stated figure was 18 too high. The band watched the WORLD when the
+ * thing that rots is the PROSE.
+ *
+ * So this reads the claims. Any "N operations no curated tool cover(s)" or "N uncovered operations" in
+ * the README, in `docs/`, or in a test file has to equal the computed figure — and there must be at
+ * least one, so deleting the sentences is not a way to pass. Adding curated tools now fails here, in a
+ * message naming every file to update, which is the only kind of reminder that survives.
  */
-test("the uncovered-operation count is what the docs and comments say", () => {
-  const publicOps = getSpecIndex().counts.public;
+test("every stated uncovered-operation count matches the registry", async () => {
+  const { readdirSync } = await import("node:fs");
+  const index = getSpecIndex();
+  const publicOps = index.counts.public;
+
+  // Declared pairs INTERSECTED with the public set, not counted raw. Subtracting a count that may
+  // include an internal operation from a count that excludes them gives a figure that is too low, and
+  // this test would then enforce it. No curated tool declares an internal path today — verified, the
+  // intersection changes nothing — so this is about the day one does, or the day a spec refresh
+  // reclassifies an endpoint.
+  const publicPairs = new Set(index.operations.filter((o) => !o.internal).map((o) => `${o.method} ${o.path}`));
   const covered = new Set();
-  for (const tool of allTools) for (const [method, path] of tool.apiPaths ?? []) covered.add(`${method} ${path}`);
+  for (const tool of allTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      if (publicPairs.has(`${method} ${path}`)) covered.add(`${method} ${path}`);
+    }
+  }
   const uncovered = publicOps - covered.size;
 
   assert.equal(publicOps, 321, "the README says 321 public operations in four places");
+
+  // Both phrasings in use, and `~` allowed so an approximate claim is caught rather than excused.
+  const CLAIM = /~?(\d+)\s+(?:public\s+)?(?:operations?\s+no curated tool covers?|uncovered operations?)/g;
+  const files = [
+    ...DOC_FILES,
+    ...readdirSync(join(repo, "test"))
+      .filter((f) => f.endsWith(".mjs"))
+      .map((f) => `test/${f}`),
+  ];
+
+  // Comment leaders stripped and whitespace collapsed BEFORE matching. Two of these sentences wrap
+  // inside a JSDoc block, and the `*` that starts the continuation line sits between the words — so the
+  // regex silently skipped them, which is the worst possible failure for a test whose whole job is
+  // catching stale prose. Found in review of this very test: it was guarding four of six claims while
+  // reporting itself satisfied.
+  const readable = (file) =>
+    readFileSync(join(repo, file), "utf8")
+      .replace(/^[ \t]*\*[ \t]?/gm, "")
+      .replace(/[ \t]*\n[ \t]*/g, " ");
+
+  const wrong = [];
+  let found = 0;
+  for (const file of files) {
+    for (const m of readable(file).matchAll(CLAIM)) {
+      found++;
+      if (Number(m[1]) !== uncovered) wrong.push(`${file}: says ${m[1]}`);
+    }
+  }
+
+  // Six today. The floor is high enough that losing one is noticed, which matters because a claim this
+  // test cannot see is indistinguishable from a claim that does not exist.
   assert.ok(
-    uncovered >= 150 && uncovered <= 190,
-    `${uncovered} operations are uncovered (${publicOps} public - ${covered.size} declared), which is ` +
-      `outside the band the comments in test/discovery-*.test.mjs describe as 170`,
+    found >= 6,
+    `only ${found} statements of the uncovered count were found — if the sentences were removed rather ` +
+      `than corrected, or a wrapped one stopped matching, this test has nothing left to guard`,
+  );
+  assert.deepEqual(
+    wrong,
+    [],
+    `${uncovered} operations are uncovered (${publicOps} public − ${covered.size} declared by curated ` +
+      `tools). These say otherwise:\n  ${wrong.join("\n  ")}`,
   );
 });
 
