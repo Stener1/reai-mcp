@@ -143,3 +143,34 @@ Three things it holds deliberately:
 - **No external request of any kind** — no CDN, font or image. Hosts render this under a strict CSP, and an accounting view should not phone anywhere.
 
 One limit, stated rather than papered over: for a bank account whose currency differs from the books', postings carry two amounts and the OpenAPI document documents neither, so which is the bank figure could not be established against any reachable tenant. The view shows both and **declines to compute a difference** instead of guessing one — a wrong difference at that moment would prompt a fabricated discrepancy posting.
+
+## Loans
+
+Five operations, and the two that matter are undocumented in the spec.
+
+`perspective` is not a label on the loan — it selects **which table `counterpartyId` is read from**. Measured on the write test tenant: `borrower` resolves the id against creditors and answers `404 "Creditor with id=N not found"` for a miss, `lender` resolves the same id against debtors and answers `404 "Debtor with id=N not found"`. So flipping `perspective` on an existing loan silently changes what an unchanged id means, which is why `reai_update_loan` refuses that edit unless a `counterpartyId` comes with it. The response renames the field a second time: what goes in as `counterpartyId` comes back as `creditorId` or `debtorId`, with the other null, plus a derived `counterpartyName` and `counterpartyType`.
+
+`loanType` and `perspective` are also constrained *pairs*, which nothing documents. Measured, all twelve combinations, with the derived accounts as principal / interest / accrued:
+
+| `loanType` | `borrower` | `lender` |
+|---|---|---|
+| `bank_loan` | 2220 / 8150 / 2950 (bank) | refused |
+| `owner_loan_to_company` | 2255 / 8159 / 2950 (owner) | refused |
+| `company_loan_to_owner` | refused | 1370 / 8050 / 1760 (owner) |
+| `company_loan_to_employee` | refused | 1572 / 8050 / 1760 (other) |
+| `intercompany` | 2260 / 8130 / 2950 (company) | 1320 / 8030 / 1760 (company) |
+| `other` | 2220 / 8159 / 2950 (other) | 1320 / 8050 / 1760 (other) |
+
+The lock is just the direction the name already states — a bank loan is one the company took, a company loan to the owner is one it granted — and `intercompany` and `other` say nothing about direction, so both are allowed. A wrong pair answers `400 "Lånetypen er ikke gyldig for valgt låneperspektiv"`, so `reai_create_loan` refuses it locally and says which direction the type means. `reference` is unique per company too: `400 "Lån med referanse X finnes allerede."`, explained in English rather than passed through.
+
+That account wiring is the useful half of this domain, and it is derived *once*. The trap is that `PUT` treats the accounts like every other field: **omit them and they are cleared**, and nothing re-derives them. Measured with `interestTreatment` held constant, so it is omission and nothing else: `8150`/`2950` → `null`/`null`. `principalAccountNumber` is the exception and survives, so a caller who checks one field concludes the wrong thing about the other two.
+
+This was first written up here as a consequence of switching `interestTreatment` to `capitalize`, because that is when it was first seen, and re-measuring is what corrected it: carrying the accounts through a switch to `capitalize` keeps them, and omitting them clears them with the treatment untouched. The treatment has nothing to do with it.
+
+So the hazard belongs to the raw endpoint, and this server already has two layers against it — both checked live rather than assumed. `reai_update_loan` merges, so a partial edit carries the accounts back; and `reai_request` refuses the same `PUT` through its omission gate, which named all ten missing fields including the three accounts. Producing the broken state required `clearOmittedFields: true`, the deliberate override, which is the right amount of difficulty. When the read tools do report a loan as inconsistent it came from the ReAI UI, another client, or that override, and the repair is to pass the numbers explicitly.
+
+`PUT /api/loans/{id}` replaces rather than patches — measured, a body of only the nine required fields nulled `description` and `maturityDate` and reverted `repaymentType`, `dayCountConvention`, `interestTreatment` and `relatedParty` to their defaults — so `reai_update_loan` reads the loan and merges, like the other replacement `PUT`s here.
+
+`relatedParty` is never inferred: it stayed `false` on a `company_loan_to_owner` with everything else set. `reai_create_loan` sets it for owner, employee and intercompany loans unless told otherwise, and says that it did, because the field feeds note disclosure and a filed record that understates a related party is wrong in a way nobody reads back. A company loan to a personal shareholder also has tax consequences a bookkeeping record does not capture; the tool says to ask an accountant rather than pretending to know.
+
+Deleting is real: `204`, then `404`, with no archive and no reversal. Order matters — a creditor or debtor still referenced by a loan cannot be deleted, measured `409 "Cannot delete creditor that is referenced by one or more loans"`.

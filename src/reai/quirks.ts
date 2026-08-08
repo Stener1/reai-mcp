@@ -1518,6 +1518,81 @@ export const QUIRKS: readonly Quirk[] = [
       "a repeated key. This server handles that for you.",
   },
   {
+    id: "loan-type-and-perspective-are-constrained-pairs",
+    paths: ["/api/loans", "/api/loans/{id}"],
+    methods: ["POST", "PUT"],
+    statuses: [400],
+    kind: "validation",
+    note:
+      'IF the 400 reads "Lånetypen er ikke gyldig for valgt låneperspektiv", it is this: loanType and ' +
+      "perspective are not independent, and that sentence is the whole explanation the API gives for a " +
+      "rule nothing documents. (This endpoint has other 400s — a principalAmount under 0.01, a " +
+      "reference over 30 characters, a malformed date — and they are not this one.) Four of the six " +
+      "types are direction-locked, because the name already states the direction. Measured, all twelve " +
+      "combinations, on tenant 2783:\n\n" +
+      "  bank_loan                 borrower only\n" +
+      "  owner_loan_to_company     borrower only\n" +
+      "  company_loan_to_owner     lender only\n" +
+      "  company_loan_to_employee  lender only\n" +
+      "  intercompany              either\n" +
+      "  other                     either\n\n" +
+      "The counterparty is looked up BEFORE this check, so a bad counterpartyId hides it: a wrong id " +
+      "answers 404 first and the pair error only appears once the id is real.\n\n" +
+      "`reference` is unique per company as well, and says so in Norwegian too: " +
+      '400 "Lån med referanse X finnes allerede." reai_create_loan checks the pair locally and ' +
+      "translates both.",
+  },
+  {
+    id: "creditor-or-debtor-referenced-by-a-loan-cannot-be-deleted",
+    paths: ["/api/creditors/{id}", "/api/debtors/{id}"],
+    methods: ["DELETE"],
+    statuses: [409],
+    kind: "workflow",
+    note:
+      'A 409 "Cannot delete creditor that is referenced by one or more loans" means what it says, and ' +
+      "the order is the fix: delete the loans first, then the counterparty. Measured on tenant 2783 for " +
+      "a creditor; a debtor is the mirror image, since a loan names exactly one of the two depending on " +
+      "its perspective.\n\n" +
+      "reai_list_loans shows which loans point where — read `creditorId` and `debtorId` rather than " +
+      "looking for `counterpartyId`, which is the request-side name only. Deleting a loan is a real " +
+      "delete (204, then 404), so this is not an archive that keeps the link alive.",
+  },
+  {
+    id: "loan-delete-is-real-not-an-archive",
+    paths: ["/api/loans/{id}"],
+    methods: ["DELETE"],
+    kind: "irreversible",
+    note:
+      "204, and the id then reads 404. A real delete: no archive, no {\"outcome\"} variant, nothing " +
+      "that brings the record back, and no endpoint here recreates one with its history. Measured on " +
+      "tenant 2783.\n\n" +
+      "The derived ledger accounts go with it, along with `outstandingPrincipal` and " +
+      "`accruedInterestBalance`. Since the API derives those accounts only at CREATION, re-recording " +
+      "the loan afterwards will derive them from the new loanType and perspective rather than restore " +
+      "what was there.",
+  },
+  {
+    id: "loan-interest-accounts-are-cleared-by-omission",
+    paths: ["/api/loans/{id}"],
+    methods: ["PUT"],
+    kind: "irreversible",
+    note:
+      "This PUT replaces, and the LEDGER ACCOUNTS are part of what it replaces. Omitting " +
+      "interestExpenseAccountNumber and accruedInterestAccountNumber clears them — measured with " +
+      "interestTreatment held constant, so it is the omission and nothing else: 8150 and 2950 both " +
+      "became null. Nothing re-derives them; the API derives the accounts once, at creation, from " +
+      "loanType and perspective. The loan is then self-contradictory (a treatment that posts interest, " +
+      "with no account to post it to) and no response says so.\n\n" +
+      "principalAccountNumber is the EXCEPTION and survives omission, which is what makes this easy to " +
+      "miss: check that one field and the record looks intact.\n\n" +
+      "Worth knowing what this is NOT. It was first recorded here as a consequence of switching " +
+      "interestTreatment to capitalize, because that is when it was first seen. Re-measured: carrying " +
+      "the accounts through a switch to capitalize keeps them, and omitting them clears them with the " +
+      "treatment untouched. The treatment is irrelevant.\n\n" +
+      "reai_update_loan reads the loan and merges, so it cannot cause this. Use it, or send every " +
+      "account number on every PUT.",
+  },
+  {
     id: "expense-voucher-unlink-is-broken-upstream",
     // Both endpoints, because the note is about both: the same 409 comes back from the plain expense
     // delete, which is the operation `reai_reverse_expense` actually sends. Registering only the

@@ -13,9 +13,9 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **145 tools**: 138 curated across eleven accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **150 tools**: 143 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **106 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **110 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 
@@ -388,6 +388,35 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 | `reai_get_opening_balance` | The ledger position the books start from — returned as a **voucher**, which is why its `DELETE` can reverse — or a plain answer that none is recorded | read |
 | `reai_get_annual_accounts` | Whether a submission record exists for a fiscal year, and its `status` — the API's states are `incomplete`, `complete`, `signing`, `signed` and `submitted_in_other_system`, so existing is not the same as filed | read |
 
+### Loans
+
+| Tool | What it does | Risk |
+|---|---|---|
+| `reai_list_loans` | Every loan, borrowed and lent, with its derived ledger accounts and resolved counterparty. `query` filters **locally** — the endpoint takes no parameters | read |
+| `reai_get_loan` | One loan, and a warning when its `interestTreatment` has no account to post interest to | read |
+| `reai_create_loan` | Record a loan. Infers `relatedParty` for owner, employee and intercompany loans, which the API never does | irreversible |
+| `reai_update_loan` | Change a loan. Reads and merges, because the `PUT` replaces; refuses a `perspective` flip without a new `counterpartyId` | irreversible |
+| `reai_delete_loan` | Remove the record outright — measured `204`, then `404` | irreversible |
+
+**`perspective` decides which table `counterpartyId` is read from.** `borrower` reads it as a **creditor** id, `lender` as a **debtor** id — measured, the wrong one answers `404 "Creditor with id=N not found"` or `"Debtor with id=N not found"`. The response then renames it again, to `creditorId` or `debtorId`.
+
+**The ledger accounts are derived once and never again.** Leave them out and the API wires up the standard Norwegian accounts from `loanType` and `perspective` — measured `2220`/`8150`/`2950` for a borrower bank loan, `1370`/`8050`/`1760` for a company loan to the owner. But a `PUT` that **omits** the interest accounts clears them, with `interestTreatment` untouched, and nothing re-derives them — while `principalAccountNumber` survives omission, so checking one proves nothing about the others. `reai_update_loan` merges and so cannot cause this; both read tools report a loan that arrives already unwired: [docs/tools.md](docs/tools.md#loans).
+
+**`loanType` and `perspective` are constrained pairs.** Four of the six types are direction-locked, and the API refuses the rest with a Norwegian `400`. `reai_create_loan` refuses locally instead, with the reason:
+
+| `loanType` | `borrower` | `lender` |
+|---|---|---|
+| `bank_loan` | 2220 / 8150 / 2950 | refused |
+| `owner_loan_to_company` | 2255 / 8159 / 2950 | refused |
+| `company_loan_to_owner` | refused | 1370 / 8050 / 1760 |
+| `company_loan_to_employee` | refused | 1572 / 8050 / 1760 |
+| `intercompany` | 2260 / 8130 / 2950 | 1320 / 8030 / 1760 |
+| `other` | 2220 / 8159 / 2950 | 1320 / 8050 / 1760 |
+
+`reference` is also unique per company — another Norwegian-only `400`, explained in English by the tool.
+
+These are `irreversible` even though a loan record posts nothing — measured, the voucher count did not move — because the record is the basis for later interest and repayment postings, and the measurement was taken on a company with no loan history to lose. The two reads are unaffected.
+
 **Shape is not membership.** Every `countryCode` argument here checks two uppercase letters and every `currencyCode` three, because a pattern is all the spec documents — so `UK` passes local validation and is refused by the API, which is the worst division of labour available. These two endpoints are the actual lists. Both `404`s above are answers rather than failures, and only for the documented message: [docs/tools.md](docs/tools.md#reference-data-and-company-state).
 
 ### Optional: the one UI surface
@@ -396,16 +425,17 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count in this README is the default 145, and `REAI_ENABLE_UI=1` registers a 146th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
+It sits outside the default surface rather than inside it — every count in this README is the default 150, and `REAI_ENABLE_UI=1` registers a 151st tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
-Anything not listed — projects, timesheets, share investments, loans — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+Anything not listed — projects, timesheets, share investments, debtors — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 145 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 150 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
 REAI_TOOLSETS=bookkeeping,sales    # 49 tools
 REAI_TOOLSETS=purchase             # 33 tools
+REAI_TOOLSETS=bank                 # 21 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
@@ -413,10 +443,11 @@ REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
-(unset)                            # all 145
+REAI_TOOLSETS=loans                # 12 tools
+(unset)                            # all 150
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary` and `reference`; listing all eleven is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference` and `loans`; listing all twelve is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## Configuration
 
@@ -441,7 +472,7 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **106 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **110 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 170 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.

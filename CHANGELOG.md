@@ -9,7 +9,109 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**145 tools**: 138 across eleven accounting domains, plus 7 always-on.
+### Added
+
+- **Loans: five curated tools, and four constraints the spec does not state.** `/api/loans` had no
+  curated coverage and was listed as blocked on "no data" — both test companies have zero loans. With
+  a write tenant available the domain could be *measured* instead of guessed, which is the only way any
+  of this was findable.
+  - **`perspective` decides which table `counterpartyId` is read from.** The spec types it
+    `integer/int32` and stops. Measured: `borrower` resolves it against **creditors** and answers
+    `404 "Creditor with id=N not found"`, `lender` against **debtors** with `"Debtor with id=N not
+    found"`. So flipping `perspective` silently changes what an unchanged id means — `reai_update_loan`
+    refuses that edit unless a `counterpartyId` comes with it. The response then renames the field
+    again, to `creditorId` or `debtorId`.
+  - **`loanType` and `perspective` are constrained pairs**, and a wrong pair answers
+    `400 "Lånetypen er ikke gyldig for valgt låneperspektiv"` — a Norwegian sentence about an
+    undocumented rule. All twelve combinations measured: `bank_loan` and `owner_loan_to_company` are
+    borrower-only, `company_loan_to_owner` and `company_loan_to_employee` lender-only, `intercompany`
+    and `other` either. `reai_create_loan` refuses locally and says which direction the type means.
+    Worth noting the counterparty is looked up *first*, so a bad id hides the pair error entirely —
+    which is why an earlier probe of the same matrix read as all-valid and had to be redone.
+  - **`reference` is unique per company**, also Norwegian-only:
+    `400 "Lån med referanse X finnes allerede."` Translated, with a pointer at `reai_list_loans`.
+  - **The ledger accounts are derived once and cleared by omission.** Leave them out at creation and
+    the API wires up the standard Norwegian accounts from `loanType` and `perspective` — 2220/8150/2950
+    for a borrower bank loan, 1370/8050/1760 for a company loan to the owner, and the full matrix is in
+    the module doc. But `PUT` treats them like any other field: omitting
+    `interestExpenseAccountNumber` and `accruedInterestAccountNumber` clears them, nothing re-derives
+    them, and the loan is then self-contradictory with no response saying so.
+    `principalAccountNumber` survives omission, so checking one field proves nothing about the others.
+  - That last one was **first written up as a consequence of switching `interestTreatment` to
+    `capitalize`**, because that is when it was first seen. Re-measuring with the treatment held
+    constant corrected it: omission is the cause and the treatment is irrelevant — carrying the
+    accounts through a `capitalize` switch keeps them. The wrong version had already reached the module
+    doc, the README and `docs/tools.md` before the second measurement.
+  - `relatedParty` is never inferred: it stayed `false` on a `company_loan_to_owner` with everything
+    else set. `reai_create_loan` sets it for owner, employee and intercompany loans unless told
+    otherwise, and says that it did.
+  - Classified `irreversible`, matching the existing policy tier for `/api/loans`, even though the
+    measurement points the other way — creating a loan posted **nothing** (voucher count 0 before and
+    after) and `DELETE` answers 204 then 404. Not relaxed: the measurement came from a company with no
+    loan history, says nothing about deleting a loan with repayments against it, and the record is the
+    basis for postings rather than reference data. The two reads are unaffected.
+  - **Six review findings, all accepted, two of them data-integrity bugs in the merge — which is
+    exactly where the risk was said to be.**
+    - *Reclassifying carried the old classification's accounts.* Accounts are derived at creation only,
+      so moving a borrower loan from `bank_loan` to `owner_loan_to_company` kept 2220/8150 where the API
+      would have derived 2255/8159 — a loan filed against the wrong balance-sheet line by an edit that
+      reads like a relabelling. The merge cannot tell a derived number from a deliberate one, so the
+      tool now refuses a reclassification that names no accounts, and quotes what the API would have
+      derived for the new combination so the caller can accept or override.
+    - *The same edit bypassed the `relatedParty` inference*, which ran only on create: changing a
+      `bank_loan` to `intercompany` carried the stored `false` into the write and left note disclosure
+      understating a related party — the exact harm the create-side inference exists to prevent,
+      reachable by an edit instead of a creation.
+    - *An idempotent restatement was refused.* `{ perspective: "borrower", … }` on a loan that was
+      already borrower demanded a redundant `counterpartyId` for a table change that was not happening.
+      Keyed on the value changing now, not on the field being present.
+    - *`companyBankId` could not be cleared*, though `LoanReq` permits null and omission means "keep"
+      under the merge — so a supported edit was unreachable. Now nullable.
+    - *The local filter did not search `description`*, which both the tool description and the argument
+      description promised it did.
+    - *The update tool declared only its `PUT`*, not the `GET` it always performs first — understating
+      what it touches, and excluding it from the merge-tool invariant that finds read-merge-write tools
+      by exactly that pair.
+    - Each of the four behavioural fixes is mutation-verified on its own.
+  - **An independent review then found nine more, and one of its findings is that my own summary was
+    overstated.** "All three write-ups are fixed" was wrong: there was a fourth copy of the corrected
+    `interestTreatment` claim, in the create tool's own description — the string an agent actually
+    reads. Deleted.
+    - The **wrong-table 404 was passed through raw**, which is the failure this whole domain is about.
+      A debtor id sent with `perspective: "borrower"` answered `404 "Creditor with id=78 not found"`
+      from a POST, where a 404 reads as a missing endpoint rather than a misdirected id. Both write
+      tools now name the id space they searched and which perspective would fit. The duplicate-reference
+      translation was in `create` only, leaving the curated `PUT` **worse informed than `reai_request`**,
+      whose quirk covers it — both now share one helper.
+    - `counterpartyNote` **fabricated a perspective**: an absent value read as "borrower", so the tool
+      asserted a classification for a record it could not classify. Three cases now, not two.
+    - The README said *"Anything not listed — projects, timesheets, share investments, **loans** — is
+      reachable through the escape hatch"* three sections below a Loans table, and the `REAI_TOOLSETS`
+      block gained no `loans` row (nor `bank`, which was missing already — `test/docs.test.mjs` only
+      checks rows that are present, so an omission is invisible to CI).
+    - **Twelve behaviours survived deliberate mutation of `src/`** — the matrix and the merge were
+      pinned, but nothing that only *speaks* to the caller was: the lender branch of
+      `missingInterestAccounts` (no test drove a lender loan through either read tool), the `accrue`
+      arm, the `capitalize` exemption, the list's whole INCONSISTENT note, both error translations, the
+      no-op guard, three of the four inherently-related types, and the quirk scoping that PR #97 exists
+      to protect. Ten new tests, each verified against the mutation it was written for.
+    - Two quirks added (110 total) for hazards recorded only where the wrong reader would look: the
+      `409` on deleting a creditor or debtor still referenced by a loan was documented in
+      `reai_delete_loan`'s description, which nobody deleting a creditor will read, and the loan `DELETE`
+      being a real delete had no quirk at all. The pair quirk now leads with its trigger, since it fires
+      on any 400 from those paths and there are other 400s.
+    - `companyBankId` was flagged as possibly unverified — the one settable field with no evidence a GET
+      returns it, and this API has a habit of renaming fields in responses. Measured: it comes back
+      under the same name, so the merge preserves it. The same read turned up `outstandingPrincipal` and
+      `accruedInterestBalance`, which no endpoint here moves — so repayments happen in the ReAI UI, and
+      the read tools now say so.
+  - Two new quirks (108 total) so the escape hatch warns as well, and both hazards were verified live
+    through the real tools: the direction rule and duplicate reference are refused before anything is
+    sent, a partial edit keeps all nine untouched fields, and reaching the unwired state at all
+    required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
+    omission gate, which named all ten omitted fields.
+
+**150 tools**: 143 across twelve accounting domains, plus 7 always-on.
 
 ### Added
 

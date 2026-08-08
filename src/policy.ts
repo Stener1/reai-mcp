@@ -95,6 +95,15 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   "/api/manual-reconciliations",
   "/api/bank-transactions",
   "/api/assets",
+  // Loans stay here after being measured, which is worth recording because the measurement points
+  // the other way. On the write test tenant, creating a loan posted NOTHING -- voucher count 0
+  // before and 0 after -- and DELETE answered 204 with the id then reading 404, so by the letter of
+  // the reversible list ("records an agent can safely create and clean up") a loan record qualifies.
+  // It is not moved, for two reasons. The measurement was taken on a company with no loan history at
+  // all, and says nothing about deleting a loan that has repayments or interest postings against it;
+  // and the record is the BASIS for those postings rather than reference data, so the cost of being
+  // wrong is asymmetric. Reads are unaffected -- reai_list_loans and reai_get_loan are read tier --
+  // so what this costs is creating a loan in the default mode, which is a deliberate act anyway.
   "/api/loans",
   "/api/share-investments",
   "/api/ledger",
