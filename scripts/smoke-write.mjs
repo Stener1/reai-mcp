@@ -336,7 +336,9 @@ async function main() {
           sub?.invoiceComment === `${STAMP} invoice note` &&
           sub?.internalComment === `${STAMP} internal note` &&
           sub?.lines?.length === 2 &&
-          sub?.lines?.[1]?.discount === 10;
+          // Keyed on rowNumber, not position: the assertion should not depend on the API
+          // returning lines in order.
+          sub?.lines?.find((l) => l.rowNumber === 2)?.discount === 10;
         report(
           "the lines and comments survived an edit that replaces",
           survived,
@@ -357,6 +359,21 @@ async function main() {
           "emptying the billing lines is refused, naming deactivate instead",
           emptied.isError === true && /reai_deactivate_subscription/.test(textOf(emptied)),
           firstLineOf(textOf(emptied)),
+        );
+
+        // An ARMED subscription's substance must not be editable with sending off. Arming it needs
+        // full mode, so this suite cannot create an armed one — what it can prove is the other
+        // half: on an UNARMED subscription the same change goes through, so the gate above is
+        // scoped rather than blanket. The armed refusal itself is covered in the unit tests and in
+        // smoke-full-write.
+        const unarmedSubstance = await client.callTool({
+          name: "reai_update_subscription",
+          arguments: { id: created.subscriptionId, intervalMonths: 6 },
+        });
+        report(
+          "changing the substance of an UNARMED subscription is ordinary work",
+          !unarmedSubstance.isError,
+          firstLineOf(textOf(unarmedSubstance)),
         );
 
         // And the invoice-delivery gate still bites on an explicit change in this mode.

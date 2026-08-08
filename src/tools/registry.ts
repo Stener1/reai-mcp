@@ -572,13 +572,13 @@ export function startOfYear(): string {
  * (the account number), and the address sub-resources (the postcode). The safe shape is always
  * the same: read the record, overlay the changes, send back everything settable.
  *
- * Five tools now do that, and THREE use this: reai_update_company_bank, reai_update_creditor and
- * reai_set_supplier_address. reai_set_customer_address and reai_update_agreement still hand-roll
- * it — the first predates this helper and keeps its own parts list, the second dispatches on a
- * template and merges into a sub-object of a wrapper, which is a different enough shape that
- * folding it in would complicate both. Worth saying rather than claiming the de-duplication is
- * finished: it is half done, deliberately for the agreement tool and only by inertia for the
- * customer one.
+ * Six tools now do that, and FOUR use this: reai_update_company_bank, reai_update_creditor,
+ * reai_set_supplier_address and reai_update_subscription. reai_set_customer_address and
+ * reai_update_agreement still hand-roll it — the first predates this helper and keeps its own parts
+ * list, the second dispatches on a template and merges into a sub-object of a wrapper, which is a
+ * different enough shape that folding it in would complicate both. Worth saying rather than
+ * claiming the de-duplication is finished: it is two thirds done, deliberately for the agreement
+ * tool and only by inertia for the customer one.
  *
  * `settable` matters as much as the merge: a response usually carries more than its request
  * accepts — CompanyBankRes has 18 properties against CompanyBankReq's six — so echoing a GET

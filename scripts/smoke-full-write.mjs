@@ -462,6 +462,20 @@ async function main() {
       );
     }
 
+    // NOT covered live: an ARMED subscription being edited.
+    //
+    // Attempted, and the attempt is the finding. Creating one requires REAI_ALLOW_EXTERNAL_SEND —
+    // arming IS a send, so reai_create_subscription with automaticBillingGeneration=true is refused
+    // here exactly as it should be, and reai_request cannot get round it because the body-field gate
+    // catches the same flag. So neither write suite can construct the precondition without enabling
+    // the switch these runs exist to keep off.
+    //
+    // Which is worth stating rather than leaving as a gap: the state the gate protects is reachable
+    // in practice — somebody arms a subscription in the ReAI UI, and an agent later edits it — but
+    // not from here. The refusal is covered in test/subscriptions.test.mjs, driven through the
+    // handler with allowExternalSend false, including the scoping (a comment edit still works) and
+    // the three ways to disarm.
+
     // --- 4z. Agreement terms, on real data -----------------------------------
     //
     // The PUT behind this REPLACES the agreement, which is why the tool reads and merges and

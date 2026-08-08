@@ -125,6 +125,26 @@ const SUBSCRIPTION_REQUIRED = [
 ] as const;
 
 /**
+ * Changes that alter what an unattended invoice SAYS or who RECEIVES it.
+ *
+ * Used only when the stored subscription is already armed: editing these on a machine that
+ * invoices by itself reaches a third party as surely as arming it does, and the argument gate
+ * cannot see it, because the arming is on the record rather than in the call.
+ *
+ * Deliberately not every field. A comment, a due-day or an unlinked project changes nothing
+ * anybody receives, and gating those would make ordinary maintenance need the send flag.
+ */
+const BILLING_SUBSTANCE = [
+  "customerId",
+  "serviceRecipients",
+  "subscriptionLines",
+  "startDate",
+  "intervalMonths",
+  "billingTiming",
+  "currencyCode",
+] as const;
+
+/**
  * What SubscriptionLineReq accepts, of the eleven a response line carries.
  *
  * vatTitle, vatRate and amounts are computed and have no place in a write — which is the trap in
@@ -197,8 +217,11 @@ const writeFields = {
     .boolean()
     .optional()
     .describe(
-      "Arms EHF/Peppol transmission of what this subscription produces. Needs full mode and " +
-        "external send enabled; an EHF document cannot be recalled.",
+      "Arms EHF/Peppol transmission of what this subscription produces. Setting it to TRUE needs " +
+        "full mode and external send enabled; an EHF document cannot be recalled. Setting it to " +
+        "false needs neither — turning a send off is not a send — which is how the arming is " +
+        "removed. (automaticBillingGeneration's description already scopes its claim this way; " +
+        "this one read as though both directions were gated.)",
     ),
   projectId: z.number().int().positive().optional().describe("Tag billing to a project."),
   agreementId: z.number().int().positive().optional().describe("Link to an agreement."),
@@ -423,9 +446,17 @@ const updateSubscription = defineTool({
     "write, and nothing changed, discounts included.\n\n" +
     "IT DOES NOT DISARM ANYTHING. outputMode, automaticBillingGeneration and sendEhf are carried " +
     "over as they are, so a subscription that was invoicing on its own still is after an ordinary " +
-    "edit. Pass those fields explicitly to change them — passing sendEhf: false or " +
-    "automaticBillingGeneration: false is how you stop it, and neither needs " +
-    "REAI_ALLOW_EXTERNAL_SEND because turning a send OFF is not a send.\n\n" +
+    "edit. Pass those fields explicitly to change them: sendEhf: false, " +
+    'automaticBillingGeneration: false and outputMode: "create_order" are the three ways to stop ' +
+    "it, and none of them needs REAI_ALLOW_EXTERNAL_SEND, because turning a send OFF is not a " +
+    "send.\n\n" +
+    "What DOES need it: changing who or what an ARMED subscription bills. When the stored " +
+    "subscription already arms a send, a change to customerId, serviceRecipients, " +
+    "subscriptionLines, startDate, intervalMonths, billingTiming or currencyCode is refused " +
+    "without REAI_ALLOW_EXTERNAL_SEND — it alters what an unattended invoice will say and who " +
+    "receives it, and the write ladder cannot see that on its own, because the arming is on the " +
+    "record rather than in the call. Comments, due-days and project links are not gated: they " +
+    "reach nobody.\n\n" +
     "Between the read and the write an edit made in the ReAI UI is silently reverted; there is no " +
     "version field to prevent it.",
   risk: "reversible",
@@ -442,9 +473,13 @@ const updateSubscription = defineTool({
     // something — and optionalShape adds only `.optional()`, which left no way at all to detach a
     // subscription from its project or agreement. A capability this change removed by accident.
     //
-    // Exactly the five the document types as nullable. daysUntilDue, periodAlignment, sendEhf and
-    // serviceRecipients are NOT nullable, so null stays rejected for them — an empty array is how
-    // service recipients are cleared, and the merge lets an explicit [] win.
+    // These five because they are the OPTIONAL fields the document types as nullable. Twelve of
+    // the seventeen are nullable there — the other seven are all REQUIRED, where the merge treats
+    // null as missing and refuses, so making them nullable would buy nothing and read as
+    // permission. (An earlier version of this comment said "exactly the five the document types as
+    // nullable", which was simply wrong about the document.) daysUntilDue, periodAlignment,
+    // sendEhf and serviceRecipients are optional and NOT nullable, so null stays rejected for
+    // them; recipients are cleared with an empty array, which the merge lets win.
     agreementId: writeFields.agreementId.nullable().optional(),
     projectId: writeFields.projectId.nullable().optional(),
     invoiceEmail: writeFields.invoiceEmail.nullable().optional(),
@@ -501,14 +536,34 @@ const updateSubscription = defineTool({
           ),
         )
       : undefined;
+    // Four differences between the shapes, not three: `companyName` becomes `name`, and
+    // `companyId` is response-only. Absent values are filtered like the lines are — every
+    // SubscriptionServiceRecipientRes property is optional, so echoing an undefined through would
+    // build a recipient with no organizationNumber, which the API refuses with
+    // "400 serviceRecipients[0].organizationNumber". Measured.
     const storedRecipients = Array.isArray(record.serviceRecipients)
-      ? (record.serviceRecipients as Array<Record<string, unknown>>).map((r) => ({
-          organizationNumber: r.organizationNumber,
-          // `companyName` on the way out, `name` on the way in.
-          name: r.companyName ?? r.name,
-          countryCode: r.countryCode,
-        }))
+      ? (record.serviceRecipients as Array<Record<string, unknown>>).map((r) => {
+          const mapped: Record<string, unknown> = {};
+          const name = r.companyName ?? r.name;
+          if (r.organizationNumber !== undefined && r.organizationNumber !== null) {
+            mapped.organizationNumber = r.organizationNumber;
+          }
+          if (name !== undefined && name !== null) mapped.name = name;
+          if (r.countryCode !== undefined && r.countryCode !== null) mapped.countryCode = r.countryCode;
+          return mapped;
+        })
       : undefined;
+    // organizationNumber is required on a recipient, so one that cannot supply it cannot be
+    // carried back — better to say so than to send a body the API will refuse.
+    const unwritable = storedRecipients?.find((r) => r.organizationNumber === undefined);
+    if (unwritable && !Object.hasOwn(changes, "serviceRecipients")) {
+      return fail(
+        `Subscription ${id} has a service recipient with no organizationNumber ` +
+          `(${JSON.stringify(unwritable.name ?? "unnamed")}), and the API requires one on every ` +
+          `recipient sent. Nothing was written, because carrying it back would be refused. Pass ` +
+          `serviceRecipients explicitly to say what the list should be.`,
+      );
+    }
 
     const { merged, kept, missing, given: givenKeys } = mergeForReplacement({
       existing: {
@@ -544,6 +599,36 @@ const updateSubscription = defineTool({
     }
     const lineCount = lines.length;
 
+    // The arming lives on the RECORD, and the argument gate only sees this CALL — so preserving an
+    // armed state through a merge is invisible to it. reai_activate_subscription below closes
+    // exactly this gap for exactly this reason, and it applies here too.
+    //
+    // What changed: before this tool merged, outputMode and automaticBillingGeneration were
+    // REQUIRED arguments, so every update that succeeded with sending off had necessarily
+    // DISARMED the subscription — preserving the arming was refused. Now preservation is the
+    // default, which means an unattended invoicing machine could be repointed at a different
+    // customer, given a different amount, or backdated, in the default mode with
+    // REAI_ALLOW_EXTERNAL_SEND unset. The booleans are unchanged; who is billed, how much and on
+    // what schedule are not, and those are what actually reach a third party.
+    //
+    // Scoped to the substance of the billing: editing an internal comment on an armed
+    // subscription changes nothing anyone receives, and refusing that would make the tool
+    // unusable for the benign edits it exists for.
+    const storedArmed: string[] = [];
+    if (record.automaticBillingGeneration === true) storedArmed.push("automaticBillingGeneration");
+    if (record.outputMode === "create_invoice") storedArmed.push('outputMode="create_invoice"');
+    if (record.sendEhf === true) storedArmed.push("sendEhf");
+    const billingSubstance = givenKeys.filter((k) => (BILLING_SUBSTANCE as readonly string[]).includes(k));
+    if (storedArmed.length > 0 && billingSubstance.length > 0) {
+      assertTransmitAllowed(
+        "external",
+        ctx.config.allowExternalSend,
+        `changing ${billingSubstance.join(", ")} on subscription ${id}, which carries ` +
+          `${storedArmed.join(", ")} and bills on its own — this changes what an unattended ` +
+          `invoice will say and who receives it`,
+      );
+    }
+
     const res = await ctx.client.request<Record<string, unknown>>({
       method: "PUT",
       path: `/api/subscriptions/${id}`,
@@ -566,8 +651,14 @@ const updateSubscription = defineTool({
     if (armed.length > 0) {
       notes.push(
         `Still armed: ${armed.join(", ")}. This edit did not change that — it carries over what ` +
-          `was already set, so the subscription goes on billing as it was. Pass those fields ` +
-          `explicitly to stop it.`,
+          `was already set. ` +
+          // "goes on billing" is false for a stopped subscription, and reai_list_subscriptions is
+          // careful about that distinction. Measured: a replacement does NOT reactivate one.
+          (record.active === false
+            ? `The subscription is INACTIVE, so it is not billing; if it is activated again it will ` +
+              `bill on its own. Editing it does not reactivate it — measured.`
+            : `So it goes on billing as it was.`) +
+          ` Pass those fields explicitly to change them.`,
       );
     }
     return ok(res.data, { note: notes.join("\n\n") });

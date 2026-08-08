@@ -5,7 +5,7 @@ import { allTools, registeredTools } from "../dist/server.js";
 import { classifyRequest } from "../dist/policy.js";
 
 /**
- * The four tools that wrap a replacement, and the helper they share.
+ * The tools that wrap a replacement, and the helper they share.
  *
  * Gating the two destructive PUTs left no safe route to a rename — `reai_request` in `full` mode
  * was the only one — so these close a gap the previous change named rather than fixed.
@@ -353,13 +353,19 @@ test("a supplier address change missing a required part is refused locally", asy
 test("every tool that wraps a replacement declares the read it depends on", () => {
   // A merge tool without a declared GET understates what it does, and the pattern is the whole
   // point: read, merge, write.
-  for (const name of [
-    "reai_update_company_bank",
-    "reai_update_creditor",
-    "reai_set_supplier_address",
-    "reai_set_customer_address",
-    "reai_update_agreement",
-  ]) {
+  // Derived, not listed: a hardcoded set went stale the moment reai_update_subscription joined,
+  // and it would have passed while omitting it. Any tool declaring both a GET and a write on the
+  // SAME resource is merging, which is the property this is about.
+  const merging = registeredTools.filter((t) => {
+    const paths = t.apiPaths ?? [];
+    return (
+      paths.some(([m]) => m === "GET") &&
+      paths.some(([m]) => m === "PUT" || m === "PATCH") &&
+      t.name.startsWith("reai_")
+    );
+  });
+  assert.ok(merging.length >= 5, `expected the merge tools; found ${merging.map((t) => t.name)}`);
+  for (const name of merging.map((t) => t.name)) {
     const paths = tool(name).apiPaths ?? [];
     assert.ok(
       paths.some(([m]) => m === "GET"),
