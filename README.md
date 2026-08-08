@@ -441,6 +441,26 @@ But `employmentLines` inside that patch **is** a replacement. An employee with t
 
 Two more measured on the live tenant. Creating an employee with nothing but a name and an email is **not** a blank record: `dateOfEmployment` defaults to today and an employment relation with one empty line is created automatically, typed `ordinaertArbeidsforhold` — and employment is what the a-melding reports, so that date is not cosmetic. And `phone` is normalised to E.164 (`"22 33 44 55"` and `"0047 22334455"` both become `"+4722334455"`, a foreign number is fine) while an **unparseable** value is stored as `null` with a `200` and no error — `"nonsense"` silently replaced a stored number — so the tools read the phone back and say so when it did not survive.
 
+| `reai_list_users` · `reai_get_user` | Who can reach the books, with roles and effective permissions — including people who have not accepted their invitation yet | read |
+| `reai_list_roles` · `reai_list_permissions` | The roles this tenant can grant and what each actually carries, and the permission catalogue behind the codes | read |
+| `reai_list_user_invitations` | Invitations sent and not yet accepted — standing access waiting to be claimed | read |
+
+**The roles do not mean what their names suggest**, and this is the one finding here worth reading before granting anyone access. Measured on a live tenant by comparing the permission *sets*, not the counts:
+
+```
+ROLE_OWNER         51 permissions   not assignable
+ROLE_TENANT_ADMIN  51 permissions   assignable   — identical to OWNER, 0 missing, 0 extra
+ROLE_ACCOUNTANT    51 permissions   assignable   — identical to OWNER, 0 missing, 0 extra
+ROLE_AUDITOR       20 permissions   assignable   — read-only
+ROLE_EMPLOYEE       6 permissions   assignable   — self-scoped only
+```
+
+So "accountant" is not a narrower role than "admin": both are exactly the owner's access, including `tenant:user:write` — the permission to invite further people. The only thing `ROLE_OWNER` has that they do not is that it cannot be handed out. `reai_list_roles` computes that comparison against *your* tenant rather than repeating these numbers, so it stays true if the roles change.
+
+Permission codes carry their scope as a prefix, and it is easy to miss: `self:…` reaches only the acting user's own records — their employee card, their expenses, their timesheets — while `tenant:…` reaches the company's. `ROLE_EMPLOYEE`'s six permissions are all `self:`.
+
+The writes on these paths stay with `reai_request`, and are already gated: `POST /api/users` **invites** an email address and is classified as an external send, `PUT /api/users/{id}` changes what someone may do, and `DELETE` revokes access. Granting privilege is the one write in this API where what leaves the tenant is not data but authority.
+
 Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
 
 ### Fixed assets
@@ -536,19 +556,19 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 125 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 130 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 38 tools
 REAI_TOOLSETS=purchase             # 33 tools
-REAI_TOOLSETS=organisation         # 20 tools
+REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 125
+(unset)                            # all 130
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -559,7 +579,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **92 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **93 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

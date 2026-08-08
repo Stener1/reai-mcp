@@ -256,6 +256,32 @@ async function main() {
         { tenantId },
         (t) => /department\(s\)\.$/m.test(t) || /No departments\. That is not the same/.test(t),
       ],
+      // Access control. Every tenant has at least the owner, so unlike departments there IS a
+      // non-empty answer to assert — and the role comparison is computed from the response, so
+      // this checks the computation against whatever the live tenant actually returns.
+      [
+        "reai_list_users",
+        { tenantId },
+        (t) => /\d+ user\(s\) with access\./.test(t) && !/UNKNOWN/.test(t),
+      ],
+      [
+        "reai_list_roles",
+        { tenantId },
+        // The finding this toolset exists for: an assignable role identical to the owner's. If ReAI
+        // ever narrows ROLE_ACCOUNTANT this check fails, which is the point — the claim is measured
+        // per tenant rather than asserted from a comment.
+        (t) => /IDENTICAL to ROLE_OWNER/.test(t) && /ASSIGNABLE role\(s\) carry everything/.test(t),
+      ],
+      [
+        "reai_list_permissions",
+        { tenantId },
+        (t) => /permission\(s\), in \d+ group\(s\)/.test(t) && /tenant-wide and \d+ self-scoped/.test(t),
+      ],
+      [
+        "reai_list_user_invitations",
+        { tenantId },
+        (t) => /pending invitation\(s\)/.test(t) || /No pending invitations/.test(t),
+      ],
       [
         "reai_list_employees",
         { tenantId },
@@ -453,34 +479,62 @@ async function main() {
     // ok() emits `note + "\n\n" + body`, but a tool that adds no note emits the body
     // alone — reai_get_bank_transaction does, and assuming the blank line reported its
     // perfectly good record as "not a record". Try both, whole text first.
+    // Every blank-line-separated block, tried from the LAST backwards, because ok() puts the body
+    // last and the notes before it. The previous version tried the whole text and then everything
+    // after the FIRST blank line, which assumed a single note paragraph — and reai_get_user emits
+    // two, so its body never parsed and the check reported "id=1853 but the response is not a
+    // record" about a record it had just fetched by that id. The write suite's jsonOf was rewritten
+    // for the same reason when quirk notes started appearing above bodies; this is the same bug in
+    // the other script.
     const parseBody = (text) => {
-      const attempts = [text];
-      const at = text.indexOf("\n\n");
-      if (at !== -1) attempts.push(text.slice(at + 2));
-      for (const candidate of attempts) {
+      const blocks = text.split("\n\n");
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const candidate = blocks[i].trim();
+        if (!candidate.startsWith("{") && !candidate.startsWith("[")) continue;
         try {
           return JSON.parse(candidate);
         } catch {
-          /* try the next framing */
+          /* not the body after all — keep looking rather than giving up on the first candidate */
         }
+      }
+      // Some tools return the body alone, with no note at all.
+      try {
+        return JSON.parse(text);
+      } catch {
+        return undefined;
+      }
+    };
+    // Shared with firstIdOf below, because the two must agree about what an id is called: users are
+    // keyed `userId` and agreements `agreementId`, and having the finder look at one field while the
+    // verifier looked at another is how this produced "id=1853 → but the response is not a record"
+    // for a record it had just fetched by that id.
+    const ID_FIELDS = ["id", "userId", "agreementId", "voucherId", "customerId", "supplierId"];
+    const idOfRecord = (body) => {
+      for (const field of ID_FIELDS) {
+        if (typeof body?.[field] === "number") return body[field];
       }
       return undefined;
     };
     const isRecordWithId = (text, id) => {
       const body = parseBody(text);
-      return !!body && !Array.isArray(body) && typeof body === "object" && body.id === id;
+      return !!body && !Array.isArray(body) && typeof body === "object" && idOfRecord(body) === id;
     };
     const describeRecord = (text, id) => {
       const body = parseBody(text);
       if (Array.isArray(body)) return `id=${id} but the response is a LIST of ${body.length}`;
       if (!body || typeof body !== "object") return `id=${id} but the response is not a record`;
-      return body.id === id ? `id=${id}` : `asked for ${id}, got ${JSON.stringify(body.id)}`;
+      return idOfRecord(body) === id ? `id=${id}` : `asked for ${id}, got ${JSON.stringify(idOfRecord(body))}`;
     };
+    // A hardcoded `.id` returned null for users, so the getter was SKIPPED — silently, on every
+    // run, for a tenant that plainly has a user to fetch, and the skip line said "returned nothing
+    // to fetch", which was false. Same shape as the field-name bugs in the write suite's stray
+    // sweep: a check that cannot run reads exactly like a check that passed.
     const firstIdOf = (text) => {
       const parsed = parseBody(text);
       if (parsed === undefined) return null;
       const rows = Array.isArray(parsed) ? parsed : (parsed?.content ?? parsed?.items ?? []);
-      return Array.isArray(rows) && rows.length ? (rows[0]?.id ?? null) : null;
+      if (!Array.isArray(rows) || rows.length === 0) return null;
+      return idOfRecord(rows[0]) ?? null;
     };
     // Three of these default their window to the current year (vouchers) or the last year
     // (orders, invoices), so on a tenant whose records are older the list comes back empty
@@ -496,6 +550,7 @@ async function main() {
       ["reai_list_supplier_invoices", "reai_get_supplier_invoice", { tenantId }],
       ["reai_list_departments", "reai_get_department", { tenantId }],
       ["reai_list_employees", "reai_get_employee", { tenantId }],
+      ["reai_list_users", "reai_get_user", { tenantId }],
       ["reai_list_assets", "reai_get_asset", { tenantId }],
     ]) {
       try {

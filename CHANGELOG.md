@@ -9,9 +9,47 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**125 tools**: 118 across ten accounting domains, plus 7 always-on.
+**130 tools**: 123 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Access control** (5 read tools) — `reai_list_users`, `reai_get_user`,
+  `reai_list_roles`, `reai_list_permissions`, `reai_list_user_invitations`. The
+  Users domain was entirely uncovered, and "who can reach our books" is a question
+  worth being able to ask.
+  - **The roles do not mean what their names suggest.** Measured on a live tenant by
+    comparing the permission *sets* rather than their sizes: `ROLE_TENANT_ADMIN` and
+    `ROLE_ACCOUNTANT` are **identical to `ROLE_OWNER`** — 51 permissions each, zero
+    missing, zero extra — and both are assignable while `ROLE_OWNER` is not. So
+    inviting someone as an accountant grants exactly what the owner has, including
+    `tenant:user:write`, the permission to invite more people. `ROLE_AUDITOR` is 20
+    read-only permissions and `ROLE_EMPLOYEE` is 6, all self-scoped.
+  - `reai_list_roles` **computes that comparison against your tenant** rather than
+    repeating the numbers, so it stays true if ReAI ever narrows a role — and a test
+    feeds it a narrowed `ROLE_ACCOUNTANT` to prove the claim comes from the data.
+  - Permission codes are scoped by prefix: `self:` reaches only the acting user's own
+    records, `tenant:` the company's. And the catalogue is not the whole vocabulary —
+    measured, `GET /api/users/permissions` returns 45 codes, all `tenant:`, while the
+    owner's effective set is 51, so the six `self:` codes appear on users and roles
+    but are never published.
+  - The writes stay with `reai_request` and are already gated: `POST /api/users`
+    invites an email address and is classified as an external send, `PUT` changes what
+    someone may do, `DELETE` revokes. A test asserts no curated tool reaches anything
+    but `GET` under `/api/users`.
+
+### Fixed
+
+- **`scripts/smoke.mjs` silently skipped a check it could have run.** Its
+  `firstIdOf` looked only for `id`, and users are keyed `userId`, so
+  `reai_get_user` was reported as "returned nothing to fetch on this tenant" — a
+  false statement about a tenant that plainly has a user. The id field list is now
+  shared with the verifier, which had the same assumption and would otherwise have
+  failed the check it had just fetched by that id.
+- **And its `parseBody` assumed a single note paragraph.** It tried the whole text
+  and then everything after the *first* blank line, so a tool emitting two notes had
+  its body never parse. It now scans blank-line-separated blocks from the last
+  backwards — the same fix the write suite's `jsonOf` needed when quirk notes started
+  appearing above bodies.
 
 - **A stray sweep in the write suite**, and the reason it was needed. Eight orders
   had been sitting on the test tenant since an ad-hoc subscription-billing probe,
