@@ -120,10 +120,13 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "gotcha",
     note:
       "The phone number is NORMALISED, not merely validated: 90123456, 004790123456 and " +
-      "+4790123456 are all stored as +4790123456, so the value does not come back as it was sent. " +
-      "The schema's \"international E.164 format\" describes the stored form, not what has to go " +
-      "in. An invalid Norwegian number is refused in Norwegian: \"Skriv inn et gyldig " +
-      "telefonnummer. Norske nummer kan skrives uten +47.\"",
+      "+4790123456 are all stored as +4790123456, so a Norwegian value does not come back as it was " +
+      "sent. But the field really is international — +46701234567, +14155552671, +447911123456 and " +
+      "+4915112345678 were all accepted and stored EXACTLY as sent. Only the shorthand is " +
+      "Norwegian: bare digits are read as +47, so a bare foreign number is refused.\n" +
+      "The refusal is \"Skriv inn et gyldig telefonnummer. Norske nummer kan skrives uten +47.\" — " +
+      "and it says that for a malformed SWEDISH or American number too, so do not read it as \"this " +
+      "number must be Norwegian\" and start rewriting country codes.",
   },
   {
     id: "contact-person-patch-blank-clears-null-keeps",

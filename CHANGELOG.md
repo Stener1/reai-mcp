@@ -7,6 +7,18 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Fixed
+
+- **The contact-phone refusal told an agent the number had to be Norwegian, on a field that is
+  international.** Codex caught it on PR #110 and the measurement is decisive: `+46701234567`,
+  `+14155552671`, `+447911123456` and `+4915112345678` are all accepted and stored **exactly as sent**.
+  Only the shorthand is Norwegian — bare digits are read as `+47`, which is why a bare foreign number is
+  refused — and the rejection is worded in Norwegian *whatever the number's country*, including for a
+  malformed Swedish or American one. The old translation read that wording as evidence about the number
+  and advised that "a Norwegian one starts with 4 or 9", which for a foreign contact points at the one
+  part that was correct. It now says the field is international, shows the accepted foreign forms, and
+  says plainly that the Norwegian wording is not a signal.
+
 ### Added
 
 - **Contact persons on a customer** — `reai_list_customer_contacts`, `reai_get_customer_contact`,
