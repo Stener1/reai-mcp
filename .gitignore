@@ -14,7 +14,9 @@ spec/index.json
 
 # Agent scratch space. `.claude/worktrees/` holds real git worktrees, and `git add -A`
 # stages one as a gitlink — a 160000 entry pointing at a commit nobody can fetch, which
-# is how a submodule that does not exist gets committed to a public repo.
+# is how a submodule that does not exist gets committed to a public repo. It happened twice, on
+# #93 and #95, and Codex caught both -- `git submodule status` exits fatally on a gitlink with no
+# .gitmodules entry, and a fresh checkout carries an unexplained empty path.
 .claude/worktrees/
 coverage/
 *.tsbuildinfo

@@ -226,14 +226,8 @@ const apiNotes = defineTool({
 });
 
 /**
- * Add spec-derived guidance to a failed `reai_request` call.
- *
- * Only for 4xx: a 5xx or a transport failure says nothing about the payload, and
- * guessing at required fields there would be noise.
- */
-/**
- * Tenant ids the caller put in the PATH or QUERY, which the bound-tenant check would
- * otherwise never see.
+ * Tenant ids the caller named ANYWHERE in the request, which the bound-tenant check
+ * would otherwise never see.
  *
  * `resolveTenantId` governs exactly one thing: the value that becomes the X-Tenant-Id
  * header. But twelve operations name a tenant as a path or query parameter, and
@@ -242,35 +236,104 @@ const apiNotes = defineTool({
  * every client company. So a grant bound to one tenant could still address another by
  * naming it in the path, making the consent page's promise narrower than it reads.
  * Found independently by two reviewers, which is usually a sign it is real.
+ *
+ * It used to look only where the SPEC declared a tenant parameter, which left two holes,
+ * both reachable through `reai_request`:
+ *
+ *   1. An **unresolvable path** checked nothing at all — `if (!op) return []`. Unknown
+ *      paths are deliberately permitted here (the API decodes and normalises before
+ *      routing, and refusing what this server cannot resolve would refuse legitimate
+ *      calls), so the one gate that must not depend on resolution was the one that did.
+ *   2. An **undeclared parameter** was invisible even on a resolved path. The spec
+ *      declares what the API documents, not what it reads.
+ *   3. The **body** was never looked at, so `POST /api/x {"tenantId": 9999}` passed.
+ *
+ * Now it scans the path segments, every query key and the whole body for anything named
+ * like a tenant, regardless of what the spec says. Measured against the live API on
+ * 2026-08-08: `tenantId`, `tenant_id`, `tenant` and `companyId` in the query are all
+ * ignored by ReAI, a body tenant id is ignored, and a duplicate `X-Tenant-Id` does not
+ * displace the first — so today none of these actually reach another company's books.
+ * That is upstream behaviour we neither control nor get told about when it changes, and
+ * this gate is the promise the consent page makes to a user. So it fails closed on the
+ * request rather than trusting the API to keep ignoring it.
+ *
+ * Deliberately NOT keyed on risk: a read across the boundary is the disclosure the
+ * boundary exists to prevent.
+ *
+ * The key vocabulary is narrow on purpose -- see `namesATenant` below for the fields a
+ * looser rule would have refused.
  */
 function tenantIdsInRequest(
   method: HttpMethod,
   path: string,
   query: Record<string, unknown> | undefined,
+  body?: unknown,
 ): number[] {
-  const op = resolveOperation(method, path);
-  if (!op) return [];
-
   const found: number[] = [];
-  const specSegments = op.path.split("/").filter(Boolean);
-  const actualSegments = path.split("/").filter(Boolean);
+  /** A tenant id is a positive integer. Anything else cannot address a company. */
+  const push = (raw: unknown) => {
+    if (typeof raw === "number" && Number.isInteger(raw)) found.push(raw);
+    else if (typeof raw === "string" && /^\d+$/.test(raw)) found.push(Number(raw));
+  };
+  /**
+   * Keys that name the ACTING tenant. Deliberately narrow, and the narrowness is
+   * measured rather than guessed: a plain /tenant/i over the spec's own vocabulary
+   * matches `tenantNoticeMonths` (a small integer, so a rental agreement with three
+   * months' notice would read as "tenant 3"), `tenantPhone` (eight digits),
+   * `enkOwnerPersonIdentifierOnTenant` (eleven), and `tenantBirthDate` — all of which
+   * would refuse ordinary writes on a bound connection. A boundary that fires on
+   * innocent bodies gets switched off, so it fires on tenant ids only.
+   *
+   * `companyId` is excluded for a stronger reason: it is a DIFFERENT id space. `Tenant`
+   * itself has a `companyId`, and `CustomerRes`, `SupplierRes` and
+   * `SubscriptionServiceRecipientRes` all carry one for a counterparty. Treating it as a
+   * tenant would refuse the most ordinary write there is.
+   */
+  const namesATenant = (key: string) => /^(client_?)?tenant_?id$/i.test(key) || /^tenant$/i.test(key);
 
-  for (const param of op.params ?? []) {
-    if (!/tenant/i.test(param.name)) continue;
-    if (param.in === "path") {
+  // Path parameters still need the spec, because only the spec says which segment is the
+  // parameter. A path that resolves to nothing contributes nothing here -- and that is
+  // exactly why the query and body scans below do not consult it.
+  const op = resolveOperation(method, path);
+  if (op) {
+    const specSegments = op.path.split("/").filter(Boolean);
+    const actualSegments = path.split("/").filter(Boolean);
+    for (const param of op.params ?? []) {
+      if (param.in !== "path" || !namesATenant(param.name)) continue;
       const index = specSegments.indexOf(`{${param.name}}`);
-      const value = index >= 0 ? actualSegments[index] : undefined;
-      if (value !== undefined && /^\d+$/.test(value)) found.push(Number(value));
-    } else if (param.in === "query") {
-      // Query keys bind case-insensitively on this API.
-      const entry = Object.entries(query ?? {}).find(
-        ([k]) => k.toLowerCase() === param.name.toLowerCase(),
-      );
-      const raw = entry?.[1];
-      if (typeof raw === "number" && Number.isInteger(raw)) found.push(raw);
-      else if (typeof raw === "string" && /^\d+$/.test(raw)) found.push(Number(raw));
+      if (index >= 0) push(actualSegments[index]);
     }
   }
+
+  // Query keys bind case-insensitively on this API, and are scanned whether or not the
+  // spec declares them.
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (namesATenant(key)) push(value);
+  }
+
+  // The body, at any depth: a tenant id nested under a wrapper object is the same
+  // request. Cycles are possible in a hand-built argument object, so nodes are tracked.
+  const seen = new Set<unknown>();
+  const walk = (node: unknown, depth: number) => {
+    if (node === null || typeof node !== "object" || depth > 8 || seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (namesATenant(key)) push(value);
+      // A `tenant` key may hold the whole Tenant object rather than its id, and that
+      // object's own primary key is `id` -- which nothing else here matches, since a bare
+      // `id` means the record being written almost everywhere else.
+      if (/^tenant$/i.test(key) && value !== null && typeof value === "object" && !Array.isArray(value)) {
+        push((value as Record<string, unknown>).id);
+      }
+      walk(value, depth + 1);
+    }
+  };
+  walk(body, 0);
+
   return found;
 }
 
@@ -461,13 +524,16 @@ const request = defineTool({
     // boundary rather than about the write ladder.
     const boundTenant = ctx.config.boundTenantId;
     if (boundTenant !== undefined) {
-      const named = tenantIdsInRequest(method, canonical.decodedPathname, args.query).filter(
-        (id) => id !== boundTenant,
-      );
+      const named = tenantIdsInRequest(
+        method,
+        canonical.decodedPathname,
+        args.query,
+        args.body,
+      ).filter((id) => id !== boundTenant);
       if (named.length > 0) {
         return okText(
           `This connection is bound to tenant ${boundTenant}, and this request names tenant ` +
-            `${named.join(", ")} in its path or query. Refused.\n` +
+            `${named.join(", ")} in its path, query or body. Refused.\n` +
             `The tenant chosen at authorization is a boundary, not a default, so it cannot be ` +
             `overridden per call — including by an endpoint that takes a tenant id as a parameter.`,
         );

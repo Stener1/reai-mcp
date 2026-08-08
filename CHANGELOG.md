@@ -124,6 +124,42 @@ All notable changes to `reai-mcp`. Format loosely follows
     "a suffix rule only fires on a stem the table knows" already covers it and more strictly, and
     dropping the gate did not fail the draft. A test that survives the mutation it was written for is
     not coverage.
+- **The tenant boundary asked the OpenAPI spec for permission to check.** A connection bound to one
+  company at authorization time must not address another, and `reai_request` can name a tenant in
+  four places: the header, the path, the query and the body. The gate read the spec to find where a
+  tenant *was declared*, which left three holes, each reachable:
+  - **An unresolvable path checked nothing at all** — `if (!op) return []`. Unknown paths are
+    deliberately permitted here (the API decodes and normalises before routing, so refusing what
+    this server cannot resolve would refuse legitimate calls), which made the one gate that must not
+    depend on resolution the only one that did.
+  - **An undeclared query parameter was invisible even on a resolved path.** `GET /api/vouchers`
+    declares `startDate`, `endDate`, `voucherType`, `registeredBy`, `includeReversed` — and no
+    tenant parameter, so `?tenantId=<other>` was not looked at. The spec declares what the API
+    documents, not what it reads.
+  - **The body was never read**, so `POST /api/x {"tenantId": <other>}` passed the boundary.
+  - Now the path segments, every query key and the whole body (at depth, through arrays, and
+    through a `tenant` object's own `id`) are scanned regardless of what the spec says. Each hole
+    mutation-tested separately: restoring the give-up-on-unresolved line, removing the query scan
+    and removing the body walk each fail their own test and nothing else.
+  - **None of the three currently reaches another company's books.** Measured against the live API
+    on 2026-08-08 with a read-only probe on tenant 2634 and a nonexistent tenant id: `tenantId`,
+    `tenant_id`, `tenant` and `companyId` in the query are all ignored, a body tenant id is ignored,
+    and a duplicate `X-Tenant-Id` does not displace the first — 57 vouchers returned in every case.
+    That is upstream behaviour nobody here controls or is told about when it changes, and this gate
+    is the promise the consent page makes to a user, so it fails closed on the request rather than
+    trusting ReAI to keep ignoring it.
+  - **The key vocabulary is narrow, and the narrowness is measured rather than guessed.** A plain
+    `/tenant/i` over the spec's own field names matches `tenantNoticeMonths` (a small integer — a
+    rental agreement with three months' notice would have read as "tenant 3"), `tenantPhone` (eight
+    digits), `enkOwnerPersonIdentifierOnTenant` (eleven) and `tenantBirthDate`, so it would have
+    refused ordinary writes. `companyId` is excluded for a stronger reason: it is a different id
+    space — `Tenant` itself has a `companyId`, and `CustomerRes`, `SupplierRes` and
+    `SubscriptionServiceRecipientRes` each carry one for a counterparty. A boundary that fires on
+    innocent bodies gets switched off. There is a test asserting a body carrying all six of those
+    fields goes through.
+  - Not keyed on risk, which is unchanged but now asserted: a *read* across the boundary is the
+    disclosure the boundary exists to prevent.
+  - Also deleted a doc comment the code it described had left behind, above `tenantIdsInRequest`.
 
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
