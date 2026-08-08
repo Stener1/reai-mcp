@@ -1543,6 +1543,25 @@ export const QUIRKS: readonly Quirk[] = [
       "translates both.",
   },
   {
+    id: "counterparty-names-are-not-unique",
+    paths: ["/api/creditors", "/api/debtors"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "A duplicate NAME is accepted here. Measured on tenant 2783: two debtors called the same thing " +
+      "were created as ids 19 and 20, with no complaint. So creating before listing can leave two " +
+      "records nobody can tell apart, and an instruction like \"use the debtor called X\" then names no " +
+      "record at all.\n\n" +
+      "Worth stating because this API is INCONSISTENT about it: an employee name is unique and answers " +
+      '409 "Ansatt med dette navnet finnes allerede". Both of these endpoints do document a 409 without ' +
+      "saying what causes it, and nobody here has reproduced one, so a 409 should be read rather than " +
+      "assumed to be a name collision.\n\n" +
+      "Only creditors were left untested — the measurement above is on debtors, and the mirror is an " +
+      "inference. List with GET /api/creditors or GET /api/debtors first; neither takes any parameter, " +
+      "so neither can be asked to search or to include archived rows, though `Creditor` and `Debtor` both " +
+      "carry an `archived` flag that the response shapes do not expose.",
+  },
+  {
     id: "creditor-or-debtor-referenced-by-a-loan-cannot-be-deleted",
     paths: ["/api/creditors/{id}", "/api/debtors/{id}"],
     methods: ["DELETE"],

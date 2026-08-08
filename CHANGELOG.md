@@ -9,6 +9,14 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
+### Changed
+
+- **`reai_list_creditors` and `reai_update_creditor` moved from the `purchase` toolset to `loans`.**
+  A deployment pinned to `REAI_TOOLSETS=purchase` loses both: add `loans` to keep them. `purchase` goes
+  from 33 tools to 31, `loans` from 12 to 20. The reasoning is under Added below — in short, `creditorId`
+  and `debtorId` occur once each in the whole API document, both on `LoanRes`, so a creditor is not a
+  payables concept in ReAI.
+
 ### Added
 
 - **The lender half of the loan matrix was unrecordable, and the counterparties were in the wrong
@@ -31,14 +39,52 @@ All notable changes to `reai-mcp`. Format loosely follows
     repeated names and says to choose by id.
   - The asymmetry between the two is real and visible in the shapes, not merely the tidy story the old
     comment admitted was unverified: a creditor is `{id, name, bankAccountNumber, …}`, a debtor is
-    `{id, name, …}` with no account at all. Re-measured while moving it: `PUT /api/creditors/{id} {name}`
-    — what a rename looks like — answered 200 and set `bankAccountNumber` from 15062099533 to **null**,
+    `{id, name, …}` with no account at all. Re-measured while moving it: answered 200 and set `bankAccountNumber` to **null** (the probe value, `1506 20 99533`, was supplied by this repository and fails the Norwegian mod-11 check — not anyone's account),
     which is what `reai_update_creditor`'s read-merge-write exists to prevent and why
     `reai_update_debtor` needs none.
   - Both deletes translate the `409` the ordering causes: the API says
     *"Cannot delete creditor that is referenced by one or more loans"*, which names the constraint but
     not the way out — loans first, and `reai_list_loans` shows which point where. An unrelated 409 is
     rethrown rather than explained as a loan reference, which is the PR #97 lesson.
+  - **Fifteen review findings addressed, and the first one is about my own prose.** An account number
+    appeared in a tool *description* — which ships in the MCP manifest to every connecting model — with
+    surrounding text asserting it was read off a live tenant. It was a value this repository supplied, and
+    it fails the Norwegian mod-11 check digit, so it can be nobody's account; but "measured on a live
+    tenant" next to eleven digits reads as a real counterparty's bank details in a public repo. The
+    description now carries no digits at all, and the three places that keep the number say what it is.
+    - *`reai_update_debtor` had zero coverage*, and three mutations proved it: sending `body: {}` still
+      reported *"Debtor 19 renamed to …"* because the note was built from the argument, and writing to
+      `/api/creditors/{id}` from either debtor tool went unnoticed. The notes now report what the API
+      **stored** — including "unconfirmed" when the response carries no name, and a warning when the API
+      stored something other than what was sent, since ReAI title-cases names elsewhere.
+    - *The duplicate-name detection missed the collisions that matter*: `"Kari Nordmann"` against
+      `"kari nordmann"`, and a trailing space. It now keys on a normalised name and displays the
+      original — and it no longer throws a `TypeError` out of a read tool on a list containing `null`.
+    - *"A debtor is `{id, name}` — measured" was a claim about the RESPONSE*, presented as one about the
+      record. `components.schemas.Debtor` also carries `archived` and `tenantId`, which `DebtorRes` does
+      not expose, so whether a replacing `PUT` resets `archived` is unknown and unobservable from here.
+      The argument for `reai_update_debtor` needing no merge is now the true one — `DebtorReq` accepts
+      only `name`, so the request cannot carry anything else — and the unknown is stated instead of
+      papered over. `reai_list_debtors` also says an expected-but-absent debtor may be archived, since
+      that endpoint takes no parameters and cannot be asked.
+    - *Creditor name non-uniqueness was asserted flatly and only debtors were measured.* Hedged, with the
+      counter-example named: an employee name IS unique here (`409 "Ansatt med dette navnet finnes
+      allerede"`), so ReAI is inconsistent and a mirror-image inference is not safe. Both creates also
+      document a 409 that nobody has reproduced — both now surface the API's own words rather than
+      guessing a cause, and there is a quirk (111 total) so the raw path is told too.
+    - *In the default write mode the tool invited a call the server refuses.* `bankAccountNumber` is
+      payment routing, so supplying it escalates `POST /api/creditors` to irreversible and it is rejected
+      — while the description said "set it here if you know it" and the fallback advice pointed at
+      `reai_update_creditor`, which is not even visible in that mode. Said plainly now, in the
+      description and in the README row.
+    - *Two README paragraphs became false when I edited the tables under them*: "All three read the
+      record first and merge" over a two-row table, and "These are irreversible … the two reads are
+      unaffected" over a ten-row one. Both fixed, and the risk-column guard now parses a slash-joined
+      cell — it could not see a two-tool row at all, which is how the row this PR deleted had been
+      invisible all along. Strengthening it immediately caught `irreversible + external send`.
+    - The move is a breaking change for `REAI_TOOLSETS=purchase` and now has a `### Changed` entry saying
+      so, the rethrow uses the house form rather than a `throw` smuggled into an IIFE, and
+      `reai_update_debtor` declares `idempotent`.
   - Verified live through the curated tools only, on tenant 2783: a `company_loan_to_owner` recorded
     end to end (accounts 1370/8050 derived, `relatedParty` inferred), the duplicate-name warning fired,
     deleting the referenced debtor was refused with the ordering, deleting the loan then let it through,

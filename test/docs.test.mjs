@@ -149,9 +149,18 @@ test("no documentation table calls an irreversible tool reversible", () => {
         if (!line.includes(`\`${tool.name}\``)) continue;
         if (!line.trimStart().startsWith("|")) continue;
         rowsChecked++;
+        // The risk cell is the LAST one, and a row naming two tools writes it as `read / reversible`.
+        // Matching `| reversible |` could not see that, so a bundled row was structurally invisible to
+        // this check: two of them were added in the same PR that noticed, and the row this file used to
+        // rely on (`read / **irreversible**`) had been invisible all along.
+        const cells = line.split("|").map((c) => c.trim()).filter((c) => c !== "");
+        const risk = (cells[cells.length - 1] ?? "").toLowerCase().replace(/\*/g, "");
+        // MENTIONS irreversible, rather than equals it: a real cell can read `read / reversible` for a
+        // two-tool row or `irreversible + external send` for a transmitting one, and both are correct.
+        // The failure being guarded is a cell that says reversible or read INSTEAD of irreversible.
         assert.ok(
-          !/\|\s*reversible\s*\|/.test(line) && !/\|\s*read\s*\|/.test(line),
-          `${tool.name} is irreversible but its row in ${file} says otherwise:\n  ${line.trim()}`,
+          risk.includes("irreversible"),
+          `${tool.name} is irreversible but its row in ${file} claims ${JSON.stringify(risk)}:\n  ${line.trim()}`,
         );
       }
     }

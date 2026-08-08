@@ -15,7 +15,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 - **156 tools**: 149 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **110 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **111 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 
@@ -366,6 +366,7 @@ The sharp edge here fails silently. `variantId` is optional in the schema and re
 |---|---|---|
 | `reai_update_company_bank` | Change a company account — label, currency, SWIFT, or the number itself — **without emptying `bban`** | **irreversible** |
 | `reai_set_supplier_address` | Change part of a supplier's address without dropping the postcode | reversible |
+| `reai_update_creditor` | Rename a loan counterparty **without emptying the account its repayments go to** — listed with the [loans](#loans), where it now lives | **irreversible** |
 
 Each of these wraps a `PUT` that replaces rather than patches, on a record carrying a payment destination the schema does not require — so the body an ordinary rename produces is accepted and empties the account. All three read the record first and merge. The measurements, and why the two account-carrying ones need `REAI_WRITE_MODE=full` even though they are the *safe* way to do the job, are in [docs/safety.md](docs/safety.md#the-three-curated-merge-tools).
 
@@ -396,7 +397,7 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 | `reai_create_loan` | Record a loan. Infers `relatedParty` for owner, employee and intercompany loans, which the API never does | irreversible |
 | `reai_update_loan` | Change a loan. Reads and merges, because the `PUT` replaces; refuses a `perspective` flip without a new `counterpartyId` | irreversible |
 | `reai_delete_loan` | Remove the record outright — measured `204`, then `404` | irreversible |
-| `reai_list_creditors` · `reai_create_creditor` | Counterparties the company borrows **from** — the id a `borrower` loan needs. A creditor carries the account repayments go to | read / reversible |
+| `reai_list_creditors` · `reai_create_creditor` | Counterparties the company borrows **from** — the id a `borrower` loan needs. Creating one is reversible; giving it a `bankAccountNumber` is **payment routing** and needs `full` | read / reversible |
 | `reai_update_creditor` | Rename one, or change that account. Reads and merges: a raw `PUT {name}` sets `bankAccountNumber` to null, measured | **irreversible** |
 | `reai_delete_creditor` | Remove one. Its loans first — a referenced creditor answers `409` | reversible |
 | `reai_list_debtors` · `reai_create_debtor` | Counterparties the company lends **to** — the id every `lender` loan needs. A debtor has no bank account, just a name | read / reversible |
@@ -421,7 +422,7 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 
 **The counterparties live here, not with suppliers.** `creditorId` and `debtorId` appear exactly once each in the whole API document, both on `LoanRes` — nothing else references either — so a creditor is not a payables concept in ReAI, it is one end of a loan. They used to sit in `purchase`, which meant a caller who enabled only `loans` could not create the counterparty its own tools require. **Names are not unique on either side**: two debtors with the same name were created as separate ids, so list before creating and choose by id.
 
-These are `irreversible` even though a loan record posts nothing — measured, the voucher count did not move — because the record is the basis for later interest and repayment postings, and the measurement was taken on a company with no loan history to lose. The two reads are unaffected.
+**The three loan writes** — `reai_create_loan`, `reai_update_loan`, `reai_delete_loan` — are `irreversible` even though a loan record posts nothing (measured, the voucher count did not move), because the record is the basis for later interest and repayment postings and the measurement came from a company with no loan history to lose. Everything else in this table is a read or a `reversible` counterparty write, so the loan **reads** are available in every mode.
 
 **Shape is not membership.** Every `countryCode` argument here checks two uppercase letters and every `currencyCode` three, because a pattern is all the spec documents — so `UK` passes local validation and is refused by the API, which is the worst division of labour available. These two endpoints are the actual lists. Both `404`s above are answers rather than failures, and only for the documented message: [docs/tools.md](docs/tools.md#reference-data-and-company-state).
 
@@ -433,7 +434,7 @@ These are `irreversible` even though a loan record posts nothing — measured, t
 
 It sits outside the default surface rather than inside it — every count in this README is the default 156, and `REAI_ENABLE_UI=1` registers a 157th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
-Anything not listed — projects, timesheets, share investments, debtors — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+Anything not listed — projects, timesheets, share investments, documents — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
 If 156 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
@@ -478,7 +479,7 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **110 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **111 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 170 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
