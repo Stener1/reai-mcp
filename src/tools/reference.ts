@@ -331,7 +331,10 @@ const getAnnualAccounts = defineTool({
     try {
       const res = await ctx.client.request<unknown>({
         method: "GET",
-        path: `/api/annual-accounts/${encodeURIComponent(args.year)}`,
+        // No encodeURIComponent: `fiscalYear` admits four ASCII digits only, so there is nothing to
+        // encode, and its sibling reai_get_tax_return interpolates the same value raw. A no-op that
+        // looks like a safety measure is worse than its absence.
+        path: `/api/annual-accounts/${args.year}`,
         tenantId,
       });
       const status = (res.data as { status?: string } | undefined)?.status;

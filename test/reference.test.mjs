@@ -299,7 +299,9 @@ test("the fiscal year is a four-digit string, the same as its two sibling tools"
   assert.equal(year.safeParse("2025").success, true);
   assert.equal(year.safeParse("1999").success, true, "a legacy fiscal year is not this server's to refuse");
   assert.equal(year.safeParse(2025).success, false, "a number is not the shape the spec declares");
-  for (const bad of ["1", "20255", "", "abcd", "202 5"]) {
+  // "0999" among them: `Number("0999")` is 999, so admitting it would make the payload's `year` stop
+  // identifying the year requested — the round-trip the number conversion exists to preserve.
+  for (const bad of ["1", "20255", "", "abcd", "202 5", "0000", "0999"]) {
     assert.equal(year.safeParse(bad).success, false, bad);
   }
 
@@ -367,8 +369,14 @@ test("the code hint fires only on a single match", async () => {
 
 test("the documented phrase is found in the raw body too, not only in the message", async () => {
   // The annual-accounts 404 is documented as returning AnnualAccountsSubmissionRes, not a
-  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is the
-  // only place the phrase can appear. Both halves of the check are load-bearing.
+  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is
+  // where the phrase would live.
+  //
+  // Honest about what this proves: review showed the `|| phrase.test(err.rawBody)` half of the check
+  // cannot currently be reached, because ReaiApiError.describe() already embeds rawBody in the
+  // message, so the message test matches first for every error the class can build. The half stays as
+  // defence against that rendering changing, and this test pins the OUTCOME rather than the branch —
+  // it would still catch the tool ceasing to recognise a body-only 404.
   const bodyOnly = new ReaiApiError({
     status: 404,
     method: "GET",

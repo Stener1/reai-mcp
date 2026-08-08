@@ -535,7 +535,15 @@ export function requireTenantId(explicit: number | undefined, ctx: ToolContext):
 export const fiscalYear = z
   .string()
   .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
-  .refine((value) => Number(value) > 0, "Year 0000 is not a fiscal year; the API declares year > 0.");
+  // Four digits AND at least 1000, which is stricter than "greater than zero" for a reason review
+  // found: `"0999"` passed a `> 0` refinement, and reai_get_annual_accounts converts the argument with
+  // `Number(...)` so its payload reported year 999 for a request to /api/annual-accounts/0999. A
+  // leading-zero year is not a fiscal year anybody has books for, and refusing it makes the conversion
+  // injective — the field a consumer keys on identifies the year that was asked for.
+  .refine(
+    (value) => Number(value) >= 1000,
+    "Year must be 1000 or later; a leading-zero year is not a fiscal year, and the API declares year > 0.",
+  );
 
 export const COUNTRY_CODE = z
   .string()
