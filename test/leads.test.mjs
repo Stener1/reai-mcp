@@ -593,3 +593,105 @@ test("reai_update_lead does not create a lead in order to empty it", async () =>
   assert.notEqual(setting.state.id, null, "a set alongside a clear must still create the lead");
   assert.equal(setting.state.status, "active");
 });
+
+test("a verified non-outcome is an error, not just prose", async () => {
+  // Every one of these branches detects that the API did not do what it reported. Prose alone is
+  // what an agent skims past, so the result carries isError too — following
+  // reai_update_company_bank, and not fail(), because the body is the evidence for the claim.
+  const silent = (state) => {
+    const fake = fakeLead(state);
+    fake.client.request = async (req) => ({
+      data: req.method === "GET" ? { orgNumber: ORG, companyName: "X", lead: { ...state } } : {},
+      status: 200,
+    });
+    return fake;
+  };
+
+  const saved = await runLive("reai_save_lead", { orgNumber: ORG }, silent({ id: null }));
+  assert.equal(saved.result.isError, true, "a POST that saved nothing");
+
+  const deleted = await runLive("reai_delete_lead", { orgNumber: ORG }, silent({ id: 700 }));
+  assert.equal(deleted.result.isError, true, "a DELETE that removed nothing");
+
+  const converted = await runLive("reai_convert_lead", { orgNumber: ORG }, silent({ id: 700 }));
+  assert.equal(converted.result.isError, true, "a convert that produced no customer");
+
+  // And the successful paths must NOT be errors, or the flag says nothing.
+  const fine = await runLive("reai_save_lead", { orgNumber: ORG }, fakeLead());
+  assert.notEqual(fine.result.isError, true);
+});
+
+test("reai_update_lead checks the end state it was asked for and reports what did not take", async () => {
+  // The API answered 200 and stored nothing at least once in this domain, so the tool compares the
+  // readback against the request instead of echoing the intent.
+  const fake = fakeLead({ id: 700 });
+  const original = fake.client.request;
+  fake.client.request = async (req) => {
+    // A PATCH that accepts the notes and quietly drops them: exactly the shape measured elsewhere.
+    if (req.method === "PATCH") return { data: {}, status: 200 };
+    return original(req);
+  };
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, notes: "please keep" }, fake);
+  assert.equal(result.isError, true);
+  assert.match(text, /THE WRITE DID NOT FULLY TAKE/);
+  assert.match(text, /notes: asked for "please keep", reads null/);
+
+  // A phone is compared loosely, because ReAI normalises it — an exact comparison would report
+  // every successful phone write as a failure.
+  const normalising = fakeLead({ id: 700 });
+  const inner = normalising.client.request;
+  normalising.client.request = async (req) => {
+    const res = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) normalising.state.phone = "+4740000000";
+    return res;
+  };
+  const ok2 = await runLive("reai_update_lead", { orgNumber: ORG, phone: "40000000" }, normalising);
+  assert.notEqual(ok2.result.isError, true, "normalisation is not a mismatch");
+  assert.ok(!/DID NOT FULLY TAKE/.test(ok2.text));
+
+  // But a phone that vanished IS one.
+  const dropping = fakeLead({ id: 700 });
+  const inner2 = dropping.client.request;
+  dropping.client.request = async (req) => {
+    const res = await inner2(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) dropping.state.phone = null;
+    return res;
+  };
+  const bad = await runLive("reai_update_lead", { orgNumber: ORG, phone: "40000000" }, dropping);
+  assert.equal(bad.result.isError, true);
+  assert.match(bad.text, /phone: asked for "40000000", reads null/);
+});
+
+/**
+ * Why reai_log_lead_contact stays `reversible`, deliberately.
+ *
+ * Review argued for `irreversible`, on the grounds that a contact event has no DELETE of its own and
+ * the only remedy destroys the whole lead. The premise is right and the tool says so. The conclusion
+ * does not follow, for three reasons:
+ *
+ *  1. `irreversible` in this codebase names a specific class — writes that touch the ledger, issue a
+ *     legal document, move money, run payroll, file with the tax authority, or administer access. A
+ *     CRM annotation is none of them, and diluting the label weakens the one signal an operator
+ *     configures their deployment on.
+ *  2. Unremovable RESIDUE is already normal under `reversible`. reai_delete_customer archives rather
+ *     than deletes as soon as the customer has transactions, and an archived counterparty cannot be
+ *     removed at all afterwards — the test tenant carries several, permanently. If unremovability
+ *     alone earned escalation, most of the master-data tools would qualify.
+ *  3. classifyRequest says `reversible` for POST /api/leads/{id}/contact-events, so escalating only
+ *     the curated tool would hide the safe path while leaving the same call available through
+ *     reai_request. That moves the ceiling without moving the risk.
+ *
+ * Pinned as a test so the decision cannot be reversed silently, in either direction: change the
+ * reasoning here first, then the classification.
+ */
+test("logging a contact event is reversible-class, and the reason is the description's job", () => {
+  const logTool = tool("reai_log_lead_contact");
+  assert.equal(logTool.risk, "reversible");
+  assert.equal(classifyRequest("POST", "/api/leads/1/contact-events"), "reversible");
+  // The tool and the escape hatch must agree, which is the third argument above.
+  assert.equal(logTool.risk, classifyRequest("POST", "/api/leads/1/contact-events"));
+  // And the part that is actionable has to be stated where a caller reads it.
+  assert.match(logTool.description, /no endpoint that removes a contact event/);
+  assert.match(logTool.description, /reai_delete_lead/);
+  assert.match(logTool.description, /every other event/);
+});

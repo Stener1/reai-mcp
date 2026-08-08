@@ -362,13 +362,18 @@ const saveLead = defineTool({
     // The POST response does not carry the new state, and a saved-but-empty lead is exactly the
     // shape that reads like a failure, so the id is read back rather than assumed.
     const after = await readLeadState(ctx, tenantId, args.orgNumber);
-    return ok(after.record, {
+    const result = ok(after.record, {
       note: isSaved(after.state)
         ? `${after.record.companyName ?? args.orgNumber} is now a saved lead, id ${after.state.id}, ` +
           `with no status, notes or follow-up on it. reai_update_lead sets those.`
         : `The POST succeeded but the lead still reads id null, so nothing was actually saved. Do ` +
           `not treat this company as tracked.`,
     });
+    // Flagged on the RESULT, following reai_update_company_bank: a verified non-outcome must reach
+    // the caller as an error and not only as prose, since prose is what an agent skims. Not fail(),
+    // because the response body is the evidence for the claim and discarding it would hide it.
+    if (!isSaved(after.state)) result.isError = true;
+    return result;
   },
 });
 
@@ -554,9 +559,39 @@ const updateLead = defineTool({
     }
 
     const after = await readLeadState(ctx, tenantId, args.orgNumber);
+
+    // Verify the end state the caller asked for, field by field, and say so when it did not happen.
+    //
+    // Worth the arithmetic in this domain specifically: one of these endpoints answered 200 and
+    // stored nothing at all, and another applied to a different set of fields than the body named.
+    // A tool over an API like that should not report the intent back as though it were the outcome.
+    // Phone is compared loosely because ReAI normalises it — 40000000 is stored as +4740000000, so
+    // only the difference between "something" and "nothing" is checkable here.
+    const mismatches: string[] = [];
+    const compare = (key: "status" | "notes" | "email" | "followUpAt") => {
+      if (!given(key)) return;
+      const want = args[key] ?? null;
+      const got = after.state[key] ?? null;
+      if (want !== got) {
+        mismatches.push(`${key}: asked for ${JSON.stringify(want)}, reads ${JSON.stringify(got)}`);
+      }
+    };
+    compare("status");
+    compare("notes");
+    compare("email");
+    compare("followUpAt");
+    if (given("phone")) {
+      const got = after.state.phone ?? null;
+      if (args.phone === null && got !== null) {
+        mismatches.push(`phone: asked to clear it, reads ${JSON.stringify(got)}`);
+      } else if (args.phone !== null && got === null) {
+        mismatches.push(`phone: asked for ${JSON.stringify(args.phone)}, reads null`);
+      }
+    }
+
     const field = (key: keyof LeadState) =>
       `${String(key)} ${JSON.stringify(after.state[key] ?? null)}`;
-    return ok(after.record, {
+    const result = ok(after.record, {
       note:
         `${after.record.companyName ?? args.orgNumber}` +
         (isSaved(before.state)
@@ -567,8 +602,16 @@ const updateLead = defineTool({
         `\n\nState now: ${field("status")}, ${field("notes")}, ${field("followUpAt")}` +
         (after.state.convertedCustomerId
           ? `. Still linked to customer ${after.state.convertedCustomerId} from an earlier conversion.`
-          : `.`),
+          : `.`) +
+        (mismatches.length > 0
+          ? `\n\nBUT THE WRITE DID NOT FULLY TAKE. Read back from the API:\n` +
+            mismatches.map((m) => `  - ${m}`).join("\n") +
+            `\n\nEvery call above returned success, so this is the API storing something other ` +
+            `than what it accepted. Re-read with reai_get_lead before relying on any of it.`
+          : ``),
     });
+    if (mismatches.length > 0) result.isError = true;
+    return result;
   },
 });
 
@@ -693,7 +736,7 @@ const convertLead = defineTool({
     // available by reading the lead back. Reporting it matters: it is the handle for undoing this.
     const after = await readLeadState(ctx, tenantId, args.orgNumber);
     const customerId = after.state.convertedCustomerId;
-    return ok(
+    const result = ok(
       { customerId: customerId ?? null, lead: after.state, convertResponse: res.data ?? null },
       {
         link: customerId ? ctx.client.deepLink(`/customers/${customerId}`, tenantId) : undefined,
@@ -707,6 +750,8 @@ const convertLead = defineTool({
           (created ? ` The lead did not exist before this call and was saved first.` : ``),
       },
     );
+    if (customerId === null || customerId === undefined) result.isError = true;
+    return result;
   },
 });
 
@@ -749,7 +794,7 @@ const deleteLead = defineTool({
       tenantId,
     });
     const after = await readLeadState(ctx, tenantId, args.orgNumber);
-    return ok(after.record, {
+    const result = ok(after.record, {
       note: isSaved(after.state)
         ? `The DELETE returned success but ${name} still reads lead id ${after.state.id}. The lead ` +
           `was NOT removed.`
@@ -761,6 +806,8 @@ const deleteLead = defineTool({
               `exists. Deleting the lead did not touch it.`
             : ``),
     });
+    if (isSaved(after.state)) result.isError = true;
+    return result;
   },
 });
 

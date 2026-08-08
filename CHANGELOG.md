@@ -53,6 +53,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     one.
   - Five quirks record all of it against the operations concerned, so `reai_request`
     callers get the same warnings.
+  - **Every verified non-outcome is an error, not just prose**: a POST that saved no lead,
+    a DELETE that removed none, a convert that produced no customer id. And
+    `reai_update_lead` now compares the readback against what it was asked for, field by
+    field, and reports which values did not take — worth the arithmetic in a domain where
+    one endpoint answered 200 and stored nothing. Phone is compared loosely, since ReAI
+    normalises it.
+  - A clear-only request on a company with no lead state no longer creates a lead in order
+    to empty it.
 
 - **Nullability now survives the enum rendering in the spec index.** `enumType()` threw
   away the fallback string that carried the trailing `?`, so all **65** enum-typed body

@@ -1795,19 +1795,78 @@ async function main() {
     if (tools.has("reai_update_lead")) {
       console.log("\n  Leads (CRM state on a register company):");
       const org = "938225605";
+      // The scenario below runs inside its own try/finally. It materialises a lead and, briefly, a
+      // customer, and it sits BEFORE the residue sweeps: a throw anywhere in it would otherwise
+      // escape to the outer cleanup block, skipping both the lead deletion and every sweep, and
+      // leave exactly the litter the sweeps exist to notice.
+      let leadCustomerId;
       const lead = async (args = {}) =>
         await client.callTool({ name: "reai_get_lead", arguments: { orgNumber: org, tenantId, ...args } });
-      const stateOf = async () => (jsonOf(await lead())?.lead ?? {});
+      // An unreadable response must never look like an empty one. Collapsing it to {} made
+      // `id === undefined` mean "no lead", so a 401 or a shape change would have been reported as a
+      // clean tenant — the check passing because it could not see, which is the failure this whole
+      // suite exists to catch. UNREADABLE is returned instead and every check treats it as a fail.
+      const UNREADABLE = Symbol("unreadable");
+      const stateOf = async () => {
+        try {
+          const res = await lead();
+          if (res.isError) return UNREADABLE;
+          const record = jsonOf(res);
+          // `lead` may legitimately be absent on a company with no state, but the ENVELOPE must be
+          // there: no orgNumber means this is not a lead response at all.
+          if (!record || typeof record !== "object" || record.orgNumber === undefined) return UNREADABLE;
+          return record.lead ?? {};
+        } catch {
+          return UNREADABLE;
+        }
+      };
+      const unsaved = (state) => state !== UNREADABLE && (state.id === null || state.id === undefined);
+      const describeState = (state) => (state === UNREADABLE ? "COULD NOT READ the lead" : `lead id ${state.id}`);
       const callLead = async (name, args) =>
         await client.callTool({ name, arguments: { orgNumber: org, tenantId, ...args } });
+      // Customers for this org, or UNREADABLE. Used for the pre-conversion baseline and the
+      // after-the-fact check, both of which must fail rather than pass when the list cannot be read.
+      const customersForOrg = async (archived) => {
+        try {
+          const res = await client.callTool({
+            name: "reai_list_customers",
+            arguments: { organizationNumber: org, ...(archived ? { archived: true } : {}), pageSize: 50, tenantId },
+          });
+          if (res.isError) return UNREADABLE;
+          const rows = listOf(res);
+          return Array.isArray(rows) ? rows.map((r) => r.id) : UNREADABLE;
+        } catch {
+          return UNREADABLE;
+        }
+      };
 
+      try {
       // Start from nothing, whatever an interrupted earlier run left behind.
       await callLead("reai_delete_lead", {});
       const before = await stateOf();
       report(
         "the subject starts as a register entry with no lead state",
-        before.id === null || before.id === undefined,
-        before.id ? `lead ${before.id} still present — abort` : "unsaved",
+        unsaved(before),
+        unsaved(before) ? "unsaved" : `${describeState(before)} — abort`,
+      );
+      // Which customers for this org existed BEFORE anything was converted. Conversion reuses an
+      // existing customer for the same organisation number rather than making a second one, so
+      // without this the cleanup below would delete a customer the suite did not create — on a
+      // tenant where a real one could exist under this org number.
+      const activeBefore = await customersForOrg(false);
+      const archivedBefore = await customersForOrg(true);
+      const baselineReadable = activeBefore !== UNREADABLE && archivedBefore !== UNREADABLE;
+      const customerBaseline = new Set(
+        baselineReadable ? [...activeBefore, ...archivedBefore] : [],
+      );
+      report(
+        "the customer baseline for the subject org could be read",
+        baselineReadable,
+        baselineReadable
+          ? customerBaseline.size === 0
+            ? "no pre-existing customer for this org"
+            : `${customerBaseline.size} pre-existing: ${[...customerBaseline].join(", ")} — these will NOT be deleted`
+          : "COULD NOT READ the customer list — cleanup cannot tell new from pre-existing",
       );
 
       // 1. Setting everything, which PATCH can do.
@@ -1877,6 +1936,7 @@ async function main() {
       report(
         "contact details written to an unsaved company actually land",
         !onUnsaved.isError &&
+          materialised !== UNREADABLE &&
           materialised.id !== null &&
           materialised.id !== undefined &&
           materialised.email === "zz2@example.invalid",
@@ -1891,12 +1951,12 @@ async function main() {
       const stillUnsaved = await stateOf();
       report(
         "clearing fields on an untouched company creates no lead",
-        !clearOnUnsaved.isError && (stillUnsaved.id === null || stillUnsaved.id === undefined),
+        !clearOnUnsaved.isError && unsaved(stillUnsaved),
         clearOnUnsaved.isError
           ? firstLineOf(textOf(clearOnUnsaved))
-          : stillUnsaved.id
-            ? `CREATED lead ${stillUnsaved.id} in order to empty it`
-            : "no lead created",
+          : unsaved(stillUnsaved)
+            ? "no lead created"
+            : `${describeState(stillUnsaved)} — created in order to empty it`,
       );
 
       // 5. A contact event, which is append-only: nothing can remove it but deleting the lead.
@@ -1915,7 +1975,14 @@ async function main() {
       //    the tool saved the lead before converting — an unsaved company cannot be converted at all.
       const converted = await callLead("reai_convert_lead", {});
       const convertedState = await stateOf();
-      const customerId = convertedState.convertedCustomerId;
+      const customerId = convertedState === UNREADABLE ? undefined : convertedState.convertedCustomerId;
+      // Handed to the finally as soon as it is known, which is what makes the cleanup independent of
+      // reaching the end of the scenario. It is set ONLY for a customer proven new against the
+      // baseline taken before the conversion, so a throw can never make the finally delete a record
+      // this run did not create. Cleared again once the scenario has removed it itself.
+      if (typeof customerId === "number" && baselineReadable && !customerBaseline.has(customerId)) {
+        leadCustomerId = customerId;
+      }
       report(
         "converting a lead produces a customer and names it",
         !converted.isError && typeof customerId === "number",
@@ -1937,37 +2004,95 @@ async function main() {
       const finalState = await stateOf();
       report(
         "deleting the lead returns the company to register-only",
-        !removed.isError && (finalState.id === null || finalState.id === undefined),
-        removed.isError ? firstLineOf(textOf(removed)) : "unsaved again",
+        !removed.isError && unsaved(finalState),
+        removed.isError ? firstLineOf(textOf(removed)) : unsaved(finalState) ? "unsaved again" : describeState(finalState),
       );
-      if (typeof customerId === "number") {
+      // Only a customer this run PROVED to be new. Conversion reuses an existing customer for the
+      // same organisation number, so deleting whatever convertedCustomerId names would remove a
+      // record the suite did not create — and this script's rule is that it never deletes those.
+      const customerIsNew = leadCustomerId === customerId && typeof customerId === "number";
+      if (typeof customerId === "number" && !customerIsNew) {
+        report(
+          "the converted customer is left alone, because this run did not create it",
+          baselineReadable,
+          baselineReadable
+            ? `customer ${customerId} pre-dates this run — not deleted`
+            : `customer ${customerId} may or may not be new (baseline unreadable) — NOT deleted; ` +
+              `check by hand whether it should be`,
+        );
+      }
+      if (customerIsNew) {
         const del = await client.callTool({
           name: "reai_delete_customer",
           arguments: { id: customerId, tenantId },
         });
+        const gone = !del.isError && /was DELETED outright/.test(textOf(del));
         report(
           "with the lead gone, the converted customer deletes outright",
-          !del.isError && /was DELETED outright/.test(textOf(del)),
+          gone,
           firstLineOf(textOf(del)) +
             (/ARCHIVED/.test(textOf(del))
               ? ` — unarchive and delete customer ${customerId} by hand`
               : ""),
         );
+        // Removed here, so the finally does not try again and report a 404 as a cleanup failure.
+        if (gone) leadCustomerId = undefined;
       }
       // The customer is the part that survives a lead delete, so prove it is gone by its own path
       // rather than inferring it from the lead. A stray customer named after a real company is
       // exactly the litter this suite exists to prevent.
       if (typeof customerId === "number") {
         for (const archived of [false, true]) {
-          const still = await client.callTool({
-            name: "reai_list_customers",
-            arguments: { organizationNumber: org, ...(archived ? { archived: true } : {}), pageSize: 50, tenantId },
-          });
-          const rows = listOf(still) ?? [];
+          const ids = await customersForOrg(archived);
+          const label = `no ${archived ? "archived" : "active"} customer is left for the converted org`;
+          if (ids === UNREADABLE) {
+            report(label, false, "COULD NOT READ the customer list — this proves nothing either way");
+            continue;
+          }
+          // The baseline, not zero: a pre-existing customer for this org is allowed to remain, and
+          // demanding zero would report someone else's data as this run's litter.
+          const extra = ids.filter((id) => !customerBaseline.has(id));
           report(
-            `no ${archived ? "archived" : "active"} customer is left for the converted org`,
-            rows.length === 0,
-            rows.length === 0 ? "none" : `STILL PRESENT — delete customer(s) ${rows.map((r) => r.id).join(", ")} by hand`,
+            label,
+            extra.length === 0,
+            extra.length === 0
+              ? customerBaseline.size === 0
+                ? "none"
+                : `only the ${customerBaseline.size} pre-existing`
+              : `STILL PRESENT — delete customer(s) ${extra.join(", ")} by hand`,
+          );
+        }
+      }
+      } catch (err) {
+        // Reported and swallowed rather than rethrown. Rethrowing would take out the residue sweeps
+        // that run after this section, which is precisely when they are most worth having.
+        report("the lead scenario ran to completion", false, `THREW — ${err?.message ?? err}`);
+      } finally {
+        // Runs whether the scenario finished or threw. It reports what it had to clean up, because a
+        // silent tidy-up would hide the fact that the run did not complete normally.
+        const leftover = await stateOf();
+        if (leftover === UNREADABLE || !unsaved(leftover)) {
+          const removedLate = await callLead("reai_delete_lead", {}).catch((err) => ({
+            isError: true,
+            content: [{ type: "text", text: String(err?.message ?? err) }],
+          }));
+          const nowState = await stateOf();
+          report(
+            "cleanup: no lead state survives this section",
+            unsaved(nowState),
+            unsaved(nowState)
+              ? "removed after an incomplete run"
+              : `${describeState(nowState)} — delete it by hand with reai_delete_lead: ${firstLineOf(textOf(removedLate))}`,
+          );
+        }
+        if (typeof leadCustomerId === "number") {
+          const del = await client
+            .callTool({ name: "reai_delete_customer", arguments: { id: leadCustomerId, tenantId } })
+            .catch((err) => ({ isError: true, content: [{ type: "text", text: String(err?.message ?? err) }] }));
+          report(
+            "cleanup: the customer this section created is gone",
+            !del.isError && /was DELETED outright/.test(textOf(del)),
+            firstLineOf(textOf(del)) || `delete customer ${leadCustomerId} by hand`,
           );
         }
       }
