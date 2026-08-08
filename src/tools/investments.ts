@@ -93,6 +93,28 @@ import {
  */
 
 const INSTRUMENT_TYPES = ["LISTED_SHARE", "UNLISTED_SHARE", "FUND", "BOND", "OTHER"] as const;
+
+/**
+ * The asset account a FRESH position of each type derives, measured on tenant 2783.
+ *
+ * Recorded because the account does NOT follow the type on an update, and the numbers differ per type —
+ * so a reclassification leaves the position booked where its old type belonged. Measured: a
+ * `LISTED_SHARE` position on 1810 was changed to `BOND`, `FUND`, `UNLISTED_SHARE` and `OTHER` in turn,
+ * every PUT answered 200, and the account stayed **1810** throughout, while fresh positions of those
+ * types derive 1830, 1810, 1350 and 1820.
+ *
+ * This is the loan-reclassification shape again: the merge doing its job carries the old classification's
+ * account into the new one, and nothing in the response says the balance sheet now disagrees with the
+ * label. Kept as data so a refusal can name the right number instead of only saying the stored one is
+ * suspect.
+ */
+const DERIVED_ASSET_ACCOUNTS: Record<string, string> = {
+  LISTED_SHARE: "1810",
+  UNLISTED_SHARE: "1350",
+  FUND: "1810",
+  BOND: "1830",
+  OTHER: "1820",
+};
 const EVENT_TYPES = ["PURCHASE", "SALE", "DIVIDEND", "CAPITAL_REPAYMENT", "WRITE_DOWN"] as const;
 
 /**
@@ -476,6 +498,11 @@ const updateInvestment = defineTool({
     "than a rule — it IS settable, this tool sends it, and whether an omitting PUT preserves or " +
     "re-derives it was not measured. So do not treat a surviving account number as proof the write was " +
     "harmless.\n\n" +
+    "**Changing `instrumentType` requires naming the asset account too.** The API derives the account at " +
+    "creation and does not move it — measured, a LISTED_SHARE position on 1810 became BOND, FUND, " +
+    "UNLISTED_SHARE and OTHER in turn and stayed on 1810 every time, while fresh positions of those types " +
+    "derive 1830, 1810, 1350 and 1820. So a bare relabelling would leave the holding booked where its old " +
+    "type belonged. This tool refuses that and tells you what a fresh position of the new type gets.\n\n" +
     "This cannot change what a position HOLDS. Quantity and cost come from events; add one with " +
     "reai_add_share_investment_event.",
   risk: "irreversible",
@@ -524,6 +551,31 @@ const updateInvestment = defineTool({
           `supplies ${missing.length === 1 ? "it" : "them"}. Nothing was written.`,
       );
     }
+    // Reclassifying changes which account the position SHOULD sit on, and the API does not move it:
+    // measured, a LISTED_SHARE on 1810 changed to BOND, FUND, UNLISTED_SHARE and OTHER in turn kept 1810
+    // every time, while fresh positions of those types derive 1830, 1810, 1350 and 1820. So the merge —
+    // doing exactly what it is for — would leave the holding booked where its old type belonged, and
+    // nothing in the response would say the balance sheet now disagrees with the label. The tool cannot
+    // tell a derived number from a deliberate one, so it refuses and names what a fresh position gets.
+    const typeChanged = given.includes("instrumentType") && changes.instrumentType !== record.instrumentType;
+    if (typeChanged && !given.includes("assetAccountNumber")) {
+      const fresh = DERIVED_ASSET_ACCOUNTS[String(merged.instrumentType)];
+      return fail(
+        `Refusing to change instrumentType on share investment ${id} without saying which asset account ` +
+          `it should use. The API derives the account at CREATION only and does not move it: this edit ` +
+          `would leave the position on ` +
+          `${JSON.stringify(record.assetAccountNumber ?? null)}, which is where ` +
+          `${JSON.stringify(record.instrumentType ?? "its old type")} belongs. Nothing was written.\n\n` +
+          (fresh
+            ? `Measured, a fresh ${merged.instrumentType} position derives ${fresh}. Pass ` +
+              `assetAccountNumber: ${JSON.stringify(fresh)} to accept that, or your own number to override.`
+            : `Pass assetAccountNumber explicitly.`) +
+          `\n\nIf the CLASSIFICATION was the mistake and the account is right, pass the stored account ` +
+          `back explicitly — that says you meant it. A position with no events can also be deleted and ` +
+          `recorded again, which is the only thing that re-derives an account.`,
+      );
+    }
+
     let res;
     try {
       res = await ctx.client.request<Investment>({

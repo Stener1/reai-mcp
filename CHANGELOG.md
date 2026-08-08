@@ -37,6 +37,23 @@ All notable changes to `reai-mcp`. Format loosely follows
     nothing today — no tool declares one, verified — but with a synthetic internal declaration the naive
     form yields 151 against the correct 152, which is exactly the wrong number this test would then
     enforce everywhere.
+- **Reclassifying a share investment left it booked on the old type's account.** Raised in review as a
+  documentation point; measuring it made it behaviour. The asset account is derived at creation and the
+  API does not move it — a `LISTED_SHARE` position on 1810 was changed to `BOND`, `FUND`,
+  `UNLISTED_SHARE` and `OTHER` in turn, every `PUT` answered 200, and the account stayed **1810** every
+  time. Fresh positions of those types derive **1830**, 1810, **1350** and **1820**, so the numbers
+  genuinely differ per type and a bare relabelling leaves the holding on the wrong balance-sheet line
+  with nothing in the response saying so.
+  - `reai_update_share_investment` now refuses a type change that does not name an `assetAccountNumber`,
+    and quotes what a fresh position of the new type derives so the caller can accept or override — the
+    same shape as the loan reclassification guard, for the same reason: the merge cannot tell a derived
+    number from a deliberate one. Restating the type a position already has is not a change and still
+    writes.
+  - The measured table is kept as data next to the enum rather than as prose, so the refusal can name a
+    number, and there is a test that fails if a type loses its measured account.
+  - Verified live on tenant 2783: the bare reclassification is refused naming both 1810 and 1830, the
+    same call with `assetAccountNumber: "1830"` goes through and stores `BOND`/1830, and the position was
+    deleted afterwards.
 
 ### Added
 
