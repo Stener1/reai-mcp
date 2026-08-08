@@ -598,11 +598,12 @@ test("no read tool accepts an input it never sends", async () => {
   // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
   // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
   // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
-  {
-    const { registeredTools: everyTool } = await import("../dist/server.js");
-    const reads = everyTool.filter((t) => t.risk === "read");
-    assert.ok(reads.length >= 57, `only ${reads.length} read tools — the risk filter has stopped matching`);
-  }
+  // A population floor is not enough here: every tool in this sweep can be SKIPPED at runtime
+  // (the stub never reached the request, or the tool states no count), and a harness that stops
+  // reaching the request skips all of them while the population stays intact. Found by the
+  // independent review of PR #108: breaking tenant resolution took this sweep from 52 tools
+  // examined to 7, and it still passed. So the floor counts what was actually exercised.
+  let exercised = 0;
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude
   // system-only accounts and did not. This sweeps for the same class across every
@@ -647,6 +648,7 @@ test("no read tool accepts an input it never sends", async () => {
       continue; // a tool that refuses this combination locally is not the target here
     }
     if (calls.length === 0) continue;
+    exercised += 1;
 
     // A field counts as used if its VALUE or its NAME shows up anywhere in any request
     // the handler made — query, path or body. Some fields legitimately choose an
@@ -663,6 +665,10 @@ test("no read tool accepts an input it never sends", async () => {
   }
 
   assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
+  assert.ok(
+    exercised >= 39,
+    `only ${exercised} read tools reached the request (of 52 today) — the sweep is skipping its subjects`,
+  );
 });
 
 test("constraints the descriptions promise are enforced, and no further", () => {

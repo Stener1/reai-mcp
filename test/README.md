@@ -85,6 +85,22 @@ Seven more now carry a floor:
 | `no tool is softer than the policy for any path it declares` | declared paths classifying `irreversible` |
 | `a curated tool accepting an arms-a-send field escalates like the escape hatch` | `escalatingBodyFieldNames` |
 
+### A population floor is not always the right floor
+
+The independent review of this PR found the next layer down. Three of these sweeps can **skip** a
+tool at runtime — the stub never reached the request, the tool states no count, the handler refused
+the argument combination locally — and a floor on the filtered population says nothing about that.
+Breaking tenant resolution in one line took the preflight sweep from 52 tools examined to 7, and it
+passed, floor and all, because the 76 read tools were still there to be counted.
+
+So for those three the floor counts **what the sweep actually exercised**, not what it selected:
+tools compared (30 of 41), tools that echoed the payload (51 of 68), tools that reached the request
+(39 of 52). Verified against a realistic regression — every `reai_list_*` handler returning without
+calling the API — where all three fail and the population floors did not.
+
+The question to ask of any floor: *if the thing this test examines silently stopped happening, would
+this number change?* A count of the population answers no. A count of the work answers yes.
+
 ### Choosing the threshold
 
 A floor at 1 only catches total collapse, which the rest of the suite already catches. The rule used

@@ -120,6 +120,9 @@ async function statesACount(tool) {
   return one.called && two.called && one.note !== two.note;
 }
 
+/** How many tools this sweep really compared, as opposed to filtered and then skipped. */
+let conflateExamined = 0;
+
 async function conflatesEmptyWithSurprise(tool) {
   const empty = await against(tool, EMPTY_SHAPE[tool.name] ?? []);
   const wrapped = await against(tool, { content: [{ id: 1, name: "A real row" }], totalElements: 1 });
@@ -127,19 +130,18 @@ async function conflatesEmptyWithSurprise(tool) {
   if (wrapped.threw) return `threw on an unexpected shape — ${wrapped.threw.slice(0, 60)}`;
   // A tool that never states a quantity cannot state a wrong one.
   if (!EMPTY_SHAPE[tool.name] && !(await statesACount(tool))) return null;
+  conflateExamined += 1;
   if (empty.note === wrapped.note) return `same note for [] and {content:[…]}: ${empty.note.split("\n")[0].slice(0, 64)}`;
   return null;
 }
 
 test("no read tool gives the same answer for an empty list and a shape surprise", async () => {
-  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
-  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
-  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
-  {
-    const { registeredTools } = await import("../dist/server.js");
-    const reads = registeredTools.filter((t) => t.risk === "read");
-    assert.ok(reads.length >= 57, `only ${reads.length} read tools — the risk filter has stopped matching`);
-  }
+  // A population floor is not enough here: every tool in this sweep can be SKIPPED at runtime
+  // (the stub never reached the request, or the tool states no count), and a harness that stops
+  // reaching the request skips all of them while the population stays intact. Found by the
+  // independent review of PR #108: breaking tenant resolution took this sweep from 52 tools
+  // examined to 7, and it still passed. So the floor counts what was actually exercised.
+  conflateExamined = 0;
   const offenders = [];
   for (const tool of registeredTools) {
     if (tool.risk !== "read" || tool.name === "reai_request") continue;
@@ -150,6 +152,10 @@ test("no read tool gives the same answer for an empty list and a shape surprise"
     offenders,
     [],
     "a tool told the model there is nothing, about a response that contained something",
+  );
+  assert.ok(
+    conflateExamined >= 30,
+    `only ${conflateExamined} tools were actually compared (of 41 today) — the sweep is skipping its subjects`,
   );
 });
 
@@ -175,9 +181,8 @@ test("every empty-shape override is load-bearing", async () => {
 test("and the rows are not thrown away either", async () => {
   // Reporting the surprise is only half of it: the payload has to survive, or an operator
   // cannot see what the endpoint actually sent. Checked by marker rather than by wording.
-  // Floor: same read filter as the sweep above, same failure mode if it stops matching.
-  const reads = registeredTools.filter((t) => t.risk === "read");
-  assert.ok(reads.length >= 57, `only ${reads.length} read tools — the risk filter has stopped matching`);
+  // Floor on tools actually exercised, for the reason given on the sweep above.
+  let exercised = 0;
   const marker = "UNIQUE-MARKER-9c1f";
   const wrapped = { content: [{ id: 1, name: marker }], totalElements: 1 };
   const swallowed = [];
@@ -189,9 +194,14 @@ test("and the rows are not thrown away either", async () => {
     if (EMPTY_SHAPE[tool.name]) continue;
     const { called, text } = await against(tool, wrapped);
     if (!called || !text) continue;
+    exercised += 1;
     if (!text.includes(marker)) swallowed.push(`${tool.name}: ${text.split("\n")[0].slice(0, 70)}`);
   }
   assert.deepEqual(swallowed, [], "a tool dropped the response and said nothing about it");
+  assert.ok(
+    exercised >= 51,
+    `only ${exercised} read tools echoed anything (of 68 today) — the sweep is skipping its subjects`,
+  );
 });
 
 test("okList separates the three answers", () => {
