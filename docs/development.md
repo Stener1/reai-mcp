@@ -8,7 +8,7 @@ npm run typecheck
 npm run smoke        # read-only, end-to-end against the live API (needs a token)
 ```
 
-The suite is 759 unit tests over the write-policy classifier, the discovery ranker, spec
+The suite is 760 unit tests over the write-policy classifier, the discovery ranker, spec
 search/describe, the OAuth server and every curated tool's request shaping. None of it needs network
 access or credentials: the ReAI client is faked, and the OpenAPI snapshot in `spec/` is the fixture.
 

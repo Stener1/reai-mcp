@@ -491,7 +491,7 @@ The MCP endpoint enforces two ceilings, both well above any real tool call:
 ```bash
 npm install
 npm run build        # rebuild the spec index, then compile
-npm test             # build + 759 unit tests (no credentials needed)
+npm test             # build + 760 unit tests (no credentials needed)
 npm run typecheck
 npm run smoke        # read-only, end-to-end against the live API (needs a token)
 ```
