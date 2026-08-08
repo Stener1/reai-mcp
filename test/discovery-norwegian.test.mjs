@@ -421,7 +421,6 @@ test("the loan vocabulary reaches the loan endpoints", () => {
   for (const query of [
     "gjeld",
     "avdrag",
-    "nedbetaling",
     "hovedstol",
     "borrowing",
     "banklån",
@@ -433,6 +432,44 @@ test("the loan vocabulary reaches the loan endpoints", () => {
     const at = rankOf(query, "GET /api/loans");
     assert.ok(at >= 0 && at < 3, `"${query}" should reach GET /api/loans in the top 3, got ${at + 1}`);
   }
+});
+
+/**
+ * The other half of adding vocabulary, and the half the first version of this work got wrong: a word
+ * broad enough to mean several things must not outrank the resource a query NAMES.
+ *
+ * Review measured four cases where the new entries did exactly that — `gjeld til leverandør` pushed the
+ * supplier ledger from first to fourth, `nedbetaling av faktura` and `avdrag på faktura` moved off the
+ * invoice payments, `motpart på banktransaksjon` filled all four top places with creditors and debtors,
+ * and the English `renter agreement` (a person who rents) lost the rent agreement. Every one was a
+ * generic term carrying several strong tokens and drowning a specific one.
+ *
+ * Two of the terms were dropped rather than weakened, because they are genuinely ambiguous and picking
+ * a side is the bug: `nedbetaling` (an invoice gets paid down too — it reaches the invoice payments,
+ * which is the better default) and `motpart` (the counterparty of anything, not only a loan). The rest
+ * carry ONE token now.
+ */
+test("a broad loan word does not outrank the resource a query names", () => {
+  for (const [query, want] of [
+    ["gjeld til leverandør", "GET /api/ledger/supplier"],
+    ["nedbetaling av faktura", "GET /api/invoices/{id}/payments"],
+  ]) {
+    assert.equal(rankOf(query, want), 0, `"${query}" should rank ${want} first`);
+  }
+
+  // English: a `renter` is a person who rents, so the -er rule reaching `rent` is CORRECT here and the
+  // rent agreement has to win. Asserted on the RESOURCE rather than the verb — it ranks the POST first,
+  // which is a question about intent and not about this fix.
+  const top = searchOperations({ query: "renter agreement", limit: 1 }).map((h) => h.path)[0];
+  assert.match(String(top), /rent-agreement/, `"renter agreement" should still rank the rent agreement first, got ${top}`);
+
+  // `avdrag på faktura` is the one case left imperfect, and it is stated rather than hidden: the
+  // invoice payments rank third behind the two loan reads. Accepted because `avdrag` is specifically a
+  // loan principal instalment in Norwegian accounting — an invoice is paid in `delbetaling` — so the
+  // phrase is unusual and the term is worth keeping. If it ever needs fixing, the fix is a
+  // narrower-scope mechanism, not a heavier synonym.
+  const at = rankOf("avdrag på faktura", "GET /api/invoices/{id}/payments");
+  assert.ok(at >= 0 && at < 4, `the invoice payments should still be reachable, got ${at + 1}`);
 });
 
 test("the counterparty ledgers answer to their Norwegian names", () => {

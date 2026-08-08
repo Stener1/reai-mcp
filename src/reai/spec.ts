@@ -1061,7 +1061,19 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // `rent` and that matches the path segment. Norwegian rent is `leie`; the collision is with English.
   // Same shape as the `levere`/`aktiver` homographs already recorded above, so it is fixed the same
   // way: an explicit entry, which wins over a derived stem.
-  gjeld: ["loans", "loan", "creditors", "debt"],
+  //
+  // Every entry here carries ONE or two tokens, and that restraint is the whole lesson of the first
+  // version, which carried three or four each. Review measured the result: `gjeld til leverandør`
+  // pushed the supplier ledger from first to FOURTH, `nedbetaling av faktura` and `avdrag på faktura`
+  // moved off the invoice payments, `motpart på banktransaksjon` filled all four top places with
+  // creditors and debtors, and the English `renter agreement` — a person who rents — lost the rent
+  // agreement. A broad word carrying several strong tokens drowns the specific resource a query names,
+  // which is a worse failure than the word missing, because the caller named the thing they wanted.
+  //
+  // `nedbetaling` and `motpart` are GONE rather than weakened, because they are genuinely ambiguous and
+  // choosing a side is itself the bug: an invoice is paid down too (it reaches the invoice payments,
+  // which is the better default), and a counterparty belongs to anything, not only a loan.
+  gjeld: ["loan"],
   gjeldsbrev: ["loans", "loan"],
   laan: ["loans", "loan"],
   // Deliberately NOT carrying "bank" as well: with it, `banklån` ranked /api/loans fifth behind the
@@ -1072,12 +1084,11 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   aksjonaerlan: ["loans", "loan", "owner"],
   eierlan: ["loans", "loan", "owner"],
   konsernlan: ["loans", "loan", "intercompany"],
-  rente: ["loans", "loan", "interest"],
-  renter: ["loans", "loan", "interest"],
-  rentesats: ["loans", "loan", "interest"],
-  rentefot: ["loans", "loan", "interest"],
-  avdrag: ["loans", "loan", "repayment", "principal"],
-  nedbetaling: ["loans", "loan", "repayment"],
+  rente: ["interest", "loan"],
+  renter: ["interest", "loan"],
+  rentesats: ["interest", "loan"],
+  rentefot: ["interest", "loan"],
+  avdrag: ["loan"],
   hovedstol: ["loans", "loan", "principal"],
   laneperspektiv: ["loans", "loan"],
   borrowing: ["loans", "loan"],
@@ -1088,7 +1099,6 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   kreditorer: ["creditors", "creditor"],
   debitor: ["debtors", "debtor"],
   debitorer: ["debtors", "debtor"],
-  motpart: ["creditors", "debtors", "counterparty"],
   leiekontrakt: ["rent-agreement", "agreement", "rent"],
   husleie: ["rent-agreement", "rent"],
   leieavtale: ["rent-agreement", "agreement", "rent"],

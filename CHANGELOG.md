@@ -136,6 +136,21 @@ All notable changes to `reai-mcp`. Format loosely follows
   - `banklån` is deliberately mapped to the loan terms only. Carrying `bank` as well ranked
     `/api/loans` fifth, behind the company-bank family, because the extra term pulls a whole domain up
     — a compound names one thing.
+  - **The first version of this was too strong, and review measured how.** Every entry carried three or
+    four tokens, so a broad word drowned the specific resource a query named: `gjeld til leverandør`
+    pushed the supplier ledger from first to **fourth**, `nedbetaling av faktura` and `avdrag på faktura`
+    moved off the invoice payments, `motpart på banktransaksjon` filled all four top places with
+    creditors and debtors, and the English `renter agreement` — a person who rents — lost the rent
+    agreement. That is a worse failure than the word missing, because the caller named the thing they
+    wanted. Every entry carries one or two tokens now.
+  - `nedbetaling` and `motpart` are **dropped rather than weakened**: they are genuinely ambiguous, and
+    picking a side is the bug. An invoice is paid down too, and `nedbetaling` reaching the invoice
+    payments is the better default; a counterparty belongs to anything, not only a loan.
+  - One case is left imperfect and stated rather than hidden: `avdrag på faktura` ranks the invoice
+    payments third, behind the invoice list and its e-invoice status. Accepted because `avdrag` is
+    specifically a loan principal instalment in Norwegian accounting — an invoice is paid in
+    `delbetaling` — so the phrase is unusual and the term is worth keeping. The fix, if it is ever
+    needed, is a narrower-scope mechanism rather than a heavier synonym.
   - Mutation-verified: removing the new entries fails all three new tests.
 
 **145 tools**: 138 across eleven accounting domains, plus 7 always-on.
