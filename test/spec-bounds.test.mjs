@@ -843,16 +843,19 @@ test("every path placeholder is either swept or listed as unattributable", () =>
  * locally, with a validation error that reads like the caller's mistake. Nothing upstream is consulted,
  * so nothing ever corrects it.
  *
- * There are eighteen `z.enum(...)` lists across the curated tools, seven of them added by this repository
- * in a single day — loan types, perspectives, repayment types, day counts, interest treatments, instrument
- * types, event types. Every one is a copy of something the document states, and a copy is a claim with a
- * shelf life. Measured when this was written: no drift, which is exactly when the guard is worth adding
- * rather than after a spec refresh has quietly broken a domain.
+ * Keyed on dotted LOCATIONS rather than argument names, for the reason `constraintsOf` gives above: the
+ * first version of this sweep iterated top-level `inputSchema` entries only, so every enum inside an
+ * array of objects was invisible — `reai_create_expense.perDiems[].tripType` and `costs[].category`
+ * among them, both backed by documented enums. A sweep that silently skips the nested half is the same
+ * failure this file already records for bounds, and review caught it here within the hour.
  *
- * `DELIBERATELY_NARROWER` is for cases where refusing a documented value is the point — there are none
- * today, and an entry has to say why.
+ * `DELIBERATELY_NARROWER` holds VALUES, not locations: exempting a whole argument would suppress the
+ * comparison for every other value too, so the day the document gains another one, that drift hides
+ * behind an exemption written for something else.
  */
-const DELIBERATELY_NARROWER = {};
+const DELIBERATELY_NARROWER = {
+  // "tool.location": { values: ["X"], reason: "why refusing X is deliberate" }
+};
 
 /**
  * Follow a `$ref` anywhere in the document, not only into `components.schemas`.
@@ -870,76 +873,143 @@ function derefAny(node, guard = 0) {
   return n;
 }
 
-/** A zod enum's members, through optional / nullable / default / array wrappers. */
-function zodEnumValues(schema) {
-  let def = schema?._def;
-  for (let i = 0; i < 6 && def; i++) {
-    if (Array.isArray(def.values)) return def.values;
-    def = def.innerType?._def ?? def.type?._def ?? def.schema?._def;
-  }
-  return undefined;
-}
-
-/** Every enum the spec declares for a property name on one operation, body and parameters alike. */
-function specEnumsFor(method, path) {
+/** Every enum the SPEC declares, by dotted location, for one operation — body and parameters alike. */
+function specEnumLocations(method, path) {
   const op = SPEC.paths?.[path]?.[method.toLowerCase()];
   if (!op) return {};
   const found = {};
-  const walk = (schema, depth = 0) => {
+  const walk = (schema, prefix, depth = 0) => {
     const s = derefAny(schema);
-    if (!s || depth > 4) return;
+    if (!s || depth > 6) return;
+    const items = derefAny(s.items);
+    if (items) walk(items, `${prefix}[]`, depth + 1);
     for (const [name, raw] of Object.entries(s.properties ?? {})) {
       const prop = derefAny(raw);
-      if (Array.isArray(prop?.enum)) found[name] = prop.enum;
-      const items = derefAny(prop?.items);
-      if (Array.isArray(items?.enum)) found[name] = items.enum;
-      if (prop?.properties) walk(prop, depth + 1);
+      const location = prefix ? `${prefix}.${name}` : name;
+      if (Array.isArray(prop?.enum)) found[location] = prop.enum;
+      const inner = derefAny(prop?.items);
+      if (Array.isArray(inner?.enum)) found[`${location}[]`] = inner.enum;
+      if (prop?.properties || prop?.items) walk(prop, location, depth + 1);
     }
   };
-  walk(derefAny(op.requestBody)?.content?.["application/json"]?.schema);
+  walk(derefAny(op.requestBody)?.content?.["application/json"]?.schema, "");
   for (const raw of op.parameters ?? []) {
     const param = derefAny(raw);
     const schema = derefAny(param?.schema);
     if (Array.isArray(schema?.enum)) found[param.name] = schema.enum;
-    const items = derefAny(schema?.items);
-    if (Array.isArray(items?.enum)) found[param.name] = items.enum;
+    const inner = derefAny(schema?.items);
+    if (Array.isArray(inner?.enum)) found[param.name] = inner.enum;
   }
   return found;
 }
 
+/** Every enum a TOOL declares, by the same dotted location, walking into objects and arrays. */
+function toolEnumLocations(schema, prefix = "", out = {}, depth = 0) {
+  if (!schema || depth > 6) return out;
+  let def = schema._def;
+  // Unwrap optional / nullable / default / effects until something structural appears.
+  for (let i = 0; i < 6 && def; i++) {
+    if (Array.isArray(def.values)) {
+      out[prefix] = def.values;
+      return out;
+    }
+    if (def.typeName === "ZodArray" || def.type) {
+      const inner = def.type ?? def.innerType;
+      if (inner) return toolEnumLocations(inner, `${prefix}[]`, out, depth + 1);
+    }
+    if (def.typeName === "ZodObject" || typeof def.shape === "function") {
+      const shape = typeof def.shape === "function" ? def.shape() : def.shape;
+      for (const [name, child] of Object.entries(shape ?? {})) {
+        toolEnumLocations(child, prefix ? `${prefix}.${name}` : name, out, depth + 1);
+      }
+      return out;
+    }
+    def = def.innerType?._def ?? def.schema?._def;
+  }
+  return out;
+}
+
+/**
+ * Every comparison this sweep is expected to make, pinned.
+ *
+ * A floor was the first version and review was right that it is too weak: a floor of eight let the sweep
+ * lose most of its comparisons and stay green —
+ * while counting operation occurrences rather than distinct locations made it easier still, since a
+ * create and an update mapping the same argument both counted. Pinning the set means losing one fails,
+ * and gaining one fails with a nudge to add it here, which is the only way the claim stays true.
+ */
+const EXPECTED_ENUM_COMPARISONS = [
+  "reai_add_salary_line.specificationCode",
+  "reai_add_share_investment_event.eventType",
+  "reai_create_asset.depreciationMethod",
+  "reai_create_expense.costs[].category",
+  "reai_create_expense.perDiems[].tripType",
+  "reai_create_loan.dayCountConvention",
+  "reai_create_loan.interestTreatment",
+  "reai_create_loan.loanType",
+  "reai_create_loan.perspective",
+  "reai_create_loan.repaymentType",
+  "reai_create_share_investment.instrumentType",
+  "reai_create_subscription.billingTiming",
+  "reai_create_subscription.outputMode",
+  "reai_create_subscription.periodAlignment",
+  "reai_create_supplier_invoice.documentType",
+  "reai_list_invoices.dueDateStatus",
+  "reai_list_invoices.paymentStatus",
+  "reai_list_invoices.type",
+  "reai_list_orders.status",
+  "reai_list_vat_codes.usage",
+  "reai_list_vouchers.voucherType",
+  "reai_log_lead_contact.source",
+  "reai_search_leads.contactStatus",
+  "reai_search_leads.leadFilter",
+  "reai_search_leads.statusFilter",
+  "reai_set_asset_depreciation.depreciationMethod",
+  "reai_update_expense.costs[].category",
+  "reai_update_expense.perDiems[].tripType",
+  "reai_update_lead.status",
+  "reai_update_loan.dayCountConvention",
+  "reai_update_loan.interestTreatment",
+  "reai_update_loan.loanType",
+  "reai_update_loan.perspective",
+  "reai_update_loan.repaymentType",
+  "reai_update_salary_line.specificationCode",
+  "reai_update_share_investment.instrumentType",
+  "reai_update_subscription.billingTiming",
+  "reai_update_subscription.outputMode",
+  "reai_update_subscription.periodAlignment",
+];
+
 test("no tool enum has fallen behind the values the spec allows", () => {
   const narrower = [];
-  let compared = 0;
+  const compared = new Set();
   for (const tool of registeredTools) {
-    for (const [arg, schema] of Object.entries(tool.inputSchema ?? {})) {
-      const mine = zodEnumValues(schema);
-      if (!mine) continue;
+    const mine = toolEnumLocations({ _def: { typeName: "ZodObject", shape: () => tool.inputSchema ?? {} } });
+    for (const [location, values] of Object.entries(mine)) {
       for (const [method, path] of tool.apiPaths ?? []) {
-        const theirs = specEnumsFor(method, path)[arg];
+        const theirs = specEnumLocations(method, path)[location];
         if (!theirs) continue;
-        compared++;
-        const key = `${tool.name}.${arg}`;
-        if (key in DELIBERATELY_NARROWER) continue;
-        const missing = theirs.filter((v) => !mine.includes(v));
-        if (missing.length > 0) {
-          narrower.push(`${key} (${method} ${path}) refuses ${missing.join(", ")}`);
-        }
+        const key = `${tool.name}.${location}`;
+        compared.add(key);
+        const exempt = DELIBERATELY_NARROWER[key]?.values ?? [];
+        const missing = theirs.filter((v) => !values.includes(v) && !exempt.includes(v));
+        if (missing.length > 0) narrower.push(`${key} (${method} ${path}) refuses ${missing.join(", ")}`);
       }
     }
   }
 
-  // The sweep has to be doing work: if the zod unwrapping or the spec walk breaks, every enum silently
-  // stops being compared and this passes on an empty set — the vacuity the documentation guard was caught
-  // by one iteration ago, in a test that also looked fine.
-  assert.ok(
-    compared >= 8,
-    `only ${compared} tool enums were matched against the document — the unwrapping or the spec walk has ` +
-      `stopped finding them, so this test is passing on nothing`,
+  // The set, not a floor: if argument matching or the spec walk regresses, the comparisons vanish and a
+  // floor would still pass. Distinct locations, so a create and an update sharing an argument count once.
+  assert.deepEqual(
+    [...compared].sort(),
+    [...EXPECTED_ENUM_COMPARISONS].sort(),
+    "the set of enums compared against the document changed — add a new one to EXPECTED_ENUM_COMPARISONS, " +
+      "or find out why one stopped being seen",
   );
   assert.deepEqual(
     narrower,
     [],
     "these tools refuse values the API documents, which the caller sees as their own mistake — widen the " +
-      "enum, or record why refusing it is deliberate in DELIBERATELY_NARROWER",
+      "enum, or record the specific values in DELIBERATELY_NARROWER with why",
   );
 });
