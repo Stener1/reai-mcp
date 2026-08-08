@@ -9,9 +9,59 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**136 tools**: 129 across ten accounting domains, plus 7 always-on.
+**141 tools**: 134 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,
+  `reai_update_lead`, `reai_log_lead_contact`, `reai_convert_lead`, `reai_delete_lead`.
+  Measured on tenant 2783, the CRM half of the leads domain has four traps, and each one
+  turns a 200 into something other than what was asked for:
+  - **Null means two opposite things depending on the endpoint.** `PATCH /api/leads/...`
+    documents null as "leave unchanged" and honours that — `{notes: null, email: null,
+    phone: null, followUpAt: null}` against a lead holding all four returned 200 and
+    changed nothing. The `PUT` setters clear on the same null. So the general-looking
+    endpoint cannot clear a field at all. `reai_update_lead` takes one rule — omit to
+    keep, null to clear — and routes each field to whichever endpoint does that,
+    reporting the calls it made.
+  - **`PUT .../contact` answers 200 on an unsaved company and stores nothing.** Every
+    other write materialises the lead row (PATCH, status, notes, follow-up and a contact
+    event each turned `lead.id: null` into a real id); contact left it null, which means
+    the email and phone were accepted and discarded. `reai_update_lead` therefore saves
+    the lead first before writing to a company that has never been touched.
+  - **`PUT .../contact` needs both fields in the body, every time.** A single-key body has no
+    single behaviour: `{phone: null}` alone was a complete no-op in 4 of 4 trials, re-read
+    after four seconds, with the phone it named still in place — while the identical body
+    sent straight after `PUT /notes` and `PUT /follow-up` behaved as a full replacement and
+    cleared the omitted email. Nothing in the request accounted for the difference, so the
+    tool reads the lead and carries over what the caller did not mention, which is correct
+    under either reading. The unit-test fake throws on a single-key body rather than
+    modelling one, since sending one is the defect.
+  - **Undoing a conversion has an order**: the lead first, the customer second. Deleting the
+    customer while the converted lead still pointed at it ARCHIVED it — `"it had
+    transactions"`, on a customer minutes old with no ledger entry, order or invoice. With
+    the lead gone it deleted outright.
+  - **A status cannot be unset**, and the spec says it can: `PatchLeadReq.status` points
+    at `PUT /status` with an explicit null, which answers `400 "Validation failed"` and
+    leaves the old status in place. Passing null is refused up front with that
+    explanation instead of forwarded.
+  - **`convert` exists only by id** — the `/org/{orgNumber}` form 404s — so an unsaved
+    company cannot be converted at all until it has been saved. The tool does that first,
+    and reads the new customer id back from the lead, because the convert response body
+    is the *company* record. Repeat conversions are safe: a second call, and a fresh lead
+    for an org that already has a customer, each returned 200 without creating a second
+    one.
+  - Five quirks record all of it against the operations concerned, so `reai_request`
+    callers get the same warnings.
+
+- **Nullability now survives the enum rendering in the spec index.** `enumType()` threw
+  away the fallback string that carried the trailing `?`, so all **65** enum-typed body
+  fields read as non-nullable — **36 of them wrongly**. Not cosmetic:
+  `test/merge-tools.test.mjs` decides from that exact string whether a curated tool may
+  accept null, so a correctly nullable enum field looked like a tool defect whose
+  suggested fix was to delete a `.nullable()` the API honours. Found while adding a lead
+  tool that tripped the guard. The new test asserts the property against the raw spec
+  rather than a list of examples.
 
 - **The bounds sweep now covers QUERY parameters, not just write bodies.** Review of
   the lead search caught three unenforced maxima by reading, and the reason nothing

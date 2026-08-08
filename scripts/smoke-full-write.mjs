@@ -1783,6 +1783,182 @@ async function main() {
       }
     }
 
+    // --- Leads: the CRM state, and the two 200s that do not mean what they say ---
+    //
+    // Every check here exists because the endpoint underneath it lies in a specific way. A mocked
+    // unit test cannot catch any of them, since the lie IS the API's behaviour: null ignored by
+    // PATCH, and a contact write accepted against a company that has no row to store it in.
+    //
+    // The subject is a real register company (Brønnøysund is the source, so there is no such thing
+    // as a test one). Nothing here contacts it: lead state is private CRM data on this tenant, and
+    // the suite removes what it writes.
+    if (tools.has("reai_update_lead")) {
+      console.log("\n  Leads (CRM state on a register company):");
+      const org = "938225605";
+      const lead = async (args = {}) =>
+        await client.callTool({ name: "reai_get_lead", arguments: { orgNumber: org, tenantId, ...args } });
+      const stateOf = async () => (jsonOf(await lead())?.lead ?? {});
+      const callLead = async (name, args) =>
+        await client.callTool({ name, arguments: { orgNumber: org, tenantId, ...args } });
+
+      // Start from nothing, whatever an interrupted earlier run left behind.
+      await callLead("reai_delete_lead", {});
+      const before = await stateOf();
+      report(
+        "the subject starts as a register entry with no lead state",
+        before.id === null || before.id === undefined,
+        before.id ? `lead ${before.id} still present — abort` : "unsaved",
+      );
+
+      // 1. Setting everything, which PATCH can do.
+      const set = await callLead("reai_update_lead", {
+        status: "active",
+        notes: `Zz ${STAMP} lead notes`,
+        email: "zz@example.invalid",
+        phone: "40000000",
+        followUpAt: today,
+      });
+      const seeded = await stateOf();
+      report(
+        "one call sets status, notes, contact details and follow-up",
+        !set.isError &&
+          seeded.status === "active" &&
+          seeded.notes?.includes(STAMP) === true &&
+          seeded.email === "zz@example.invalid" &&
+          seeded.followUpAt === today,
+        set.isError ? firstLineOf(textOf(set)) : `status ${seeded.status}, follow-up ${seeded.followUpAt}`,
+      );
+      // Phone normalisation, which is why the tool says so rather than echoing the input.
+      report(
+        "the phone comes back normalised to E.164",
+        seeded.phone === "+4740000000",
+        `sent 40000000, stored ${JSON.stringify(seeded.phone)}`,
+      );
+      report(
+        "creating the lead is reported as creation, not as an update",
+        /CREATED lead/.test(textOf(set)),
+        firstLineOf(textOf(set)),
+      );
+
+      // 2. Clearing, which PATCH CANNOT do — the whole reason this tool dispatches.
+      const cleared = await callLead("reai_update_lead", {
+        notes: null,
+        followUpAt: null,
+        phone: null,
+      });
+      const empty = await stateOf();
+      report(
+        "null clears notes, follow-up and phone — the fields PATCH would have ignored",
+        !cleared.isError && empty.notes === null && empty.followUpAt === null && empty.phone === null,
+        cleared.isError
+          ? firstLineOf(textOf(cleared))
+          : `notes ${JSON.stringify(empty.notes)}, follow-up ${JSON.stringify(empty.followUpAt)}, phone ${JSON.stringify(empty.phone)}`,
+      );
+      report(
+        "an untouched field survives a call that clears its neighbours",
+        empty.email === "zz@example.invalid" && empty.status === "active",
+        `email ${JSON.stringify(empty.email)}, status ${JSON.stringify(empty.status)}`,
+      );
+
+      // 3. The status that cannot be unset, refused locally rather than sent.
+      const refused = await callLead("reai_update_lead", { status: null });
+      const afterRefusal = await stateOf();
+      report(
+        "clearing a status is refused with the reason, and changes nothing",
+        refused.isError === true && /cannot be cleared/.test(textOf(refused)) && afterRefusal.status === "active",
+        refused.isError ? "refused locally" : `NOT REFUSED — status is now ${afterRefusal.status}`,
+      );
+
+      // 4. A contact write on an UNSAVED company: 200, and stores nothing. The tool has to have
+      //    saved the lead first, so this is the check that the save-first is really there.
+      await callLead("reai_delete_lead", {});
+      const onUnsaved = await callLead("reai_update_lead", { email: "zz2@example.invalid" });
+      const materialised = await stateOf();
+      report(
+        "contact details written to an unsaved company actually land",
+        !onUnsaved.isError &&
+          materialised.id !== null &&
+          materialised.id !== undefined &&
+          materialised.email === "zz2@example.invalid",
+        onUnsaved.isError
+          ? firstLineOf(textOf(onUnsaved))
+          : `lead ${materialised.id}, email ${JSON.stringify(materialised.email)}`,
+      );
+
+      // 5. A contact event, which is append-only: nothing can remove it but deleting the lead.
+      const logged = await callLead("reai_log_lead_contact", {
+        contactedOn: today,
+        source: "phone",
+        note: `Zz ${STAMP}`.slice(0, 180),
+      });
+      report(
+        "a contact event is recorded and reported as unremovable",
+        !logged.isError && /cannot be removed on its own/.test(textOf(logged)),
+        logged.isError ? firstLineOf(textOf(logged)) : firstLineOf(textOf(logged)),
+      );
+
+      // 6. Conversion, then back out of it completely. The endpoint is id-only, so this also proves
+      //    the tool saved the lead before converting — an unsaved company cannot be converted at all.
+      const converted = await callLead("reai_convert_lead", {});
+      const convertedState = await stateOf();
+      const customerId = convertedState.convertedCustomerId;
+      report(
+        "converting a lead produces a customer and names it",
+        !converted.isError && typeof customerId === "number",
+        converted.isError ? firstLineOf(textOf(converted)) : `customer ${customerId}`,
+      );
+      const again = await callLead("reai_convert_lead", {});
+      report(
+        "a repeat conversion reports the same customer without calling convert",
+        !again.isError && new RegExp(`already converted to customer ${customerId}`).test(textOf(again)),
+        firstLineOf(textOf(again)),
+      );
+
+      // Undo in this order, which is not the obvious one. Deleting the customer FIRST archived it
+      // instead: "it had transactions", on a customer minutes old with no ledger entry, no order and
+      // no invoice — the converted lead still pointing at it is what counts as a transaction. Once
+      // the lead was gone, unarchiving and deleting the same customer removed it outright. So the
+      // lead is deleted first here, and the customer after.
+      const removed = await callLead("reai_delete_lead", {});
+      const finalState = await stateOf();
+      report(
+        "deleting the lead returns the company to register-only",
+        !removed.isError && (finalState.id === null || finalState.id === undefined),
+        removed.isError ? firstLineOf(textOf(removed)) : "unsaved again",
+      );
+      if (typeof customerId === "number") {
+        const del = await client.callTool({
+          name: "reai_delete_customer",
+          arguments: { id: customerId, tenantId },
+        });
+        report(
+          "with the lead gone, the converted customer deletes outright",
+          !del.isError && /was DELETED outright/.test(textOf(del)),
+          firstLineOf(textOf(del)) +
+            (/ARCHIVED/.test(textOf(del))
+              ? ` — unarchive and delete customer ${customerId} by hand`
+              : ""),
+        );
+      }
+      // The customer is the part that survives a lead delete, so prove it is gone by its own path
+      // rather than inferring it from the lead. A stray customer named after a real company is
+      // exactly the litter this suite exists to prevent.
+      if (typeof customerId === "number") {
+        for (const archived of [false, true]) {
+          const still = await client.callTool({
+            name: "reai_list_customers",
+            arguments: { organizationNumber: org, ...(archived ? { archived: true } : {}), pageSize: 50, tenantId },
+          });
+          const rows = listOf(still) ?? [];
+          report(
+            `no ${archived ? "archived" : "active"} customer is left for the converted org`,
+            rows.length === 0,
+            rows.length === 0 ? "none" : `STILL PRESENT — delete customer(s) ${rows.map((r) => r.id).join(", ")} by hand`,
+          );
+        }
+      }
+    }
+
     // --- A sweep for test records this run did NOT create -------------------
     //
     // The stamp sweep below catches leaks from THIS run. It cannot catch leaks from any other, and
@@ -1975,6 +2151,34 @@ async function main() {
       } catch (err) {
         report(`sweep: ${label}`, false, `sweep threw — ${err?.message ?? err}`);
       }
+    }
+
+    // Leads cannot join the sweep above, because a lead's name is the REGISTER's name — a real
+    // company, never "Zz something". Nothing about the row says "test". What makes them sweepable
+    // instead is the baseline: measured, both 2783 and 2634 have 0 saved leads, so on this tenant a
+    // saved lead is residue by definition, and listing every one of them is cheap. If a human ever
+    // starts doing real CRM work here, this check turns into a list of their leads and should become
+    // a baseline comparison rather than a zero.
+    try {
+      const saved = await client.callTool({
+        name: "reai_search_leads",
+        arguments: { leadFilter: "saved", pageSize: 200, tenantId },
+      });
+      const rows = jsonOf(saved)?.items;
+      if (!Array.isArray(rows)) {
+        report("sweep: no lead state left behind", false, `could not read the saved-lead list: ${firstLineOf(textOf(saved))}`);
+      } else {
+        report(
+          "sweep: no lead state left behind",
+          rows.length === 0,
+          rows.length === 0
+            ? "clean (0 saved leads, which is this tenant's baseline)"
+            : `LEFTOVER LEAD(S) ${rows.map((r) => `${r.id} ${r.companyName}`).join(", ")} — remove with ` +
+              `reai_delete_lead, or record why they stay`,
+        );
+      }
+    } catch (err) {
+      report("sweep: no lead state left behind", false, `sweep threw — ${err?.message ?? err}`);
     }
 
     // A last sweep by stamp, independent of the ids we think we hold. If a

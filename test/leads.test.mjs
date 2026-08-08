@@ -203,11 +203,375 @@ test("and still works if a response ever arrives flattened", async () => {
 });
 
 test("the documented query-parameter maxima are enforced locally", () => {
-  // These are QUERY parameters, which test/spec-bounds.test.mjs does not sweep — it walks write
-  // bodies — so this class of mismatch was invisible to it and had to be caught by reading.
+  // Kept after test/spec-bounds.test.mjs grew a query sweep of its own: that one proves every
+  // parameter agrees with the spec, this one pins the four values a reader would otherwise have to
+  // regenerate the index to see.
   const shape = tool("reai_search_leads").inputSchema;
   for (const [field, cap] of [["query", 200], ["legalFormCode", 500], ["industryCodePrefix", 500], ["city", 1000]]) {
     assert.equal(shape[field].safeParse("x".repeat(cap)).success, true, `${field} at ${cap}`);
     assert.equal(shape[field].safeParse("x".repeat(cap + 1)).success, false, `${field} over ${cap}`);
   }
+});
+
+/**
+ * Lead writes.
+ *
+ * The fake below is not a stub that returns 200: it is the measured behaviour of the live endpoints,
+ * which is the only reason these tests can fail for the right reason. Two rules matter, both taken
+ * from tenant 2783:
+ *
+ *   - PATCH ignores null. Collapsing reai_update_lead into "one PATCH with everything" therefore
+ *     leaves the fields the caller asked to clear exactly as they were, and the assertions here
+ *     catch that instead of watching a mocked 200 go by.
+ *   - PUT .../contact does not create the lead. A tool that writes contact details to an unsaved
+ *     company gets a 200 and stores nothing, so the fake keeps the id null for that one call.
+ */
+const ORG = "938225605";
+
+function fakeLead(initial = {}) {
+  const state = {
+    id: null,
+    status: null,
+    notes: null,
+    email: null,
+    phone: null,
+    followUpAt: null,
+    convertedCustomerId: null,
+    convertedAt: null,
+    ...initial,
+  };
+  const calls = [];
+  let nextId = 53797;
+  const materialise = () => {
+    if (state.id === null) state.id = nextId++;
+  };
+  const client = {
+    deepLink: () => "link",
+    request: async (req) => {
+      calls.push(req);
+      const { method, path, body } = req;
+      if (method === "GET") {
+        return { data: { orgNumber: ORG, companyName: "AARSKOG ELEKTRO HOLDING AS", lead: { ...state } }, status: 200 };
+      }
+      if (method === "POST" && path === "/api/leads") {
+        materialise();
+        return { data: {}, status: 200 };
+      }
+      if (method === "PATCH") {
+        materialise();
+        // Null LEAVES THE VALUE ALONE. This is the whole trap.
+        for (const [k, v] of Object.entries(body ?? {})) if (v !== null && v !== undefined) state[k] = v;
+        return { data: {}, status: 200 };
+      }
+      if (method === "PUT" && path.endsWith("/notes")) {
+        materialise();
+        state.notes = body?.notes ?? null;
+        return { data: {}, status: 200 };
+      }
+      if (method === "PUT" && path.endsWith("/follow-up")) {
+        materialise();
+        state.followUpAt = body?.followUpAt ?? null;
+        return { data: {}, status: 200 };
+      }
+      if (method === "PUT" && path.endsWith("/status")) {
+        if (body?.status === null || body?.status === undefined) {
+          throw new Error('ReAI PUT /status failed with HTTP 400: Validation failed');
+        }
+        materialise();
+        state.status = body.status;
+        return { data: {}, status: 200 };
+      }
+      if (method === "PUT" && path.endsWith("/contact")) {
+        // A single-key body is rejected outright rather than modelled, because the live endpoint
+        // does not have one behaviour for it: measured as a total no-op in isolation, and as a full
+        // replacement that cleared the omitted field when sent after the other setters. Neither
+        // reading is safe to build on, so sending one is the defect.
+        const keys = Object.keys(body ?? {});
+        if (keys.length !== 2 || !keys.includes("email") || !keys.includes("phone")) {
+          throw new Error(`single-key contact write: ${JSON.stringify(body)}`);
+        }
+        // Deliberately NOT materialised: measured, this answers 200 against an unsaved company,
+        // leaves lead.id null, and stores nothing.
+        if (state.id !== null) for (const k of ["email", "phone"]) state[k] = body[k];
+        return { data: {}, status: 200 };
+      }
+      if (method === "POST" && path.endsWith("/contact-events")) {
+        materialise();
+        return { data: { id: 66150 }, status: 200 };
+      }
+      if (method === "POST" && path.endsWith("/convert")) {
+        materialise();
+        state.convertedCustomerId ??= 5983;
+        state.status = "converted";
+        return { data: { orgNumber: ORG, companyName: "AARSKOG ELEKTRO HOLDING AS" }, status: 200 };
+      }
+      if (method === "DELETE") {
+        for (const k of Object.keys(state)) state[k] = null;
+        return { data: {}, status: 200 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    },
+  };
+  return { state, calls, client };
+}
+
+async function runLive(name, args, fake) {
+  const validated = z.object(tool(name).inputSchema).parse({ tenantId: 2783, ...args });
+  const result = await tool(name).handler(validated, {
+    client: fake.client,
+    config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+    session: {},
+  });
+  return { result, text: result.content.find((c) => c.type === "text").text };
+}
+
+test("every lead write is classified no more permissively than the escape hatch would be", () => {
+  const registered = new Set(registeredTools.map((t) => t.name));
+  for (const name of [
+    "reai_save_lead",
+    "reai_update_lead",
+    "reai_log_lead_contact",
+    "reai_convert_lead",
+    "reai_delete_lead",
+  ]) {
+    assert.ok(registered.has(name), name);
+    assert.equal(tool(name).risk, "reversible");
+    for (const [method, path] of tool(name).apiPaths) {
+      const concrete = path.replace("{orgNumber}", ORG).replace("{id}", "1");
+      assert.equal(classifyRequest(method, concrete), "reversible", `${method} ${concrete}`);
+      // A lead write must never look like an external send, whatever the body. "none" is the
+      // answer for a path carrying no transmission pattern at all; "internal" would also be fine.
+      assert.notEqual(classifyTransmission(method, concrete, undefined), "external", `${method} ${concrete}`);
+    }
+  }
+  assert.equal(tool("reai_delete_lead").destructive, true);
+});
+
+test("reai_update_lead clears through the setters, because PATCH cannot", async () => {
+  const fake = fakeLead({ id: 700, status: "active", notes: "keep me", email: "a@b.no", phone: "+4740000000", followUpAt: "2026-09-01" });
+  const { text } = await runLive(
+    "reai_update_lead",
+    { orgNumber: ORG, notes: null, followUpAt: null, phone: null, email: "new@b.no" },
+    fake,
+  );
+  // The end state is what matters: against the measured PATCH semantics, a single PATCH carrying
+  // these nulls would have left all three values in place.
+  assert.equal(fake.state.notes, null, "notes should be cleared");
+  assert.equal(fake.state.followUpAt, null, "follow-up should be cleared");
+  assert.equal(fake.state.phone, null, "phone should be cleared");
+  assert.equal(fake.state.email, "new@b.no", "email set in the same call");
+  assert.equal(fake.state.status, "active", "status was not mentioned, so it must not move");
+
+  // And no null was sent through PATCH, where it would have been silently ignored.
+  for (const c of fake.calls.filter((c) => c.method === "PATCH")) {
+    assert.ok(
+      !Object.values(c.body ?? {}).includes(null),
+      `PATCH carried a null, which does nothing: ${JSON.stringify(c.body)}`,
+    );
+  }
+  assert.match(text, /PUT \.\.\.\/notes with null to clear the notes/);
+  assert.match(text, /PUT \.\.\.\/contact with email set and phone cleared/);
+});
+
+test("reai_update_lead sends the values it is setting in a single PATCH", async () => {
+  const fake = fakeLead({ id: 700 });
+  await runLive(
+    "reai_update_lead",
+    { orgNumber: ORG, status: "disqualified", notes: "no budget", followUpAt: "2026-12-01" },
+    fake,
+  );
+  const patches = fake.calls.filter((c) => c.method === "PATCH");
+  assert.equal(patches.length, 1, "three set fields should not cost three calls");
+  assert.deepEqual(patches[0].body, { status: "disqualified", notes: "no budget", followUpAt: "2026-12-01" });
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, 0, "nothing was being cleared");
+  assert.equal(fake.state.status, "disqualified");
+  assert.equal(fake.state.notes, "no budget");
+});
+
+test("reai_update_lead saves an unsaved company before writing contact details to it", async () => {
+  const fake = fakeLead(); // id null: a register company nobody has touched
+  const { text } = await runLive("reai_update_lead", { orgNumber: ORG, email: "new@b.no" }, fake);
+  // Without the save, PUT /contact answers 200 and stores nothing — the failure this guards.
+  assert.notEqual(fake.state.id, null, "the lead must exist before contact details are written");
+  assert.equal(fake.state.email, "new@b.no", "the email must actually land");
+  const order = fake.calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.path}`);
+  assert.equal(order[0], "POST /api/leads", `expected the save first, got ${JSON.stringify(order)}`);
+  assert.match(text, /this CREATED lead/);
+  assert.match(text, /silently stores nothing on an unsaved company/);
+});
+
+test("reai_update_lead refuses to clear a status, and says why, before calling anything", async () => {
+  const fake = fakeLead({ id: 700, status: "disqualified" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, status: null }, fake);
+  assert.equal(result.isError, true);
+  assert.equal(fake.calls.length, 0, "nothing should be sent for a request that cannot succeed");
+  assert.match(text, /cannot be cleared/);
+  assert.match(text, /Validation failed/);
+  assert.match(text, /reai_delete_lead/);
+  assert.equal(fake.state.status, "disqualified");
+});
+
+test("reai_update_lead refuses a call with nothing in it", async () => {
+  const fake = fakeLead({ id: 700 });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG }, fake);
+  assert.equal(result.isError, true);
+  assert.equal(fake.calls.length, 0);
+  assert.match(text, /reai_save_lead/);
+});
+
+test("reai_save_lead reads the id back and does not write over an existing lead", async () => {
+  const fresh = fakeLead();
+  const first = await runLive("reai_save_lead", { orgNumber: ORG }, fresh);
+  assert.match(first.text, /is now a saved lead, id 53797/);
+
+  const already = fakeLead({ id: 700, status: "active" });
+  const second = await runLive("reai_save_lead", { orgNumber: ORG }, already);
+  assert.match(second.text, /ALREADY a saved lead/);
+  assert.equal(already.calls.filter((c) => c.method === "POST").length, 0, "nothing to write");
+});
+
+test("reai_save_lead does not claim success when the row still reads null", async () => {
+  const stuck = fakeLead();
+  // A POST that answers 200 and creates nothing is the shape PUT /contact actually has, so it is
+  // not hypothetical for this domain.
+  stuck.client.request = async (req) => {
+    if (req.method === "GET") {
+      return { data: { orgNumber: ORG, companyName: "X", lead: { id: null } }, status: 200 };
+    }
+    return { data: {}, status: 200 };
+  };
+  const { text } = await runLive("reai_save_lead", { orgNumber: ORG }, stuck);
+  assert.match(text, /still reads id null/);
+  assert.match(text, /Do not treat this company as tracked/);
+});
+
+test("reai_log_lead_contact records the event and warns that it cannot be taken back", async () => {
+  const fake = fakeLead();
+  const { text } = await runLive(
+    "reai_log_lead_contact",
+    { orgNumber: ORG, contactedOn: "2026-08-08", source: "phone", note: "left a message" },
+    fake,
+  );
+  assert.match(text, /Logged phone contact/);
+  assert.match(text, /as event 66150/);
+  assert.match(text, /also created the lead/);
+  assert.match(text, /cannot be removed on its own/);
+  assert.equal(tool("reai_log_lead_contact").inputSchema.note.safeParse("x".repeat(181)).success, false);
+});
+
+test("reai_convert_lead saves first, converts by id, and reports the customer", async () => {
+  const fake = fakeLead();
+  const { text } = await runLive("reai_convert_lead", { orgNumber: ORG }, fake);
+  const writes = fake.calls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(writes, ["/api/leads", "/api/leads/53797/convert"], "id-only endpoint needs the save first");
+  assert.ok(!writes.some((p) => p.includes("/org/")), "the org form of convert answers 404");
+  assert.match(text, /is now customer 5983/);
+  assert.match(text, /saved first/);
+});
+
+test("reai_convert_lead does not call convert again on an already-converted lead", async () => {
+  const fake = fakeLead({ id: 700, status: "converted", convertedCustomerId: 4242, convertedAt: "2026-08-01" });
+  const { text } = await runLive("reai_convert_lead", { orgNumber: ORG }, fake);
+  assert.equal(fake.calls.filter((c) => c.method === "POST").length, 0);
+  assert.match(text, /already converted to customer 4242 on 2026-08-01/);
+});
+
+test("reai_convert_lead does not claim a customer the lead does not name", async () => {
+  const fake = fakeLead({ id: 700 });
+  // A 200 whose convertedCustomerId never appears: the convert response is the company record, so
+  // there is nothing in it to mistake for proof.
+  const original = fake.client.request;
+  fake.client.request = async (req) =>
+    req.method === "POST" && req.path.endsWith("/convert")
+      ? { data: { orgNumber: ORG }, status: 200 }
+      : original(req);
+  const { text } = await runLive("reai_convert_lead", { orgNumber: ORG }, fake);
+  assert.match(text, /NOT established that a customer was created/);
+  assert.match(text, /reai_list_customers/);
+});
+
+test("reai_delete_lead says what is unrecoverable and what survives", async () => {
+  const converted = fakeLead({ id: 700, notes: "long history", convertedCustomerId: 4242 });
+  const { text } = await runLive("reai_delete_lead", { orgNumber: ORG }, converted);
+  assert.match(text, /Lead 700 .* is gone, along with its notes and contact events/s);
+  assert.match(text, /Customer 4242,.*still exists/s);
+  assert.match(text, /lead\.id null/);
+
+  const untouched = fakeLead();
+  const skipped = await runLive("reai_delete_lead", { orgNumber: ORG }, untouched);
+  assert.equal(untouched.calls.filter((c) => c.method === "DELETE").length, 0);
+  assert.match(skipped.text, /nothing to delete/);
+});
+
+test("reai_delete_lead reports a DELETE that did not take", async () => {
+  const stubborn = fakeLead({ id: 700 });
+  stubborn.client.request = async (req) => ({
+    data: req.method === "GET" ? { orgNumber: ORG, companyName: "X", lead: { id: 700 } } : {},
+    status: 200,
+  });
+  const { text } = await runLive("reai_delete_lead", { orgNumber: ORG }, stubborn);
+  assert.match(text, /still reads lead id 700/);
+  assert.match(text, /was NOT removed/);
+});
+
+test("the lead quirks reach the endpoints they describe, and not the reads", () => {
+  const ids = (m, p) => quirksFor(m, p).map((q) => q.id);
+  assert.ok(ids("PATCH", "/api/leads/org/{orgNumber}").includes("lead-patch-cannot-clear-a-field-only-the-put-setters-can"));
+  assert.ok(ids("PUT", "/api/leads/org/{orgNumber}/status").includes("lead-status-cannot-be-unset-once-set"));
+  assert.ok(ids("PUT", "/api/leads/org/{orgNumber}/contact").includes("lead-contact-put-needs-both-fields-in-the-body"));
+  assert.ok(ids("POST", "/api/leads/{id}/convert").includes("lead-convert-is-addressable-by-id-only"));
+  for (const path of ["/api/leads/org/{orgNumber}/contact", "/api/leads/org/{orgNumber}/notes"]) {
+    assert.ok(
+      ids("PUT", path).includes("lead-rows-are-created-by-the-first-write-except-contact"),
+      path,
+    );
+  }
+  // The creation quirk is about writes. A GET cannot create a lead, so it must not appear on one.
+  assert.ok(!ids("GET", "/api/leads").includes("lead-rows-are-created-by-the-first-write-except-contact"));
+  assert.ok(!ids("GET", "/api/leads/org/{orgNumber}").includes("lead-patch-cannot-clear-a-field-only-the-put-setters-can"));
+});
+
+test("the null-clearing quirk names both halves, and the contact quirk says to send both fields", () => {
+  const patch = quirksFor("PATCH", "/api/leads/org/{orgNumber}").find(
+    (q) => q.id === "lead-patch-cannot-clear-a-field-only-the-put-setters-can",
+  );
+  assert.match(patch.note, /leave unchanged/);
+  assert.match(patch.note, /PUT \.\.\.\/notes/);
+  assert.match(patch.note, /reai_update_lead/);
+
+  const contact = quirksFor("PUT", "/api/leads/org/{orgNumber}/contact").find(
+    (q) => q.id === "lead-contact-put-needs-both-fields-in-the-body",
+  );
+  assert.match(contact.note, /Send email AND phone every time/);
+  // Both observations, so nobody "simplifies" the guidance back to one of them.
+  assert.match(contact.note, /no-op in 4 of 4 trials/);
+  assert.match(contact.note, /full replacement/);
+  assert.match(contact.note, /reai_update_lead/);
+
+  const creation = quirksFor("PUT", "/api/leads/org/{orgNumber}/contact").find(
+    (q) => q.id === "lead-rows-are-created-by-the-first-write-except-contact",
+  );
+  assert.match(creation.note, /stored nowhere/);
+  assert.match(creation.note, /POST \/api\/leads first/);
+});
+
+test("reai_update_lead carries the contact field it is not changing, never sending one alone", async () => {
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const { text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  const contact = fake.calls.filter((c) => c.method === "PUT" && c.path.endsWith("/contact"));
+  assert.equal(contact.length, 1);
+  // Both keys, with the untouched email carried over at its current value. The fake throws on a
+  // single-key body, so a regression fails here even before the state assertions.
+  assert.deepEqual(contact[0].body, { email: "keep@b.no", phone: "41000000" });
+  assert.equal(fake.state.email, "keep@b.no", "the email must survive a phone-only request");
+  assert.match(text, /email carried over unchanged/);
+});
+
+test("reai_update_lead carries a null contact field as null, not as absent", async () => {
+  // The carried value comes from the lead, so an empty one has to be sent explicitly — dropping it
+  // would put the tool back to a single-key body.
+  const fake = fakeLead({ id: 700, email: null, phone: null });
+  await runLive("reai_update_lead", { orgNumber: ORG, email: "first@b.no" }, fake);
+  const contact = fake.calls.find((c) => c.path.endsWith("/contact"));
+  assert.deepEqual(contact.body, { email: "first@b.no", phone: null });
 });

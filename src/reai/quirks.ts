@@ -1517,6 +1517,81 @@ export const QUIRKS: readonly Quirk[] = [
       "style=form, explode=false — i.e. ?include=summary,pending_postings, comma-joined rather than " +
       "a repeated key. This server handles that for you.",
   },
+  {
+    id: "lead-patch-cannot-clear-a-field-only-the-put-setters-can",
+    paths: ["/api/leads/{id}", "/api/leads/org/{orgNumber}"],
+    methods: ["PATCH"],
+    kind: "gotcha",
+    note:
+      "PATCH on a lead can only SET. Null means 'leave unchanged', which the schema does say — " +
+      "measured, `{notes: null, email: null, phone: null, followUpAt: null}` against a lead holding " +
+      "all four returned 200 and changed nothing. Clearing goes through the setters instead, where " +
+      "null does clear: PUT .../notes, PUT .../follow-up, PUT .../contact. So the same null is a " +
+      "no-op on one endpoint and a delete on another, and the general-looking one is the no-op. " +
+      "reai_update_lead hides this: omit to keep, null to clear, whichever endpoint that takes.",
+  },
+  {
+    id: "lead-status-cannot-be-unset-once-set",
+    paths: ["/api/leads/{id}/status", "/api/leads/org/{orgNumber}/status"],
+    methods: ["PUT"],
+    kind: "gotcha",
+    note:
+      "A lead status cannot be returned to null, and the spec says otherwise: PatchLeadReq.status " +
+      "documents \"To clear an existing status use PUT /status with explicit null\". Measured, that " +
+      'answers 400 "Validation failed" and the status stays as it was. The only moves are active ↔ ' +
+      "disqualified, or DELETE the lead and lose everything else on it. `converted` is refused here " +
+      "too (400 listing the allowed values) — it is produced by POST /api/leads/{id}/convert.",
+  },
+  {
+    id: "lead-rows-are-created-by-the-first-write-except-contact",
+    paths: [
+      "/api/leads",
+      "/api/leads/org/{orgNumber}",
+      "/api/leads/org/{orgNumber}/status",
+      "/api/leads/org/{orgNumber}/notes",
+      "/api/leads/org/{orgNumber}/follow-up",
+      "/api/leads/org/{orgNumber}/contact",
+      "/api/leads/org/{orgNumber}/contact-events",
+    ],
+    methods: ["POST", "PUT", "PATCH"],
+    kind: "gotcha",
+    note:
+      "A lead search returns REGISTER companies, most with lead.id null, and the row is created by " +
+      "the first write to it — measured, PATCH, PUT /status, PUT /notes, PUT /follow-up and " +
+      "POST /contact-events each turned a null id into a real one. `PUT .../contact` is the " +
+      "exception and the dangerous one: against an unsaved company it answers 200 and leaves the id " +
+      "null, so the email and phone are accepted and stored nowhere. POST /api/leads first, which " +
+      "is what reai_update_lead does before any write to an unsaved company.",
+  },
+  {
+    id: "lead-contact-put-needs-both-fields-in-the-body",
+    paths: ["/api/leads/{id}/contact", "/api/leads/org/{orgNumber}/contact"],
+    methods: ["PUT"],
+    kind: "gotcha",
+    note:
+      "Send email AND phone every time, even to change one of them. A body carrying only one of the " +
+      "two did not behave consistently: on a lead holding both, `{phone: null}` on its own was a " +
+      "complete no-op in 4 of 4 trials — re-read after four seconds, with the phone it named still " +
+      "in place — while the same body sent straight after PUT .../notes and PUT .../follow-up " +
+      "behaved as a full replacement and cleared the omitted email. Nothing in the request " +
+      "accounted for the difference. With both fields present the outcome is unambiguous either " +
+      "way, so read the lead first and carry over what you are not changing. reai_update_lead does " +
+      "this for you.",
+  },
+  {
+    id: "lead-convert-is-addressable-by-id-only",
+    paths: ["/api/leads/{id}/convert"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "Every other lead endpoint has an /org/{orgNumber} twin; convert does not, and the org form " +
+      'answers 404 "No static resource". An unsaved company has no id, so it cannot be converted ' +
+      "at all until POST /api/leads gives it one — reai_convert_lead does that first. Converting " +
+      "is also safe to repeat: measured, a second call returned 200 without creating a second " +
+      "customer, and converting a FRESH lead for an org that already has a customer likewise added " +
+      "none. The response body is the company record, not the customer, so the new customer id has " +
+      "to be read back from the lead's convertedCustomerId.",
+  },
 ];
 
 /** Normalize for prefix comparison: lowercase, no trailing slash. */

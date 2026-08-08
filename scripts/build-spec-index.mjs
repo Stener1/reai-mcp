@@ -151,12 +151,21 @@ function typeName(schema) {
 const ENUM_LIMIT = 24;
 
 function enumType(schema, fallback) {
-  const values = (schema?.enum ?? deref(schema?.items)?.enum)?.filter((e) => e !== null);
+  const declared = schema?.enum ?? deref(schema?.items)?.enum;
+  const values = declared?.filter((e) => e !== null);
   if (!values?.length) return fallback;
   const shown = values.slice(0, ENUM_LIMIT).join("|");
   const suffix = values.length > ENUM_LIMIT ? `|+${values.length - ENUM_LIMIT} more` : "";
   const array = String(fallback ?? "").includes("[]") || schema?.type === "array";
-  return `enum(${shown}${suffix})${array ? "[]" : ""}`;
+  // Nullability has to survive the enum rendering. It did not: this threw `fallback` away, and
+  // with it the trailing "?" that typeName had already worked out, so all 65 enum-typed body
+  // fields in the spec read as non-nullable regardless of what they declare. That silence is not
+  // harmless -- test/merge-tools.test.mjs decides from this exact string whether a tool may accept
+  // null, so a nullable enum looked like a tool bug and the fix on offer was to drop a correct
+  // `.nullable()`. Both signals count: `type: [..., "null"]`, which typeName encodes, and a null
+  // sitting among the enum values, which is filtered out above and would otherwise vanish.
+  const nullable = String(fallback ?? "").endsWith("?") || declared.some((e) => e === null);
+  return `enum(${shown}${suffix})${array ? "[]" : ""}${nullable ? "?" : ""}`;
 }
 
 function trim(text, max) {
