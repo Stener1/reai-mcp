@@ -21,8 +21,15 @@ All notable changes to `reai-mcp`. Format loosely follows
   covered, since a Norwegian query uses either (*"godkjenn reiseregningen"*, *"til
   godkjenning"*).
   - Enumerated from the spec's action segments rather than from any benchmark's phrasings —
-    the difference between covering a category and fitting a score. The tuned corpus did not
-    move; the second corpus went 23 → 25.
+    the difference between covering a category and fitting a score.
+  - **Half of it was missing at first**, and review found it: the words went into the synonym
+    table but not into `METHOD_INTENT` and `WRITE_INTENT_VERBS`, which the file's own comments
+    say must be kept in step. So *"aktiver abonnement"* expanded to `activate`, matched the
+    right path segment, and still lost to three `GET`s because nothing said a write was
+    wanted — `/activate` ranked fifth. Routing the imperatives through those tables put it
+    first and lifted **all three** corpora: 36 → 39, 23 → 26, 18 → 20. Verbal nouns and
+    participles stay out (*"hvilke venter på godkjenning"* is a question, *"avsluttet"* is a
+    participle), as those tables' own exclusions require.
   - **And that spent the second corpus as a measurement**, which is said plainly where it
     used to claim otherwise: I read its failures before doing this work, so it is a regression
     floor now, exactly like the tuned one, and its floor moved to 25 to match.
@@ -31,17 +38,39 @@ All notable changes to `reai-mcp`. Format loosely follows
   business owner asks their bookkeeper, and instructions a bookkeeper gives the system — half
   naming an action, half plain reads, so the score says something about both.
   - **16 of 28 in the top 3** first measurement, 21 in the top 10. After fixing only the two
-    queries that returned *nothing at all*: **18 of 28, 23 in the top 10.** Those two were
+    queries that returned *nothing at all*: 18 of 28. After review's method-table fix: **20 of
+    27, 23 in the top 10.** Those two were
     `land` — the plainest way to ask which countries the API accepts, whose vocabulary was
     never added when the country list became a tool — and `skylder` (owes), for *"hvem skylder
     oss penger"*, which is the customer ledger.
   - Same rule as before, and it is the whole discipline: an empty result strands an agent and
     is worth fixing; a right answer at rank five is not worth tuning for.
+  - **Three synonyms were removed on accounting grounds, not string grounds**, all found by
+    review and all worth recording:
+    - `nedskriv` (impair — write the value down, keep the asset) had been mapped to
+      `POST /api/assets/{id}/write-off`, which takes no amount and is the **destructive
+      disposal** for something scrapped, lost or sold. *"nedskriv maskinen"* would have
+      steered an agent toward disposing of the machine. There is no write-down endpoint, so
+      the word maps to nothing — the same call as `valutakurs`, where a confident wrong answer
+      is worse than no result.
+    - `underkjenn` (reject a claim) had been mapped to `/unapprove`, which by its own
+      description returns an **already approved** expense to `for_approval` and is refused
+      otherwise. Rejecting a pending claim has no endpoint at all.
+    - `åpne` alone is an adjective as often as an imperative: *"åpne poster"* — open items,
+      i.e. unpaid — is a read, and the mapping put three mutating
+      `POST /api/postings/*/open` operations above `GET /api/postings/groups`. `gjenåpne`
+      carries the meaning unambiguously.
+  - `skylder` (owes) is **direction-neutral** now. Hard-coding the customer side ranked both
+    customer-ledger routes above the supplier ledger for *"hva skylder vi"* — the opposite
+    side of the books. The direction lives in `PHRASE_SYNONYMS`, which can tell *"skylder
+    oss"* from *"skylder vi"*.
   - Five of the thirty targets I wrote named endpoints that **do not exist** — no
     `/api/offers/{id}/convert`, no `/api/vat-returns/{id}/submit`, no
     `/api/warehouses/{id}/name`, no `/api/invoices/{id}/register-payment`, and validation only
     on tax returns. Three were repointed, two dropped. That is the fourth time in this work a
-    "ranking failure" turned out to be my own wrong assumption about the API.
+    "ranking failure" turned out to be my own wrong assumption about the API — and a **sixth**
+    target was wrong in a way the existence check could not catch: `nedskriv maskinen` pointed
+    at an endpoint that exists and means something else. Dropped, leaving 27 cases.
 
 ### Fixed
 

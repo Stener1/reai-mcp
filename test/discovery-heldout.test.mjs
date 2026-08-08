@@ -99,16 +99,17 @@ test("no held-out query returns nothing at all", () => {
   assert.deepEqual(empty, [], "these queries found no endpoint at all");
 });
 
-test("at least 34 of the 41 held-out queries rank their endpoint in the top 3", () => {
+test("at least 38 of the 41 first-corpus queries rank their endpoint in the top 3", () => {
   // A floor rather than an exact score, so the file does not have to be edited every time the
   // scorer changes for an unrelated reason — but high enough that losing several is a failure.
-  // Measured at 37 when written; 17 before the vocabulary work.
+  // Measured at 37 when written; 17 before the vocabulary work; 39 once the Norwegian action
+  // imperatives reached METHOD_INTENT and WRITE_INTENT_VERBS, which is why the floor moved from 34.
   const hits = CASES.filter(([q, want]) => {
     const at = rankOf(q, want);
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 34,
+    hits.length >= 38,
     `only ${hits.length} of ${CASES.length} in the top 3:\n  ` +
       CASES.filter(([q, want]) => {
         const at = rankOf(q, want);
@@ -256,7 +257,8 @@ test("a-melding finds the operation that FILES it, not the tax return", () => {
 // the API and not one verb for any of them — took this corpus from 23 to 25, and I had read its
 // failures first. Whether or not enumerating the words from the spec's own action segments rather
 // than from these phrasings makes the work generalising, the measurement is spent: this set is a
-// regression floor now, exactly like the tuned one above, and the floor below moved to 25 to match.
+// regression floor now, exactly like the tuned one above, and the floor below moved to 26 to match
+// (23 untouched, 25 after the action words, 26 once those words reached the method tables too).
 // A third corpus follows, written afterwards and measured once, because the only way to keep an
 // honest number is to keep writing new ones.
 const FRESH = [
@@ -305,7 +307,7 @@ test("no query in the second corpus returns nothing at all", () => {
   assert.deepEqual(empty, [], "these queries found no endpoint at all");
 });
 
-test("the second corpus holds its measured score of 25 in the top 3", () => {
+test("the second corpus holds its measured score of 26 in the top 3", () => {
   // Was 23 when this set was untouched; 25 after the action vocabulary, which was added knowing
   // these failures. A floor at the measured value either way, so the score cannot quietly fall.
   const hits = FRESH.filter(([q, want]) => {
@@ -315,8 +317,8 @@ test("the second corpus holds its measured score of 25 in the top 3", () => {
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 25,
-    `${hits.length} of ${FRESH.length} in the top 3; the measured baseline is 25`,
+    hits.length >= 26,
+    `${hits.length} of ${FRESH.length} in the top 3; the measured baseline is 26`,
   );
 });
 
@@ -335,8 +337,23 @@ test("the second corpus holds its measured score of 25 in the top 3", () => {
 // repointed at the endpoint that does answer them and two were dropped, because pointing a query at
 // something that cannot answer it measures nothing.
 //
+// A SIXTH target was wrong in a subtler and more instructive way, and review caught it rather than
+// the existence check: "nedskriv maskinen" pointed at POST /api/assets/{id}/write-off. Nedskrivning
+// is an IMPAIRMENT — write the value down, keep the asset — while that endpoint takes no amount and
+// is the destructive disposal for something scrapped, lost or sold. The API has no write-down
+// endpoint at all, so the case is dropped rather than answered: `nedskriv` maps to nothing on
+// purpose, on the same reasoning as `valutakurs` above, where a confident wrong answer is worse than
+// no result. An existence check cannot catch this class — the path existed, it just meant something
+// else.
+//
 //   first measurement                                            16 of 28 in the top 3, 21 in the top 10
 //   after fixing only the two queries that returned NOTHING      18 of 28, 23 in the top 10
+//   after review made the action words reach the METHOD tables   20 of 27, 23 in the top 10
+//
+// That third line is not tuning against this corpus: the change was routing the action vocabulary
+// through METHOD_INTENT and WRITE_INTENT_VERBS, which review pointed out I had missed — the words
+// expanded to the right segment and then lost to three GETs because nothing said a write was wanted.
+// It moved the TUNED corpus from 36 to 39 as well, which is the shape a general improvement has.
 //
 // The two empties were `land` (the plainest way to ask which countries the API accepts — the country
 // list only became a tool last iteration and its vocabulary was never added with it) and `skylder`
@@ -353,7 +370,6 @@ const EVERYDAY = [
   ["lag faktura for abonnementene", "/api/subscriptions/generate-due"],
   ["krediter fakturaen", "/api/invoices/{id}/credit"],
   ["send inn mva-meldingen", "/api/vat-returns"],
-  ["nedskriv maskinen", "/api/assets/{id}/write-off"],
   ["lukk avstemmingen for mars", "/api/manual-reconciliations/{bankAccountId}/close"],
   ["åpne avstemmingen på nytt", "/api/manual-reconciliations/{bankAccountId}/reopen"],
   ["oppdater firmaopplysninger fra brreg", "/api/customers/{id}/sync-brreg"],
@@ -389,7 +405,7 @@ test("no query in the third corpus returns nothing at all", () => {
   assert.deepEqual(empty, [], "these queries found no endpoint at all");
 });
 
-test("the third corpus holds its measured score of 18 in the top 3", () => {
+test("the third corpus holds its measured score of 20 in the top 3", () => {
   const hits = EVERYDAY.filter(([q, want]) => {
     const at = searchOperations({ query: q, limit: 10 })
       .map((h) => h.path)
@@ -397,12 +413,12 @@ test("the third corpus holds its measured score of 18 in the top 3", () => {
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 18,
-    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 18`,
+    hits.length >= 20,
+    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 20`,
   );
 });
 
-test("the third corpus reaches 23 of 28 within the top ten", () => {
+test("the third corpus reaches 23 of 27 within the top ten", () => {
   // Reported separately because the two say different things: top-3 is whether the agent sees the
   // right endpoint immediately, top-10 whether it is reachable at all without rephrasing.
   const hits = EVERYDAY.filter(([q, want]) =>

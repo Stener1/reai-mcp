@@ -614,9 +614,11 @@ A third cause, found later: the table was **all nouns**. The API has 65 segments
 
 | corpus | first measurement | after fixing only the queries that returned NOTHING | now |
 |---|---|---|---|
-| tuned (`discovery-norwegian`) | — | — | 36/41 top-3 |
-| second (`FRESH`) | 19/28 | 23/28 | 25/28 after the action words |
-| third (`EVERYDAY`) | 16/28 | **18/28**, 23/28 within the top ten | floor |
+| first (`discovery-norwegian`) | 17/45 | — | **39/41** top-3 |
+| second (`FRESH`) | 19/28 | 23/28 | **26/28** |
+| third (`EVERYDAY`) | 16/28 | 18/28 | **20/27**, 23 within the top ten |
+
+The action words alone moved the second corpus 23 → 25. What moved all three was routing them through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
 
 The rule held across all three: a query that returns **nothing** strands an agent and is worth fixing; a query that returns the right endpoint at rank five is not worth tuning for. Five of the third corpus's thirty targets named endpoints that do not exist — the fourth time in this work that a "ranking failure" was really a wrong assumption about the API.
 

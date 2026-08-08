@@ -803,7 +803,18 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
     // and ranked POST /api/employees first. An unconditional token cannot tell the two apart, and a
     // wrongly-implied write is worse than a create verb this table happens not to know.
     "opprett", "opprette", "registrer", "registrere",
-    "bokfor", "bokfore", "bokfør", "bokføre"], ["POST"]],
+    "bokfor", "bokfore", "bokfør", "bokføre",
+    // The action imperatives. Adding them to TERM_SYNONYMS alone was half a change: these tables are
+    // what decide METHOD, so "aktiver abonnement" expanded to `activate`, matched the right segment,
+    // and still lost to three GETs because nothing said a write was wanted. Only unambiguous
+    // imperatives — the verbal nouns stay out, since "hvilke venter på godkjenning" is a question and
+    // "avsluttet" is a participle that appears in one.
+    "godkjenn", "godkjenne", "lever", "levere", "lukk", "lukke", "avslutt", "avslutte",
+    "gjenapne", "gjenåpne", "gjenopprett", "gjenopprette", "dearkiver",
+    "avskriv", "avskrive", "utranger", "utrangere", "konverter", "konvertere",
+    "aktiver", "aktivere", "deaktiver", "deaktivere",
+    "fullfor", "fullfore", "fullfør", "fullføre", "ferdigstill", "ferdigstille",
+    "generer", "generere", "valider", "validere", "krediter", "kreditere", "innsend"], ["POST"]],
   [["update", "change", "edit", "modify", "rename",
     "endre", "oppdater", "oppdatere", "rediger"], ["PUT", "PATCH"]],
   [["delete", "remove", "cancel", "slett", "slette", "fjern", "fjerne"], ["DELETE"]],
@@ -836,6 +847,14 @@ const WRITE_INTENT_VERBS = new Set([
   "slett", "slette", "fjern", "fjerne",
   "endre", "oppdater", "oppdatere", "rediger",
   "bokfor", "bokfore", "bokfør", "bokføre",
+  // Kept in step with METHOD_INTENT, as the comment there requires. Same exclusions: imperatives
+  // only, no verbal nouns and no participles.
+  "godkjenn", "godkjenne", "lever", "levere", "lukk", "lukke", "avslutt", "avslutte",
+  "gjenapne", "gjenåpne", "gjenopprett", "gjenopprette", "dearkiver",
+  "avskriv", "avskrive", "utranger", "utrangere", "konverter", "konvertere",
+  "aktiver", "aktivere", "deaktiver", "deaktivere",
+  "fullfor", "fullfore", "fullfør", "fullføre", "ferdigstill", "ferdigstille",
+  "generer", "generere", "valider", "validere", "krediter", "kreditere", "innsend",
 ]);
 
 function hasWriteIntent(tokens: readonly string[]): boolean {
@@ -874,6 +893,10 @@ function impliedMethodsFor(tokens: readonly string[]): Set<HttpMethod> | undefin
  */
 const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bcost\s*(centre|center)s?\b/g, "department"],
+  // Who owes whom. The verb "skylde" is neutral and these two phrasings point at opposite sides of
+  // the books: "hvem skylder oss" is the customer ledger, "hva skylder vi" the supplier ledger.
+  [/\bskylder\s+oss\b/g, "customer ledger"],
+  [/\bskylder\s+vi\b/g, "supplier ledger"],
   // Maps to the resource only. Injecting "depreciation" here made the nested
   // write endpoint dominate: even "create fixed asset" ranked
   // PUT /api/assets/{id}/depreciation above POST /api/assets. A user who means
@@ -1006,9 +1029,12 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   land: ["country", "countries"],
   landkode: ["country", "countries", "countryCode"],
   // "hvem skylder oss penger" — who owes us money — is the customer ledger, and no form of "skylde"
-  // was in the table at all.
-  skylder: ["ledger", "customer", "unpaid", "due"],
-  skylde: ["ledger", "customer", "unpaid", "due"],
+  // was in the table at all. The verb itself is direction-NEUTRAL, deliberately: "hva skylder vi" is
+  // the same verb pointing at the supplier side, and hard-coding `customer` here ranked both
+  // customer-ledger routes above the supplier ledger for it — the opposite side of the books. The
+  // direction lives in PHRASE_SYNONYMS, where "skylder oss" and "skylder vi" can be told apart.
+  skylder: ["ledger", "unpaid", "due"],
+  skylde: ["ledger", "unpaid", "due"],
   skyldig: ["unpaid", "due", "ledger"],
 
   // --- Norwegian ACTION words, enumerated from the API's own action segments ---------
@@ -1030,8 +1056,11 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   godkjenn: ["approve"],
   godkjenne: ["approve"],
   godkjenning: ["approve"],
-  underkjenn: ["unapprove"],
-  underkjenne: ["unapprove"],
+  // `underkjenn`/`underkjenne` are deliberately ABSENT. They mean reject or disallow a claim, and the
+  // only endpoint near them is POST /api/expenses/{id}/unapprove — which by its own description
+  // "returns an APPROVED expense to for_approval so it can be corrected again" and is refused for an
+  // expense that is not approved. Rejecting a pending claim has no endpoint at all, so mapping the
+  // word would answer a question the API cannot answer, confidently.
   lever: ["deliver"],
   levere: ["deliver"],
   levering: ["deliver"],
@@ -1040,14 +1069,21 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   avslutt: ["close"],
   avslutte: ["close"],
   gjenapne: ["reopen"],
-  apne: ["reopen", "open"],
+  // `apne`/`åpne` alone is NOT here: it is an adjective as often as an imperative, and "åpne poster"
+  // — open items, i.e. unpaid — is a read. Mapped unconditionally it put the three mutating
+  // POST /api/postings/{customer,employee,supplier}/open operations above GET /api/postings/groups
+  // for that phrase. `gjenapne` carries the same meaning unambiguously when reopening IS the intent.
   gjenopprett: ["unarchive", "restore"],
   gjenopprette: ["unarchive", "restore"],
   dearkiver: ["unarchive"],
   avskriv: ["depreciation", "asset"],
   avskrive: ["depreciation", "asset"],
-  nedskriv: ["write-off"],
-  nedskrive: ["write-off"],
+  // `nedskriv`/`nedskrivning` are deliberately ABSENT, and this is the one that mattered most.
+  // Nedskrivning is an IMPAIRMENT — write the carrying value down and keep the asset. The endpoint
+  // this would have reached, POST /api/assets/{id}/write-off, takes no amount and is the destructive
+  // disposal for something scrapped, lost or sold; reai_write_off_asset is marked irreversible and
+  // destructive for that reason. Mapping the word would have pointed "nedskriv maskinen" at disposing
+  // of the machine. There is no write-down endpoint, so there is nothing to point it at.
   utranger: ["write-off"],
   utrangere: ["write-off"],
   konverter: ["convert"],
