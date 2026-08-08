@@ -12,13 +12,23 @@ const tool = (name) => {
   return found;
 };
 
-async function run(name, args, data) {
+/**
+ * `data` may be a value, or a function of the request.
+ *
+ * Three of these tools now fetch /api/users/roles as well, so owner-equivalence is computed from
+ * this tenant's permission sets rather than asserted from a role code. `rolesData` supplies that
+ * second response; passing null for it is how the "role list unreadable" branch is exercised.
+ */
+async function run(name, args, data, rolesData = roles()) {
   const calls = [];
   const validated = z.object(tool(name).inputSchema).parse({ tenantId: 2634, ...args });
   const result = await tool(name).handler(validated, {
     client: {
       request: async (req) => {
         calls.push(req);
+        if (req.path === "/api/users/roles" && name !== "reai_list_roles") {
+          return { data: rolesData, status: 200 };
+        }
         return { data: typeof data === "function" ? data(req) : data, status: 200 };
       },
       deepLink: () => "link",
@@ -88,7 +98,7 @@ test("no access tool can grant, change or revoke access", () => {
 });
 
 test("the user list flags owner-equivalent access and unaccepted invitations", async () => {
-  const { text } = await run("reai_list_users", {}, [
+  const { calls, text } = await run("reai_list_users", {}, [
     user(),
     user({ userId: 2, roleCodes: ["ROLE_ACCOUNTANT"], owner: false }),
     user({
@@ -100,11 +110,60 @@ test("the user list flags owner-equivalent access and unaccepted invitations", a
       expiresAt: "2026-09-01",
     }),
   ]);
+  // The role list is fetched, because the comparison has to come from this tenant.
+  assert.deepEqual(calls.map((c) => c.path), ["/api/users", "/api/users/roles"]);
   assert.match(text, /3 user\(s\) with access/);
-  assert.match(text, /3 hold owner-equivalent access/);
+  assert.match(text, /3 hold everything ROLE_OWNER has/);
+  assert.match(text, /judged on their own effective permissions rather than their role title/);
   assert.match(text, /1 have not accepted/);
   assert.match(text, /PENDING INVITATIONS are standing access/);
   assert.match(text, /invited@example.invalid as ROLE_TENANT_ADMIN until 2026-09-01/);
+});
+
+// The finding this fix is for: a hardcoded role list would report these users as holding full owner
+// access on a tenant where ReAI has narrowed the role. In an access audit that is the one direction
+// that must not be wrong.
+test("a user whose role has been NARROWED is not reported as owner-equivalent", async () => {
+  const narrowedRoles = roles().map((r) =>
+    r.code === "ROLE_ACCOUNTANT" ? { ...r, effectivePermissionCodes: OWNER_PERMS.slice(0, 30) } : r,
+  );
+  const { text } = await run(
+    "reai_list_users",
+    {},
+    [
+      user(),
+      user({
+        userId: 2,
+        owner: false,
+        roleCodes: ["ROLE_ACCOUNTANT"],
+        effectivePermissionCodes: OWNER_PERMS.slice(0, 30),
+      }),
+    ],
+    narrowedRoles,
+  );
+  assert.match(text, /1 hold everything ROLE_OWNER has/, "only the actual owner");
+});
+
+test("a direct grant can make a narrow role owner-equivalent, and is judged that way", async () => {
+  // The other direction: the permissions decide, so ROLE_EMPLOYEE plus enough direct grants is
+  // owner-equivalent however narrow the title sounds.
+  const { text } = await run("reai_list_users", {}, [
+    user(),
+    user({
+      userId: 2,
+      owner: false,
+      roleCodes: ["ROLE_EMPLOYEE"],
+      directPermissionCodes: OWNER_PERMS.slice(0, 45),
+      effectivePermissionCodes: OWNER_PERMS,
+    }),
+  ]);
+  assert.match(text, /2 hold everything ROLE_OWNER has/);
+});
+
+test("an unreadable role list is reported as unknown, not as nobody", async () => {
+  const { text } = await run("reai_list_users", {}, [user()], { roles: [] });
+  assert.match(text, /could not be established/);
+  assert.match(text, /Do not read that as "none do"/);
 });
 
 test("a non-list response is reported as unknown, never as an empty tenant", async () => {
@@ -159,6 +218,7 @@ test("one user's report names direct permissions and owner-equivalence", async (
     directPermissionCodes: ["tenant:user:write"],
   }));
   assert.match(text, /OWNER-EQUIVALENT access/);
+  assert.match(text, /Judged on the permissions themselves/);
   assert.match(text, /1 permission\(s\) are granted DIRECTLY/);
   assert.match(text, /tenant:user:write/);
   assert.match(text, /51 effective permission\(s\): 45 tenant-wide, 6 self-scoped/);
@@ -207,9 +267,36 @@ test("no pending invitations says so about invitations only", async () => {
 test("a pending invitation to an owner-equivalent role is counted", async () => {
   const { text } = await run("reai_list_user_invitations", {}, [
     user({ status: "pending_invitation", roleCodes: ["ROLE_ACCOUNTANT"] }),
-    user({ userId: 4, status: "pending_invitation", roleCodes: ["ROLE_EMPLOYEE"] }),
+    user({
+      userId: 4,
+      status: "pending_invitation",
+      roleCodes: ["ROLE_EMPLOYEE"],
+      effectivePermissionCodes: OWNER_PERMS.slice(45),
+    }),
   ]);
-  assert.match(text, /1 of them would grant owner-equivalent access/);
+  assert.match(text, /1 of them would grant everything ROLE_OWNER has/);
+  assert.match(text, /judged on the permissions rather than the role title/);
+});
+
+// ok() caps the serialised body, not a caller-supplied note, so an unbounded summary built here
+// could push the result past the limit the rest of the server holds itself to.
+test("the pending-invitation summary is bounded, and says how many it left out", async () => {
+  const many = Array.from({ length: 25 }, (_, i) =>
+    user({
+      userId: 100 + i,
+      status: "pending_invitation",
+      email: `invitee${i}@example.invalid`,
+      roleCodes: ["ROLE_AUDITOR"],
+      effectivePermissionCodes: OWNER_PERMS.slice(0, 20),
+    }),
+  );
+  // reai_list_users is the one that enumerates them; the invitations tool only counts, so there is
+  // nothing unbounded there.
+  const { text } = await run("reai_list_users", {}, many);
+  const note = text.split("\n\n").slice(0, 2).join("\n\n");
+  assert.match(note, /and 15 more, listed in the body below/);
+  assert.match(note, /invitee0@example.invalid/);
+  assert.ok(!/invitee12@example.invalid/.test(note), "only the first ten belong in the note");
 });
 
 test("the role-equivalence quirk reaches the endpoints where it matters", () => {
@@ -218,6 +305,9 @@ test("the role-equivalence quirk reaches the endpoints where it matters", () => 
     ["POST", "/api/users"],
     ["GET", "/api/users/roles"],
     ["GET", "/api/users/{id}"],
+    // The last paragraph is specifically about this endpoint, and it was not attached to it — so
+    // discovery on the catalogue published no warning that the self: codes are missing from it.
+    ["GET", "/api/users/permissions"],
   ]) {
     assert.ok(
       quirksFor(method, path).some((q) => q.id === "three-roles-are-the-same-role"),
@@ -238,4 +328,34 @@ test("the catalogue's incompleteness is stated rather than left to surprise some
   assert.match(tool("reai_list_permissions").description, /simply not published/);
   const quirk = quirksFor("GET", "/api/users/roles").find((q) => q.id === "three-roles-are-the-same-role");
   assert.match(quirk.note, /does not list the self-scoped ones at all/);
+});
+
+// A role holding everything the owner has PLUS something else still carries the owner's access.
+// Requiring equal set sizes was stricter than the question, and left a branch no fixture exercised.
+test("a role with a superset of the owner's permissions counts as owner-equivalent", async () => {
+  const withExtra = roles().map((r) =>
+    r.code === "ROLE_ACCOUNTANT"
+      ? { ...r, effectivePermissionCodes: [...OWNER_PERMS, "tenant:something:new"] }
+      : r,
+  );
+  // The fallback path: a user with no effective list of its own, judged by role code.
+  const { text } = await run(
+    "reai_list_users",
+    {},
+    [user({ userId: 2, owner: false, roleCodes: ["ROLE_ACCOUNTANT"], effectivePermissionCodes: [] })],
+    withExtra,
+  );
+  assert.match(text, /1 hold everything ROLE_OWNER has/);
+  assert.match(text, /ROLE_ACCOUNTANT/);
+});
+
+test("the role-code fallback does not flag a narrow role as owner-equivalent", async () => {
+  // Exercises the other side of the fallback: with no effective permission list on the row, the
+  // role code decides — and ROLE_EMPLOYEE must not qualify. Without this, a mutation making every
+  // role count as owner-equivalent changed no test.
+  const { text } = await run("reai_list_users", {}, [
+    user({ userId: 2, owner: false, roleCodes: ["ROLE_EMPLOYEE"], effectivePermissionCodes: [] }),
+    user({ userId: 3, owner: false, roleCodes: ["ROLE_AUDITOR"], effectivePermissionCodes: [] }),
+  ]);
+  assert.match(text, /0 hold everything ROLE_OWNER has/);
 });

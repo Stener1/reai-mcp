@@ -24,14 +24,25 @@ All notable changes to `reai-mcp`. Format loosely follows
     inviting someone as an accountant grants exactly what the owner has, including
     `tenant:user:write`, the permission to invite more people. `ROLE_AUDITOR` is 20
     read-only permissions and `ROLE_EMPLOYEE` is 6, all self-scoped.
-  - `reai_list_roles` **computes that comparison against your tenant** rather than
-    repeating the numbers, so it stays true if ReAI ever narrows a role — and a test
-    feeds it a narrowed `ROLE_ACCOUNTANT` to prove the claim comes from the data.
+  - **All five tools compute that comparison against your tenant** rather than
+    repeating the numbers, so they stay true if ReAI ever narrows a role. The first
+    version only did it in `reai_list_roles` and hardcoded the role codes in the
+    other three — which, on a tenant with a narrowed `ROLE_ACCOUNTANT`, would have
+    reported a narrowed user as holding full owner access. In an access audit that is
+    the one direction that must not be wrong. Judgement is now on each user's own
+    `effectivePermissionCodes`, so a **direct grant** can make a narrow role
+    owner-equivalent and a **narrowed** role does not stay so by keeping its title.
+    Tests cover both directions, plus an unreadable role list reported as *unknown*
+    rather than as "nobody".
   - Permission codes are scoped by prefix: `self:` reaches only the acting user's own
     records, `tenant:` the company's. And the catalogue is not the whole vocabulary —
     measured, `GET /api/users/permissions` returns 45 codes, all `tenant:`, while the
     owner's effective set is 51, so the six `self:` codes appear on users and roles
     but are never published.
+  - The pending-invitation summary is bounded at ten with a count of the rest:
+    `ok()` caps the serialised body but not a caller-supplied note, so an
+    unbounded enumeration built here could have pushed the result past the limit the
+    rest of the server holds itself to.
   - The writes stay with `reai_request` and are already gated: `POST /api/users`
     invites an email address and is classified as an external send, `PUT` changes what
     someone may do, `DELETE` revokes. A test asserts no curated tool reaches anything

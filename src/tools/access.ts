@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { defineTool, ok, okList, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import {
+  defineTool,
+  ok,
+  okList,
+  requireTenantId,
+  tenantIdArg,
+  type ToolContext,
+  type ToolDef,
+} from "./registry.js";
 
 /**
  * Who can reach the books — the access-control side of a tenant, entirely uncovered until now.
@@ -55,8 +63,63 @@ type RoleRecord = {
   effectivePermissionCodes?: string[];
 };
 
-/** Roles measured to carry exactly the owner's permission set. */
-const OWNER_EQUIVALENT = ["ROLE_OWNER", "ROLE_TENANT_ADMIN", "ROLE_ACCOUNTANT"];
+/**
+ * The roles that carry the owner's full permission set ON THIS TENANT, computed rather than listed.
+ *
+ * A hardcoded list of role codes was the first version, and it contradicted the very thing this
+ * toolset is for: `reai_list_roles` computes the comparison from the response, while the user,
+ * single-user and invitation summaries asserted it from the code alone. On a tenant where ReAI has
+ * narrowed ROLE_ACCOUNTANT, that would report a narrowed user as holding full owner access — a
+ * false answer in an access audit, which is the one place it must not be wrong.
+ *
+ * Costs one extra GET per call. The alternative is a claim about someone's authority derived from a
+ * measurement taken on a different company.
+ */
+async function ownerEquivalentRoles(
+  ctx: ToolContext,
+  tenantId: number,
+): Promise<{ codes: Set<string>; ownerPermissions: Set<string> } | undefined> {
+  try {
+    const res = await ctx.client.request<RoleRecord[]>({
+      method: "GET",
+      path: "/api/users/roles",
+      tenantId,
+    });
+    const rows = Array.isArray(res.data) ? res.data : undefined;
+    if (rows === undefined) return undefined;
+    const owner = rows.find((r) => r.code === "ROLE_OWNER");
+    const ownerPermissions = new Set(owner?.effectivePermissionCodes ?? []);
+    if (ownerPermissions.size === 0) return undefined;
+    const codes = new Set<string>();
+    for (const role of rows) {
+      const set = new Set(role.effectivePermissionCodes ?? []);
+      // COVERS the owner's set, not equals it. Requiring equal sizes was the first version and it
+      // was stricter than the question: a role holding everything the owner has plus something else
+      // still carries the owner's access, which is what this is used to warn about. It also left an
+      // untested branch — a mutation removing the size check changed no test, because no fixture had
+      // a superset role. Superset semantics match holdsOwnerAccess, so both now ask the same thing.
+      if ([...ownerPermissions].every((p) => set.has(p))) {
+        if (role.code !== undefined) codes.add(role.code);
+      }
+    }
+    return { codes, ownerPermissions };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a user's OWN effective permissions cover everything the owner has. */
+function holdsOwnerAccess(
+  user: UserRecord,
+  yardstick: { codes: Set<string>; ownerPermissions: Set<string> } | undefined,
+): boolean {
+  if (yardstick === undefined) return false;
+  const own = new Set(user.effectivePermissionCodes ?? []);
+  // The permissions decide it, not the role name — a direct grant can lift a narrow role, and a
+  // narrowed role does not become owner-equivalent by keeping its title.
+  if (own.size > 0) return [...yardstick.ownerPermissions].every((p) => own.has(p));
+  return (user.roleCodes ?? []).some((r) => yardstick.codes.has(r));
+}
 
 /** How much of the company a permission list reaches, by prefix. */
 function scopeSummary(codes: readonly string[] | undefined): string {
@@ -89,18 +152,19 @@ const listUsers = defineTool({
   apiPaths: [["GET", "/api/users"]],
   inputSchema: { tenantId: tenantIdArg },
   handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
     const res = await ctx.client.request<UserRecord[]>({
       method: "GET",
       path: "/api/users",
-      tenantId: requireTenantId(args.tenantId, ctx),
+      tenantId,
     });
     const rows = Array.isArray(res.data) ? res.data : undefined;
+    const yardstick = await ownerEquivalentRoles(ctx, tenantId);
     // Counted from the rows, never from their absence: a response that is not a list is reported as
     // unreadable rather than as an empty company, which for an access question would be the worst
     // possible wrong answer.
     const pending = rows?.filter((u) => u.status === "pending_invitation") ?? [];
-    const ownerLike =
-      rows?.filter((u) => (u.roleCodes ?? []).some((r) => OWNER_EQUIVALENT.includes(r))) ?? [];
+    const ownerLike = rows?.filter((u) => holdsOwnerAccess(u, yardstick)) ?? [];
     const notes: string[] = [];
     if (rows === undefined) {
       notes.push(
@@ -109,20 +173,37 @@ const listUsers = defineTool({
       );
     } else {
       notes.push(
-        `${rows.length} user(s) with access. ${ownerLike.length} hold owner-equivalent access ` +
-          `(${OWNER_EQUIVALENT.join(", ")} are the same 51 permissions — measured, identical sets), ` +
-          `and ${pending.length} have not accepted yet.`,
+        `${rows.length} user(s) with access. ` +
+          (yardstick === undefined
+            ? `Whether any of them hold owner-equivalent access could not be established — the role ` +
+              `list this compares against was unreadable. Do not read that as "none do".`
+            : `${ownerLike.length} hold everything ROLE_OWNER has, judged on their own effective ` +
+              `permissions rather than their role title` +
+              (yardstick.codes.size > 1
+                ? ` (on this tenant ${[...yardstick.codes].join(", ")} all carry the owner's full ` +
+                  `${yardstick.ownerPermissions.size}-permission set)`
+                : ``) +
+              `.`) +
+          ` ${pending.length} have not accepted yet.`,
       );
       if (pending.length > 0) {
+        // Bounded, because ok() caps the serialised BODY and not a caller-supplied note: a tenant
+        // with a long invitation list would otherwise push this result past the limit the rest of
+        // the server holds itself to, from a string this tool built itself.
+        const SHOWN = 10;
         notes.push(
           `PENDING INVITATIONS are standing access waiting to be claimed: ` +
             pending
+              .slice(0, SHOWN)
               .map(
                 (u) =>
                   `${u.email ?? "?"} as ${(u.roleCodes ?? []).join(", ") || "no role"}` +
                   `${u.expiresAt ? ` until ${u.expiresAt}` : ""}`,
               )
               .join("; ") +
+            (pending.length > SHOWN
+              ? ` — and ${pending.length - SHOWN} more, listed in the body below`
+              : ``) +
             `. Revoking one is DELETE /api/users/{id} through reai_request.`,
         );
       }
@@ -141,28 +222,40 @@ const getUser = defineTool({
     "directPermissionCodes is the part a role does not explain — permissions attached to the person " +
     "rather than inherited — so a user whose role looks narrow can still hold more.",
   risk: "read",
-  apiPaths: [["GET", "/api/users/{id}"]],
+  apiPaths: [
+    ["GET", "/api/users/{id}"],
+    ["GET", "/api/users/roles"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("User id, from reai_list_users."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
     const res = await ctx.client.request<UserRecord>({
       method: "GET",
       path: `/api/users/${args.id}`,
-      tenantId: requireTenantId(args.tenantId, ctx),
+      tenantId,
     });
     const user = res.data ?? {};
     const roles = user.roleCodes ?? [];
+    const yardstick = await ownerEquivalentRoles(ctx, tenantId);
     const notes = [
       `${user.email ?? `User ${args.id}`}${user.fullName ? ` (${user.fullName})` : ""}: status ` +
         `${user.status ?? "unknown"}, role(s) ${roles.join(", ") || "none"}. ${scopeSummary(user.effectivePermissionCodes)}.`,
     ];
-    if (roles.some((r) => OWNER_EQUIVALENT.includes(r))) {
+    if (holdsOwnerAccess(user, yardstick)) {
       notes.push(
-        `That role carries OWNER-EQUIVALENT access: ROLE_OWNER, ROLE_TENANT_ADMIN and ` +
-          `ROLE_ACCOUNTANT hold identical permission sets — measured, 51 each with nothing missing ` +
-          `or extra — so this person can do anything the owner can, including inviting others.`,
+        `This user holds OWNER-EQUIVALENT access: their effective permissions cover everything ` +
+          `ROLE_OWNER has on this tenant (${yardstick?.ownerPermissions.size} permission(s)), so ` +
+          `they can do anything the owner can, including inviting others. Judged on the permissions ` +
+          `themselves — a role title is not evidence either way, since a direct grant can lift a ` +
+          `narrow role and a narrowed role keeps its name.`,
+      );
+    } else if (yardstick === undefined) {
+      notes.push(
+        `Whether this is owner-equivalent access could not be established — the role list it is ` +
+          `compared against was unreadable. Do not read that as "no".`,
       );
     }
     if ((user.directPermissionCodes ?? []).length > 0) {
@@ -300,24 +393,30 @@ const listInvitations = defineTool({
     "question. Revoking one is DELETE /api/users/{id} through reai_request; sending one is POST " +
     "/api/users, which mails the invitation and is therefore treated as an external send.",
   risk: "read",
-  apiPaths: [["GET", "/api/users/invitations"]],
+  apiPaths: [
+    ["GET", "/api/users/invitations"],
+    ["GET", "/api/users/roles"],
+  ],
   inputSchema: { tenantId: tenantIdArg },
   handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
     const res = await ctx.client.request<UserRecord[]>({
       method: "GET",
       path: "/api/users/invitations",
-      tenantId: requireTenantId(args.tenantId, ctx),
+      tenantId,
     });
     const rows = Array.isArray(res.data) ? res.data : undefined;
-    const ownerLike = rows?.filter((u) =>
-      (u.roleCodes ?? []).some((r) => OWNER_EQUIVALENT.includes(r)),
-    );
+    const yardstick = rows && rows.length > 0 ? await ownerEquivalentRoles(ctx, tenantId) : undefined;
+    const ownerLike = rows?.filter((u) => holdsOwnerAccess(u, yardstick));
     return okList(res.data, {
       noun: "pending invitation",
       suffix:
         rows && rows.length > 0
-          ? `. ${ownerLike?.length ?? 0} of them would grant owner-equivalent access — ` +
-            `ROLE_TENANT_ADMIN and ROLE_ACCOUNTANT carry the same 51 permissions as ROLE_OWNER.`
+          ? yardstick === undefined
+            ? `. Whether any would grant owner-equivalent access could not be established — the ` +
+              `role list it is compared against was unreadable.`
+            : `. ${ownerLike?.length ?? 0} of them would grant everything ROLE_OWNER has, judged on ` +
+              `the permissions rather than the role title.`
           : ".",
       empty:
         "No pending invitations: everyone with access has accepted it. That is a statement about " +

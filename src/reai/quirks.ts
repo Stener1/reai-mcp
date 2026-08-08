@@ -609,7 +609,10 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "three-roles-are-the-same-role",
-    paths: ["/api/users", "/api/users/{id}", "/api/users/roles"],
+    // /api/users/permissions is here because the last paragraph is specifically about it — the
+    // quirk warned that the catalogue omits the self-scoped codes while not being attached to the
+    // catalogue, so discovery on that endpoint published nothing.
+    paths: ["/api/users", "/api/users/{id}", "/api/users/roles", "/api/users/permissions"],
     kind: "gotcha",
     note:
       "The role NAMES imply a hierarchy the permissions do not implement. Measured on a live tenant " +
