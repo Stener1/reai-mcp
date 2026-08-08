@@ -1,7 +1,7 @@
 {
   "name": "reai-mcp",
   "version": "0.3.0",
-  "description": "MCP server for ReAI (app.reai.no) — Norwegian accounting. Curated bookkeeping tools plus full-API escape hatch. Runs as local stdio or self-hosted remote connector.",
+  "description": "MCP server for ReAI (app.reai.no) \u2014 Norwegian accounting. Curated bookkeeping tools plus full-API escape hatch. Runs as local stdio or self-hosted remote connector.",
   "license": "MIT",
   "author": "Stener Torstensen",
   "repository": {
@@ -47,7 +47,8 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "audit:messages": "node scripts/audit-messages.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

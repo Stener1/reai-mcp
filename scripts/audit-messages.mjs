@@ -1,30 +1,67 @@
 #!/usr/bin/env node
 /**
- * Does the API still say what this repository claims it says?
+ * Does the API still produce the REFUSAL STRINGS this repository matches on?
  *
- * Twelve places in `src/` pattern-match on the TEXT of a ReAI error to turn it into something an
- * agent can act on: a Norwegian validation message becomes an explanation and a next step. Every one
- * of those regexes is a silent dependency on upstream wording. If a message is rephrased, the match
- * stops firing, the translation disappears, and the agent gets the raw Norwegian instead — with
- * nothing failing anywhere. This repository has already shipped one such case: a quirk quoted
- * "…kan skrives uten +" while the live string was "…kan skrives uten +47.".
+ * That is the whole scope. The first version of this file claimed more than it delivered, so "What
+ * this cannot catch" below is part of the contract now rather than a footnote.
  *
- * So the wording is checked rather than trusted. Each case below is a request DESIGNED TO FAIL, which
- * is what makes this safe to run against a real tenant: a refused write creates nothing. The two
- * three cases that need a customer to exist create one, delete it in a `finally`, and shout if the
- * deletion did not take.
+ * Nineteen places in `src/` turn a ReAI error into something an agent can act on by reading its text:
+ * a Norwegian validation message becomes an explanation and a next step. Each is a silent dependency
+ * on upstream wording. Rephrase the message and the match stops firing, the agent gets raw Norwegian,
+ * and nothing fails — the unit tests stub the error, so they keep passing against a string the API no
+ * longer produces. This repository shipped exactly that once: a quirk quoting "…kan skrives uten +"
+ * against a live "…kan skrives uten +47.".
  *
- * THREE outcomes, not two, and the third is the point:
+ * ## Safety
  *
- *   OK            the shipped regex matches what came back
- *   DRIFT         the request reached the rule and the wording no longer matches — act on this
- *   INCONCLUSIVE  the request never reached the rule (usually a shape error in the probe itself)
+ * Every case is a request the API should REFUSE, so nothing is created. That is a claim about each
+ * request, and the first version got it wrong twice — the independent review of PR #114 found two
+ * probes issuing calls this repo's own policy classifies IRREVERSIBLE:
  *
- * That distinction is not decoration. Writing this, two probes reported DRIFT because the voucher
- * body was missing `postings[].postingDate` and then `postings[].currency` — the API answered
- * "Validation failed" about MY request and never evaluated the account rule at all. A two-outcome
- * audit would have sent someone to rewrite two regexes that were perfectly correct. An audit that
- * cannot tell "the wording changed" from "I asked wrongly" is worse than no audit.
+ *   - `DELETE /api/share-investments/{first row}`, with no check that the position had transactions.
+ *     It passed only because the one position in the test tenant happened to be undeletable; a clean
+ *     position would have been destroyed. Removed — that string is an exemption with the reason now.
+ *   - `POST /api/general-sub-accounts`. `classifyRequest` returns irreversible, because once an
+ *     account has any sub-account every posting to it must name one and there is no DELETE. It was
+ *     also the WRONG endpoint: `subaccounts.ts` catches that string from a read-only GET.
+ *
+ * What remains: five reads, three refused POSTs, one refused PATCH. The three cases that need a
+ * customer create one, record it in `created`, and delete it in a `finally` — the idiom
+ * `test/smoke-cleanup.test.mjs` checks. A cleanup that cannot confirm deletion FAILS the run, because
+ * `DELETE /api/customers/{id}` can legitimately answer `{"outcome":"archived"}`, and an archived
+ * customer is invisible to the default list, so it would otherwise vanish quietly.
+ *
+ * ## Three outcomes
+ *
+ *   OK            the shipped pattern matches, against the same text the shipped code reads
+ *   DRIFT         the rule was reached and the wording or the status changed — act on this
+ *   INCONCLUSIVE  the request never reached the rule; the probe is what needs fixing
+ *
+ * The classifier is what the review broke hardest, in both directions:
+ *
+ *   - It inferred "the probe was malformed" from `fieldErrors` being present. ReAI answers a type or
+ *     format error with `{"detail":"Failed to read request"}` and NO fieldErrors, so a malformed probe
+ *     was reported as DRIFT. Shape errors are recognised by an explicit marker list covering both.
+ *   - Worse, DRIFT was unreachable whenever `fieldErrors` was non-empty: a message that MOVED from
+ *     `detail` into `fieldErrors` — which sales.ts records ReAI doing "often enough that detail-only
+ *     translation fails open" — was reported INCONCLUSIVE, hiding the likeliest drift there is. Each
+ *     case now mirrors the haystack of the code it guards, so a message changing fields is a DRIFT
+ *     against a site reading `detail` and an OK against one reading the raw body — which is the truth.
+ *   - `reachedRule: (r) => r.status === 400` treated ANY 400 as the rule being reached, so an
+ *     unrelated blank-name refusal was reported as drift in the phone rule. Gone: the status is
+ *     asserted, never used to infer reachability.
+ *
+ * ## What this cannot catch
+ *
+ * Every case is a refusal, so nothing here observes what the API ACCEPTS, normalises or stores. Two of
+ * the five false claims that motivated this file are therefore still out of reach:
+ *
+ *   - `skipRegistryLookup` (#113) drifts on a 201 — whose name came back, and whose address.
+ *   - The phone rule (#111, #112) is a STORAGE claim: default region NO, canonicalised to E.164, a
+ *     Norway-valid bare number stored under +47. Only the refusal text is checked here.
+ *
+ * Also uncovered: which of two ambiguous causes produced a message (the reconciliation and contact
+ * 404s both assert ambiguity as measured fact), anything about a 2xx body, and the four exemptions.
  *
  *   REAI_USER_API_TOKEN=… REAI_WRITE_TEST_TENANTS=2783 node scripts/audit-messages.mjs --tenant 2783
  */
@@ -34,6 +71,7 @@ const tenantArg = args.indexOf("--tenant");
 const tenantId = tenantArg >= 0 ? Number(args[tenantArg + 1]) : undefined;
 const token = process.env.REAI_USER_API_TOKEN;
 const baseUrl = process.env.REAI_BASE_URL ?? "https://app.reai.no";
+const TIMEOUT_MS = 30_000;
 
 if (!token) {
   console.error("REAI_USER_API_TOKEN is not set.");
@@ -44,19 +82,25 @@ if (!tenantId) {
   process.exit(2);
 }
 
-// The same guard the write scripts carry, for the same reason: most cases here are refused writes,
-// but "refused" is a property of the request being wrong, and a probe can be wrong in the other
-// direction too. A tenant holding real books must be opted in deliberately or not at all.
 const declaredTestTenants = (process.env.REAI_WRITE_TEST_TENANTS ?? "")
   .split(",")
   .map((t) => t.trim())
   .filter(Boolean);
+if (declaredTestTenants.length === 0) {
+  console.error(
+    "REAI_WRITE_TEST_TENANTS is not set.\n\n" +
+      "Most cases here are refused writes, but three create a customer to refuse against, so this\n" +
+      "runs only against a tenant declared safe to write to:\n\n" +
+      "  REAI_WRITE_TEST_TENANTS=2783 node scripts/audit-messages.mjs --tenant 2783\n\n" +
+      "Do not list a tenant that holds a real business's books.",
+  );
+  process.exit(2);
+}
 if (!declaredTestTenants.includes(String(tenantId))) {
   console.error(
     `Refusing to run against tenant ${tenantId}: it is not in REAI_WRITE_TEST_TENANTS ` +
-      `(${declaredTestTenants.join(", ") || "unset"}).\n\n` +
-      `Every case here is a request designed to FAIL, so nothing should be created — but a probe that\n` +
-      `is wrong in the other direction would write to real books, so the opt-in is required anyway.`,
+      `(${declaredTestTenants.join(", ")}).\n\n` +
+      `If ${tenantId} really is a test tenant, add it there deliberately.`,
   );
   process.exit(2);
 }
@@ -70,11 +114,15 @@ const call = async (method, path, body) => {
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   let parsed = null;
   try { parsed = await res.json(); } catch {}
   return { status: res.status, body: parsed };
 };
+
+/** Records created, so the `finally` can remove them. The idiom test/smoke-cleanup.test.mjs checks. */
+const created = {};
 
 const DATE = "2026-08-08";
 const posting = (accountNumber, amount) => ({
@@ -86,22 +134,45 @@ const posting = (accountNumber, amount) => ({
 });
 
 /**
- * `shapeError` is how a case says "this response is about my request, not about the rule". ReAI puts
- * request-shape complaints in `fieldErrors`, so their presence means the rule was never reached.
+ * The API complaining about the REQUEST instead of evaluating the rule. BOTH shapes, because assuming
+ * one of them is what made a malformed probe look like drift: a missing required field comes back as
+ * `Validation failed` with `fieldErrors`, while a bad date or a non-numeric amount comes back as
+ * `{"detail":"Failed to read request"}` with no fieldErrors at all.
  */
+const SHAPE_ERROR = [
+  /Failed to read request/i,
+  /is required/i,
+  /Cannot deserialize/i,
+  /JSON parse error/i,
+  /Failed to convert/i,
+];
+
+/**
+ * `haystack` mirrors what the guarded code reads, so an OK here means the shipped match would fire:
+ *   "message" — `err.message`, i.e. detail || title || rawBody. Does NOT include fieldErrors.
+ *   "raw"     — detail + the whole body, which the sales.ts translations use deliberately.
+ *   "detail"  — detail alone, for an anchored pattern.
+ */
+const messageOf = (body) => String(body?.detail ?? body?.title ?? JSON.stringify(body ?? ""));
+const rawOf = (body) => `${body?.detail ?? ""} ${JSON.stringify(body ?? "")}`;
+
 const CASES = [
   {
     id: "Bankkonto ikke funnet",
     where: "src/tools/bankvat.ts",
     pattern: /Bankkonto ikke funnet/,
-    what: "the manual-reconciliation 404, whose ambiguity a whole quirk is about",
-    run: () => call("GET", `/api/manual-reconciliations/999999?month=2026-07`),
+    haystack: "message",
+    expectStatus: 404,
+    what: "the manual-reconciliation 404 a whole quirk is about",
+    run: () => call("GET", "/api/manual-reconciliations/999999?month=2026-07"),
   },
   {
     id: "må posteres med underkonto",
     where: "src/tools/bookkeeping.ts",
     pattern: /må posteres med underkonto/,
-    what: "an account that requires a sub-account, reported per line",
+    haystack: "message",
+    expectStatus: 400,
+    what: "an account that requires a sub-account",
     run: () =>
       call("POST", "/api/vouchers", {
         date: DATE,
@@ -113,7 +184,9 @@ const CASES = [
     id: "må posteres med bankkonto",
     where: "src/tools/bookkeeping.ts",
     pattern: /må posteres med bankkonto/,
-    what: "an account that requires a bank account, reported per line",
+    haystack: "message",
+    expectStatus: 400,
+    what: "an account that requires a bank account",
     run: () =>
       call("POST", "/api/vouchers", {
         date: DATE,
@@ -125,101 +198,110 @@ const CASES = [
     id: "does not support general sub-accounts",
     where: "src/tools/subaccounts.ts",
     pattern: /does not support general sub-accounts/,
-    what: "creating a sub-account under an account that cannot have one",
-    run: () => call("POST", "/api/general-sub-accounts", { accountNumber: "3000", name: "Zz Probe" }),
+    haystack: "message",
+    expectStatus: 400,
+    // A GET, which is what subaccounts.ts declares and catches from. The first version POSTed to
+    // /api/general-sub-accounts — a different controller, and irreversible per classifyRequest.
+    what: "reading sub-accounts for an account that cannot have them",
+    run: () => call("GET", "/api/general-sub-accounts/accounts/3000"),
   },
   {
-    id: "registrerte transaksjoner og kan ikke slettes",
-    where: "src/tools/investments.ts",
-    pattern: /registrerte transaksjoner og kan ikke slettes/,
-    what: "a share position that has transactions and so cannot be removed",
-    run: async () => {
-      const list = await call("GET", "/api/share-investments");
-      const rows = list.body?.content ?? list.body ?? [];
-      if (!Array.isArray(rows) || rows.length === 0) {
-        return { skip: "no share investments in this tenant to attempt a delete on" };
-      }
-      return call("DELETE", `/api/share-investments/${rows[0].id}`);
-    },
+    id: "Creditor|Debtor with id=",
+    where: "src/tools/loans.ts",
+    pattern: /(Creditor|Debtor) with id=(\d+) not found/,
+    haystack: "raw",
+    expectStatus: 404,
+    // Missed entirely by the first version, which only saw `.test(` and this uses `.exec(`. It needs
+    // no loan to exist, so "tenant 2783 has no loans" never applied to it.
+    what: "the wrong-table diagnosis in translateLoanError",
+    run: () =>
+      call("POST", "/api/loans", {
+        reference: "Zz-audit-probe",
+        loanType: "bank_loan",
+        perspective: "borrower",
+        counterpartyId: 999999,
+        currency: "NOK",
+        principalAmount: 1000,
+        disbursementDate: DATE,
+        // The counterparty is resolved AFTER the body is validated, so every required field has to be
+        // present or the probe never reaches the rule. The classifier said so twice while this was
+        // being written — first `currency`, then `interestRateAnnual` — and each time it named the
+        // probe rather than loans.ts, which is the behaviour the three outcomes exist for.
+        interestRateAnnual: 5,
+        repaymentType: "annuity",
+        maturityDate: "2030-08-08",
+      }),
   },
   {
     id: "only be added to company customers",
     where: "src/tools/sales.ts",
     pattern: /only be added to company customers/,
+    haystack: "raw",
+    expectStatus: 400,
     what: "a contact person on a private customer",
     run: async () => {
-      const created = await call("POST", "/api/customers", {
+      const made = await call("POST", "/api/customers", {
         name: "Zz Message Audit Private",
         privateContact: true,
       });
-      const id = created.body?.id;
-      if (!id) return { skip: `could not create the private customer probe (HTTP ${created.status})` };
-      try {
-        return await call("POST", `/api/customers/${id}/contact-persons`, { name: "Zz Probe" });
-      } finally {
-        const gone = await call("DELETE", `/api/customers/${id}`);
-        if (gone.body?.outcome !== "deleted") {
-          console.error(`  !! probe customer ${id} was not deleted: ${JSON.stringify(gone.body)}`);
-        }
+      created.privateCustomer = made.body?.id;
+      if (!created.privateCustomer) {
+        return { skip: `could not create the private customer probe (HTTP ${made.status})` };
       }
+      return call("POST", `/api/customers/${created.privateCustomer}/contact-persons`, {
+        name: "Zz Probe",
+      });
     },
   },
   {
     id: "gyldig telefonnummer",
     where: "src/tools/sales.ts",
     pattern: /gyldig telefonnummer/,
-    what: "an unparseable phone number, whose whole guidance hangs off this string",
-    // A nonexistent customer id was the first attempt, and the audit correctly called it
-    // INCONCLUSIVE: the 404 arrives before the phone is parsed, so the rule was never reached. It
-    // needs a real customer — the PATCH itself still fails, so the phone is never stored.
+    haystack: "raw",
+    expectStatus: 400,
+    what: "an unparseable phone number — only the REFUSAL, not the storage rule",
     run: async () => {
-      const created = await call("POST", "/api/customers", {
+      const made = await call("POST", "/api/customers", {
         name: "Zz Message Audit Phone",
         privateContact: true,
       });
-      const id = created.body?.id;
-      if (!id) return { skip: `could not create the phone probe customer (HTTP ${created.status})` };
-      try {
-        return await call("PATCH", `/api/customers/${id}`, { phone: "nonsense" });
-      } finally {
-        const gone = await call("DELETE", `/api/customers/${id}`);
-        if (gone.body?.outcome !== "deleted") {
-          console.error(`  !! probe customer ${id} was not deleted: ${JSON.stringify(gone.body)}`);
-        }
+      created.phoneCustomer = made.body?.id;
+      if (!created.phoneCustomer) {
+        return { skip: `could not create the phone probe customer (HTTP ${made.status})` };
       }
+      return call("PATCH", `/api/customers/${created.phoneCustomer}`, { phone: "nonsense" });
     },
-    reachedRule: (r) => r.status === 400,
   },
   {
     id: "Contact person with id=",
     where: "src/tools/sales.ts",
     pattern: /Contact person with id=/,
+    haystack: "raw",
+    expectStatus: 404,
     what: "the ambiguous contact 404 — same wording for deleted and wrong-parent",
     run: async () => {
-      const created = await call("POST", "/api/customers", {
+      const made = await call("POST", "/api/customers", {
         name: "Zz Message Audit Company As",
         organizationNumber: "812345672",
         skipRegistryLookup: true,
       });
-      const id = created.body?.id;
-      if (!id) return { skip: `could not create the company probe (HTTP ${created.status})` };
-      try {
-        return await call("GET", `/api/customers/${id}/contact-persons/999999`);
-      } finally {
-        const gone = await call("DELETE", `/api/customers/${id}`);
-        if (gone.body?.outcome !== "deleted") {
-          console.error(`  !! probe customer ${id} was not deleted: ${JSON.stringify(gone.body)}`);
-        }
+      created.companyCustomer = made.body?.id;
+      if (!created.companyCustomer) {
+        return { skip: `could not create the company probe (HTTP ${made.status})` };
       }
+      return call("GET", `/api/customers/${created.companyCustomer}/contact-persons/999999`);
     },
   },
   {
-    id: "Customer with id=",
+    id: "^Customer with id=",
     where: "src/tools/sales.ts",
     pattern: /^Customer with id=/,
-    what: "the missing-customer 404, which must stay distinguishable from the one above",
+    // Anchored and case-SENSITIVE in the shipped code, deliberately: matching it loosely is how a
+    // healthy customer was once reported as nonexistent. So compare against `detail` alone.
+    haystack: "detail",
+    expectStatus: 404,
+    what: "the missing-customer 404, which must stay distinguishable from the contact one",
     run: () => call("GET", "/api/customers/999999/contact-persons"),
-    detailOnly: true, // the shipped regex is anchored, so compare it against `detail` alone
   },
 ];
 
@@ -227,50 +309,108 @@ let ok = 0;
 let drift = 0;
 let inconclusive = 0;
 
-for (const probe of CASES) {
-  const result = await probe.run();
-  if (result.skip) {
-    inconclusive += 1;
-    console.log(`INCONCLUSIVE  ${probe.id}\n              ${result.skip}`);
-    continue;
-  }
-  const detail = result.body?.detail ?? "";
-  const fieldErrors = result.body?.fieldErrors ?? [];
-  const haystack = probe.detailOnly ? String(detail) : `${detail} ${JSON.stringify(result.body ?? "")}`;
+/**
+ * Wrapped in `main()` with a top-level `finally`, which is the shape test/smoke-cleanup.test.mjs
+ * checks for — this script is now in its SUITES list, because the review of PR #114 pointed out a
+ * third record-creating script had been written outside a guard that exists precisely because the
+ * same cleanup mistake was made three times in three iterations.
+ */
+async function main() {
+  try {
+    for (const probe of CASES) {
+      let result;
+      try {
+        result = await probe.run();
+      } catch (err) {
+        inconclusive += 1;
+        console.log(`INCONCLUSIVE  ${probe.id}\n              the probe threw: ${err.message}`);
+        continue;
+      }
+      if (result.skip) {
+        inconclusive += 1;
+        console.log(`INCONCLUSIVE  ${probe.id}\n              ${result.skip}`);
+        continue;
+      }
 
-  // Did the request reach the rule at all? A `fieldErrors` list is the API complaining about the
-  // request's SHAPE, which means the rule was never evaluated.
-  const reached = probe.reachedRule
-    ? probe.reachedRule(result)
-    : fieldErrors.length === 0 || probe.pattern.test(haystack);
-  if (!reached) {
-    inconclusive += 1;
-    console.log(
-      `INCONCLUSIVE  ${probe.id}\n              the probe never reached the rule — HTTP ${result.status}, ` +
-        `fieldErrors: ${fieldErrors.map((f) => f.message).join("; ")}\n` +
-        `              Fix the probe, do NOT touch ${probe.where}.`,
-    );
-    continue;
+      const detail = String(result.body?.detail ?? "");
+      const haystack =
+        probe.haystack === "detail"
+          ? detail
+          : probe.haystack === "raw"
+            ? rawOf(result.body)
+            : messageOf(result.body);
+      const matches = probe.pattern.test(haystack);
+
+      // A shape complaint means the rule was never evaluated — unless the pattern matched anyway, in
+      // which case we plainly reached it.
+      if (!matches && SHAPE_ERROR.some((p) => p.test(rawOf(result.body)))) {
+        inconclusive += 1;
+        console.log(
+          `INCONCLUSIVE  ${probe.id}\n` +
+            `              the request never reached the rule — HTTP ${result.status}: ${detail.slice(0, 100)}\n` +
+            `              Fix the probe. Do NOT touch ${probe.where}.`,
+        );
+        continue;
+      }
+
+      if (matches && result.status === probe.expectStatus) {
+        ok += 1;
+        console.log(`OK            ${probe.id}\n              HTTP ${result.status}: ${detail.slice(0, 110)}`);
+        continue;
+      }
+
+      drift += 1;
+      if (matches) {
+        // Wording held, status moved. Six sites gate on the status as well as the text, so this breaks
+        // them just as thoroughly — and the first version could not see it at all.
+        console.log(
+          `DRIFT         ${probe.id}  (${probe.where})\n` +
+            `              the wording still matches but the STATUS changed: expected ` +
+            `${probe.expectStatus}, got ${result.status}\n` +
+            `              Any translation gated on the status has stopped firing.`,
+        );
+      } else {
+        console.log(
+          `DRIFT         ${probe.id}  (${probe.where} depends on this)\n` +
+            `              expected to match ${probe.pattern} in the ${probe.haystack} the code reads\n` +
+            `              got HTTP ${result.status}: ${detail.slice(0, 140)}\n` +
+            `              This is ${probe.what}. The translation is no longer firing.`,
+        );
+      }
+    }
+  } finally {
+  // Cleanup is part of the result, not a courtesy: a record stranded on real books is a failure even
+  // when every message matched. "archived" is NOT deleted, and an archived customer does not appear in
+  // the default list, so it would otherwise vanish quietly.
+  let leaked = 0;
+  for (const [key, id] of Object.entries(created)) {
+    if (!id) continue;
+    try {
+      const gone = await call("DELETE", `/api/customers/${id}`);
+      if (gone.body?.outcome !== "deleted") {
+        leaked += 1;
+        console.error(
+          `  !! ${key} (customer ${id}) was not deleted: ${JSON.stringify(gone.body)}\n` +
+            `     Remove it by hand. "archived" counts as left behind.`,
+        );
+      }
+    } catch (err) {
+      leaked += 1;
+      console.error(`  !! ${key} (customer ${id}) could not be deleted: ${err.message}`);
+    }
   }
-  if (probe.pattern.test(haystack)) {
-    ok += 1;
-    console.log(`OK            ${probe.id}\n              HTTP ${result.status}: ${String(detail).slice(0, 110)}`);
-  } else {
-    drift += 1;
+  console.log(`\n${ok} unchanged, ${drift} drifted, ${inconclusive} inconclusive`);
+  if (drift > 0) {
     console.log(
-      `DRIFT         ${probe.id}  (${probe.where} depends on this)\n` +
-        `              expected to match ${probe.pattern}\n` +
-        `              got HTTP ${result.status}: ${String(detail).slice(0, 140)}\n` +
-        `              This is ${probe.what}. The translation is no longer firing.`,
+      "\nA drifted message means an agent is now getting raw Norwegian where it used to get an\n" +
+        "explanation. Re-measure the wording and update the pattern AND whatever quotes it.",
     );
+  }
+  if (leaked > 0) {
+    console.error(`\n${leaked} record(s) left on tenant ${tenantId}. Remove them.`);
+  }
+    process.exit(drift > 0 || leaked > 0 ? 1 : 0);
   }
 }
 
-console.log(`\n${ok} unchanged, ${drift} drifted, ${inconclusive} inconclusive`);
-if (drift > 0) {
-  console.log(
-    "\nA drifted message means an agent is now getting raw Norwegian where it used to get an\n" +
-      "explanation. Re-measure the new wording and update the regex AND whatever quotes it.",
-  );
-}
-process.exit(drift > 0 ? 1 : 0);
+await main();

@@ -9,26 +9,51 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **`scripts/audit-messages.mjs` — a check on whether the API still says what this repository claims it
-  says.** Five consecutive iterations found a false *measured* claim in shipped guidance (the phone rule
-  three times, `skipRegistryLookup`, a quirk telling agents to strip a correct `+47`, a 404 translation
-  asserting the wrong thing). Every one was found by accident or by review; none by the suite. The reason
-  is structural: twelve places in `src/` match on the **text** of a ReAI error, the unit tests stub that
-  text, and so they keep passing against a string the API no longer produces. This repository shipped
-  exactly that once — a quirk quoting `"…kan skrives uten +"` against a live `"…kan skrives uten +47."`.
-  - Every case is a request built to be **refused**, which is what makes it safe against a real tenant:
-    a rejected write creates nothing. It carries the write scripts' `REAI_WRITE_TEST_TENANTS` guard
-    anyway, because a probe wrong in the other direction would write for real. First run: **9 of 9
-    triggerable messages unchanged, 0 drifted.**
-  - It reports **three** outcomes, and the third is why it can be trusted. Two of its own probes first
-    reported `DRIFT` because the voucher body was missing `postings[].postingDate` and then
-    `postings[].currency` — the API was complaining about the *request* and never evaluated the account
-    rule being checked. A two-outcome audit would have sent someone to rewrite two regexes that were
-    correct, so `INCONCLUSIVE` says `do NOT touch` the file and names the probe as the thing to fix.
-  - `test/message-drift.test.mjs` keeps it complete: it fails if a text-matching regex is added to `src/`
-    without a probe, or if an exemption names a regex that no longer exists. Both mutations verified. The
-    four exemptions each state the missing test data rather than shrugging — tenant 2783 has no loans and
-    no manual company bank account.
+- **`scripts/audit-messages.mjs` — does the API still produce the refusal strings this repository
+  matches on?** Five consecutive iterations found a false *measured* claim in shipped guidance (the phone
+  rule three times, `skipRegistryLookup`, a quirk telling agents to strip a correct `+47`, a 404
+  translation blaming the wrong record). Every one was found by accident or by review; none by the suite.
+  The reason is structural: nineteen places in `src/` match on the **text** of a ReAI error, the unit
+  tests stub that text, and so they keep passing against a string the API no longer produces. This
+  repository shipped exactly that once — a quirk quoting `"…kan skrives uten +"` against a live
+  `"…kan skrives uten +47."`. First run: **9 of 9 triggerable messages unchanged, 0 drifted.**
+  - Every case is a request built to be **refused**, so nothing is created. The first version got that
+    claim wrong twice, and the independent review caught it: two probes issued calls this repo's own
+    `classifyRequest` calls **irreversible** — `DELETE /api/share-investments/{first row}` with no check
+    that the position had transactions (it passed only because the one position in the test tenant
+    happened to be undeletable; a clean one would have been destroyed) and `POST /api/general-sub-accounts`,
+    which was also the **wrong endpoint**, since that string is caught from a read-only GET.
+  - It reports **three** outcomes, and `INCONCLUSIVE` earned its place three times over: probes reported
+    drift because the voucher body was missing `postings[].postingDate`, then `postings[].currency`, then
+    because the loan body was missing `currency` and `interestRateAnnual`. Each time the API was
+    complaining about the *request* and never evaluated the rule, so the result names the probe as the
+    thing to fix and says `Do NOT touch` the source file. Both shapes of shape-error are recognised now —
+    `Validation failed` with `fieldErrors`, **and** `{"detail":"Failed to read request"}` with none, which
+    the first version misread as drift. Worse, that version made `DRIFT` **unreachable** whenever
+    `fieldErrors` was present, hiding the likeliest drift of all: a message moving from `detail` into
+    `fieldErrors`.
+  - Each case declares which **haystack** it compares against, because `err.message` never includes
+    `fieldErrors` while the `sales.ts` translations deliberately search the raw body — a wider haystack
+    than production's reports `OK` for a match the shipped code would miss. Each also declares the
+    **status** it expects: six sites gate on the status, so a 404 becoming a 400 kills a translation that
+    a text-only check calls fine.
+  - Cleanup is part of the result. A record that cannot be confirmed deleted **fails the run**, because
+    `DELETE /api/customers/{id}` can answer `{"outcome":"archived"}` and an archived customer is invisible
+    to the default list. The script is now in `test/smoke-cleanup.test.mjs`'s SUITES — the review pointed
+    out a third record-creating script had been written outside a guard that exists because the same
+    mistake was made three times. That guard now also recognises a `for (… of Object.entries(created))`
+    sweep, which covers every key by construction, but only when the loop really issues a delete.
+  - `test/message-drift.test.mjs` keeps the audit complete. The first version covered exactly one shape,
+    `/prose/.test(`, and the review proved it blind to `.includes`, `.exec`, `.startsWith`, a `switch`
+    over a message, and single-word Norwegian compounds — six real dependencies invisible, including
+    `loans.ts`'s wrong-table diagnosis, which needed no test data and so was never covered by the "no
+    loans in this tenant" exemption. It also accepted `pattern.includes(probe)`, so nine probe patterns
+    replaced with `/e/` satisfied everything, and floored the population at 9 against 14, so an ordinary
+    refactor hoisting regexes into constants dropped five silently. All fixed and each evasion verified.
+  - **What it cannot catch is now part of the contract**, in the script, the docs and here: every case is
+    a refusal, so nothing observes what the API accepts, normalises or stores. Two of the five motivating
+    failures remain out of reach — `skipRegistryLookup` drifts on a `201`, and the phone rule is a storage
+    claim.
 
 ### Fixed
 

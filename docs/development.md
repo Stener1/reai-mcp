@@ -70,41 +70,62 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/audit-messages.mjs --tenant 1234
 ```
 
-### Why `audit-messages.mjs` exists
+### Why `audit-messages.mjs` exists, and what it does not cover
 
-Twelve places in `src/` turn a ReAI error into something an agent can act on by matching its **text** —
-a Norwegian validation message becomes an explanation and a next step. Each of those matches is a
-silent dependency on upstream wording: rephrase the message and the translation stops firing, the
-agent gets raw Norwegian, and nothing fails, because the unit tests stub the error and keep passing
-against a string the API no longer produces. This repository shipped exactly that once, a quirk quoting
-`"…kan skrives uten +"` against a live `"…kan skrives uten +47."`.
+Nineteen places in `src/` turn a ReAI error into something an agent can act on by reading its **text** —
+a Norwegian validation message becomes an explanation and a next step. Each is a silent dependency on
+upstream wording: rephrase the message and the match stops firing, the agent gets raw Norwegian, and
+nothing fails, because the unit tests stub the error and keep passing against a string the API no
+longer produces. This repository shipped exactly that once, a quirk quoting `"…kan skrives uten +"`
+against a live `"…kan skrives uten +47."`.
 
 Every case is a request built to be **refused**, which is what makes it safe against a real tenant: a
-rejected write creates nothing. Three cases need a customer to exist; they create one, delete it in a
-`finally`, and shout if the deletion did not take. It carries the same `REAI_WRITE_TEST_TENANTS` guard
-as the write scripts, because a probe that is wrong in the *other* direction would write for real.
+rejected write creates nothing. Three cases need a customer to exist; they create one, record it in
+`created`, and delete it in a `finally` — the idiom `test/smoke-cleanup.test.mjs` checks, which the
+script is now listed in. **A cleanup that cannot confirm deletion fails the run**, because
+`DELETE /api/customers/{id}` can legitimately answer `{"outcome":"archived"}`, and an archived customer
+is invisible to the default list.
 
-It reports **three** outcomes, and the third is what makes it trustworthy:
+It carries the same `REAI_WRITE_TEST_TENANTS` guard as the write scripts, because a probe wrong in the
+*other* direction would write for real. That is not hypothetical: the first version of this script
+shipped two probes that this repo's own `classifyRequest` calls **irreversible** — a
+`DELETE /api/share-investments/{first row}` with no check that the position had transactions, and a
+`POST /api/general-sub-accounts`, which was also the wrong endpoint (the string is caught from a
+read-only GET). Both are gone; the share-investment string is an exemption with the reason.
+
+Three outcomes, and the third is what makes it trustworthy:
 
 | outcome | meaning |
 |---|---|
-| `OK` | the shipped regex matches what came back |
-| `DRIFT` | the request reached the rule and the wording changed — act on this |
+| `OK` | the shipped pattern matches, **in the same text the shipped code reads** |
+| `DRIFT` | the rule was reached and the wording *or the status* changed — act on this |
 | `INCONCLUSIVE` | the request never reached the rule, so the code is not the problem |
 
-That distinction was not theoretical. Two probes here first reported `DRIFT` because the voucher body
-was missing `postings[].postingDate`, then `postings[].currency` — the API was complaining about the
-*request* and never evaluated the account rule. A two-outcome audit would have sent someone to rewrite
-two regexes that were perfectly correct, so an inconclusive result says `do NOT touch` the file.
+Each case declares which haystack it compares against, because `err.message` is `detail || title ||
+rawBody` and never includes `fieldErrors`, while the `sales.ts` translations deliberately search the
+raw body. An audit with a wider haystack than production's reports `OK` for a match the shipped code
+would miss. Each case also declares the status it expects: six sites gate on the status as well as the
+text, so a 404 becoming a 400 kills a translation that a text-only check calls fine.
 
-`test/message-drift.test.mjs` keeps the audit honest in the other direction: it fails if a new
-text-matching regex is added to `src/` without a probe, or if an exemption names a regex that no longer
-exists. The exemptions each say what test data is missing — today, four are blocked on tenant 2783
-having no loans and no manual company bank account.
+`INCONCLUSIVE` earned its place three times over. Writing this, probes reported drift because the
+voucher body was missing `postings[].postingDate`, then `postings[].currency`, then because the loan
+body was missing `currency` and `interestRateAnnual` — every time, the API was complaining about the
+*request* and never evaluated the rule. So a shape error names the probe as the thing to fix and says
+`Do NOT touch` the source file. Both shapes of shape-error are recognised: `Validation failed` with
+`fieldErrors`, **and** `{"detail":"Failed to read request"}` with none, which is what a bad date or a
+non-numeric amount returns.
 
-**Both write scripts refuse to run unless the tenant is listed in `REAI_WRITE_TEST_TENANTS`.** A tenant id on the command line is not consent — the tenant has to be declared safe to write to, out of band, in the environment. This exists because passing the wrong `--tenant` was once all it took to post a voucher into a live business's books. They also clean up in a `finally` so a mid-run failure still removes what was created, and report loudly enough to act on when they cannot.
+**What it cannot catch.** Every case is a refusal, so nothing here observes what the API *accepts,
+normalises or stores*. Two of the five false claims that motivated the script are therefore still out
+of reach: `skipRegistryLookup` drifts on a `201`, and the phone rule is a storage claim (default region
+NO, canonicalised to E.164, a Norway-valid bare number stored under `+47`). Also uncovered: which of two
+ambiguous causes produced a message, anything in a 2xx body, and the ten exemptions.
 
-`smoke-full-write.mjs` additionally requires `--i-understand-this-posts-to-real-books`, and asserts the whole external-send guard **before** it writes anything: if EHF, invoice email or a tax filing turns out to be reachable, it aborts without touching the ledger.
+`test/message-drift.test.mjs` keeps the audit complete in the other direction. It fails if a
+text-reading dependency is added to `src/` without a probe, or if an exemption names something that no
+longer exists. It covers four shapes — `/re/.test`, `/re/.exec`, `.includes`/`.startsWith`/`.endsWith`
+on any receiver, and `case "…":` — because the first version saw only the first and was demonstrably
+blind to the rest, including `loans.ts`'s wrong-table diagnosis, which needed no test data at all.
 
 ## A note on `npm audit`
 

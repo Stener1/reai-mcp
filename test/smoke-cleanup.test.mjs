@@ -27,7 +27,14 @@ import { readFileSync } from "node:fs";
  *    those by reading, which is the honest way.
  */
 
-const SUITES = ["scripts/smoke-write.mjs", "scripts/smoke-full-write.mjs"];
+const SUITES = [
+  "scripts/smoke-write.mjs",
+  "scripts/smoke-full-write.mjs",
+  // Added after the review of PR #114 pointed out a third record-creating script had been written
+  // outside this guard — which exists because the same mistake was made three times in three
+  // iterations. Its three customer probes use the same `created.x = …` / delete-in-`finally` idiom.
+  "scripts/audit-messages.mjs",
+];
 
 /**
  * The two shapes a cleanup takes in these suites. Written once and shared by every assertion and
@@ -45,10 +52,20 @@ const DELETE_CALL = /(?:name:\s*"reai_delete_[a-z_]+"|method:\s*"DELETE")[\s\S]{
  * `/api/supplier-invoices/${created.supplierInvoiceId}/payments/${created.supplierPaymentId}`, and
  * a non-greedy single capture stops at the invoice id and reports the payment as never deleted.
  */
-function deletedKeys(text) {
+function deletedKeys(text, allKeys = []) {
   const keys = new Set();
   for (const [window] of text.matchAll(DELETE_CALL)) {
     for (const m of window.matchAll(/created\.([A-Za-z0-9_]+)/g)) keys.add(m[1]);
+  }
+  // A loop over the whole record — `for (const [key, id] of Object.entries(created))` with a DELETE in
+  // its body — covers every key by construction, which is STRONGER than naming each one: it cannot
+  // miss a key added later. Recognised deliberately rather than made to conform, but only when the
+  // body really issues a delete, so the loop cannot be a report-only pass.
+  const sweep = /for\s*\(\s*const\s*\[[^\]]+\]\s*of\s*Object\.entries\(\s*created\s*\)\s*\)\s*\{([\s\S]{0,600})/.exec(
+    text,
+  );
+  if (sweep && /(?:name:\s*"reai_delete_[a-z_]+"|method:\s*"DELETE"|"DELETE",)/.test(sweep[1])) {
+    for (const key of allKeys) keys.add(key);
   }
   return keys;
 }
@@ -100,7 +117,7 @@ for (const path of SUITES) {
     // Deleted, not merely mentioned. The first version checked `finallyHalf.includes("created.x")`,
     // which a message like `remove bank ${created.bankId} by hand` satisfies — so a suite that
     // only WARNED about a leftover passed a test named "is deleted".
-    const deleted = deletedKeys(finallyHalf);
+    const deleted = deletedKeys(finallyHalf, [...created]);
     const undeleted = [...created].filter((key) => !deleted.has(key) && !(key in NOT_A_RECORD));
     assert.deepEqual(
       undeleted,
