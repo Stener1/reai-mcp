@@ -279,7 +279,7 @@ test("tool counts stated in the changelog match the groups", () => {
   // The list ran out at "eight" the moment a ninth toolset shipped, and `words[9]` being
   // undefined made the failure read as a changelog problem rather than a test one.
   const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "eleven", "twelve"];
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen"];
   const domains = Object.keys(TOOL_GROUPS).length;
   assert.ok(words[domains], `no word for ${domains} domains — extend the list above`);
   assert.ok(

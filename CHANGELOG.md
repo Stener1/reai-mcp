@@ -34,6 +34,78 @@ All notable changes to `reai-mcp`. Format loosely follows
   not a leak in the normal case. It is stuck here because that particular position has an event and cannot
   be deleted, and sub-accounts have no `DELETE` endpoint at all. Recorded as known-unrecoverable with the
   reason, which makes the suite green at 158/0 without hiding anything.
+- **Share investments: seven curated tools, built around the constraints that were measured first.** The
+  domain was recorded as module-disabled and was only empty; the previous entry records the four quirks
+  that came out of driving it. 163 tools across thirteen domains.
+  - **The create tool refuses an opening balance unless the caller says a permanent record is intended.**
+    `openingQuantity`, `openingCostAmount` and `openingDate` look like fields on a record and silently
+    produce a `PURCHASE` event; a position with any event can never be deleted, and nothing removes an
+    event. `acceptPermanentPosition: true` is the only argument on this server whose job is to make
+    someone stop and think, and it exists because one position on the write test tenant is unremovable
+    for exactly this reason. The refusal names both ways forward — create it empty and add the purchase
+    as an explicit event, which is also the only way to give it a settlement account and a fee.
+  - **The position and the event are classified apart** because only one of them posts: creating a
+    position left the voucher count at 0, while a `DIVIDEND` booked `SH1-2026` on 1920/8071. The event
+    tool is `destructive` as well as `irreversible`, reports the `voucherId` it booked, and says
+    *unconfirmed* rather than guessing when the response carries none.
+  - Both Norwegian refusals are translated where they surface: the securities account an event needs
+    (`"Velg verdipapirkontoen transaksjonen ble gjort opp mot."`, on a body the document marks as
+    requiring nothing) and the deletion refusal — which is really about a decision taken at creation, so
+    the message says so and points at the event list. Anything else propagates.
+  - `reai_update_share_investment` reads and merges, because the `PUT` replaces *and* requires
+    `instrumentType`, which the document does not list as required.
+  - **The Nordnet bulk import is deliberately not curated.** One call, an unknown number of events, every
+    one a posting, and every position it touches made permanent. `reai_request` reaches it for anyone who
+    means it, and there is a test recording the decision so it reads as a choice rather than an oversight.
+  - The repository's own guards caught two things before review did: `test/spec-bounds.test.mjs` rejected
+    five argument bounds I had guessed at (the spec caps `name` at 150, `ticker` 20, `isin` 12,
+    `organizationNumber` 9, `assetAccountNumber` 10, and requires `amount` ≥ 0.01), and the read-tool
+    sweep required the local `query` filter to be declared with the test that proves it.
+  - **One structural weakness found and closed before review.** `INVESTMENT_SETTABLE` — the vocabulary the
+    update merge may carry — listed the opening fields, because they are part of the `PUT` body. That meant
+    the only thing stopping `reai_update_share_investment` from creating the very event the create tool
+    guards against was zod stripping an undeclared argument: verified through the real server, the PUT body
+    comes out clean, but calling the handler directly forwards it, and one `.passthrough()` or one added
+    argument would make that the live path. The opening fields are out of that list, so the update cannot
+    express an opening balance at all, and there is a test driving the handler directly to keep it that way.
+    `mergeForReplacement`'s own comment warns about this exact shape.
+  - **Two reviews found thirteen more things, and three were claims of mine that were simply false.**
+    - `assetAccountNumber` is **settable** — it is in `ShareInvestmentReq` and this server sends it — so
+      "it survived the omitting PUT because it is derived rather than settable" was the wrong mechanism,
+      stated in the module doc, the tool description, `docs/tools.md` and a quirk. `quantity` and
+      `costPrice` genuinely are derived and cannot be sent; the account number survived once, and why is
+      unmeasured. Corrected everywhere, because the mechanism is what a reader reasons from.
+    - The description asserted facts the API never reported: an absent `withinExemptionMethod` read as
+      *"outside the exemption method"* — a tax classification inferred from a missing field, three lines
+      from a sentence saying this server does not judge that — and a missing account number printed as
+      *"Asset account none"*. Both now say unknown. This is the defect class the repo already names in
+      `test/writes.test.mjs`.
+    - *"`reai_request` reaches it for anyone who means it"*, about the Nordnet import, is very likely
+      false: nothing here constructs a `FormData`, and a JSON-transported MCP argument never is one. The
+      honest version says the import belongs in the ReAI UI and that the JSON form is unverified —
+      establishing it would require a call that posts.
+    - `reai_create_share_investment` did not translate the settlement-account refusal, which **its own
+      accepted opening balance can provoke**, since that balance is an event. The caller who acknowledged
+      permanence in writing got the raw Norwegian back. Both write tools translate it now.
+    - "Deleting its voucher answers `reversed`" was one measurement stated as a rule, and this repo's own
+      `reai_delete_voucher` says ReAI chooses delete or reverse — with a quirk recording a "reversed" that
+      left no postings at all. Hedged to the observation.
+    - `destructive: true` on the event tool changed nothing (`destructiveHintFor` already returns true for
+      anything irreversible) and no other ledger-posting POST here carries it. Dropped, along with the
+      claim that it added protection; the test now asserts the hint the client actually receives.
+    - `quantity`, `pricePerUnit` and the opening amounts are bounded positive locally — the document
+      leaves them bare, and a negative-unit PURCHASE would be a permanent event. Recorded as a local
+      decision rather than a documented bound, which is the distinction `spec-bounds` keeps honest. The
+      genuinely unknown failure modes (a SALE larger than the holding, a non-`OPEN` status, an event in a
+      closed period) are now stated as unknown instead of implied.
+    - Five mutations that had survived are now caught: the query filter losing fields, derived fields
+      echoed into the replacing PUT, `INVESTMENT_REQUIRED` losing `instrumentType`, the exemption ternary,
+      and `readableRecord` losing its expect-list. The "Nordnet not curated" test was vacuous — it
+      asserted a name does not exist and that the word "ledger" appears somewhere — and now asserts the
+      reasoning survives, which is the only thing that makes an absence a decision.
+  - Verified live on tenant 2783 without creating a single event: the opening-balance refusal fires, a
+    position created empty reports itself deletable and deletes, the merge keeps `ticker` through a
+    rename, and the known-permanent record refuses deletion with the reason. Nothing new was left behind.
 
 ### Changed
 
@@ -262,7 +334,7 @@ All notable changes to `reai-mcp`. Format loosely follows
     required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
     omission gate, which named all ten omitted fields.
 
-**156 tools**: 149 across twelve accounting domains, plus 7 always-on.
+**163 tools**: 156 across thirteen accounting domains, plus 7 always-on.
 ### Fixed
 
 - **A whole domain was almost unnameable, and one of its commonest words pointed at the wrong thing.**
