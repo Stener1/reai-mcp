@@ -259,10 +259,21 @@ test("a curated tool on an {outcome} endpoint reports which outcome happened", a
       unexercised.push(`${t.name} — ${failures.join(" | ").slice(0, 200)}`);
       continue;
     }
-    // Deleted and archived are the two that mean opposite things for recoverability. If the tool
-    // produces the same text for both, it did not read the outcome.
-    if (notes.get("deleted") === notes.get("archived")) {
-      offenders.push(`${t.name} (${hits.map(([m, p]) => `${m} ${p}`).join(", ")})`);
+    // All THREE pairwise, not just deleted vs archived. Review's point, and it is the right one: the
+    // harness was already driving `reversed` and then ignoring what came back, so a tool that folded
+    // a reversal into its archived or unknown branch passed — on vouchers, expenses and salary runs,
+    // where a reversal POSTS to the ledger and is the most consequential of the three to get wrong.
+    const pairs = [
+      ["deleted", "archived"],
+      ["deleted", "reversed"],
+      ["archived", "reversed"],
+    ];
+    const same = pairs.filter(([a, b]) => notes.get(a) === notes.get(b));
+    if (same.length > 0) {
+      offenders.push(
+        `${t.name} (${hits.map(([m, p]) => `${m} ${p}`).join(", ")}) — same note for ` +
+          same.map(([a, b]) => `${a}/${b}`).join(" and "),
+      );
     }
   }
 

@@ -1531,10 +1531,14 @@ async function main() {
     // reported and stepped over, not allowed to propagate.
     console.log("\n  Cleanup:");
 
-    const attempt = async (label, call, describe) => {
+    // `passed` is optional and defaults to "the call did not error". Without it, a cleanup check could
+    // only ever assert that something was sent: review caught the outcome check below returning a
+    // "NO OUTCOME REPORTED" detail string while still counting as a pass, which is the shape where a
+    // regression shows up in the log and not in the exit code.
+    const attempt = async (label, call, describe, passed = (r) => !r.isError) => {
       try {
         const r = await call();
-        report(label, !r.isError, describe(r));
+        report(label, passed(r), describe(r));
         return r;
       } catch (err) {
         report(label, false, `CLEANUP REQUEST THREW — ${err?.message ?? err}`);
@@ -1748,6 +1752,7 @@ async function main() {
             ? firstLineOf(text)
             : `NO OUTCOME REPORTED — ${firstLineOf(text)}`;
         },
+        (r) => !r.isError && /was (DELETED|ARCHIVED)/.test(textOf(r)),
       );
     }
     if (created.voucherId) {

@@ -163,9 +163,11 @@ const deleteCompanyBank = defineTool({
           ? `Company bank ${args.id} was DELETED outright — the record is gone, and nothing can ` +
             `unarchive it.`
           : outcome === "archived"
-            ? `Company bank ${args.id} was ARCHIVED, not deleted: payments already made through it ` +
-              `still reference it, so the audit trail is kept. It stays out of the default ` +
-              `reai_list_company_banks view.`
+            ? `Company bank ${args.id} was ARCHIVED, not deleted: something still references it — a ` +
+              `payment, a posting or a reconciliation — so the audit trail is kept. Which of those ` +
+              `it is, this response does not say, and archival is not evidence that any payment was ` +
+              `ever made through the account. It stays out of the default reai_list_company_banks ` +
+              `view.`
             : `Company bank ${args.id}: the DELETE returned HTTP ${res.status} with no recognised ` +
               `outcome (${JSON.stringify(outcome)}). Which of the two happened is NOT established — ` +
               `check reai_list_company_banks before assuming.`,

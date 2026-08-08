@@ -460,19 +460,24 @@ const deleteProduct = defineTool({
     return ok(res.data ?? { productId: args.id }, {
       note:
         outcome === "deleted"
-          ? `Product ${args.id} was DELETED outright. Anything whose lines still name it — an order, ` +
-            `an invoice — can now never be deleted through the API: every DELETE on those answers ` +
-            `500 "Referenced record is not accessible", and there is no product unarchive endpoint ` +
-            `to restore the reference with. Remove dependents BEFORE their master data.`
+          ? `Product ${args.id} was DELETED outright. Any ORDER whose lines still name it can now ` +
+            `never be deleted through the API: every DELETE on one answers 500 "Referenced record ` +
+            `is not accessible", and there is no product unarchive endpoint to restore the ` +
+            `reference with. Remove dependents BEFORE their master data. (Invoices are not part of ` +
+            `this: the API has no invoice DELETE at all, so an invoice was never deletable and ` +
+            `crediting it with reai_credit_invoice is the only route regardless.)`
           : outcome === "archived"
             ? `Product ${args.id} was ARCHIVED, not deleted: something references it, so the audit ` +
-              `trail is kept. It is hidden from the default reai_list_products view. Note that ` +
-              `products have NO unarchive endpoint, so this is not a state you can reverse through ` +
-              `the API either — it is just a state where the references still resolve.`
+              `trail is kept and those references still resolve. Two things follow, and neither is ` +
+              `good news. Products have NO unarchive endpoint, so this is not a state you can ` +
+              `reverse through the API. And GET /api/products takes no archived filter — measured, ` +
+              `its only parameter is the tenant header — so an archived product cannot be listed ` +
+              `through this API at all. reai_list_products will simply not show it.`
             : `Product ${args.id}: the DELETE returned HTTP ${res.status} with no recognised outcome ` +
               `(${JSON.stringify(outcome)}). Whether it was deleted or archived is NOT established, ` +
-              `so check with reai_list_products and reai_list_products with archived: true before ` +
-              `assuming either.`,
+              `and this API gives you no way to settle it: there is no archived filter on the ` +
+              `product list, so an absent product is either gone or archived and the two look the ` +
+              `same. Check in the ReAI UI if it matters.`,
     });
   },
 });

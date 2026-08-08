@@ -40,7 +40,23 @@ All notable changes to `reai-mcp`. Format loosely follows
     the innocent is worse than no test.
   - The full-write suite deletes the company bank through the curated tool now rather than
     `reai_request`, so the fix is exercised live. Its own label had said "deleted or
-    archived" for the same reason the tools did.
+    archived" for the same reason the tools did — and its `attempt()` helper gained an
+    optional pass predicate, because the first version returned a `NO OUTCOME REPORTED`
+    detail string while still counting as a pass: a regression visible in the log and not in
+    the exit code.
+  - The audit compares all **three** outcomes pairwise, not just deleted against archived.
+    The harness was already driving `reversed` and ignoring what came back, so a tool folding
+    a reversal into its archived or unknown branch would have passed — on vouchers, expenses
+    and salary runs, where a reversal POSTS to the ledger and is the most consequential of
+    the three to misreport.
+  - Three claims in the new notes were wrong and are corrected. There is **no invoice DELETE
+    endpoint at all**, so "a dependent invoice can no longer be deleted" attributed an
+    impossible operation to product deletion — crediting was always the only route.
+    `GET /api/products` takes **no archived filter** (measured: its only parameter is the
+    tenant header), so the advice to list archived products was unfollowable — and the real
+    fact is worse and now stated: an archived product cannot be listed through this API at
+    all. And archival of a company bank is not evidence that any payment was ever made
+    through it; any retained posting or reconciliation will do.
 
 
 - **The invoice-delivery gate read only one direction, and the other one was reachable
