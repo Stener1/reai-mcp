@@ -640,3 +640,251 @@ test("both loan quirks are scoped to the right methods and statuses", async () =
   assert.deepEqual(quirksFor("GET", "/api/loans").map((q) => q.id), []);
   assert.deepEqual(quirksFor("GET", "/api/loans/{id}").map((q) => q.id), []);
 });
+
+/**
+ * The counterparties, which are the reason the lender half of the loan matrix was unusable: every
+ * `company_loan_to_owner`, every `company_loan_to_employee` and the lender side of `intercompany` and
+ * `other` need a DEBTOR id, and nothing listed or created one.
+ */
+test("the counterparty tools live in the loans toolset, not purchase", async () => {
+  const { TOOL_GROUPS } = await import("../dist/server.js");
+  const names = TOOL_GROUPS.loans.map((t) => t.name);
+  for (const name of [
+    "reai_list_creditors",
+    "reai_create_creditor",
+    "reai_update_creditor",
+    "reai_delete_creditor",
+    "reai_list_debtors",
+    "reai_create_debtor",
+    "reai_update_debtor",
+    "reai_delete_debtor",
+  ]) {
+    assert.ok(names.includes(name), `${name} belongs with the loans it exists for`);
+  }
+  // The point of the move: enabling only `loans` must be a workable configuration.
+  assert.ok(
+    !TOOL_GROUPS.purchase.some((t) => /creditor|debtor/.test(t.name)),
+    "a counterparty tool left behind in purchase defeats the move",
+  );
+});
+
+test("a debtor list warns when a name identifies more than one record", async () => {
+  // Measured: two debtors with the same name were created as ids 19 and 20 without complaint. An agent
+  // told to use "the debtor called X" needs to know when that phrase does not name a record.
+  const { ctx } = ctxFor([
+    { status: 200, data: [
+      { id: 19, name: "Kari Nordmann" },
+      { id: 20, name: "Kari Nordmann" },
+      { id: 21, name: "Ola Nordmann" },
+    ] },
+  ]);
+  const text = textOf(await tool("reai_list_debtors").handler({}, ctx));
+  assert.match(text, /3 debtor\(s\)/);
+  assert.match(text, /appear more than once/);
+  assert.match(text, /Kari Nordmann/);
+  assert.match(text, /choose by id/);
+
+  // And it stays quiet when every name is distinct.
+  const distinct = ctxFor([{ status: 200, data: [{ id: 1, name: "A" }, { id: 2, name: "B" }] }]);
+  assert.doesNotMatch(textOf(await tool("reai_list_debtors").handler({}, distinct.ctx)), /more than once/);
+});
+
+test("creating a creditor without an account says the repayment has nowhere to go", async () => {
+  const { ctx, sent } = ctxFor([{ status: 201, data: { id: 91, name: "A Bank AS", bankAccountNumber: null } }]);
+  const res = await tool("reai_create_creditor").handler({ name: "A Bank AS" }, ctx);
+  assert.equal(sent[0].path, "/api/creditors");
+  assert.match(textOf(res), /no destination yet/i);
+  assert.match(textOf(res), /perspective "borrower"/);
+
+  // With an account it does not nag. (The account number here is a value this repository made up; it
+  // fails the Norwegian mod-11 check, so it is nobody's account.)
+  const withAccount = ctxFor([{ status: 201, data: { id: 92, name: "A Bank AS", bankAccountNumber: "15062099533" } }]);
+  const ok = await tool("reai_create_creditor").handler({ name: "A Bank AS", bankAccountNumber: "15062099533" }, withAccount.ctx);
+  assert.doesNotMatch(textOf(ok), /no destination/i);
+
+  // The case that distinguishes a note about the RESPONSE from one about the request: an account was
+  // sent and the response carries none. Keying the branch on the argument makes this silent, which is a
+  // tool reporting an outcome the API never confirmed.
+  const mismatch = ctxFor([{ status: 201, data: { id: 93, name: "A Bank AS" } }]);
+  const warned = await tool("reai_create_creditor").handler(
+    { name: "A Bank AS", bankAccountNumber: "15062099533" },
+    mismatch.ctx,
+  );
+  assert.match(textOf(warned), /An account was sent but the response carries none/);
+  assert.match(textOf(warned), /NOT established/);
+});
+
+test("creating a debtor points at the perspective its id belongs to", async () => {
+  const { ctx, sent } = ctxFor([{ status: 201, data: { id: 19, name: "Kari Nordmann" } }]);
+  const res = await tool("reai_create_debtor").handler({ name: "Kari Nordmann" }, ctx);
+  assert.deepEqual(sent[0].body, { name: "Kari Nordmann" }, "a debtor has no other field");
+  assert.match(textOf(res), /perspective "lender"/);
+  // The trap worth naming at the moment the id is handed over.
+  assert.match(textOf(res), /looked up among CREDITORS and answers 404/);
+});
+
+test("deleting a referenced counterparty explains the ordering, both sides", async () => {
+  // Measured: 409 "Cannot delete creditor that is referenced by one or more loans". The message names
+  // the constraint and not the way out, which is an ordering the caller cannot infer from a 409.
+  for (const [toolName, kind, field] of [
+    ["reai_delete_creditor", "Creditor", "creditorId"],
+    ["reai_delete_debtor", "Debtor", "debtorId"],
+  ]) {
+    const err = new ReaiApiError({
+      status: 409,
+      method: "DELETE",
+      path: "/api/creditors/91",
+      rawBody: '{"detail":"Cannot delete creditor that is referenced by one or more loans"}',
+    });
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: { request: async () => { throw err; }, deepLink: () => "" },
+    };
+    const res = await tool(toolName).handler({ id: 91 }, ctx);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), new RegExp(`${kind} 91 is still named by at least one loan`));
+    assert.match(textOf(res), /Delete the loans first/);
+    assert.match(textOf(res), new RegExp(field));
+  }
+});
+
+test("an unrelated 409 is not explained as a loan reference", async () => {
+  // The PR #97 lesson: a confident wrong explanation is worse than none. Anything else must rethrow.
+  const err = new ReaiApiError({
+    status: 409,
+    method: "DELETE",
+    path: "/api/creditors/91",
+    rawBody: '{"detail":"Some other conflict entirely"}',
+  });
+  const ctx = {
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: { request: async () => { throw err; }, deepLink: () => "" },
+  };
+  await assert.rejects(() => tool("reai_delete_creditor").handler({ id: 91 }, ctx), /Some other conflict/);
+});
+
+test("the creditor account is payment routing, and the tool says so", async () => {
+  // reai_create_creditor is `reversible`, so it is offered on a default server — but supplying
+  // bankAccountNumber escalates it to irreversible through the payment-routing gate, and the call is
+  // then refused before the handler runs. That is the right classification (an account number is where
+  // money ends up) and the wrong thing to leave unsaid: the first version of the description told the
+  // caller to "set it here if you know it", which is a use the default mode rejects.
+  const { curatedArgsEscalate } = await import("../dist/policy.js");
+  const create = tool("reai_create_creditor");
+  assert.equal(create.risk, "reversible");
+
+  const escalated = curatedArgsEscalate(create.apiPaths ?? [], { name: "A Bank AS", bankAccountNumber: "15062099533" });
+  assert.equal(escalated?.risk, "irreversible", "an account number must escalate — it is a payment destination");
+  assert.deepEqual(escalated?.fields, ["bankAccountNumber"]);
+  assert.equal(
+    curatedArgsEscalate(create.apiPaths ?? [], { name: "A Bank AS" }),
+    undefined,
+    "a creditor with no account routes no payment",
+  );
+
+  // The description has to carry it, or the tool is offered for a use that fails.
+  assert.match(create.description, /payment routing/i);
+  assert.match(create.description, /reversible/);
+});
+
+test("the loan tools point at the counterparty tools that now exist", () => {
+  // #98 said to use reai_request because nothing curated existed. This PR made that false, and a
+  // description telling an agent to reach past a tool that exists is the same class of error as naming
+  // a tool that does not.
+  const create = tool("reai_create_loan").description;
+  assert.doesNotMatch(create, /reai_request on \/api\/creditors/);
+  assert.match(create, /reai_create_creditor/);
+  assert.match(create, /reai_create_debtor/);
+  for (const name of ["reai_create_creditor", "reai_create_debtor", "reai_list_creditors", "reai_list_debtors"]) {
+    assert.ok(create.includes(name), `${name} is how a caller gets a counterparty id`);
+  }
+});
+
+/**
+ * What the counterparty tools actually SEND. Review mutated `src/` and found three survivors here, the
+ * worst being `reai_update_debtor` sending `body: {}` — the rename fails upstream and the tool still
+ * reports "Debtor 19 renamed to …", because the note was built from the argument instead of the
+ * response. Two others wrote to `/api/creditors/{id}` from the debtor tools and nothing noticed, because
+ * the only tests touching those paths stubbed the client to throw and never asserted where it went.
+ */
+test("the counterparty writes go to the path and body they claim", async () => {
+  const update = ctxFor([{ status: 200, data: { id: 19, name: "Renamed AS" } }]);
+  const res = await tool("reai_update_debtor").handler({ id: 19, name: "Renamed AS" }, update.ctx);
+  assert.equal(update.sent[0].method, "PUT");
+  assert.equal(update.sent[0].path, "/api/debtors/19", "a debtor rename must not write to a creditor");
+  assert.deepEqual(update.sent[0].body, { name: "Renamed AS" }, "an empty body would fail upstream and still read as success");
+  assert.match(textOf(res), /is now "Renamed AS"/);
+
+  const delDebtor = ctxFor([{ status: 204, data: undefined }]);
+  await tool("reai_delete_debtor").handler({ id: 19 }, delDebtor.ctx);
+  assert.equal(delDebtor.sent[0].method, "DELETE");
+  assert.equal(delDebtor.sent[0].path, "/api/debtors/19");
+
+  const delCreditor = ctxFor([{ status: 204, data: undefined }]);
+  await tool("reai_delete_creditor").handler({ id: 91 }, delCreditor.ctx);
+  assert.equal(delCreditor.sent[0].path, "/api/creditors/91");
+
+  const createDebtor = ctxFor([{ status: 201, data: { id: 20, name: "New AS" } }]);
+  await tool("reai_create_debtor").handler({ name: "New AS" }, createDebtor.ctx);
+  assert.equal(createDebtor.sent[0].path, "/api/debtors");
+});
+
+test("a rename reports what was stored, not what was asked for", async () => {
+  // ReAI normalises names elsewhere in this API — suppliers come back title-cased — so echoing the
+  // argument can report a value that was never written.
+  const normalised = ctxFor([{ status: 200, data: { id: 19, name: "Kari Nordmann" } }]);
+  const res = await tool("reai_update_debtor").handler({ id: 19, name: "kari nordmann" }, normalised.ctx);
+  assert.match(textOf(res), /stored something other than/);
+  assert.match(textOf(res), /"Kari Nordmann"/);
+
+  // And a response with no name at all must not be reported as a confirmed rename.
+  const silent = ctxFor([{ status: 200, data: {} }]);
+  const quiet = await tool("reai_update_debtor").handler({ id: 19, name: "X" }, silent.ctx);
+  assert.match(textOf(quiet), /unconfirmed/);
+});
+
+test("duplicate names are caught however they differ in case or spacing", async () => {
+  // The collisions that actually cause the mistake. Comparing raw strings missed all of these.
+  for (const [label, rows] of [
+    ["case", [{ id: 1, name: "Kari Nordmann" }, { id: 2, name: "kari nordmann" }]],
+    ["trailing space", [{ id: 1, name: "Kari" }, { id: 2, name: "Kari " }]],
+    ["both", [{ id: 1, name: " KARI " }, { id: 2, name: "kari" }]],
+  ]) {
+    const { ctx } = ctxFor([{ status: 200, data: rows }]);
+    const text = textOf(await tool("reai_list_debtors").handler({}, ctx));
+    assert.match(text, /appear more than once/, `${label} collision missed`);
+    assert.match(text, /1 name\(s\)/, `${label}: the count must be of names, not rows`);
+  }
+
+  // Unnamed rows are not duplicates of each other, and a null row must not throw out of a read tool.
+  const odd = ctxFor([{ status: 200, data: [null, { id: 1 }, { id: 2, name: "" }, { id: 3, name: "A" }] }]);
+  const text = textOf(await tool("reai_list_debtors").handler({}, odd.ctx));
+  assert.match(text, /4 debtor\(s\)/);
+  assert.doesNotMatch(text, /appear more than once/);
+});
+
+test("a 409 on creating a counterparty is reported, not diagnosed", async () => {
+  // Both creates document a 409 and the document does not say what it is for, while measurement says
+  // duplicate names are accepted. So the tool must surface the API's words without inventing a cause.
+  for (const [toolName, kind] of [["reai_create_creditor", "creditor"], ["reai_create_debtor", "debtor"]]) {
+    const err = new ReaiApiError({
+      status: 409,
+      method: "POST",
+      path: `/api/${kind}s`,
+      rawBody: '{"detail":"Some conflict the document does not explain"}',
+      problem: { detail: "Some conflict the document does not explain" },
+    });
+    const ctx = {
+      config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: { request: async () => { throw err; }, deepLink: () => "" },
+    };
+    const res = await tool(toolName).handler({ name: "X" }, ctx);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /409 conflict/);
+    assert.match(textOf(res), /Some conflict the document does not explain/, "the API's own words must survive");
+    assert.match(textOf(res), /probably not it/, "it must not assert a cause it cannot know");
+  }
+});
