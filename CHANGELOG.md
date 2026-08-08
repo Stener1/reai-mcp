@@ -27,6 +27,16 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Mutation-verified in both directions: putting 170 back in the README fails with
     *"README.md: says 170"*, and stripping the sentences fails with *"only 0 statements of the uncovered
     count were found"*.
+  - **And then review found the new guard was itself blind to two of the six claims.** Both wrap inside a
+    JSDoc block, and the `*` starting the continuation line sits between the words, so the regex skipped
+    them — a test whose entire job is catching stale prose, reporting itself satisfied while guarding four
+    of six. Comment leaders are stripped and whitespace collapsed before matching now, the floor is six
+    rather than four, and drift in a previously invisible claim fails with the file named.
+  - The subtraction also counted declared pairs without checking they are public, so a curated tool
+    declaring an internal path would have made the enforced figure too low. Intersected now. It changes
+    nothing today — no tool declares one, verified — but with a synthetic internal declaration the naive
+    form yields 151 against the correct 152, which is exactly the wrong number this test would then
+    enforce everywhere.
 
 ### Added
 

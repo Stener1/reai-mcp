@@ -194,9 +194,21 @@ test("no documentation table calls an irreversible tool reversible", () => {
  */
 test("every stated uncovered-operation count matches the registry", async () => {
   const { readdirSync } = await import("node:fs");
-  const publicOps = getSpecIndex().counts.public;
+  const index = getSpecIndex();
+  const publicOps = index.counts.public;
+
+  // Declared pairs INTERSECTED with the public set, not counted raw. Subtracting a count that may
+  // include an internal operation from a count that excludes them gives a figure that is too low, and
+  // this test would then enforce it. No curated tool declares an internal path today — verified, the
+  // intersection changes nothing — so this is about the day one does, or the day a spec refresh
+  // reclassifies an endpoint.
+  const publicPairs = new Set(index.operations.filter((o) => !o.internal).map((o) => `${o.method} ${o.path}`));
   const covered = new Set();
-  for (const tool of allTools) for (const [method, path] of tool.apiPaths ?? []) covered.add(`${method} ${path}`);
+  for (const tool of allTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      if (publicPairs.has(`${method} ${path}`)) covered.add(`${method} ${path}`);
+    }
+  }
   const uncovered = publicOps - covered.size;
 
   assert.equal(publicOps, 321, "the README says 321 public operations in four places");
@@ -210,20 +222,31 @@ test("every stated uncovered-operation count matches the registry", async () => 
       .map((f) => `test/${f}`),
   ];
 
+  // Comment leaders stripped and whitespace collapsed BEFORE matching. Two of these sentences wrap
+  // inside a JSDoc block, and the `*` that starts the continuation line sits between the words — so the
+  // regex silently skipped them, which is the worst possible failure for a test whose whole job is
+  // catching stale prose. Found in review of this very test: it was guarding four of six claims while
+  // reporting itself satisfied.
+  const readable = (file) =>
+    readFileSync(join(repo, file), "utf8")
+      .replace(/^[ \t]*\*[ \t]?/gm, "")
+      .replace(/[ \t]*\n[ \t]*/g, " ");
+
   const wrong = [];
   let found = 0;
   for (const file of files) {
-    const text = readFileSync(join(repo, file), "utf8");
-    for (const m of text.matchAll(CLAIM)) {
+    for (const m of readable(file).matchAll(CLAIM)) {
       found++;
       if (Number(m[1]) !== uncovered) wrong.push(`${file}: says ${m[1]}`);
     }
   }
 
+  // Six today. The floor is high enough that losing one is noticed, which matters because a claim this
+  // test cannot see is indistinguishable from a claim that does not exist.
   assert.ok(
-    found >= 4,
+    found >= 6,
     `only ${found} statements of the uncovered count were found — if the sentences were removed rather ` +
-      `than corrected, this test has nothing left to guard`,
+      `than corrected, or a wrapped one stopped matching, this test has nothing left to guard`,
   );
   assert.deepEqual(
     wrong,
