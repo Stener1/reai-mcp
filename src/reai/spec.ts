@@ -392,6 +392,29 @@ export function resolveOperation(method: string, concretePath: string): SpecOper
  * Required fields are excluded deliberately: the API rejects a body missing one, so `missingRequired`
  * already explains it and naming it twice would bury the fields that get silently dropped.
  */
+/**
+ * The operation a request will actually reach, resolved from every form of the path it might route as.
+ *
+ * ReAI decodes before routing — measured: `GET /api/company%2Dbanks` and `GET /api/employe%65s`
+ * both answer 200 — while `resolveOperation` matches the literal string it is given, so an encoded
+ * path resolves to nothing. That is harmless for a note and not harmless for a gate: the write
+ * policy already classifies on both forms and takes the stricter, and the omission gate was
+ * resolving only the raw one, so a percent-encoded PUT skipped it entirely and could clear an
+ * account number exactly as the gate exists to prevent. Found in review.
+ *
+ * Returns the first form that resolves, preferring whichever is passed first.
+ */
+export function resolveRoutedOperation(
+  method: HttpMethod,
+  ...paths: readonly string[]
+): SpecOperation | undefined {
+  for (const candidate of paths) {
+    const op = resolveOperation(method, candidate);
+    if (op) return op;
+  }
+  return undefined;
+}
+
 export function omittedReplacementFields(
   op: SpecOperation,
   body: unknown,

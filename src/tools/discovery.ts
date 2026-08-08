@@ -7,7 +7,8 @@ import {
   missingRequired,
   resolveOperation,
   searchOperations,
-  omittedReplacementFields,} from "../reai/spec.js";
+  omittedReplacementFields,
+  resolveRoutedOperation,} from "../reai/spec.js";
 import { findQuirks, quirksFor } from "../reai/quirks.js";
 import {
   assertAllowed,
@@ -517,7 +518,7 @@ const request = defineTool({
     const pathReason =
       escalated.length === 0 && risk === "irreversible"
         ? (() => {
-            const op = resolveOperation(method, path);
+            const op = resolveRoutedOperation(method, path, decoded);
             const q = op
               ? quirksFor(method, op.path).find((entry) => entry.kind === "irreversible")
               : undefined;
@@ -557,7 +558,10 @@ const request = defineTool({
     // After the policy checks: a call that write mode already refuses should be refused for that
     // reason, which is the more fundamental one.
     if (args.clearOmittedFields !== true) {
-      const op = resolveOperation(method, path);
+      // Both forms, because the API decodes before routing and this server does not: an encoded
+      // path resolves to no operation, and a gate that resolves nothing refuses nothing. Same
+      // reasoning as the write policy two blocks up, which takes the stricter of the two risks.
+      const op = resolveRoutedOperation(method, path, decoded);
       const omitted = op ? omittedReplacementFields(op, args.body) : { fields: [], documented: 0 };
       if (omitted.fields.length > 0) {
         return okText(
@@ -665,7 +669,10 @@ const request = defineTool({
     // failure notes by construction. Anything left holds regardless of outcome, which is the
     // definition of what belongs on a success.
     if (risk !== "read") {
-      const op = resolveOperation(method, path);
+      // Both path forms here too. An encoded path resolved to nothing, so a write that reached a
+      // quirked endpoint by that route got the bare 200 and none of the warning — the same blind
+      // spot as the omission gate, with a quieter consequence.
+      const op = resolveRoutedOperation(method, path, decoded);
       const always = op ? quirksFor(method, op.path).filter((q) => q.statuses === undefined) : [];
       for (const q of always) notes.push(`Known quirk [${q.kind}]: ${q.note}`);
     }

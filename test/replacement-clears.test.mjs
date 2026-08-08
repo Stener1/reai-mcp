@@ -517,3 +517,29 @@ test("the omitted list is exactly the optional fields, for a body that omits bot
   // name and countryCode are required and omitted; they must NOT appear.
   assert.deepEqual(fields.sort(), ["bban", "excludeFromReconciliationTodos", "swiftCode"]);
 });
+
+test("a percent-encoded path does not slip past the gate", async () => {
+  // ReAI decodes before routing — measured, GET /api/company%2Dbanks and GET /api/employe%65s both
+  // answer 200 — while resolveOperation matches the literal string. So the gate resolved nothing
+  // and refused nothing, and the encoded PUT went through with a partial body: the exact
+  // account-number clearing it exists to prevent. Found by review, not by me.
+  for (const encoded of [
+    "/api/company%2Dbanks/7",
+    "/api/company-banks/7".replace("company", "compan%79"),
+  ]) {
+    const r = await raw("PUT", encoded, { name: "Renamed AS" }, "full");
+    assert.equal(r.called, false, `${encoded} must not be sent`);
+    assert.match(r.text, /Nothing was sent/);
+    assert.match(r.text, /bban/);
+  }
+});
+
+test("the encoded form still reaches the quirk on a write that DOES go through", async () => {
+  // The same blind spot with a quieter consequence: a write to a quirked endpoint reached by an
+  // encoded path used to come back as a bare 200 with none of the warning.
+  const r = await raw("PUT", "/api/company%2Dbanks/7", { name: "x" }, "full", {
+    clearOmittedFields: true,
+  });
+  assert.equal(r.called, true);
+  assert.match(r.text, /Known quirk/);
+});

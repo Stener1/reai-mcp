@@ -73,6 +73,7 @@ Three details worth stating, because each is a decision rather than an omission:
 - **`PATCH` is never checked.** Measured, `PATCH` on this API really does patch — a body carrying only `phone` left an employee's address, bank account, start date and employment lines untouched. Gating it would refuse ordinary partial updates on a rule that does not hold there.
 - **Required fields are excluded.** The API rejects a body missing one and `missingRequired` already explains that; listing them here would bury the fields that get *silently* dropped, which are the only ones a caller cannot otherwise find out about.
 - **The write policy speaks first.** A call the current write mode forbids is refused for that reason, not for this one — otherwise an agent goes after the wrong permission.
+- **Both path forms are resolved.** ReAI decodes before routing and this server does not: `GET /api/company%2Dbanks` and `GET /api/employe%65s` both answer `200`, while the spec lookup matches the literal string. So the first version of this gate resolved nothing for an encoded path and therefore refused nothing — `PUT /api/company%2Dbanks/{id}` with a partial body went straight through and cleared the account number. Caught in review, and fixed the way the write ladder already handled it: resolve every form the request might route as. Verified live — the encoded call is now refused and the account number is untouched. The same blind spot was silencing the quirk note on successful writes reached that way.
 
 ### Changing where money goes is treated as irreversible
 

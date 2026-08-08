@@ -32,6 +32,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     (measured). **Required fields are excluded**, because the API rejects those and
     naming them would bury the silently-dropped ones. **The write policy speaks
     first**, so a call the mode forbids is refused for that reason.
+  - **Both path forms are resolved**, after review caught the first version
+    refusing nothing for a percent-encoded path. ReAI decodes before routing and
+    this server does not — `GET /api/company%2Dbanks` and `GET /api/employe%65s`
+    both answer `200` — so `PUT /api/company%2Dbanks/{id}` with a partial body
+    skipped the gate entirely and cleared the account number. Fixed the way the
+    write ladder already handled it, with `resolveRoutedOperation`; the same blind
+    spot had been silencing the quirk note on successful writes reached that way.
+    Verified live: the encoded call is refused and the account survives.
 
 - **Employee master data** (5 tools) — `reai_create_employee`,
   `reai_update_employee`, `reai_set_employee_bank_account`,
