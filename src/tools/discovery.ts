@@ -7,7 +7,8 @@ import {
   missingRequired,
   resolveOperation,
   searchOperations,
-} from "../reai/spec.js";
+  omittedReplacementFields,
+  resolveRoutedOperation,} from "../reai/spec.js";
 import { findQuirks, quirksFor } from "../reai/quirks.js";
 import {
   assertAllowed,
@@ -395,6 +396,17 @@ const request = defineTool({
         "Set for endpoints returning a file (PDF, attachment content). Returns base64 plus " +
           "content type instead of attempting to parse JSON.",
       ),
+    clearOmittedFields: z
+      .boolean()
+      .optional()
+      .describe(
+        "Acknowledge that a PUT will CLEAR the documented fields your body leaves out. Without " +
+          "this, a PUT whose body omits optional fields is refused with those fields named, " +
+          "because a full replacement stores nothing for what it does not mention — that is how a " +
+          "rename emptied a company bank's account number on a live tenant. Prefer reading the " +
+          "record and sending it back merged; set this only when clearing those fields is what you " +
+          "mean, or when the record does not carry them. PATCH is never checked: it really patches.",
+      ),
   },
   handler: async (args, ctx) => {
     const method = args.method as HttpMethod;
@@ -506,7 +518,7 @@ const request = defineTool({
     const pathReason =
       escalated.length === 0 && risk === "irreversible"
         ? (() => {
-            const op = resolveOperation(method, path);
+            const op = resolveRoutedOperation(method, path, decoded);
             const q = op
               ? quirksFor(method, op.path).find((entry) => entry.kind === "irreversible")
               : undefined;
@@ -537,6 +549,38 @@ const request = defineTool({
       ctx.config.allowExternalSend,
       sendFields.length > 0 ? `${method} ${path} with ${sendFields.join(", ")}` : `${method} ${path}`,
     );
+
+    // A full replacement clears what the body leaves out, and this hatch cannot merge on the
+    // caller's behalf the way the curated tools do. Refusing here rather than reporting it
+    // afterwards, because "these five fields were just emptied" is not a warning, it is a
+    // post-mortem — and every instance of this bug in this repo was found that way.
+    //
+    // After the policy checks: a call that write mode already refuses should be refused for that
+    // reason, which is the more fundamental one.
+    if (args.clearOmittedFields !== true) {
+      // Both forms, because the API decodes before routing and this server does not: an encoded
+      // path resolves to no operation, and a gate that resolves nothing refuses nothing. Same
+      // reasoning as the write policy two blocks up, which takes the stricter of the two risks.
+      const op = resolveRoutedOperation(method, path, decoded);
+      const omitted = op ? omittedReplacementFields(op, args.body) : { fields: [], documented: 0 };
+      if (omitted.fields.length > 0) {
+        return okText(
+          `${method} ${path} REPLACES the record, and this body leaves out ` +
+            `${omitted.fields.length} of its ${omitted.documented} documented field(s), which the ` +
+            `API stores as empty:\n\n  ${omitted.fields.join(", ")}\n\n` +
+            `Nothing was sent. This is not a theoretical risk on this API — a rename sent to ` +
+            `PUT /api/company-banks/{id} emptied the account number its own customers pay into, ` +
+            `and the same shape blanked a lease's rent and deposit while the PDF still rendered.\n\n` +
+            `Two ways forward. To change some fields and keep the rest, GET the record first, merge ` +
+            `your changes over it, and send the whole thing — that is what this server's curated ` +
+            `tools do for the endpoints they cover. To genuinely clear those fields, or if the ` +
+            `record does not carry them, pass clearOmittedFields: true and this exact call will go ` +
+            `through.\n\n` +
+            `Only PUT is checked. PATCH on this API really does patch — measured — so a partial ` +
+            `PATCH body is not flagged.`,
+        );
+      }
+    }
 
     const isMeta = path === "/api/me" || path === "/api/tenants";
     let res;
@@ -625,7 +669,10 @@ const request = defineTool({
     // failure notes by construction. Anything left holds regardless of outcome, which is the
     // definition of what belongs on a success.
     if (risk !== "read") {
-      const op = resolveOperation(method, path);
+      // Both path forms here too. An encoded path resolved to nothing, so a write that reached a
+      // quirked endpoint by that route got the bare 200 and none of the warning — the same blind
+      // spot as the omission gate, with a quieter consequence.
+      const op = resolveRoutedOperation(method, path, decoded);
       const always = op ? quirksFor(method, op.path).filter((q) => q.statuses === undefined) : [];
       for (const q of always) notes.push(`Known quirk [${q.kind}]: ${q.note}`);
     }

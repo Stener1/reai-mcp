@@ -13,6 +13,34 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_request` refuses a `PUT` that would clear the fields it does not mention.**
+  Naming the worst instances of the full-replacement class was never the same as
+  covering it: sweeping the document turns up **31 public `PUT` endpoints that can
+  clear at least one documented field by omission**, and only 15 have a curated
+  tool. The other 16 are reachable solely through the escape hatch, which cannot
+  merge on a caller's behalf. Every instance of this bug in this repo — a company
+  bank, a creditor, a lease, a subscription, a wage line — was found *after* the
+  write on a live tenant, which is why this refuses rather than warns.
+  - The refusal names the fields and the count (`leaves out 3 of its 6 documented
+    field(s)`), points at read-merge-write as the usual answer, and offers
+    `clearOmittedFields: true` for when emptying them is the intent.
+  - Verified live in both directions: after the refusal the account number was
+    still `"15201353103"`; the same call with the flag left it `""`. The write suite
+    now proves both halves on two independent endpoints — a 6-field company bank and
+    a 78-field lease where the body mentions one field.
+  - **`PATCH` is never checked**, because `PATCH` on this API really patches
+    (measured). **Required fields are excluded**, because the API rejects those and
+    naming them would bury the silently-dropped ones. **The write policy speaks
+    first**, so a call the mode forbids is refused for that reason.
+  - **Both path forms are resolved**, after review caught the first version
+    refusing nothing for a percent-encoded path. ReAI decodes before routing and
+    this server does not — `GET /api/company%2Dbanks` and `GET /api/employe%65s`
+    both answer `200` — so `PUT /api/company%2Dbanks/{id}` with a partial body
+    skipped the gate entirely and cleared the account number. Fixed the way the
+    write ladder already handled it, with `resolveRoutedOperation`; the same blind
+    spot had been silencing the quirk note on successful writes reached that way.
+    Verified live: the encoded call is refused and the account survives.
+
 - **Employee master data** (5 tools) — `reai_create_employee`,
   `reai_update_employee`, `reai_set_employee_bank_account`,
   `reai_add_employment_line`, `reai_delete_employee`. Payroll shipped first,

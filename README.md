@@ -51,6 +51,30 @@ PUT /api/creditors/{id}     {name}                          → 200, bankAccount
 
 This defeats the routing rule below, which escalates a body that *contains* a destination — it cannot see one whose danger is the omission. Both PUTs are therefore classified **irreversible** outright, creating either record stays reversible (adding diverts nothing), and a quirk tells a `reai_request` caller, because a `200` says nothing. `reai_set_customer_address` had the same shape on a smaller scale — the address PUT requires only street, city and country, so setting a street emptied the postcode — and it now reads the current address and merges.
 
+#### And the escape hatch now refuses to send one blind
+
+Naming the two worst instances is not the same as covering the class. Sweeping the document turns up **31 public `PUT` endpoints that can clear at least one documented field by omission**, and only 15 of them have a curated tool — the other 16 are reachable solely through `reai_request`, which cannot merge on a caller's behalf. Every instance of this bug in this repo was found *after* the write, on a live tenant, so a warning attached to the response is a post-mortem rather than a control.
+
+So `reai_request` now refuses a `PUT` whose body omits documented optional fields, and names them:
+
+```
+PUT /api/company-banks/1561 REPLACES the record, and this body leaves out 3 of its 6
+documented field(s), which the API stores as empty:
+
+  bban, swiftCode, excludeFromReconciliationTodos
+
+Nothing was sent.
+```
+
+Two ways past it, both deliberate: `GET` the record, merge your change over it and send the whole thing — which is what the curated tools do — or pass `clearOmittedFields: true` when emptying those fields is genuinely the intent. Verified on the live tenant in both directions: after the refusal the account number was still `"15201353103"`, and the same call with the flag set left it `""`.
+
+Three details worth stating, because each is a decision rather than an omission:
+
+- **`PATCH` is never checked.** Measured, `PATCH` on this API really does patch — a body carrying only `phone` left an employee's address, bank account, start date and employment lines untouched. Gating it would refuse ordinary partial updates on a rule that does not hold there.
+- **Required fields are excluded.** The API rejects a body missing one and `missingRequired` already explains that; listing them here would bury the fields that get *silently* dropped, which are the only ones a caller cannot otherwise find out about.
+- **The write policy speaks first.** A call the current write mode forbids is refused for that reason, not for this one — otherwise an agent goes after the wrong permission.
+- **Both path forms are resolved.** ReAI decodes before routing and this server does not: `GET /api/company%2Dbanks` and `GET /api/employe%65s` both answer `200`, while the spec lookup matches the literal string. So the first version of this gate resolved nothing for an encoded path and therefore refused nothing — `PUT /api/company%2Dbanks/{id}` with a partial body went straight through and cleared the account number. Caught in review, and fixed the way the write ladder already handled it: resolve every form the request might route as. Verified live — the encoded call is now refused and the account number is untouched. The same blind spot was silencing the quirk note on successful writes reached that way.
+
 ### Changing where money goes is treated as irreversible
 
 A few fields are ordinary master data as *records* and permanent as *consequences*. Undoing the edit is trivial; undoing what follows is not, because it happens later and through someone acting perfectly normally.

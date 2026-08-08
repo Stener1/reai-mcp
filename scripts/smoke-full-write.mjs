@@ -451,13 +451,46 @@ async function main() {
         return r.isError ? undefined : { value: jsonOf(r)?.bban };
       };
       const before = await readBban();
+
+      // The rename an agent would actually write, sent FIRST without acknowledging anything. The
+      // omission gate has to refuse it, and — the part that matters — the account number has to
+      // still be there afterwards. A refusal that arrives after the field is gone is a post-mortem.
+      const renameBody = { name: `${STAMP} renamed`, countryCode: "NO", currency: "NOK" };
+      const gated = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/company-banks/${created.doomedBankId}`,
+          body: renameBody,
+        },
+      });
+      const afterRefusal = await readBban();
+      report(
+        "the omission gate refuses a rename that would clear the account number",
+        /leaves out 3 of its 6/.test(textOf(gated)) && /bban/.test(textOf(gated)),
+        firstLineOf(textOf(gated)),
+      );
+      report(
+        "and the account number is still there — the refusal came BEFORE the write",
+        before !== undefined &&
+          afterRefusal !== undefined &&
+          !!before.value &&
+          afterRefusal.value === before.value,
+        before === undefined || afterRefusal === undefined
+          ? "COULD NOT READ the account before or after — this demonstrates nothing either way"
+          : `bban ${JSON.stringify(before.value)} → ${JSON.stringify(afterRefusal.value)}`,
+      );
+
+      // Now the same call with the clearing acknowledged, which is the damage the gate exists to
+      // stop. Proving it still happens is what justifies the gate: if this ever stops clearing,
+      // the refusal has become a false alarm and should be reconsidered rather than kept on faith.
       const wipe = await client.callTool({
         name: "reai_request",
         arguments: {
           method: "PUT",
           path: `/api/company-banks/${created.doomedBankId}`,
-          // Exactly the required set: an agent renaming the account.
-          body: { name: `${STAMP} renamed`, countryCode: "NO", currency: "NOK" },
+          body: renameBody,
+          clearOmittedFields: true,
         },
       });
       const after = await readBban();
@@ -466,7 +499,7 @@ async function main() {
       const proven =
         !wipe.isError && before !== undefined && after !== undefined && !!before.value && !after.value;
       report(
-        "a rename that omits the account number really does clear it",
+        "acknowledged, that same rename really does clear the account number",
         proven,
         before === undefined || after === undefined
           ? "COULD NOT READ the account before or after — this demonstrates nothing either way"
@@ -556,12 +589,30 @@ async function main() {
       // And the raw partial PUT, which is what the tool exists to avoid. Run deliberately to
       // confirm the destruction is real rather than inferred — on a throwaway lease, in full
       // mode, where the write ladder permits it.
+      //
+      // clearOmittedFields is required now: the omission gate refuses this body, which is the
+      // whole point of it. Asserted first, so the protection is proven on THIS endpoint too and
+      // not only on company banks — 78 fields, of which the body below mentions one.
+      const gatedLease = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/agreements/rent-agreement/${created.agreementId}`,
+          body: { landlordName: `${STAMP} utleier` },
+        },
+      });
+      report(
+        "the omission gate refuses a one-field PUT to a 78-field lease",
+        /leaves out 77 of its 78/.test(textOf(gatedLease)),
+        firstLineOf(textOf(gatedLease)),
+      );
       const rawRes = await client.callTool({
         name: "reai_request",
         arguments: {
           method: "PUT",
           path: `/api/agreements/rent-agreement/${created.agreementId}`,
           body: { landlordName: `${STAMP} utleier` },
+          clearOmittedFields: true,
         },
       });
       const wiped = await client.callTool({
@@ -1181,12 +1232,16 @@ async function main() {
         // text: create REQUIRES employeeId, update REJECTS it. The curated update tool cannot
         // send it at all, so this goes through reai_request on purpose.
         if (Number.isInteger(wageSpecId)) {
+          // clearOmittedFields because this body omits comment and holidayAllowanceEarningYear,
+          // so the omission gate would otherwise refuse it before the API could — and what is
+          // under test here is the API's own rejection of employeeId.
           const withEmployee = await client.callTool({
             name: "reai_request",
             arguments: {
               method: "PUT",
               path: `/api/salary-payments/${runId}/wage-specs/${wageSpecId}`,
               body: { employeeId: payable.id, specificationCode: "COMMISSION", quantity: 1, rate: 5000 },
+              clearOmittedFields: true,
               tenantId,
             },
           });
@@ -1235,6 +1290,8 @@ async function main() {
               method: "PUT",
               path: `/api/salary-payments/${runId}/wage-specs/${wageSpecId}`,
               body: { specificationCode: "COMMISSION", quantity: 1, rate: 2500 },
+              // Deliberate: this call exists to show the clearing, so it acknowledges it.
+              clearOmittedFields: true,
               tenantId,
             },
           });
