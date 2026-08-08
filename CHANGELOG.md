@@ -30,6 +30,29 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Two more fixtures were pinning wrong answers**, both caught by Codex on the follow-up and both
+  the same class as the review finding above:
+  - *"Hva står i leieavtalen"* — what does the lease say — was asserted against
+    `POST /api/agreements/rent-agreement`, which **creates** one. Rephrasing the question had not
+    been enough: the target was still a mutating endpoint, so a read question stayed pinned to a
+    write. It asserts `GET /api/agreements/{id}` now, which the ranker reaches at the same rank for
+    both grammatical forms.
+  - *"Last opp dokumentet"* was asserted against `GET /api/documents` when *"last opp"* is
+    explicitly an upload and the spec's `POST /api/documents` is summarised "Upload one or more
+    documents". The fixture was locking in the wrong method.
+
+- **Intent can now come from a phrase, not only from a word.** *"Last opp"* is upload and *"last
+  ned"* is download — opposite methods sharing a verb that means neither alone, and `last` is also
+  the noun for a load and an English word. So neither the method table nor the write-intent set could
+  hold it: the direction is in the particle and only the pair says anything. A new `PHRASE_INTENT`
+  table matches the raw query text, the same reasoning `PHRASE_SYNONYMS` already uses for *"skylder
+  oss"* versus *"skylder vi"*. `POST /api/documents` moves from rank 7 to rank 1 for both
+  grammatical forms, while *"last ned"* keeps a `GET` first.
+  - Asserted on the **first result**, which is what the mechanism promises: implied methods bias the
+    ranking, they do not filter by method. A first version demanded zero writes in the top five and
+    failed on *"last ned rapporten"*, where a `POST` sits at rank four behind three `GET`s — the
+    intent was respected and the assertion was describing something the rule does not do.
+
 - **Six findings from an independent review of the definite-form work**, all live:
   - A comment claimed the length guard was what kept `lån` from being stripped. It is not — the
     **gate** is, since `lå` is not a synonym key, and removing both length guards leaves the whole

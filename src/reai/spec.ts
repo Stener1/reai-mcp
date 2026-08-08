@@ -132,8 +132,17 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   const { terms, resourceCount } = expandQuery(opts.query ?? "");
   // An explicit method filter already narrows the results, so the verb hint would
   // only add noise on top of it.
-  const impliedMethods = wantMethod ? undefined : impliedMethodsFor(rawTerms);
-  const writeIntent = !wantMethod && hasWriteIntent(rawTerms);
+  // A phrase wins over the token tables when both speak, because it is the more specific statement:
+  // "last opp" is an upload whatever `last` means alone.
+  const phraseMethods = wantMethod ? undefined : phraseMethodsFor(opts.query ?? "");
+  const impliedMethods = phraseMethods ?? (wantMethod ? undefined : impliedMethodsFor(rawTerms));
+  const writeIntent =
+    !wantMethod &&
+    (hasWriteIntent(rawTerms) ||
+      // A phrase that implies a writing method is a write intent, or the endpoint it names gets only
+      // the weak generic bonus and a GET on the same resource still wins — the failure METHOD_INTENT's
+      // own comment describes.
+      [...(phraseMethods ?? [])].some((m) => m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE"));
 
   const hits: SearchHit[] = [];
   for (const op of index.operations) {
@@ -827,6 +836,32 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
     // payments — the exact false positive the note below this table was written about.
     "vis", "hent", "finn", "hvilke", "hva"], ["GET"]],
 ];
+
+/**
+ * Intent carried by a PHRASE rather than by a word.
+ *
+ * "Last opp" is upload and "last ned" is download — opposite methods, sharing a verb that means
+ * neither on its own. `last` is also the noun for a load, and an English word. So neither table above
+ * can hold it: the direction lives in the particle, and only the pair says anything.
+ *
+ * Matched against the raw query text, not the token set, because a token set has no adjacency. Same
+ * reasoning as PHRASE_SYNONYMS, which exists because "skylder oss" and "skylder vi" point at opposite
+ * sides of the books while sharing a verb.
+ */
+const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
+  [/\blast(e|er)?\s+opp\b/, ["POST"]],
+  [/\blast(e|er)?\s+ned\b/, ["GET"]],
+];
+
+function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
+  const text = query.toLowerCase();
+  const matched = PHRASE_INTENT.filter(([pattern]) => pattern.test(text));
+  // One phrase only. Two competing phrases say the user asked for two things, and guessing between
+  // them is how the verb heuristic got worse than none — the same rule impliedMethodsFor applies to
+  // its groups.
+  const only = matched.length === 1 ? matched[0] : undefined;
+  return only ? new Set(only[1]) : undefined;
+}
 
 /**
  * Verbs that unambiguously ask to CHANGE something.
