@@ -22,6 +22,7 @@ import { assetTools } from "./tools/assets.js";
 import { subscriptionTools } from "./tools/subscriptions.js";
 import { warehouseTools } from "./tools/warehouses.js";
 import { agreementTools } from "./tools/agreements.js";
+import { salaryTools } from "./tools/salary.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.3.0";
@@ -41,6 +42,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   subscriptions: subscriptionTools,
   warehouses: warehouseTools,
   agreements: agreementTools,
+  salary: salaryTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];
@@ -316,6 +318,8 @@ const GROUP_BLURBS: Record<string, string> = {
   warehouses: "warehouses and stock on hand (lager), and the adjustments that move it",
   agreements:
     "contracts (avtaler): leases, employment contracts, purchase and service agreements, and their signing status",
+  salary:
+    "payroll (lønn): salary runs and their wage lines, up to but NOT including completing one — that files the a-melding",
 };
 
 function describeEnabledGroups(toolsets: readonly string[]): string {

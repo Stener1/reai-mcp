@@ -19,10 +19,13 @@
  *     loudly enough that a human will act on it.
  *
  * It deliberately does NOT test: issuing invoices or credit notes (they transmit
- * to the customer and cannot be deleted), supplier invoices (DELETE reverses
- * rather than removes, leaving a permanent pair of entries in real books),
- * payments, payroll, or VAT settlement (which locks a period). Those are listed
- * at the end as untested, because claiming otherwise would be worse than the gap.
+ * to the customer and cannot be deleted), VAT settlement (which locks a period),
+ * or COMPLETING a payroll run — that posts the voucher, creates payslips, creates
+ * one employee payment each and files the a-melding with Skatteetaten. Payroll up
+ * to that line IS tested, because a run in status under_process has posted
+ * nothing, and the voucher count is compared across the whole section to prove it
+ * rather than assert it. Everything still untested is listed at the end, because
+ * claiming otherwise would be worse than the gap.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -213,6 +216,8 @@ async function main() {
     ruleId: undefined,
     supplierInvoiceId: undefined,
     supplierId: undefined,
+    salaryRunId: undefined,
+    salaryEmployeeIds: [],
   };
 
   try {
@@ -229,6 +234,16 @@ async function main() {
       tools.has("reai_credit_invoice") ? "VISIBLE — abort" : "hidden",
     );
     report(
+      "no curated tool completes a payroll run — that files the a-melding",
+      !tools.has("reai_complete_salary_run") && !tools.has("reai_pay_salary_run"),
+      "absent by design",
+    );
+    report(
+      "payroll drafting IS available (the toolset loaded)",
+      tools.has("reai_create_salary_run") && tools.has("reai_delete_salary_run"),
+      `${[...tools].filter((n) => n.includes("salary")).length} salary tools`,
+    );
+    report(
       "ledger tools ARE available (full mode really is on)",
       tools.has("reai_create_voucher") && tools.has("reai_delete_voucher"),
       `${tools.size} tools`,
@@ -240,6 +255,10 @@ async function main() {
       ["POST /api/orders with sendEhf", { method: "POST", path: "/api/orders", body: { customerId: 1, sendEhf: true, orderLines: [] } }],
       ["POST /api/peppol/messages/sendsbdh", { method: "POST", path: "/api/peppol/messages/sendsbdh", body: {} }],
       ["POST /api/tax-returns/2026/submit", { method: "POST", path: "/api/tax-returns/2026/submit", body: {} }],
+      // Payroll's point of no return: it posts the voucher, creates payslips, creates one
+      // employee payment each AND starts the a-melding submission to Skatteetaten. The id is
+      // deliberately one that does not exist — the refusal has to happen before the API is asked.
+      ["POST /api/salary-payments/{id}/complete", { method: "POST", path: "/api/salary-payments/999999/complete", body: { companyBankId: 1, manualPayment: true } }],
     ]) {
       const res = await client.callTool({ name: "reai_request", arguments: { ...args, tenantId } });
       const blocked = res.isError === true && /REAI_ALLOW_EXTERNAL_SEND/.test(textOf(res));
@@ -851,6 +870,234 @@ async function main() {
       !ruleRes.isError && Number.isInteger(created.ruleId),
       created.ruleId ? `id=${created.ruleId}` : textOf(ruleRes).slice(0, 200),
     );
+
+    // --- Payroll: a DRAFT run, which posts nothing ---------------------------
+    //
+    // Payroll was on this suite's untested list, and half of it stays there: completing a run
+    // is the one call that pays real people and files with the state, and it is refused above
+    // rather than exercised. What IS testable is everything up to that line, because a run in
+    // status under_process has posted no voucher — measured, and re-measured here against the
+    // voucher count so the claim is not taken on faith.
+    console.log("\n  Payroll draft (posts NO voucher — that is what is being verified):");
+
+    const vouchersBeforePayroll = countOf(
+      await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+    );
+
+    // An employee is the precondition for a run, and its bank account is the precondition for
+    // creating one at all. Two are made: one payable, one deliberately without an account.
+    const makeEmployee = async (label, extra) => {
+      // The NAME is timestamped, not only the email: an employee name is unique per tenant
+      // (409 "Ansatt med dette navnet finnes allerede"), so a record stranded by an earlier
+      // crashed run blocks every later run until someone deletes it by hand. Measured — that is
+      // exactly what happened, and the run it blocked reported a failure in the wrong place.
+      const suffix = `${Date.now()}`.slice(-7);
+      const res = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "POST",
+          path: "/api/employees",
+          body: {
+            name: `Zz Payroll ${label} ${suffix}`,
+            email: `zz-payroll-${label}-${suffix}@example.invalid`,
+            ...extra,
+          },
+          tenantId,
+        },
+      });
+      const id = res.isError ? undefined : jsonOf(res)?.id;
+      if (Number.isInteger(id)) created.salaryEmployeeIds.push(id);
+      return { res, id, data: res.isError ? undefined : jsonOf(res) };
+    };
+
+    const payable = await makeEmployee("Paid", { accountNumber: "15201353103" });
+    report(
+      "a test employee exists, with a bank account",
+      Number.isInteger(payable.id),
+      payable.id ? `id=${payable.id}` : textOf(payable.res).slice(0, 160),
+    );
+    // The renamed-and-split response field. A caller that compares what it sent to the
+    // `accountNumber` it reads back concludes the write failed; this pins why.
+    report(
+      "accountNumber goes in flat and comes back split under bankAccount",
+      payable.data?.bankAccount?.bankCode === "1520" &&
+        payable.data?.bankAccount?.accountNumber === "1353103" &&
+        payable.data?.accountNumber === undefined,
+      JSON.stringify(payable.data?.bankAccount ?? payable.data ?? null).slice(0, 160),
+    );
+
+    const unbanked = await makeEmployee("Unbanked", {});
+    if (Number.isInteger(payable.id) && Number.isInteger(unbanked.id)) {
+      // The normal first failure, and it names the employee. Asserted before the happy path,
+      // because a run created here would have to be cleaned up either way.
+      const refused = await client.callTool({
+        name: "reai_create_salary_run",
+        arguments: {
+          period: today.slice(0, 7),
+          paymentDate: today,
+          employeeIds: [payable.id, unbanked.id],
+        },
+      });
+      report(
+        "a run including an employee with no bank account is refused, by name",
+        refused.isError === true && /mangler bankkonto/i.test(textOf(refused)),
+        firstLineOf(textOf(refused)),
+      );
+
+      const runRes = await client.callTool({
+        name: "reai_create_salary_run",
+        arguments: {
+          period: today.slice(0, 7),
+          paymentDate: today,
+          employeeIds: [payable.id],
+        },
+      });
+      const run = runRes.isError ? undefined : jsonOf(runRes);
+      // Recorded in `created` for the cleanup, and used from a LOCAL for the rest of the
+      // exercise. Deleting a wage LINE is part of the test, not cleanup of the run, and
+      // `created.salaryRunId` inside that call reads to the cleanup guard — correctly — as a
+      // record being deleted in the try half.
+      //
+      // The recording comes FIRST and on its own line, because it is the line that makes the
+      // cleanup possible: an earlier version of this file assigned the local here instead, threw
+      // in the temporal dead zone, and stranded the run it had just created on a live tenant with
+      // an employee attached that then could not be deleted either.
+      if (Number.isInteger(run?.id)) created.salaryRunId = run.id;
+      const runId = created.salaryRunId;
+      // The API's own wording is "all employees eligible for the period", so the response's
+      // employeeIds is what says who is in — asserted here because the tool's note reports that
+      // list and a wrong one would read as coverage the run does not have.
+      report(
+        "the run includes exactly the employee asked for",
+        !runRes.isError && JSON.stringify(run?.employeeIds ?? null) === JSON.stringify([payable.id]),
+        `employeeIds=${JSON.stringify(run?.employeeIds ?? null)} (asked for [${payable.id}])`,
+      );
+      report(
+        "reai_create_salary_run opens a DRAFT",
+        !runRes.isError && run?.status === "under_process",
+        run ? `id=${run.id} number=${run.number} status=${run.status}` : textOf(runRes).slice(0, 200),
+      );
+      report(
+        "the draft carries no voucher",
+        !runRes.isError && (run?.voucherId ?? null) === null,
+        `voucherId=${JSON.stringify(run?.voucherId ?? null)}`,
+      );
+
+      if (Number.isInteger(runId)) {
+        const lineRes = await client.callTool({
+          name: "reai_add_salary_line",
+          arguments: {
+            id: runId,
+            employeeId: payable.id,
+            specificationCode: "COMMISSION",
+            quantity: 1,
+            rate: 5000,
+            comment: STAMP,
+          },
+        });
+        const withLine = lineRes.isError ? undefined : jsonOf(lineRes);
+        const wageSpecId = withLine?.employees?.[0]?.wageSpecs?.[0]?.id;
+        report(
+          "reai_add_salary_line moves the run's payable total",
+          !lineRes.isError && (withLine?.payableAmount ?? 0) > 0,
+          withLine
+            ? `payable=${withLine.payableAmount} withheld=${withLine.totalTaxDeducted} rate=${withLine.employees?.[0]?.taxDeductionRate}%`
+            : textOf(lineRes).slice(0, 200),
+        );
+
+        // The measured asymmetry, asserted against the live API rather than only in the tool
+        // text: create REQUIRES employeeId, update REJECTS it. The curated update tool cannot
+        // send it at all, so this goes through reai_request on purpose.
+        if (Number.isInteger(wageSpecId)) {
+          const withEmployee = await client.callTool({
+            name: "reai_request",
+            arguments: {
+              method: "PUT",
+              path: `/api/salary-payments/${runId}/wage-specs/${wageSpecId}`,
+              body: { employeeId: payable.id, specificationCode: "COMMISSION", quantity: 1, rate: 5000 },
+              tenantId,
+            },
+          });
+          report(
+            "a wage-line update carrying employeeId is refused by the API",
+            withEmployee.isError === true || /\b400\b/.test(textOf(withEmployee)),
+            firstLineOf(textOf(withEmployee)),
+          );
+
+          // The line was created WITH a comment and is updated WITHOUT one on purpose. The PUT
+          // replaces rather than patches — measured: a raw update omitting the field came back
+          // with comment null — so this asserts the tool's read-merge-write actually preserves it.
+          // The precondition is asserted first, because "the comment survived" passes trivially
+          // if there was never a comment to lose.
+          report(
+            "the line was created with a comment, so there is something to lose",
+            (withLine?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === STAMP,
+            `comment=${JSON.stringify(withLine?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
+          );
+          const changed = await client.callTool({
+            name: "reai_update_salary_line",
+            arguments: {
+              id: runId,
+              wageSpecId,
+              specificationCode: "COMMISSION",
+              quantity: 1,
+              rate: 2500,
+            },
+          });
+          const after = changed.isError ? undefined : jsonOf(changed);
+          report(
+            "reai_update_salary_line halves the line without employeeId",
+            !changed.isError && (after?.payableAmount ?? 0) < (withLine?.payableAmount ?? 0),
+            after ? `payable=${after.payableAmount}` : textOf(changed).slice(0, 200),
+          );
+          report(
+            "the comment survived an update that never mentioned it",
+            (after?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === STAMP,
+            `comment=${JSON.stringify(after?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
+          );
+          // And the raw PUT, the one a caller reaches for without the tool, still clears it. This
+          // is the measurement the merge exists for, made in the same run rather than quoted.
+          const rawPut = await client.callTool({
+            name: "reai_request",
+            arguments: {
+              method: "PUT",
+              path: `/api/salary-payments/${runId}/wage-specs/${wageSpecId}`,
+              body: { specificationCode: "COMMISSION", quantity: 1, rate: 2500 },
+              tenantId,
+            },
+          });
+          const wiped = rawPut.isError ? undefined : jsonOf(rawPut);
+          report(
+            "a RAW PUT omitting the comment clears it — which is why the tool merges",
+            !rawPut.isError &&
+              (wiped?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === null,
+            rawPut.isError
+              ? textOf(rawPut).slice(0, 160)
+              : `comment=${JSON.stringify(wiped?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
+          );
+
+          const removed = await client.callTool({
+            name: "reai_delete_salary_line",
+            arguments: { id: runId, wageSpecId },
+          });
+          const emptied = removed.isError ? undefined : jsonOf(removed);
+          report(
+            "reai_delete_salary_line returns the run to zero payable",
+            !removed.isError && (emptied?.payableAmount ?? -1) === 0,
+            emptied ? `payable=${emptied.payableAmount}` : textOf(removed).slice(0, 200),
+          );
+        }
+
+        const vouchersAfterPayroll = countOf(
+          await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+        );
+        report(
+          "drafting payroll posted no voucher",
+          vouchersBeforePayroll !== undefined && vouchersAfterPayroll === vouchersBeforePayroll,
+          `${vouchersBeforePayroll} → ${vouchersAfterPayroll}`,
+        );
+      }
+    }
   } finally {
     // --- 5. Clean up, most dependent first -----------------------------------
     //
@@ -872,6 +1119,39 @@ async function main() {
       }
     };
 
+    // The salary run before its employees: an employee referenced by a run is a dependent
+    // record, and deleting the parent first is what left four orders stranded on this tenant
+    // once already. A draft run deletes cleanly (measured 200) because it posted nothing.
+    if (created.salaryRunId) {
+      // Asserting the OUTCOME, not just the absence of an error: this endpoint deletes OR records
+      // a reversal and says which in {"outcome":...}. A draft must come back "deleted" — if it
+      // ever answers "reversed" here, something posted to a live tenant's ledger and the cleanup
+      // is the last place that would notice.
+      const del = await attempt(
+        "test salary run deleted",
+        () => client.callTool({ name: "reai_delete_salary_run", arguments: { id: created.salaryRunId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+      if (del && !del.isError) {
+        const outcome = jsonOf(del)?.outcome;
+        report(
+          "the draft was DELETED, not reversed",
+          outcome === "deleted",
+          `outcome=${JSON.stringify(outcome)}`,
+        );
+      }
+    }
+    for (const employeeId of created.salaryEmployeeIds) {
+      await attempt(
+        `test employee ${employeeId} deleted`,
+        () =>
+          client.callTool({
+            name: "reai_request",
+            arguments: { method: "DELETE", path: `/api/employees/${employeeId}`, tenantId },
+          }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
     if (created.agreementId) {
       await attempt(
         "test lease deleted",
@@ -1084,8 +1364,13 @@ async function main() {
     "\nDeliberately NOT tested:\n" +
       "  - issuing an invoice or credit note — TRANSMITS to the customer and cannot be\n" +
       "    recalled. Not a reversibility question, and no flag in this script enables it.\n" +
-      "  - registering a CUSTOMER or SALARY payment — a customer payment needs an issued\n" +
-      "    invoice, which transmits, and a salary run pays a person. A manual SUPPLIER\n" +
+      "  - COMPLETING a payroll run — one call posts the voucher, creates payslips, creates\n" +
+      "    one employee payment per payable employee AND starts the a-melding submission to\n" +
+      "    Skatteetaten. Drafting a run IS tested above (create, add, change and remove wage\n" +
+      "    lines, delete the run), and the voucher count is compared across it to show that a\n" +
+      "    draft posts nothing. The refusal at /complete is asserted before any write.\n" +
+      "  - registering a CUSTOMER payment — it needs an issued invoice, which transmits.\n" +
+      "    A manual SUPPLIER\n" +
       "    payment IS registered above: manualPayment=true is handled manually rather than\n" +
       "    through the bank integration, and the absence of an approvalUrl is asserted\n" +
       "    rather than assumed, since that is the signal a transfer awaits a human.\n" +

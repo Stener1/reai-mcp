@@ -67,6 +67,20 @@ export type Quirk = {
   note: string;
 };
 
+/**
+ * Shared by the two employee-account quirks below — see the comment there for why it is two
+ * entries and not one.
+ */
+const EMPLOYEE_ACCOUNT_SPLIT_NOTE =
+  "The request field is `accountNumber` and takes the whole number; the response field is " +
+  "`bankAccount`, an OBJECT, with the number split. Measured: sending accountNumber " +
+  '"15201353103" reads back as bankAccount { employeeBankAccountId, countryCode: "NO", ' +
+  'bankCode: "1520", accountNumber: "1353103", currency: "NOK", iban: "NO1615201353103" }. So a ' +
+  'caller checking the write by comparing `accountNumber` sees "1353103" against what it sent and ' +
+  "concludes it failed; read `bankAccount.iban`, or reassemble bankCode + accountNumber. Note " +
+  "EmployeeRes has no flat accountNumber at all, and the COLLECTION list is a thinner projection " +
+  "still — id, name and email only.";
+
 export const QUIRKS: readonly Quirk[] = [
   // --- Cross-cutting -------------------------------------------------------
   // Note: quirks true of the whole API (tenant scoping, deep links needing
@@ -488,6 +502,138 @@ export const QUIRKS: readonly Quirk[] = [
       "invoiceEmail, invoiceComment and internalComment all null with the second line gone. Mapped " +
       "properly the round-trip is lossless, discounts included. reai_update_subscription does the " +
       "mapping and the merge; a raw caller has to do both.",
+  },
+  {
+    id: "salary-complete-does-everything-at-once",
+    paths: ["/api/salary-payments/{id}/complete"],
+    methods: ["POST"],
+    kind: "irreversible",
+    note:
+      "The most consequential single call in this API, and its own description says why: it " +
+      '"finalizes the salary payment, creates its voucher and payslips, and creates one employee ' +
+      'payment per payable employee using the selected company bank. For Norwegian tenants, the ' +
+      'same A-melding validation and asynchronous submission flow as the web application is ' +
+      'started." Once Skatteetaten accepts, withholding tax and employer contribution payments are ' +
+      "registered automatically. So one call posts to the ledger, schedules real transfers to real " +
+      "people, and files with the state.\n\n" +
+      "manualPayment is the same dual-mode flag as on a supplier-invoice payment: false schedules " +
+      "the transfers, true records them as already made. companyBankId is required either way. " +
+      "There is deliberately no curated tool for this — the refusal here names what it would have " +
+      "done, which is the point.",
+  },
+  {
+    id: "salary-ctrl-aliases-have-no-documentation",
+    paths: [
+      "/salary/{id}/complete",
+      "/salary/{id}/payment-date",
+      "/salary/{id}/register-payment",
+    ],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "Three payroll endpoints live OUTSIDE /api, under the salary-ctrl tag, and the spec gives " +
+      "them no summary, no description and no required fields — an endpoint list shows them as " +
+      "bare names. What they are is not a mystery, though:\n\n" +
+      "/salary/{id}/complete is the same operation as POST /api/salary-payments/{id}/complete, " +
+      "which is to say it posts the voucher, creates payslips and payments and files the A-melding " +
+      "with Skatteetaten. /register-payment records or instructs payment of a run. Both are " +
+      "treated as EXTERNAL SENDS and refused unless REAI_ALLOW_EXTERNAL_SEND is on — the /api " +
+      "patterns alone would not have caught them, since they are not under /api.\n\n" +
+      "/payment-date is NOT gated as a send, and this is stated rather than glossed: it reads as " +
+      "setting the payout date on a run, which is local, but with no documentation and no way to " +
+      "test it on a run that has not been completed, that is inference. It is classified " +
+      "irreversible, so `full` mode is required. Treat it as unknown, and prefer the documented " +
+      "/api paths for anything you intend to be sure about.",
+  },
+  {
+    id: "salary-run-needs-employee-bank-accounts",
+    paths: ["/api/salary-payments"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [400],
+    note:
+      'Refused with 400 "Følgende ansatte mangler bankkonto: <names>" — Norwegian for "the ' +
+      'following employees are missing a bank account" — when any INCLUDED employee has none, and ' +
+      "it names them. Employees are created without one, so this is the normal first failure: set " +
+      "it with `accountNumber` on POST /api/employees or PATCH /api/employees/{id}.\n\n" +
+      "Two more things. Omitting employeeIds — or sending an empty list — includes every employee " +
+      "ELIGIBLE FOR THE PERIOD, which is the schema's own wording: passing nothing is not passing " +
+      "nobody, and it is not the whole register either, since what makes an employee ineligible is " +
+      "documented nowhere. Read employeeIds on the response to see who is actually in.\n\n" +
+      "And creating a run posts NO voucher — measured, the count did not move and voucherId stayed " +
+      "null; the voucher is made at completion, which is why a run in status under_process can be " +
+      "deleted without touching the ledger. Note the DELETE is really \"delete OR REVERSE\" and " +
+      'says which in {"outcome":"deleted"|"reversed"} — a reversal is what you get once there is ' +
+      "audit history to keep, and it posts.",
+  },
+  {
+    id: "salary-wage-line-create-and-update-differ",
+    paths: [
+      "/api/salary-payments/{id}/wage-specs",
+      "/api/salary-payments/{id}/wage-specs/{wageSpecId}",
+    ],
+    methods: ["POST", "PUT"],
+    kind: "shape",
+    note:
+      "CreateSalaryWageSpecReq REQUIRES employeeId; UpdateSalaryWageSpecReq does not accept it, and " +
+      'sending it answers 400 "Unknown field: employeeId". A line belongs to the employee it was ' +
+      "created for and cannot be moved.\n\n" +
+      "The update is a FULL REPLACEMENT, measured: a line carrying comment \"PROBE COMMENT\" was " +
+      "PUT back with the same quantity, rate and code but no comment field, and the comment came " +
+      "back null — confirmed on a re-read, and reproduced in the write suite. comment and " +
+      "holidayAllowanceEarningYear are the two optional fields, so those are the two a raw PUT " +
+      "silently erases. reai_update_salary_line reads the line and carries over what the caller " +
+      "did not mention; a raw call has to send the line as it should END UP.\n\n" +
+      "Lines derived from EXPENSE POSTINGS cannot be changed at all — the API says so on the update " +
+      "endpoint. That is also why a fresh run is not empty: it arrives pre-populated from the " +
+      "period's expense postings, and adding the same pay again is how wages go out twice.\n\n" +
+      "The response is the whole run with tax recalculated. On a tenant with no tax cards the rate " +
+      "is 50%: a 1 × 5000 COMMISSION line produced payableAmount 2500 and totalTaxDeducted 2500.",
+  },
+  {
+    id: "employee-name-must-be-unique",
+    paths: ["/api/employees"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [409],
+    note:
+      'Two employees cannot share a NAME: 409 "Ansatt med dette navnet finnes allerede" (an ' +
+      "employee with this name already exists). Not the email, the name — so real namesakes need " +
+      "distinguishing, and a leftover test record blocks the name until someone deletes it.",
+  },
+  {
+    id: "employee-with-work-data-cannot-be-deleted",
+    paths: ["/api/employees/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    statuses: [409],
+    note:
+      '409 "Employee cannot be deleted because related work data exists" — measured with nothing ' +
+      "but an EMPTY DRAFT salary run referencing them, so the bar for \"work data\" is low and the " +
+      "message does not say what the data is. Delete the salary run first and the same DELETE " +
+      "answers 204. If a payroll run has been completed the employee is presumably permanent, " +
+      "which is what a payroll record should be.",
+  },
+  {
+    // Two entries for one fact, and deliberately not one entry listing both paths: `methods`
+    // applies to EVERY path in an entry, so a single entry covering POST/PATCH/GET on both also
+    // claimed the COLLECTION GET returns a bankAccount object. It does not — that response is the
+    // EmployeeSummaryRes projection of id, name and email, which `employee-list-is-a-projection`
+    // says a few entries down. Discovery on GET /api/employees therefore showed two notes that
+    // contradicted each other, and the wrong one sent a caller looking for payroll account details
+    // that cannot be in that response at all.
+    id: "employee-account-goes-in-flat-and-comes-back-split",
+    paths: ["/api/employees"],
+    methods: ["POST"],
+    kind: "shape",
+    note: EMPLOYEE_ACCOUNT_SPLIT_NOTE,
+  },
+  {
+    id: "employee-account-split-on-read-and-update",
+    paths: ["/api/employees/{id}"],
+    methods: ["GET", "PATCH"],
+    kind: "shape",
+    note: EMPLOYEE_ACCOUNT_SPLIT_NOTE,
   },
   {
     id: "swift-code-is-normalised",
