@@ -9,6 +9,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Nine core Norwegian bookkeeping terms reached the wrong endpoint family, or nothing at all.** The
+  escape hatch is the only route to the 143 public operations no curated tool covers, and it is reached by
+  searching — so a term that does not resolve is a capability an agent cannot use. `merverdiavgift`, the
+  name on the Norwegian tax form, returned **nothing**, while the abbreviation `mva` reached
+  `/api/vat-codes`. `arsoppgjor`, `aarsoppgjor` and `arsavslutning` returned nothing while `arsregnskap`
+  was mapped and `/api/annual-accounts` exists. `postering`, `posteringer` and `posteringsgruppe` reached
+  `/api/invoice-reception-documents`, while `/api/postings` carries **nine** uncovered operations.
+  `periodisering` reached the VAT-return endpoints.
+  - Found by probing 34 standard accounting terms written from the DOMAIN rather than from the synonym
+    table, so a miss is a gap rather than a tautology: 22 landed, and only these nine had an existing
+    target. That distinction did the work — `hovedbok` "missed" by returning `/api/ledger/general` and
+    `kontoplan` by returning `/api/chart-of-accounts`, both **exactly right and my expectation wrong**, and
+    three more named families this API does not have, so they cannot be judged at all.
+    `test/discovery-heldout.test.mjs` records why the care is needed: "fixing" a ranker to reach endpoints
+    that do not exist makes it worse while the tests go greener.
+  - `periodisering: ["voucher"]` is labelled in the source as a **judgement, not a measurement** — an
+    accrual is booked as a manual voucher in Norwegian practice — so a later reader who disagrees is
+    arguing about accounting rather than about the ranker.
+  - `arsoppgjor` maps to the `annual-accounts` path token and deliberately NOT to `accounts`, which appears
+    in chart-of-accounts, general-sub-accounts and company bank accounts.
+  - Two tests: the nine terms must reach their family, and **every asserted family must exist in the spec**,
+    so the test cannot chase a phantom. Each synonym verified load-bearing by removing it and watching the
+    test fail; the phantom guard verified by pointing a term at a family that does not exist.
+
+
 - **The deployment served guidance that had already been measured false, and nothing could have noticed.** PR #115 corrected two agent-facing quirks — one told agents a `+47` prefix is REJECTED on
   a supplier phone, one said foreign numbers are stored "exactly as sent", and both are wrong. Those
   commits merged; revision 00135 kept serving the old text to anything that called
