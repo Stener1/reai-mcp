@@ -80,6 +80,8 @@ const TRIP_TYPES = ["with_overnight_stay", "day_trip_6_to_12_hours", "day_trip_o
 
 type ExpenseRecord = {
   id?: number;
+  startDate?: string | null;
+  endDate?: string | null;
   number?: number;
   title?: string;
   status?: string;
@@ -95,6 +97,39 @@ type ExpenseRecord = {
   perDiems?: Array<Record<string, unknown>>;
   mileageAllowances?: Array<Record<string, unknown>>;
 };
+
+/**
+ * A date window guaranteed to contain this expense, for the liveness lookup.
+ *
+ * GET /api/expenses defaults startDate to 1 January of the current year and endDate to today. Both
+ * ends matter: a claim from last year and a claim dated tomorrow are each outside the default
+ * window, and the lookup reads absence as a reversal. So the window is derived from the record's own
+ * dates — its startDate/endDate when present, otherwise the span of its rows — and then padded a
+ * year in both directions, because the field the list filters on is not documented and being
+ * generous costs nothing while being wrong costs a false "this was withdrawn".
+ *
+ * Returns undefined when no date can be found at all, so the caller can decline to guess.
+ */
+function expenseWindow(expense: ExpenseRecord): { startDate: string; endDate: string } | undefined {
+  const isDate = (value: unknown): value is string =>
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value);
+  const dates = [
+    expense.startDate,
+    expense.endDate,
+    ...(expense.costs ?? []).map((row) => row.date),
+    ...(expense.perDiems ?? []).flatMap((row) => [row.dateFrom, row.dateTo]),
+    ...(expense.mileageAllowances ?? []).map((row) => row.date),
+  ]
+    .filter(isDate)
+    .map((value) => value.slice(0, 10))
+    .sort();
+  const earliest = dates[0];
+  const latest = dates[dates.length - 1];
+  if (earliest === undefined || latest === undefined) return undefined;
+  const shift = (day: string, years: number): string =>
+    `${String(Number(day.slice(0, 4)) + years).padStart(4, "0")}${day.slice(4)}`;
+  return { startDate: shift(earliest, -1), endDate: shift(latest, 1) };
+}
 
 /** What a status means for what can be done next, and what the field does NOT tell you. */
 function describeExpense(expense: ExpenseRecord): string {
@@ -112,8 +147,11 @@ function describeExpense(expense: ExpenseRecord): string {
         ? `Status approved AND voucher ${expense.voucherId} is posted — this IS in the ledger. ` +
           `The status field does not say "booked"; voucherId is the only thing that does. Delete ` +
           `the voucher before changing anything.`
-        : "Status approved, no voucher yet: nothing is in the ledger. Book it to post the voucher, " +
-          "or unapprove it to edit it again.";
+        : "Status approved with NO voucher linked right now. That is not the same as no ledger " +
+          "history: if a voucher was previously REVERSED rather than deleted, the original and its " +
+          "reversal both remain posted while this field goes back to null, and nothing in this " +
+          "response can tell the two cases apart — read the ledger if it matters. Book it to post " +
+          "a voucher, or unapprove it to edit it again.";
     default:
       return (
         `Status ${JSON.stringify(expense.status)} is not one this server has seen (the response ` +
@@ -157,6 +195,26 @@ const costLine = z.object({
     ),
 });
 
+/**
+ * The update variants, which differ from the create ones by ONE field that matters.
+ *
+ * `UpdateExpenseCostReq.id` is documented as "Id of an existing cost line on this expense. Omit to
+ * add a new cost line." Since the arrays are complete lists, a row sent WITHOUT its id is not a
+ * retained row — it is a new one, and the old is deleted. So a caller keeping two rows and editing
+ * a third would silently replace all three with fresh records. Same shape as the employment-line
+ * ids in organisation.ts, and the same fix: carry the id.
+ */
+const updateLineId = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe(
+    "The id of an existing row on this expense, to KEEP it. Omit to add a new row — and since this " +
+      "array is the complete list, omitting the id of a row you meant to keep deletes it and " +
+      "recreates it with a new one.",
+  );
+
 const perDiemLine = z.object({
   dateFrom: isoDate.describe("First day of the trip, yyyy-MM-dd."),
   tripType: z.enum(TRIP_TYPES).describe("with_overnight_stay needs dateTo; the day-trip rates do not."),
@@ -184,6 +242,10 @@ const mileageLine = z.object({
   companyCar: z.boolean().optional().describe("A company car pays no allowance to the employee."),
   kilometerRateOverride: z.number().optional().describe("Replace the default rate per kilometre."),
 });
+
+const updateCostLine = costLine.extend({ id: updateLineId });
+const updatePerDiemLine = perDiemLine.extend({ id: updateLineId });
+const updateMileageLine = mileageLine.extend({ id: updateLineId });
 
 const getExpense = defineTool({
   name: "reai_get_expense",
@@ -220,7 +282,22 @@ const getExpense = defineTool({
     // small: a reversed expense is absent from every filtered view, because the filter cannot
     // express "reversed" at all. Only attempted when the status is one the filter accepts —
     // sending a status the API rejects would 400 and prove nothing.
-    if (typeof expense.status === "string" && ["open", "for_approval", "approved"].includes(expense.status)) {
+    //
+    // And the DATES have to be sent explicitly, which the first version of this missed. The list
+    // defaults startDate to 1 January of the CURRENT YEAR and endDate to TODAY, both documented, so
+    // a claim from last year or one dated tomorrow is absent from the default window — and absence
+    // is exactly what this check reads as "reversed". A live historical claim would have been
+    // reported as withdrawn, which is worse than not checking at all. Found in review.
+    //
+    // The window is taken from the expense's own dates and only widened, never narrowed. If no date
+    // can be established the check is ABANDONED rather than run on a window that might exclude the
+    // expense for an innocent reason.
+    const window = expenseWindow(expense);
+    if (
+      typeof expense.status === "string" &&
+      ["open", "for_approval", "approved"].includes(expense.status) &&
+      window !== undefined
+    ) {
       let live: number[] | undefined;
       try {
         const listed = await ctx.client.request<Array<{ id?: number }>>({
@@ -228,6 +305,8 @@ const getExpense = defineTool({
           path: "/api/expenses",
           query: {
             status: expense.status,
+            startDate: window.startDate,
+            endDate: window.endDate,
             ...(expense.employeeId != null ? { employeeIds: String(expense.employeeId) } : {}),
           },
           tenantId,
@@ -250,6 +329,15 @@ const getExpense = defineTool({
               `API represents a reversal — DELETE answers {"outcome":"reversed"} and changes no ` +
               `field a caller can see. It cannot be delivered, approved or booked; a transition ` +
               `would answer 409 "is reversed and can no longer be delivered".`,
+      );
+    }
+    else if (typeof expense.status === "string" && ["open", "for_approval", "approved"].includes(expense.status)) {
+      notes.push(
+        `Whether this expense has been REVERSED was not checked: the list call that answers it is ` +
+          `date-filtered, and no date could be read from this record to scope it with. Running it ` +
+          `on the API's default window — 1 January of the current year to today — would report a ` +
+          `claim from outside that window as reversed, which is worse than not checking. Its status ` +
+          `field cannot tell you either; a reversed expense keeps the status it had.`,
       );
     }
     if (expense.includedInPayslip === true) {
@@ -362,6 +450,9 @@ const updateExpense = defineTool({
   description:
     "Change an expense that is still open. Scalars patch — omitting title or purpose leaves them " +
     "alone — and purpose, employeeId and projectId are cleared by passing null.\n\n" +
+    "Keep a row by sending its `id`. A row without one is a NEW row, so an id left off a row you " +
+    "meant to keep deletes the original and recreates it — read the expense first and carry the " +
+    "ids across.\n\n" +
     "THE LINE ARRAYS ARE DIFFERENT: costs, perDiems and mileageAllowances are each the COMPLETE " +
     "list. Measured, an expense with two cost rows updated with one came back with one and its " +
     "total fell from 300 to 100 — the other row is gone. Omitting an array preserves it (also " +
@@ -395,17 +486,20 @@ const updateExpense = defineTool({
       .describe("Who is claiming; null detaches them, which also makes the expense undeliverable."),
     projectId: z.number().int().positive().nullable().optional().describe("Project; null clears it."),
     costs: z
-      .array(costLine)
+      .array(updateCostLine)
       .optional()
-      .describe("The COMPLETE list of cost rows. Sending fewer rows deletes the others."),
+      .describe(
+        "The COMPLETE list of cost rows. Sending fewer rows deletes the others, and a row sent " +
+          "without its `id` is treated as a NEW row rather than a kept one.",
+      ),
     perDiems: z
-      .array(perDiemLine)
+      .array(updatePerDiemLine)
       .optional()
-      .describe("The COMPLETE list of per-diem rows. Travel claims only."),
+      .describe("The COMPLETE list of per-diem rows, each with its `id` to keep it. Travel only."),
     mileageAllowances: z
-      .array(mileageLine)
+      .array(updateMileageLine)
       .optional()
-      .describe("The COMPLETE list of mileage rows. Travel claims only."),
+      .describe("The COMPLETE list of mileage rows, each with its `id` to keep it. Travel only."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -659,8 +753,13 @@ const reverseExpense = defineTool({
     'fails: 409 "is reversed and can no longer be delivered".\n\n' +
     "reai_get_expense compensates by checking list membership. Nothing else does, so a reversed " +
     "expense read through reai_request looks live.\n\n" +
-    "This does not touch a voucher. Delete that first with reai_delete_expense_voucher if the " +
-    "expense has been booked.",
+    "It DOES take the voucher with it, which an earlier version of this description got wrong. " +
+    "Measured: an expense booked to voucher 30808 was reversed, the day's voucher count went from 1 " +
+    "back to 0, and DELETE /api/vouchers/30808 then answered 404 \"Bilag ikke funnet\" — the voucher " +
+    "is gone, not stranded. So reversing a booked expense unposts it, and there is no need to " +
+    "unlink the voucher first. Afterwards reai_delete_expense_voucher answers " +
+    '409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning." because there is no longer an ' +
+    "expense to unlink it from.",
   risk: "irreversible",
   destructive: true,
   apiPaths: [["DELETE", "/api/expenses/{id}"]],
@@ -677,14 +776,19 @@ const reverseExpense = defineTool({
     const outcome = res.data?.outcome;
     return ok(res.data ?? { expenseId: args.id }, {
       note:
-        (outcome === "reversed"
-          ? `Expense ${args.id} is reversed.`
-          : `Expense ${args.id}: DELETE answered HTTP ${res.status} with outcome ` +
-            `${JSON.stringify(outcome)} rather than "reversed" — read it back before assuming ` +
-            `anything, since this endpoint is documented to reverse rather than delete.`) +
-        `\n\nIt will no longer appear in reai_list_expenses, but reai_get_expense will still return ` +
-        `it with its old status — that is how this API represents a reversal, and it is why reading ` +
-        `one through reai_request makes it look live.`,
+        outcome === "reversed"
+          ? `Expense ${args.id} is reversed.\n\nIt will no longer appear in reai_list_expenses, but ` +
+            `reai_get_expense will still return it with its old status — that is how this API ` +
+            `represents a reversal, and it is why reading one through reai_request makes it look live.`
+          : // The sentences above describe what a REVERSAL does, and were being appended to every
+            // outcome. On an unexpected one they would assert that a record vanished from the list
+            // and survives by id, neither of which is established — it might still be live, or
+            // actually gone. Left unknown instead.
+            `Expense ${args.id}: DELETE answered HTTP ${res.status} with outcome ` +
+            `${JSON.stringify(outcome)} rather than "reversed". This endpoint is documented to ` +
+            `reverse rather than delete, so what happened is NOT established: whether the expense ` +
+            `is still live, reversed, or gone. Read it back with reai_get_expense before doing ` +
+            `anything else, and do not assume it is still there.`,
     });
   },
 });

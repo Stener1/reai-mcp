@@ -50,6 +50,30 @@ All notable changes to `reai-mcp`. Format loosely follows
     on a non-travel claim are refused locally. `reai_delete_expense_voucher` reads
     the `{"outcome":…}` rather than trusting the 200, and says plainly when a
     reversal posted instead.
+  - `reai_get_expense`'s liveness lookup sends an **explicit date window** derived
+    from the expense's own dates, padded a year either side. `GET /api/expenses`
+    defaults `startDate` to 1 January of the current year and `endDate` to *today*,
+    so a claim from last year — or one dated tomorrow — was absent from the default
+    window and would have been reported as REVERSED. A false "this was withdrawn" is
+    worse than not checking, so when no date can be read the check is abandoned and
+    says so.
+  - The update tool's line arrays take each row's **`id`**, documented as "Id of an
+    existing cost line on this expense. Omit to add a new cost line." Since the
+    arrays are complete lists, a kept row sent without its id was being deleted and
+    recreated — the same defect as employment lines, and the same fix.
+  - `reai_reverse_expense` **takes the voucher with it**, which the first version of
+    its description denied. Measured after review questioned it: an expense booked to
+    voucher 30808 was reversed, the day's voucher count went from 1 back to 0, and
+    `DELETE /api/vouchers/30808` then answered `404 "Bilag ikke funnet"`. Nothing is
+    stranded, so a booked expense need not be unlinked first — and afterwards the
+    unlink answers `409 "Kan ikke slette bilag fra et slettet utlegg"` simply because
+    there is no expense left to unlink from. The description and a new quirk now say
+    that; adding an unlink to the cleanup on the strength of the old claim made the
+    suite fail, which is how the claim was caught.
+  - `describeExpense` no longer says "nothing is in the ledger" for an approved
+    expense with no voucher. If a voucher was previously **reversed** rather than
+    deleted, the original and its reversal both remain posted while the link goes back
+    to null, and the detail response cannot tell the two apart.
   - The write suite covers all of it (16 checks), including both halves of the
     reversal finding: that the API returns the old status, and that the read tool
     detects it anyway. Expense cleanup runs before the employee's, since a record

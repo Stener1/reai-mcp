@@ -165,7 +165,12 @@ test("an approved expense with no voucher is reported as not posted", async () =
   const { text } = await run("reai_get_expense", { id: 2199 }, (req) =>
     req.path === "/api/expenses/2199" ? expense({ status: "approved" }) : [{ id: 2199 }],
   );
-  assert.match(text, /no voucher yet: nothing is in the ledger/);
+  // Deliberately NOT "nothing is in the ledger": if a voucher was reversed rather than deleted,
+  // the entries survive while voucherId goes back to null, and this response cannot tell the two
+  // apart. Codex caught the tool asserting the stronger claim.
+  assert.match(text, /NO voucher linked right now/);
+  assert.match(text, /previously REVERSED/);
+  assert.ok(!/nothing is in the ledger/.test(text));
 });
 
 test("an expense already on a payslip says so, because changing it changes someone's pay", async () => {
@@ -330,10 +335,16 @@ test("reversing says the record stays and that no field will show it", async () 
   assert.match(text, /still return it with its old status/);
 });
 
-test("a reversal that answers something else is not reported as reversed", async () => {
-  const { text } = await run("reai_reverse_expense", { id: 2199 }, { outcome: "deleted" });
-  assert.match(text, /rather than "reversed"/);
-  assert.match(text, /read it back before assuming/);
+test("a reversal that answers something else is left unknown, not described as a reversal", async () => {
+  // The "vanishes from the list, survives by id" sentences describe what a REVERSAL does. Appending
+  // them to every outcome asserted a state that had not been established — it might still be live,
+  // or actually gone.
+  for (const data of [{ outcome: "deleted" }, {}, null]) {
+    const { text } = await run("reai_reverse_expense", { id: 2199 }, data);
+    assert.match(text, /NOT established/, JSON.stringify(data));
+    assert.match(text, /Read it back/);
+    assert.ok(!/no longer appear in reai_list_expenses/.test(text), JSON.stringify(data));
+  }
 });
 
 test("the measured expense quirks reach the operations that meet them", () => {
@@ -361,4 +372,121 @@ test("the tool text names the ledger consequence and the reversal blindness", ()
   assert.match(all, /Kategori må velges/);
   assert.match(all, /complete/i);
   assert.match(all, /outcome/);
+});
+
+// GET /api/expenses defaults startDate to 1 January of the CURRENT YEAR and endDate to TODAY, both
+// documented. The first version of the liveness check sent neither, so a live claim from last year
+// — or one dated tomorrow — was absent from the default window and reported as REVERSED. A false
+// "this was withdrawn" is worse than not checking at all.
+test("the liveness lookup sends an explicit window derived from the expense's own dates", async () => {
+  // Every date on the record counts, rows included — the window has to contain the whole claim.
+  const { calls, text } = await run("reai_get_expense", { id: 2199 }, (req) =>
+    req.path === "/api/expenses/2199"
+      ? expense({
+          startDate: "2024-03-01",
+          endDate: "2024-03-31",
+          costs: [{ id: 1, date: "2024-03-15", amount: 500, category: "taxi" }],
+        })
+      : [{ id: 2199 }],
+  );
+  assert.equal(calls[1].query.startDate, "2023-03-01", "padded a year before the earliest date");
+  assert.equal(calls[1].query.endDate, "2025-03-31", "padded a year after the latest");
+  assert.match(text, /Not reversed/);
+});
+
+test("a claim from a previous year is not reported as reversed just for being old", async () => {
+  const old = expense({
+    startDate: "2024-03-01",
+    endDate: "2024-03-31",
+    costs: [{ id: 1, date: "2024-03-15", amount: 500, category: "taxi" }],
+  });
+  const { text } = await run("reai_get_expense", { id: 2199 }, (req) =>
+    // The list answers within the window it was given; the point is that the window includes 2024.
+    req.path === "/api/expenses/2199" ? old : req.query.startDate <= "2024-03-01" ? [{ id: 2199 }] : [],
+  );
+  assert.match(text, /Not reversed/);
+  assert.ok(!/HAS BEEN REVERSED/.test(text));
+});
+
+test("row dates are used when the expense carries no span of its own", async () => {
+  const { calls } = await run("reai_get_expense", { id: 2199 }, (req) =>
+    req.path === "/api/expenses/2199"
+      ? expense({
+          startDate: null,
+          endDate: null,
+          costs: [{ id: 1, date: "2025-11-20" }],
+          mileageAllowances: [{ id: 2, date: "2025-12-02" }],
+        })
+      : [{ id: 2199 }],
+  );
+  assert.equal(calls[1].query.startDate, "2024-11-20");
+  assert.equal(calls[1].query.endDate, "2026-12-02");
+});
+
+test("with no date at all the check is abandoned rather than run on a window that may exclude it", async () => {
+  const { calls, text } = await run("reai_get_expense", { id: 2199 }, (req) =>
+    req.path === "/api/expenses/2199"
+      ? expense({ startDate: null, endDate: null, costs: [], perDiems: [], mileageAllowances: [] })
+      : [],
+  );
+  assert.equal(calls.length, 1, "no list call may be made on a window that cannot be scoped");
+  assert.match(text, /was not checked/);
+  assert.match(text, /worse than not checking/);
+  assert.ok(!/HAS BEEN REVERSED/.test(text));
+});
+
+// Since the arrays are complete lists, a row sent without its id is a NEW row: keeping two rows and
+// editing a third would otherwise replace all three with fresh records.
+test("the update tool accepts a line id, so a kept row keeps its identity", async () => {
+  const { calls } = await run(
+    "reai_update_expense",
+    {
+      id: 2199,
+      costs: [
+        { id: 3316, date: "2026-08-08", amount: 500, category: "taxi" },
+        { date: "2026-08-08", amount: 250, category: "hotel" },
+      ],
+    },
+    expense(),
+  );
+  const sent = calls[0].body.costs;
+  assert.equal(sent[0].id, 3316, "an existing row must keep its id");
+  assert.ok(!("id" in sent[1]), "a new row must have none");
+});
+
+test("all three line arrays can carry ids on an update", () => {
+  const shape = tool("reai_update_expense").inputSchema;
+  const parsed = z.object(shape).parse({
+    id: 1,
+    costs: [{ id: 1, date: "2026-08-08" }],
+    perDiems: [{ id: 2, dateFrom: "2026-08-08", tripType: "day_trip_over_12_hours" }],
+    mileageAllowances: [{ id: 3, date: "2026-08-08" }],
+  });
+  assert.equal(parsed.costs[0].id, 1);
+  assert.equal(parsed.perDiems[0].id, 2);
+  assert.equal(parsed.mileageAllowances[0].id, 3);
+  // The CREATE tool must not take them: there is no existing row to keep.
+  assert.equal(z.object(tool("reai_create_expense").inputSchema).parse({
+    title: "x", travel: false, costs: [{ id: 9, date: "2026-08-08" }],
+  }).costs[0].id, undefined);
+});
+
+// Review flagged the cleanup for reversing an expense without unlinking its voucher, quoting this
+// tool's own description. The description was wrong: measured, reversing a booked expense takes the
+// voucher with it — count 1 → 0, and the voucher then answers 404. The tool must not claim otherwise.
+test("reversing is described as unposting the voucher, because that is what it does", () => {
+  const description = tool("reai_reverse_expense").description;
+  assert.match(description, /DOES take the voucher with it/);
+  assert.match(description, /Bilag ikke funnet/);
+  assert.ok(
+    !/Delete that first/.test(description),
+    "the old instruction to unlink the voucher first was based on a false claim",
+  );
+  // And the quirk carries the same fact for anyone reaching the endpoint through reai_request.
+  const quirk = quirksFor("DELETE", "/api/expenses/{id}").find(
+    (q) => q.id === "reversing-an-expense-unposts-its-voucher",
+  );
+  assert.ok(quirk, "the ordering fact must be discoverable outside the curated tool");
+  assert.match(quirk.note, /gone\s+rather than stranded/);
+  assert.match(quirk.note, /expected and means nothing is left to do/);
 });

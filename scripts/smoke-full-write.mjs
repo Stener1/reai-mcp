@@ -1497,6 +1497,14 @@ async function main() {
     // Reversal is the only removal this API offers for an expense, and it is idempotent — a second
     // reverse of an already-reversed expense answered ok, measured — so this is safe to repeat.
     for (const expenseId of created.expenseIds) {
+      // Reversing is enough, including for an expense still carrying a posted voucher. Review
+      // raised the opposite concern — that a throw between booking and the normal unlink would
+      // leave an EX voucher in a live ledger — on the strength of this tool's own description,
+      // which claimed reversing "does not touch a voucher". That claim was wrong. Measured: a
+      // booked expense reversed with its voucher live took the voucher with it, the count went 1
+      // back to 0, and the voucher then answered 404. The description is corrected; the cleanup
+      // needed no change, and adding an unlink here made it FAIL, because a reversed expense
+      // answers 409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning."
       await attempt(
         `test expense ${expenseId} reversed`,
         () => client.callTool({ name: "reai_reverse_expense", arguments: { id: expenseId } }),

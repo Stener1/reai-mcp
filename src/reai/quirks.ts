@@ -591,6 +591,23 @@ export const QUIRKS: readonly Quirk[] = [
       "is 50%: a 1 × 5000 COMMISSION line produced payableAmount 2500 and totalTaxDeducted 2500.",
   },
   {
+    id: "reversing-an-expense-unposts-its-voucher",
+    paths: ["/api/expenses/{id}", "/api/expenses/{id}/voucher"],
+    methods: ["DELETE"],
+    kind: "workflow",
+    note:
+      "Reversing an expense TAKES ITS VOUCHER WITH IT. Measured: an expense booked to voucher 30808 " +
+      "was reversed with DELETE /api/expenses/{id}, the day's voucher count went from 1 back to 0, " +
+      'and DELETE /api/vouchers/30808 then answered 404 "Bilag ikke funnet". The voucher is gone ' +
+      "rather than stranded, so a booked expense does NOT have to be unlinked before it is " +
+      "reversed.\n\n" +
+      "The consequence for ordering is the other way round from what it looks like. Once the expense " +
+      "is reversed, DELETE /api/expenses/{id}/voucher answers " +
+      '409 "Kan ikke slette bilag fra et slettet utlegg/reiseregning." — not because the voucher is ' +
+      "stuck, but because there is no longer an expense to unlink it from. A 409 there after a " +
+      "reversal is expected and means nothing is left to do.",
+  },
+  {
     id: "expense-status-never-says-booked-or-reversed",
     paths: ["/api/expenses/{id}", "/api/expenses"],
     methods: ["GET"],
