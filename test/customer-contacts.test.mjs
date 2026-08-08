@@ -91,7 +91,12 @@ test("the Norwegian phone refusal is translated, and says which forms are accept
   );
 });
 
-test("a 404 on the customer explains the one way a working contact id stops working", async () => {
+test("a missing CUSTOMER and a missing CONTACT are told apart, which they were not", async () => {
+  // The bug this pins, found by the independent review of PR #110: the customer branch matched
+  // /Customer with id=/i case-INSENSITIVELY, and the contact-not-found sentence is
+  // "Contact person with id=22 not found for customer with id=6022" — which contains it. So the
+  // commonest 404 on these endpoints was reported as "Customer N does not exist in this tenant",
+  // about a customer that was fine.
   await assert.rejects(
     () =>
       run(
@@ -101,9 +106,28 @@ test("a 404 on the customer explains the one way a working contact id stops work
       ),
     (err) => {
       assert.match(err.message, /999999 does not exist in this tenant/);
-      // Measured: deleting a customer deletes its contacts, and the list then 404s rather than
-      // returning []. That is the reason a previously-good contact id starts failing here.
-      assert.match(err.message, /deleting a customer deletes/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    () =>
+      run(
+        "reai_get_customer_contact",
+        { customerId: 6022, contactPersonId: 22 },
+        {
+          error: apiError(404, "Contact person with id=22 not found for customer with id=6022"),
+        },
+      ),
+    (err) => {
+      // Must NOT claim the customer is missing.
+      assert.doesNotMatch(err.message, /does not exist in this tenant/);
+      assert.match(err.message, /Contact person 22 is not on customer 6022/);
+      // And it is genuinely ambiguous — measured, a deleted contact and a wrong-parent contact
+      // answer with the identical sentence — so both readings are named.
+      assert.match(err.message, /AMBIGUOUS/);
+      assert.match(err.message, /belong to a DIFFERENT customer/);
+      assert.match(err.message, /reai_list_customer_contacts/);
       return true;
     },
   );
@@ -168,15 +192,125 @@ test("omitting a field does not send it, which is what leaves it unchanged", asy
   assert.deepEqual(calls[0].body, { name: "Ada Renamed" });
 });
 
-test("deleting a contact that is already gone is reported as such, not as a failure", async () => {
+test("the delete's 404 is reported as the ambiguity it is, not as a job done", async () => {
+  // The first version returned a flat success for ANY 404, which the review demonstrated is wrong:
+  // DELETE /api/customers/<wrong>/contact-persons/<real id> answers 404 and the contact survives.
+  // Measuring the wording then ruled out the obvious fix — a genuinely deleted contact answers the
+  // SAME sentence as a wrong-parent one — so the tool reports both readings and how to settle it.
   const { text } = await run(
     "reai_delete_customer_contact",
     { customerId: 1, contactPersonId: 21 },
-    { error: apiError(404, "not found") },
+    { error: apiError(404, "Contact person with id=21 not found for customer with id=1") },
   );
-  // 204 the first time and 404 the second, measured. A 404 here means the caller's goal is met.
-  assert.match(text, /already removed, or it never existed/);
   assert.match(text, /Nothing was changed/);
+  assert.match(text, /AMBIGUOUS/);
+  assert.match(text, /already removed \(or never existed\)/);
+  assert.match(text, /belongs to a DIFFERENT customer/);
+  assert.match(text, /reai_list_customer_contacts/);
+});
+
+test("but a nonexistent customer is not absorbed by the delete as success", async () => {
+  // The 404 catch used to swallow this too, which made the customer translation dead code in this
+  // tool — while the file's own comment claimed every tool reported the customer 404 distinctly.
+  await assert.rejects(
+    () =>
+      run(
+        "reai_delete_customer_contact",
+        { customerId: 999999, contactPersonId: 21 },
+        { error: apiError(404, "Customer with id=999999 not found.") },
+      ),
+    (err) => {
+      assert.match(err.message, /Customer 999999 does not exist in this tenant/);
+      return true;
+    },
+  );
+});
+
+test("every contact tool that can hit these errors is wired to the translator", async () => {
+  // Two of the five had no behavioural test at all, so deleting their translateContactError call
+  // changed nothing that failed. Each tool is checked through its own handler.
+  const cases = [
+    ["reai_list_customer_contacts", { customerId: 6022 }],
+    ["reai_get_customer_contact", { customerId: 6022, contactPersonId: 22 }],
+    ["reai_create_customer_contact", { customerId: 6022, name: "Ada" }],
+    ["reai_update_customer_contact", { customerId: 6022, contactPersonId: 22, name: "Ada" }],
+    ["reai_delete_customer_contact", { customerId: 6022, contactPersonId: 22 }],
+  ];
+  for (const [name, args] of cases) {
+    await assert.rejects(
+      () => run(name, args, { error: apiError(404, "Customer with id=6022 not found.") }),
+      (err) => {
+        assert.match(
+          err.message,
+          /Customer 6022 does not exist in this tenant/,
+          `${name} does not translate the customer 404`,
+        );
+        return true;
+      },
+    );
+  }
+});
+
+test("the private-customer refusal is gated on the status, not the phrase alone", async () => {
+  // A phrase-only match turns a 500 carrying that sentence into a confident refusal about the
+  // customer's type. toolsets.test.mjs pins exactly this for the reconciliation tools; there was no
+  // analogue here, and removing the status gate broke nothing.
+  const detail = "Contact persons can only be added to company customers";
+  await assert.rejects(
+    () => run("reai_create_customer_contact", { customerId: 1, name: "Ada" }, { error: apiError(400, detail) }),
+    (err) => {
+      assert.match(err.message, /is a private individual/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => run("reai_create_customer_contact", { customerId: 1, name: "Ada" }, { error: apiError(500, detail) }),
+    (err) => {
+      // A 500 must stay a 500: the write may have committed, and this repo treats a failed POST as
+      // ambiguous rather than as a refusal.
+      assert.doesNotMatch(err.message, /is a private individual/);
+      return true;
+    },
+  );
+});
+
+test("a blank name is refused before the call, on create and on update", async () => {
+  // The claim "a blank or whitespace-only one is refused" was unpinned on create: swapping
+  // requiredName(75) for z.string().max(75) left the suite green.
+  for (const [name, args] of [
+    ["reai_create_customer_contact", { customerId: 1, name: "   " }],
+    ["reai_update_customer_contact", { customerId: 1, contactPersonId: 2, name: "   " }],
+  ]) {
+    assert.throws(
+      () => z.object(tool(name).inputSchema).parse({ tenantId: 2783, ...args }),
+      `${name} accepted a whitespace-only name`,
+    );
+  }
+});
+
+test("null is accepted and stripped, which is what makes it mean unchanged", async () => {
+  // Three descriptions promised null and the schema refused it, so an agent following them got
+  // "Invalid arguments for tool". The API does accept null; it is stripped here so that null and
+  // omitting take the same code path.
+  const { calls } = await run(
+    "reai_update_customer_contact",
+    { customerId: 1, contactPersonId: 21, name: "Ada", email: null, phone: null },
+    { data: { id: 21, name: "Ada", email: "kept@example.no", phone: "+4790123456" } },
+  );
+  assert.deepEqual(calls[0].body, { name: "Ada" }, "a null must not reach the API as a clear");
+});
+
+test("an empty email is accepted on create, because the API accepts it", async () => {
+  // create used .email(), which refuses "" — while "" is the documented clear on the update. The two
+  // tools disagreed about the same value, and create was stricter than both the spec and the API.
+  const schema = z.object(tool("reai_create_customer_contact").inputSchema);
+  assert.doesNotThrow(() => schema.parse({ customerId: 1, name: "Ada", email: "", tenantId: 2783 }));
+  assert.throws(() => schema.parse({ customerId: 1, name: "Ada", email: "not-an-email", tenantId: 2783 }));
+});
+
+test("the empty list says which customer had none", async () => {
+  const { text } = await run("reai_list_customer_contacts", { customerId: 6019 }, { data: [] });
+  assert.match(text, /Customer 6019 has no contact persons recorded/);
 });
 
 test("the contact writes classify no softer than the endpoints they call", () => {

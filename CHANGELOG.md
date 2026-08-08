@@ -25,6 +25,30 @@ All notable changes to `reai-mcp`. Format loosely follows
     and which is easy to verify wrongly: clear a field first and `null` then reports "unchanged" whichever the
     API does. Each case was run from a freshly populated contact. A blank name is refused rather than treated
     as a clear.
+  - **The independent review found the descriptions were confidently wrong in four places, one of them
+    dangerous.** The 404 translation matched `/Customer with id=/i` case-insensitively — and the
+    contact-not-found sentence is "Contact person with id=22 not found **for customer with id=6022**",
+    which contains it. So the commonest 404 on these endpoints was reported as "Customer N does not
+    exist in this tenant" about a customer that was fine, sending the agent off to re-check or
+    re-create it. Same shape as the reconciliation finding Codex caught: a phrase-gated translation
+    turning one failure into a confident verdict about a different one.
+  - Measuring the wording then ruled out the obvious fix. A genuinely deleted contact answers the
+    **same sentence** as a wrong-parent one, word for word, so the two cannot be separated. Both are
+    reported as ambiguous with the way to settle them. That also fixed the delete, which returned a
+    flat success for any 404 — including a typo'd `customerId`, where the contact demonstrably
+    survives — telling the agent its goal was met when it might not be.
+  - Three descriptions promised `null` for "leave unchanged" while the schema was
+    `z.string().optional()`, which zod refuses; an agent copying the wording out of the spec got
+    "Invalid arguments for tool". Now `.nullable()`, with nulls stripped so null and omitting share one
+    path. `reai_get_customer_contact` had the 404 backwards (it is about the contact, not the customer).
+    The header comment claimed "nothing in the schema hints at" the company-only rule — the spec does
+    say it, on `CreateCustomerReq.contactPersons`. And the two read tools overlap `reai_get_customer`,
+    which already returns `contactPersons`; the descriptions now say so instead of implying otherwise.
+  - Four **quirks** for the escape-hatch path, which had none: the company-only rule, the phone
+    normalisation, the blank-vs-null semantics and the ambiguous 404. Plus a fifth found while
+    re-verifying: `POST /api/customers` reports a duplicate **organizationNumber** as
+    "En kunde med navnet <NAME> finnes allerede." — quoting the EXISTING customer's name, which appears
+    nowhere in the request. Isolated on the live API. 121 quirks.
   - The suite's own guards caught two things on the way in, both worth more than the tools. The
     path-placeholder sweep could not attribute `{id}` in `/api/customers/{id}/contact-persons/...` to a
     `customerId` argument, so `resolveArg` now resolves a placeholder against the **owning path segment** —

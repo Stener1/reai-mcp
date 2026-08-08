@@ -618,7 +618,18 @@ function resolveArg(tool, params, parameter, path) {
   // rule about one tool. Added when the customer-contact tools arrived: naming their arguments
   // `customerId`/`contactPersonId` is clearer for a caller than a bare `id` that means the parent,
   // and without this rule the clearer names cost the sweep its attribution.
-  if (path) {
+  //
+  // NARROWED to a placeholder literally named `id`, which is the whole population this rule is for: a
+  // GENERIC id whose meaning lives in the segment before it. Without that guard the singularisation is
+  // a plural-`s` heuristic pointed at every placeholder in the spec, and the review of PR #110
+  // enumerated where it lands wrong — `/api/general-sub-accounts/accounts/{accountNumber}` yields
+  // `accountId`, `/api/tax-returns/{year}` yields `taxReturnId`, `/api/postings/groups/{postingGroupId}`
+  // yields `groupId`, `/lead/{orgNumber}/...` yields `leadId`. None matches an argument today, so
+  // nothing was mis-attributed — but the day a tool exposes the very natural `accountId` or `leadId`
+  // over one of those paths, the sweep would have checked a DIFFERENT parameter's bounds and passed for
+  // the wrong reason, with nothing to notice. A guard whose failure mode is a silent false pass is the
+  // thing this file exists to remove.
+  if (path && parameter.name === "id") {
     const segments = path.split("/").filter(Boolean);
     const index = segments.indexOf(`{${parameter.name}}`);
     const owner = index > 0 ? segments[index - 1] : undefined;
@@ -666,7 +677,7 @@ test("the path sweep sees a useful number of operations, not zero", () => {
   const ops = pathOperations();
   // Measured: well over a hundred tool operations carry a path parameter. A sweep that resolved
   // nothing would pass in silence, which is the failure mode this file keeps naming.
-  // Near the measured 107, not far below it. A floor of 80 left 27 operations' worth of slack, and
+  // Near the measured 129, not far below it. A floor of 80 left 49 operations' worth of slack, and
   // the previous iteration's lesson was that slack is where coverage disappears: `checked >= 8`
   // against an actual 11 let three tools vanish from an audit.
   assert.ok(ops.length >= 100, `only ${ops.length} tool operations resolved to path parameters`);
@@ -842,7 +853,8 @@ test("every path placeholder is either swept or listed as unattributable", () =>
   // The skip is the sweep's only blind spot, so it is pinned rather than trusted. Review showed what
   // an unpinned skip costs: 11 of 109 placeholders were unswept, and dropping `.positive()` from
   // assetId, departmentId or warehouseId left seven tools accepting an id of 0 with the whole suite
-  // green. Eight of those eleven are now resolved structurally; the remaining three are named.
+  // green. Re-measured after the owning-segment rule arrived: 133 of 134 placeholders resolve and one
+  // is named below. Both numbers were stale in this comment, which is the fault this file is about.
   const unresolved = [];
   let resolved = 0;
   for (const { tool, params, path } of pathOperations()) {
