@@ -23,11 +23,18 @@ import {
  * available. `GET /api/countries` and `GET /api/currencies` are the actual lists, and until now
  * nothing pointed at them.
  *
- * Neither endpoint documents a response schema. Almost nothing here does — measured, 12 of 430
- * operations in this spec declare one — so the shapes below are what the live API returned, not what
- * it promises: `{code, name, currencyCode}` for a country and `{code, name}` for a currency. The
- * `currencyCode` on a country is its default currency, which is the field that makes the country list
- * worth reading before creating a foreign customer rather than after.
+ * Both endpoints DO document their response, and it matches what the live API returns: `CountryRes`
+ * is `{code, name, currencyCode}` and `CurrencyRes` is `{code, name}`, confirmed against 170 and 129
+ * live rows. Worth saying because an earlier version of this file claimed the opposite, on a
+ * measurement that counted wrong: 386 of the 430 operations here declare a 2xx schema, and 368 of
+ * those declare it under the WILDCARD content type rather than under `application/json`. Counting
+ * only `application/json` gives 12, which is how "almost nothing documents a response" came to be
+ * written down as a fact.
+ * The spec index carries no response shapes at all, which is a separate gap and not evidence about
+ * the spec.
+ *
+ * The `currencyCode` on a country is its default currency, which is the field that makes the country
+ * list worth reading before creating a foreign customer rather than after.
  *
  * ## A 404 that means "nothing recorded", not "wrong endpoint"
  *
@@ -49,13 +56,29 @@ type Currency = { code?: string; name?: string };
  * Said in the tool descriptions too: a caller who thinks the API is filtering will reason wrongly
  * about what a zero-result answer proves.
  */
-function matching<T extends { code?: string; name?: string }>(rows: T[], query: string | undefined): T[] {
-  if (!query?.trim()) return rows;
-  const needle = query.trim().toLowerCase();
-  return rows.filter(
-    (row) =>
-      (row.code ?? "").toLowerCase().includes(needle) || (row.name ?? "").toLowerCase().includes(needle),
+function matching<T extends { code?: string; name?: string; currencyCode?: string }>(
+  rows: T[],
+  query: string | undefined,
+): T[] {
+  const needle = query?.trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter((row) =>
+    // currencyCode is included because the country list's whole selling point is carrying it, so
+    // "which countries use EUR" is the natural question — and it used to answer a confident zero.
+    [row.code, row.name, row.currencyCode].some((field) => (field ?? "").toLowerCase().includes(needle)),
   );
+}
+
+/**
+ * The query as the filter actually used it, or undefined.
+ *
+ * `matching` trims and ignores a blank query; the sentences below keyed on plain truthiness, so
+ * `query: "   "` reported "5 country(s) matching \"   \", filtered locally out of 5" — a filter that
+ * never ran, described as one that did, and on a single-row list it went on to claim that row matched.
+ */
+function effectiveQuery(query: string | undefined): string | undefined {
+  const trimmed = query?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 /**
@@ -83,12 +106,13 @@ const listCountries = defineTool({
     "code is two uppercase letters, because that is all the spec documents; membership of this list " +
     "is a different question and only the API can answer it. `UK` is well formed and wrong — the " +
     "United Kingdom is `GB`.\n\n" +
-    "`query` filters by code or name, case-insensitively, and it filters HERE: the endpoint takes no " +
-    "parameters, so the whole list is fetched and narrowed locally. A no-match answer therefore " +
-    "means no match in this list, not that the API was asked and said no.\n\n" +
-    "The response shape is measured rather than documented — this spec declares a response schema " +
-    "for 12 of its 430 operations, and this is not one of them. Measured live: 170 countries, every " +
-    "one a two-letter code carrying a currencyCode, with GB for the United Kingdom and no UK at all.",
+    "`query` filters by code, name or default currency, case-insensitively, and it filters HERE: THIS " +
+    "endpoint takes no parameters, so the whole list is fetched and narrowed locally. A no-match " +
+    "answer therefore means no match in this list, not that the API was asked and said no. (The API " +
+    "does have searchable variants, but they are internal endpoints this server does not expose.)\n\n" +
+    "The response is documented as `array<CountryRes>` and the live API agrees with it: measured, " +
+    "170 countries, every one a two-letter code carrying a currencyCode, with GB for the United " +
+    "Kingdom and no UK at all.",
   risk: "read",
   apiPaths: [["GET", "/api/countries"]],
   idempotent: true,
@@ -119,19 +143,20 @@ const listCountries = defineTool({
           `is below as received, and this is NOT a report that the API supports no countries.`,
       });
     }
-    const rows = matching(all, args.query);
+    const query = effectiveQuery(args.query);
+    const rows = matching(all, query);
     return okList(rows, {
       noun: "country",
-      suffix: args.query
-        ? ` matching ${JSON.stringify(args.query)}, filtered locally out of ${all.length} the API ` +
+      suffix: query
+        ? ` matching ${JSON.stringify(query)}, filtered locally out of ${all.length} the API ` +
           `returned.` +
           (rows.length === 1 && rows[0]?.code
             ? ` Send countryCode: ${JSON.stringify(rows[0].code)}.`
             : ``)
         : `. Each carries its default currencyCode, which is what to send as currencyCode on an ` +
           `invoice or order for that country unless you mean otherwise.`,
-      empty: args.query
-        ? `No country in this API's list matches ${JSON.stringify(args.query)}. The API was not ` +
+      empty: query
+        ? `No country in this API's list matches ${JSON.stringify(query)}. The API was not ` +
           `asked — the endpoint takes no parameters, so this is a local search over the ` +
           `${all.length} countries it returned. Try a shorter fragment, or call this tool with no ` +
           `query and read the list.`
@@ -151,10 +176,10 @@ const listCurrencies = defineTool({
     "Same reason to call it as reai_list_countries: currencyCode arguments are checked for shape " +
     "only, three uppercase letters, because the spec documents a pattern and not a list. A " +
     "well-formed code that is not in this list fails at the API.\n\n" +
-    "`query` filters by code or name, locally — the endpoint takes no parameters, so a no-match " +
+    "`query` filters by code or name, locally — THIS endpoint takes no parameters, so a no-match " +
     "answer is about this list and not about what the API would accept.\n\n" +
     "For the default currency of a COUNTRY, use reai_list_countries: each row carries a " +
-    "currencyCode. Measured live: 129 currencies.",
+    "currencyCode. Documented as `array<CurrencyRes>`, and measured live at 129 currencies.",
   risk: "read",
   apiPaths: [["GET", "/api/currencies"]],
   idempotent: true,
@@ -183,18 +208,19 @@ const listCurrencies = defineTool({
           `currencies.`,
       });
     }
-    const rows = matching(all, args.query);
+    const query = effectiveQuery(args.query);
+    const rows = matching(all, query);
     return okList(rows, {
       noun: "currency",
-      suffix: args.query
-        ? ` matching ${JSON.stringify(args.query)}, filtered locally out of ${all.length} the API ` +
+      suffix: query
+        ? ` matching ${JSON.stringify(query)}, filtered locally out of ${all.length} the API ` +
           `returned.` +
           (rows.length === 1 && rows[0]?.code
             ? ` Send currencyCode: ${JSON.stringify(rows[0].code)}.`
             : ``)
         : `.`,
-      empty: args.query
-        ? `No currency in this API's list matches ${JSON.stringify(args.query)}. The API was not ` +
+      empty: query
+        ? `No currency in this API's list matches ${JSON.stringify(query)}. The API was not ` +
           `asked — this is a local search over the ${all.length} currencies it returned.`
         : `The API returned an EMPTY currency list, which is not a normal answer: currencyCode ` +
           `fields elsewhere will reject everything. Treat this as an API problem.`,
@@ -231,12 +257,21 @@ const getOpeningBalance = defineTool({
         path: "/api/opening-balances",
         tenantId,
       });
-      return ok(res.data, {
-        note:
-          `Tenant ${tenantId} HAS an opening balance recorded. It is the starting position of the ` +
-          `books, so every comparative figure depends on it — changing it is not master-data work, ` +
-          `and this server offers no tool that does.`,
-      });
+      // The flag on BOTH branches, not just the 404 one. Review's point: a consumer keying on
+      // `recorded` got `false` when nothing existed and `undefined` when something did, which is the
+      // shape most likely to be read as falsy either way.
+      return ok(
+        { recorded: true, openingBalance: res.data ?? null },
+        {
+          note:
+            `Tenant ${tenantId} HAS an opening balance recorded. The API returns it as a VOUCHER ` +
+            `(VoucherDetailRes: id, number, date, description, postings, attachments), which is the ` +
+            `clearest statement of what it is — a ledger document, not a settings page. That is also ` +
+            `why its DELETE can reverse rather than remove.\n\n` +
+            `Every comparative figure the books produce depends on it, and this server offers no ` +
+            `tool that changes it.`,
+        },
+      );
     } catch (err) {
       // Only the documented "not found" case becomes an answer. Anything else is still a failure,
       // because turning every error into "nothing recorded" is how a 403 on a module or an expired
@@ -248,7 +283,7 @@ const getOpeningBalance = defineTool({
       // its own status; the phrase is then a second condition rather than the only one.
       if (isNotFound(err, /opening balance not found/i)) {
         return ok(
-          { openingBalance: null, recorded: false },
+          { recorded: false, openingBalance: null },
           {
             note:
               `Tenant ${tenantId} has NO opening balance recorded, which is what the 404 on this ` +
@@ -268,8 +303,11 @@ const getAnnualAccounts = defineTool({
   name: "reai_get_annual_accounts",
   title: "Get annual-accounts submission status for a year",
   description:
-    "Whether annual accounts have been submitted for a fiscal year, and what state that submission " +
-    "is in.\n\n" +
+    "Whether a submission record exists for a fiscal year, and what state it is in.\n\n" +
+    "Not a yes/no, because the API does not model one: the documented states are incomplete, " +
+    "complete, signing, signed and submitted_in_other_system, so a record can exist with nothing " +
+    "filed. This tool reports `submissionExists` and the `status` separately, on both the found and " +
+    "the not-found paths, rather than inventing a `submitted` flag the API has no state for.\n\n" +
     'The endpoint answers `404 "No annual-accounts submission exists"` when there is none — measured ' +
     "for 2025 on both test tenants — and this tool reports that as the answer rather than as a " +
     "failure. Nothing has been filed is a normal, useful thing to know, and it is not the same as " +
@@ -300,13 +338,24 @@ const getAnnualAccounts = defineTool({
         path: `/api/annual-accounts/${args.year}`,
         tenantId,
       });
-      return ok(res.data, {
-        note: `A submission exists for ${args.year} on tenant ${tenantId}. Its state is in the body below.`,
-      });
+      const status = (res.data as { status?: string } | undefined)?.status;
+      return ok(
+        { year: args.year, submissionExists: true, status: status ?? null, submission: res.data ?? null },
+        {
+          note:
+            `A submission record EXISTS for ${args.year} on tenant ${tenantId}, with status ` +
+            `${JSON.stringify(status ?? null)}.\n\n` +
+            `Existing is not the same as filed. The documented states are incomplete, complete, ` +
+            `signing, signed and submitted_in_other_system — there is no state called "submitted", ` +
+            `which is why this tool reports the status rather than a yes/no. ` +
+            `submitted_in_other_system means the accounts were delivered outside ReAI and takes ` +
+            `precedence over the rest.`,
+        },
+      );
     } catch (err) {
       if (isNotFound(err, /no annual-accounts submission/i)) {
         return ok(
-          { year: args.year, submission: null, submitted: false },
+          { year: args.year, submissionExists: false, status: null, submission: null },
           {
             note:
               `NO annual-accounts submission exists for ${args.year} on tenant ${tenantId}. That is ` +

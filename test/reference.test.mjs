@@ -192,14 +192,52 @@ test("any OTHER failure still fails, so an outage is never reported as an empty 
   }
 });
 
-test("a balance that DOES exist is reported as ledger position, not as master data", async () => {
-  const present = await run("reai_get_opening_balance", {}, async () => ({
-    data: { lines: [{ accountNumber: "1500", amount: 125000 }] },
+test("a balance that DOES exist is reported as a voucher, with the same flag as the absent case", async () => {
+  const voucher = { id: 9, number: "OB-1", date: "2025-01-01", postings: [{ accountNumber: "1500", amount: 125000 }] };
+  const present = await run("reai_get_opening_balance", {}, async () => ({ data: voucher, status: 200 }));
+  assert.match(present.text, /HAS an opening balance recorded/);
+  assert.match(present.text, /VOUCHER/);
+  assert.match(present.text, /why its DELETE can reverse/);
+  assert.match(present.text, /no\s+tool that changes it/);
+  // The PAYLOAD, not only the prose. A consumer keys on `recorded`, and it has to exist on both
+  // branches or it reads as falsy whichever way the answer went.
+  const body = JSON.parse(present.text.slice(present.text.indexOf("{")));
+  assert.equal(body.recorded, true);
+  assert.deepEqual(body.openingBalance, voucher);
+});
+
+test("the synthesized payloads carry the flag a consumer keys on, on both branches", async () => {
+  // Flipping either flag used to leave every test green: the assertions were all on the note.
+  const absent = await run("reai_get_opening_balance", {}, async () => {
+    throw apiError(404, "Opening balance not found");
+  });
+  const absentBody = JSON.parse(absent.text.slice(absent.text.indexOf("{")));
+  assert.equal(absentBody.recorded, false);
+  assert.equal(absentBody.openingBalance, null);
+
+  const unfiled = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+    throw apiError(404, "No annual-accounts submission exists", "/api/annual-accounts/2025");
+  });
+  const unfiledBody = JSON.parse(unfiled.text.slice(unfiled.text.indexOf("{")));
+  assert.equal(unfiledBody.submissionExists, false);
+  assert.equal(unfiledBody.status, null);
+  assert.equal(unfiledBody.year, 2025);
+});
+
+test("an existing submission reports its status, not an invented submitted flag", async () => {
+  // The API's states are incomplete, complete, signing, signed and submitted_in_other_system. There
+  // is no "submitted", so a boolean would have to invent one — and "incomplete" is exactly the state
+  // where a record exists and nothing has been filed.
+  const incomplete = await run("reai_get_annual_accounts", { year: 2025 }, async () => ({
+    data: { year: 2025, status: "incomplete" },
     status: 200,
   }));
-  assert.match(present.text, /HAS an opening balance recorded/);
-  assert.match(present.text, /every comparative figure depends on it/);
-  assert.match(present.text, /no tool that does/);
+  const body = JSON.parse(incomplete.text.slice(incomplete.text.indexOf("{")));
+  assert.equal(body.submissionExists, true);
+  assert.equal(body.status, "incomplete");
+  assert.ok(!("submitted" in body), "no invented boolean");
+  assert.match(incomplete.text, /Existing is not the same as filed/);
+  assert.match(incomplete.text, /submitted_in_other_system/);
 });
 
 test("the opening-balance tool says why its write endpoints are not curated", () => {
@@ -262,4 +300,69 @@ test("the year bound matches the spec rather than an assumption about fiscal yea
   assert.equal(year.safeParse(0).success, false);
   assert.equal(year.safeParse(32768).success, false);
   assert.equal(year.safeParse(2025.5).success, false);
+});
+
+test("the filter is case-insensitive, which the description promises", async () => {
+  // Every other query in this file is already lowercase, so a needle that stopped being lowercased
+  // would have regressed silently.
+  const respond = async () => ({ data: COUNTRIES, status: 200 });
+  for (const query of ["Sweden", "SWEDEN", "sWeDeN", "Se"]) {
+    const r = await run("reai_list_countries", { query }, respond);
+    assert.match(r.text, /Send countryCode: "SE"/, query);
+  }
+});
+
+test("a country can be found by the currency it uses", async () => {
+  // The country list's selling point is carrying a default currency, so this is the natural question.
+  // It used to answer a confident zero plus advice to try a shorter fragment.
+  const respond = async () => ({ data: COUNTRIES, status: 200 });
+  const nok = await run("reai_list_countries", { query: "NOK" }, respond);
+  assert.match(nok.text, /Send countryCode: "NO"/);
+});
+
+test("a blank query is treated as no query, not as a filter that matched everything", async () => {
+  // `matching` ignores a whitespace query, but the sentences keyed on truthiness — so "   " reported
+  // "3 country(s) matching \"   \", filtered locally out of 3", and on a one-row list it claimed that
+  // row matched a string of spaces.
+  const respond = async () => ({ data: COUNTRIES, status: 200 });
+  for (const query of ["   ", "\t", ""]) {
+    const r = await run("reai_list_countries", { query }, respond);
+    assert.match(r.text, /3 country\(s\)\./, JSON.stringify(query));
+    assert.ok(!/matching/.test(r.text), `${JSON.stringify(query)} must not claim to have filtered`);
+  }
+  const single = await run("reai_list_countries", { query: "  " }, async () => ({
+    data: [COUNTRIES[0]],
+    status: 200,
+  }));
+  assert.ok(!/Send countryCode/.test(single.text), "a blank query must not claim a single match");
+});
+
+test("the code hint fires only on a single match", async () => {
+  // Otherwise "Send countryCode: X" names an arbitrary row out of several.
+  const respond = async () => ({ data: COUNTRIES, status: 200 });
+  const many = await run("reai_list_countries", { query: "united" }, async () => ({
+    data: [COUNTRIES[2], { code: "US", name: "United States", currencyCode: "USD" }],
+    status: 200,
+  }));
+  assert.match(many.text, /2 country\(s\) matching "united"/);
+  assert.ok(!/Send countryCode/.test(many.text), "two matches must not name one code");
+  const one = await run("reai_list_countries", { query: "norway" }, respond);
+  assert.match(one.text, /Send countryCode: "NO"/);
+});
+
+test("the documented phrase is found in the raw body too, not only in the message", async () => {
+  // The annual-accounts 404 is documented as returning AnnualAccountsSubmissionRes, not a
+  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is the
+  // only place the phrase can appear. Both halves of the check are load-bearing.
+  const bodyOnly = new ReaiApiError({
+    status: 404,
+    method: "GET",
+    path: "/api/annual-accounts/2025",
+    rawBody: '{"message":"No annual-accounts submission exists for the fiscal year"}',
+  });
+  const r = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+    throw bodyOnly;
+  });
+  assert.match(r.text, /NO annual-accounts submission exists for 2025/);
+  assert.notEqual(r.result.isError, true);
 });

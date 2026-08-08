@@ -70,9 +70,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     uppercase letters and `currencyCode` for three, because a pattern is all the spec
     documents — so `UK` passes locally and fails at the API, where the United Kingdom is
     `GB`. `GET /api/countries` and `GET /api/currencies` are the real lists and nothing
-    pointed at them. Each country carries its default `currencyCode`, measured; neither
-    endpoint documents a response schema, and nor do 418 of the other 430 operations in
-    this spec.
+    pointed at them. Each country carries its default `currencyCode`, and `query` searches
+    that too — "which countries use NOK" is the natural question and used to answer zero.
+  - Both endpoints **do** document their response (`array<CountryRes>`, `array<CurrencyRes>`)
+    and the live API agrees. An earlier draft of this entry claimed the opposite on a
+    miscount: **386 of 430** operations declare a 2xx schema, 368 of them under the wildcard
+    content type, and counting only `application/json` gives 12. The real gap is that the
+    spec **index** carries no response shapes at all — so `reai_describe_endpoint` cannot say
+    what any endpoint returns, for 386 documented operations. Left for its own change.
   - `query` filters **locally**, since neither endpoint accepts a parameter. Recorded in
     `SHAPES_THE_RESPONSE` with a test that proves the request is identical either way while
     the output differs — otherwise it is a dropped input, which is the class that sweep

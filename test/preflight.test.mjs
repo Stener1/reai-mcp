@@ -573,13 +573,17 @@ test("every response-shaping exemption names a real field and a real test", asyn
     assert.ok(named, `exemption for ${entry} must name the test file that proves it`);
     const proof = readFileSync(new URL(`./${named[1]}`, import.meta.url), "utf8");
     assert.ok(proof.includes(field), `${named[1]} never mentions ${field}`);
-    // And that test has to actually run the tool both ways, or it proves nothing. A boolean is set
-    // as `field: true`; anything else — a query string, say — is set to some value, so look for the
-    // field being assigned at all rather than for one literal that only fits booleans.
+    // And that test has to actually run the tool both ways, or it proves nothing. A boolean is set as
+    // `field: true`; anything else — a query string, say — is set to a literal value.
+    //
+    // Deliberately NOT `\w+` as a fallback alternative, which is where this landed first: review
+    // stripped every real `{ query: "..." }` call out of the named test and the check still passed,
+    // satisfied by `query: c.query` in an unrelated request comparison. A bare identifier proves
+    // nothing about the field being exercised, so only a literal counts.
     assert.match(
       proof,
-      new RegExp(`${field}\\s*:\\s*(true|"[^"]+"|'[^']+'|\\w+)`),
-      `${named[1]} never exercises ${field} being set`,
+      new RegExp(`${field}\\s*:\\s*(true|false|\\d|"[^"]*"|'[^']*')`),
+      `${named[1]} never exercises ${field} being set to a literal value`,
     );
   }
 });
