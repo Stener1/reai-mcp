@@ -221,6 +221,9 @@ async function main() {
     expenseIds: [],
     /** expenseId -> voucherId, captured at booking so cleanup never has to ask. */
     expenseVoucherIds: {},
+    loanId: undefined,
+    loanCreditorId: undefined,
+    debtorId: undefined,
   };
 
   try {
@@ -1564,6 +1567,163 @@ async function main() {
       }
     }
 
+    // --- 4c. Loans and their counterparties ----------------------------------
+    //
+    // The whole domain is undocumented in the ways that matter, and every one of those was learned by
+    // measurement rather than from the spec. This section is what keeps them true: an upstream change to
+    // any of it — the direction rule, the derived accounts, the reference uniqueness, the deletion
+    // ordering — shows up here rather than in someone's books. Everything created is fully removable,
+    // measured, which is why the domain is exercised end to end and share investments are not: an event
+    // there is permanent, so the suite must never create one.
+    console.log("\n  Loans and counterparties:");
+    {
+      const creditorRes = await client.callTool({
+        name: "reai_create_creditor",
+        arguments: { name: `${STAMP} loan creditor` },
+      });
+      if (!creditorRes.isError) created.loanCreditorId = jsonOf(creditorRes)?.id;
+      report(
+        "reai_create_creditor gives a borrower loan its counterparty",
+        Number.isInteger(created.loanCreditorId),
+        created.loanCreditorId ? `id=${created.loanCreditorId}` : firstLineOf(textOf(creditorRes)),
+      );
+
+      const debtorRes = await client.callTool({
+        name: "reai_create_debtor",
+        arguments: { name: `${STAMP} loan debtor` },
+      });
+      if (!debtorRes.isError) created.debtorId = jsonOf(debtorRes)?.id;
+      report(
+        "reai_create_debtor gives a lender loan its counterparty",
+        Number.isInteger(created.debtorId),
+        created.debtorId ? `id=${created.debtorId}` : firstLineOf(textOf(debtorRes)),
+      );
+
+      if (created.loanCreditorId) {
+        // The direction rule, refused locally: nothing may reach the API, because the API's own answer is
+        // a Norwegian sentence about a rule it never documents.
+        const wrongPair = await client.callTool({
+          name: "reai_create_loan",
+          arguments: {
+            reference: `${STAMP.slice(0, 20)}-bad`,
+            loanType: "company_loan_to_owner",
+            perspective: "borrower",
+            counterpartyId: created.loanCreditorId,
+            currency: "NOK",
+            principalAmount: 1000,
+            interestRateAnnual: 1,
+            disbursementDate: today,
+            repaymentType: "bullet",
+          },
+        });
+        report(
+          "a direction-locked loanType/perspective pair is refused before anything is sent",
+          wrongPair.isError === true && /Nothing was sent/.test(textOf(wrongPair)),
+          firstLineOf(textOf(wrongPair)),
+        );
+
+        const vouchersBeforeLoan = await countOf(
+          await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+        );
+        const reference = `${STAMP.slice(0, 22)}-L`;
+        const loanRes = await client.callTool({
+          name: "reai_create_loan",
+          arguments: {
+            reference,
+            loanType: "bank_loan",
+            perspective: "borrower",
+            counterpartyId: created.loanCreditorId,
+            currency: "NOK",
+            principalAmount: 100000,
+            interestRateAnnual: 5.5,
+            disbursementDate: today,
+            repaymentType: "annuity",
+          },
+        });
+        const loan = loanRes.isError ? undefined : jsonOf(loanRes);
+        created.loanId = loan?.id;
+        report(
+          "reai_create_loan records a borrower loan with the derived Norwegian accounts",
+          !loanRes.isError &&
+            loan?.principalAccountNumber === "2220" &&
+            loan?.interestExpenseAccountNumber === "8150" &&
+            loan?.accruedInterestAccountNumber === "2950",
+          loanRes.isError
+            ? firstLineOf(textOf(loanRes))
+            : `id=${loan?.id} accounts=${loan?.principalAccountNumber}/${loan?.interestExpenseAccountNumber}/${loan?.accruedInterestAccountNumber}`,
+        );
+        report(
+          "recording a loan posts NOTHING to the ledger",
+          (await countOf(
+            await client.callTool({ name: "reai_list_vouchers", arguments: { from: today, to: today } }),
+          )) === vouchersBeforeLoan,
+          `vouchers ${vouchersBeforeLoan} before and after`,
+        );
+
+        // reference is unique per company, and says so only in Norwegian.
+        const duplicate = await client.callTool({
+          name: "reai_create_loan",
+          arguments: {
+            reference,
+            loanType: "bank_loan",
+            perspective: "borrower",
+            counterpartyId: created.loanCreditorId,
+            currency: "NOK",
+            principalAmount: 1,
+            interestRateAnnual: 0,
+            disbursementDate: today,
+            repaymentType: "bullet",
+          },
+        });
+        report(
+          "a duplicate loan reference is refused, in English",
+          duplicate.isError === true && /unique/.test(textOf(duplicate)),
+          firstLineOf(textOf(duplicate)),
+        );
+      }
+
+      if (created.loanId) {
+        // The merge: a partial edit must not clear the fields it did not mention, and must not carry the
+        // old classification's accounts into a new one.
+        const edited = await client.callTool({
+          name: "reai_update_loan",
+          arguments: { id: created.loanId, interestRateAnnual: 6.25 },
+        });
+        const after = edited.isError ? undefined : jsonOf(edited);
+        report(
+          "a partial loan edit keeps repaymentType and the interest accounts",
+          !edited.isError &&
+            after?.repaymentType === "annuity" &&
+            after?.interestExpenseAccountNumber === "8150" &&
+            after?.accruedInterestAccountNumber === "2950",
+          edited.isError
+            ? firstLineOf(textOf(edited))
+            : `repaymentType=${after?.repaymentType} accounts=${after?.interestExpenseAccountNumber}/${after?.accruedInterestAccountNumber}`,
+        );
+
+        const reclassified = await client.callTool({
+          name: "reai_update_loan",
+          arguments: { id: created.loanId, loanType: "owner_loan_to_company" },
+        });
+        report(
+          "reclassifying without naming accounts is refused, and quotes the ones the API would derive",
+          reclassified.isError === true && /2255/.test(textOf(reclassified)) && /8159/.test(textOf(reclassified)),
+          firstLineOf(textOf(reclassified)),
+        );
+
+        // The ordering: a counterparty a loan still names cannot be deleted.
+        const blocked = await client.callTool({
+          name: "reai_delete_creditor",
+          arguments: { id: created.loanCreditorId },
+        });
+        report(
+          "a creditor a loan still names cannot be deleted, and the refusal says loans first",
+          blocked.isError === true && /Delete the loans first/.test(textOf(blocked)),
+          firstLineOf(textOf(blocked)),
+        );
+      }
+    }
+
   } finally {
     // --- 5. Clean up, most dependent first -----------------------------------
     //
@@ -1810,6 +1970,26 @@ async function main() {
           !supplierOutcome.isError &&
           jsonOf(supplierOutcome)?.outcome === "archived",
         `outcome=${JSON.stringify(jsonOf(supplierOutcome ?? {})?.outcome ?? null)}`,
+      );
+    }
+    if (created.loanId) {
+      await attempt(
+        `test loan ${created.loanId} deleted`,
+        () => client.callTool({ name: "reai_delete_loan", arguments: { id: created.loanId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
+    for (const [label, id, toolName] of [
+      ["loan creditor", created.loanCreditorId, "reai_delete_creditor"],
+      ["loan debtor", created.debtorId, "reai_delete_debtor"],
+    ]) {
+      if (!id) continue;
+      // After the loan, never before: the API refuses a counterparty a loan still names, and this suite
+      // asserts that refusal above, so the order here is the other half of the same fact.
+      await attempt(
+        `test ${label} ${id} deleted`,
+        () => client.callTool({ name: toolName, arguments: { id } }),
+        (r) => firstLineOf(textOf(r)),
       );
     }
     if (created.creditorId) {
@@ -2253,7 +2433,12 @@ async function main() {
       // for them. There is NO DELETE on that resource — measured, 405 — and PUT accepts only
       // `name`, so it cannot be removed or moved. Renamed to say what it is; it will sit on account
       // 1300 of this tenant permanently.
-      "sub-accounts": [6312],
+      // 6312 came from a probe before this sweep existed. 6323 is "zz-si-probe" on account 1810, and it
+      // is a consequence rather than a separate accident: creating a share investment auto-creates a
+      // general sub-account on its derived asset account, named after the position — measured, and
+      // deleting the position removes it again. Share investment 19 cannot be deleted (it has events),
+      // so its sub-account cannot go either, and sub-accounts have no DELETE endpoint at all.
+      "sub-accounts": [6312, 6323],
     };
     // Deliberately mixed anchoring, which the first version had by accident: `^` bound only to the
     // `zz` alternative and everything else matched anywhere. Review flagged that as a false-positive
@@ -2317,6 +2502,12 @@ async function main() {
       // it went, and a future test-named sub-account would never have been noticed. They cannot be
       // deleted, so noticing is the only thing available.
       ["sub-accounts", "reai_list_sub_accounts", "id", ["name"], [{}]],
+      // Loans and their counterparties. All three are fully removable — measured — so anything left with
+      // a test prefix on it is a cleanup that did not run, not a record the API refuses to release. The
+      // loan list has no filter, hence the single empty query; the counterparty lists take none either.
+      ["loans", "reai_list_loans", "id", ["reference", "counterpartyName"], [{}]],
+      ["creditors", "reai_list_creditors", "id", ["name"], [{}]],
+      ["debtors", "reai_list_debtors", "id", ["name"], [{}]],
     ];
     for (const [label, toolName, idField, fields, variants] of SWEPT) {
       try {
