@@ -543,6 +543,16 @@ const SHAPES_THE_RESPONSE = {
   "reai_get_employee: includePersonalData":
     "returns the national identity number and bank account instead of redacting them; proven by " +
     "the redaction test in test/organisation.test.mjs",
+  // Both reference endpoints take no parameters at all, so narrowing can only happen after the whole
+  // list arrives. The filter is the useful part of the tool — a caller wanting one code should not
+  // have to read 250 rows — and the descriptions say plainly that the API was not asked, because a
+  // caller who believes otherwise will misread a no-match answer as "the API rejects this code".
+  "reai_list_countries: query":
+    "filters the returned list locally, since GET /api/countries accepts no parameters; proven by " +
+    "the local-filter test in test/reference.test.mjs",
+  "reai_list_currencies: query":
+    "filters the returned list locally, since GET /api/currencies accepts no parameters; proven by " +
+    "the local-filter test in test/reference.test.mjs",
 };
 
 // The exemption map says each entry "owes a test proving the field actually changes the
@@ -563,10 +573,17 @@ test("every response-shaping exemption names a real field and a real test", asyn
     assert.ok(named, `exemption for ${entry} must name the test file that proves it`);
     const proof = readFileSync(new URL(`./${named[1]}`, import.meta.url), "utf8");
     assert.ok(proof.includes(field), `${named[1]} never mentions ${field}`);
-    // And that test has to actually run the tool both ways, or it proves nothing.
-    assert.ok(
-      proof.includes(`${field}: true`) || proof.includes(`${field}:true`),
-      `${named[1]} never exercises ${field} being set`,
+    // And that test has to actually run the tool both ways, or it proves nothing. A boolean is set as
+    // `field: true`; anything else — a query string, say — is set to a literal value.
+    //
+    // Deliberately NOT `\w+` as a fallback alternative, which is where this landed first: review
+    // stripped every real `{ query: "..." }` call out of the named test and the check still passed,
+    // satisfied by `query: c.query` in an unrelated request comparison. A bare identifier proves
+    // nothing about the field being exercised, so only a literal counts.
+    assert.match(
+      proof,
+      new RegExp(`${field}\\s*:\\s*(true|false|\\d|"[^"]*"|'[^']*')`),
+      `${named[1]} never exercises ${field} being set to a literal value`,
     );
   }
 });

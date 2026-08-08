@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**141 tools**: 134 across ten accounting domains, plus 7 always-on.
+**145 tools**: 138 across eleven accounting domains, plus 7 always-on.
 
 ### Fixed
 
@@ -62,6 +62,49 @@ All notable changes to `reai-mcp`. Format loosely follows
   kept the shape its comment was written about.
 
 ### Added
+
+- **Reference data and company state (4 read tools), and a new `reference` toolset.**
+  `reai_list_countries`, `reai_list_currencies`, `reai_get_opening_balance`,
+  `reai_get_annual_accounts`.
+  - **Shape is not membership.** `countryCode` arguments are checked for being two
+    uppercase letters and `currencyCode` for three, because a pattern is all the spec
+    documents — so `UK` passes locally and fails at the API, where the United Kingdom is
+    `GB`. `GET /api/countries` and `GET /api/currencies` are the real lists and nothing
+    pointed at them. Each country carries its default `currencyCode`, and `query` searches
+    that too — "which countries use NOK" is the natural question and used to answer zero.
+  - Both endpoints **do** document their response (`array<CountryRes>`, `array<CurrencyRes>`)
+    and the live API agrees. An earlier draft of this entry claimed the opposite on a
+    miscount: **386 of 430** operations declare a 2xx schema, 368 of them under the wildcard
+    content type, and counting only `application/json` gives 12. The real gap is that the
+    spec **index** carries no response shapes at all — so `reai_describe_endpoint` cannot say
+    what any endpoint returns, for 386 documented operations. Left for its own change.
+  - `query` filters **locally**, since neither endpoint accepts a parameter. Recorded in
+    `SHAPES_THE_RESPONSE` with a test that proves the request is identical either way while
+    the output differs — otherwise it is a dropped input, which is the class that sweep
+    exists to catch. The exemption self-test now handles non-boolean fields; it only ever
+    looked for `field: true`.
+  - **Two 404s turned into answers.** `GET /api/opening-balances` answers
+    `404 "Opening balance not found"` and `GET /api/annual-accounts/{year}` answers
+    `404 "No annual-accounts submission exists"` — measured on both test tenants. A 404 on a
+    collection-shaped path is otherwise indistinguishable from a wrong path, a wrong tenant
+    or a disabled module. Narrowly: only the documented message becomes an answer, and a
+    403, 401 or 500 still fails, because a tool that reports every error as "nothing
+    recorded" turns an outage into a fact about the books.
+  - Opening-balance **writes stay on `reai_request`** and the tool says why: it is ledger
+    position, `DELETE` is documented "delete OR reverse", and neither test tenant has one to
+    watch those endpoints on.
+  - The 404 conversion is decided on the typed `ReaiApiError.status`, not on the rendered
+    message. A gateway `500` relaying a downstream body can carry both "HTTP 404" and the
+    documented phrase, and a text-matched guard would have reported that outage as an empty
+    set of books. The phrase is a second condition, not the only one.
+  - The two code lists need **no tenant at all** — the spec declares no `X-Tenant-Id`
+    parameter for either, so they now send none and answer immediately after authentication,
+    which is when "what country codes does this API take" is actually asked. Verified live
+    with no tenant selected: both answer, while the tenant-scoped opening-balance read still
+    refuses.
+  - `year` accepts what the API accepts: the spec says `exclusiveMinimum 0, maximum 32767`,
+    and an earlier floor of 2000 was an assumption about when ReAI's fiscal years start that
+    would have rejected a legacy year the API would have answered.
 
 - **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,
   `reai_update_lead`, `reai_log_lead_contact`, `reai_convert_lead`, `reai_delete_lead`.
