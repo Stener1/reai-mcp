@@ -835,7 +835,7 @@ test("every delete tool's endpoint is classified no worse than the tool claims",
   // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
   // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
   // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
-  assert.ok(deleters.length >= 15, `only ${deleters.length} reai_delete_* tools — the prefix has stopped matching`);
+  assert.ok(deleters.length >= 16, `only ${deleters.length} reai_delete_* tools — the prefix has stopped matching`);
   for (const tool of deleters) {
     const mode = minimumMode[tool.risk];
     assert.ok(mode, `${tool.name} has an unrecognised risk "${tool.risk}"`);

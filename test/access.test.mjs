@@ -90,7 +90,7 @@ test("no access tool can grant, change or revoke access", () => {
   // Same shape as the salary sweep: this says every /api/users path a tool declares is a GET, which is
   // vacuously true if no tool declares one. Pin the population so the claim is about something.
   const usersPaths = registeredTools.flatMap((t) => (t.apiPaths ?? []).filter(([, p]) => /^\/api\/users/.test(p)));
-  assert.ok(usersPaths.length >= 2, `only ${usersPaths.length} /api/users paths declared — the claim below is about nothing`);
+  assert.ok(usersPaths.length >= 5, `only ${usersPaths.length} /api/users paths declared — the claim below is about nothing`);
   for (const t of registeredTools) {
     for (const [method, path] of t.apiPaths ?? []) {
       if (!/^\/api\/users/.test(path)) continue;

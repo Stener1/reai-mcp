@@ -391,7 +391,7 @@ test("no tool is softer than the policy for any path it declares", () => {
     (t.apiPaths ?? []).filter(([m, p]) => classifyRequest(m, p.replace(/\{[^}]+\}/g, "7")) === "irreversible"),
   );
   assert.ok(
-    irreversiblePaths.length >= 20,
+    irreversiblePaths.length >= 38,
     `only ${irreversiblePaths.length} irreversible declared paths — this invariant is about nothing`,
   );
   const softer = [];

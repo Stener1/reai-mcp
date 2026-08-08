@@ -138,7 +138,7 @@ test("no read tool gives the same answer for an empty list and a shape surprise"
   {
     const { registeredTools } = await import("../dist/server.js");
     const reads = registeredTools.filter((t) => t.risk === "read");
-    assert.ok(reads.length >= 30, `only ${reads.length} read tools — the risk filter has stopped matching`);
+    assert.ok(reads.length >= 57, `only ${reads.length} read tools — the risk filter has stopped matching`);
   }
   const offenders = [];
   for (const tool of registeredTools) {
@@ -177,7 +177,7 @@ test("and the rows are not thrown away either", async () => {
   // cannot see what the endpoint actually sent. Checked by marker rather than by wording.
   // Floor: same read filter as the sweep above, same failure mode if it stops matching.
   const reads = registeredTools.filter((t) => t.risk === "read");
-  assert.ok(reads.length >= 30, `only ${reads.length} read tools — the risk filter has stopped matching`);
+  assert.ok(reads.length >= 57, `only ${reads.length} read tools — the risk filter has stopped matching`);
   const marker = "UNIQUE-MARKER-9c1f";
   const wrapped = { content: [{ id: 1, name: marker }], totalElements: 1 };
   const swallowed = [];

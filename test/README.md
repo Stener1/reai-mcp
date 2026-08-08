@@ -85,6 +85,17 @@ Seven more now carry a floor:
 | `no tool is softer than the policy for any path it declares` | declared paths classifying `irreversible` |
 | `a curated tool accepting an arms-a-send field escalates like the escape hatch` | `escalatingBodyFieldNames` |
 
+### Choosing the threshold
+
+A floor at 1 only catches total collapse, which the rest of the suite already catches. The rule used
+here is **⌊0.75 × the measured population⌋**, so a filter losing a quarter of its matches still
+passes but a halving fails. That mattered: four of the first floors were written by eye and came out
+at 29–39% of their population — `/api/users` paths at 2 of 7, `reai_get_*` read tools at 8 of 25,
+read-tier tools at 30 of 76, irreversible declared paths at 20 of 51. A regression turning half the
+read tools into writes would have sailed past all of them. **A floor low enough to survive the
+regression it is meant to catch is decoration**; the populations are now measured and the floors sit
+at 16/22, 17/23, 18/25, 5/7, 57/76, 38/51, 10/12, and 3/3 where the population is the whole list.
+
 All twelve floors were then checked to fire: with every corpus emptied, each of the twelve fails.
 That check is the only reason the two floors landing in the wrong place — one written into the
 neighbouring test, one swallowed by the `sourceMappingURL` line — were caught at all. **A floor

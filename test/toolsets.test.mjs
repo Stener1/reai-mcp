@@ -113,7 +113,7 @@ test("every tool that deletes is annotated destructive", () => {
   // NAME PREFIX is exactly the kind that stops matching after a rename — at which point the assertion
   // below is about the empty set and passes for the wrong reason. Established by emptying the tool
   // corpus and finding thirty sweeps in this repository that stayed green; this is one of them.
-  assert.ok(deleting.length >= 15, `only ${deleting.length} deleting tools found — the filter has stopped matching`);
+  assert.ok(deleting.length >= 17, `only ${deleting.length} of 23 deleting tools found — the filter has stopped matching`);
   const undeclared = deleting
     .filter((t) => t.destructive !== true && t.risk !== "irreversible")
     .map((t) => t.name);
@@ -564,7 +564,7 @@ test("a getter that takes one record id calls it `id`", () => {
   }
   // The population, not just the offenders. This filter is a name prefix AND a risk tier, so either
   // changing stops it matching and leaves the assertion below about the empty set.
-  assert.ok(examined >= 8, `only ${examined} reai_get_* read tools were examined — the filter has stopped matching`);
+  assert.ok(examined >= 18, `only ${examined} of 25 reai_get_* read tools were examined — the filter has stopped matching`);
   assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
 });
 
