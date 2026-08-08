@@ -1,0 +1,28 @@
+# Discovery, and why it has to work in Norwegian
+
+The escape hatch is only as good as the search in front of it: a query that returns nothing strands an
+agent. What follows is the measurement rather than the intention, and the four causes that were fixed.
+
+Discovery works in Norwegian, which for this API is not a nicety. Measured on one set of 31 realistic queries — 21 Norwegian, 10 English — before and after: **14 found before, 31 after**, top-three 12 → 28, and nothing ranked worse. `lønnskjøring` returned zero results while `lonn` was already a synonym; *"hvor mye lager har vi"* returned the chart of accounts.
+
+Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
+
+A fourth cause, and the plainest: **the definite article is a suffix in Norwegian, and nobody speaks in the indefinite.** People say *"send fakturaen"*, *"endre kunden"*, *"si opp leieavtalen"* — not *"send faktura"*. Most definite forms already resolved by accident, because the compound-stem rule finds `faktura` inside `fakturaen`; but it needs two characters left over, and the commonest noun class ends in `-e` and takes a single `-n`. So `kunden`, `ordren`, `leieavtalen` and `husleien` resolved to **nothing at all** — 19 of the table's 176 keys. (An earlier version of this sentence said "a quarter of the synonym keys", which overstated it: 44 keys end in `-e`, but 25 of those are verbs, adjectives, English nouns or plurals with no definite form at all.) `-n` and `-ne` rules cover that class now — firing **only when the stripped stem is a word the table knows**, because blind stripping turned `documentation` into `documentatio` and made one word count twice, ranking document endpoints above products for *"product documentation"*. The property is asserted the same way word-order independence is: inflection must not change the answer. A stem-changing definite (`anleggsmiddel` → `anleggsmidlet`) is still out of reach, and the test says so rather than omitting the case. The larger **`-en`/`-et` consonant-stem class** — `utgiften`, `beholdningen`, `kontoen`, `dokumentet`, `vedlegget` — was added afterwards behind the same gate, which is what made extending it cheap: the stripped stem must already be a key, so `token`, `given` and `budget` derive nothing.
+
+A third cause, found later: the table was **almost all nouns** — it held a handful of verbs (`avstemme`, `reconcile`, `signing`, `owes`) and none for any action endpoint. Of the 65 distinct trailing segments after a path placeholder, roughly 25–30 are actions — `/{id}/approve`, `/{id}/deliver`, `/{id}/depreciation`, `/{id}/close` — and not one had a Norwegian verb, so *"godkjenn utlegg"* ranked `/api/expenses` first and the endpoint that approves the claim fifth.
+
+Three of the words had to come back out, all homographs and all found by review: `aktiver` is the balance-sheet noun for **assets** as well as "activate", `avslutt` means **terminate** a contract rather than close a period, and `levere` is how a Norwegian **files a return** — that one took three filing queries the ranker had answered correctly and pointed them all at an expense claim. The expense sense survives as a phrase mapping, where the object of the verb can be seen. The action vocabulary is enumerated from those segments rather than from any benchmark's phrasing, and covers both the imperative and the verbal noun, since a Norwegian query uses either.
+
+**Three corpora, each measured once before being tuned against, and each retired to a regression floor afterwards** — because a benchmark you have read the failures of is no longer measuring anything:
+
+All three live in `test/discovery-heldout.test.mjs` (`CASES`, `FRESH`, `EVERYDAY`); `test/discovery-norwegian.test.mjs` holds a separate 31-case set, 28 of them top-3, which asserts English **ranks** and word-order stability.
+
+| corpus | before this work | after fixing only the queries that returned NOTHING | now |
+|---|---|---|---|
+| first (`CASES`, 41) | 17 | — | **39** top-3, 41 top-10 |
+| second (`FRESH`, 28) | 19 | 23 | **26** top-3 |
+| third (`EVERYDAY`, 27) | 14 | 18 | **19** top-3, 24 top-10 |
+
+What the action vocabulary generalises to is **+2 of 28 on the corpus it was not fitted to** — the same +2 it bought on the one whose failures I had read, which is the comparison worth quoting. What moved all three further was routing the words through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
+
+The rule held across all three: a query that returns **nothing** strands an agent and is worth fixing; a query that returns the right endpoint at rank five is not worth tuning for. Five of the third corpus's thirty targets named endpoints that do not exist — the fourth time in this work that a "ranking failure" was really a wrong assumption about the API.
