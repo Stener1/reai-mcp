@@ -25,6 +25,7 @@ import { agreementTools } from "./tools/agreements.js";
 import { accessTools } from "./tools/access.js";
 import { expenseTools } from "./tools/expenses.js";
 import { salaryTools } from "./tools/salary.js";
+import { subAccountTools } from "./tools/subaccounts.js";
 
 export const SERVER_NAME = "reai-mcp";
 export const SERVER_VERSION = "0.3.0";
@@ -35,7 +36,7 @@ export const SERVER_VERSION = "0.3.0";
  * escape hatch are what make the rest usable.
  */
 export const TOOL_GROUPS: Record<string, ToolDef[]> = {
-  bookkeeping: bookkeepingTools,
+  bookkeeping: [...bookkeepingTools, ...subAccountTools],
   sales: salesTools,
   purchase: [...purchaseTools, ...expenseTools],
   bank: bankVatTools,

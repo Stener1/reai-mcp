@@ -608,6 +608,43 @@ export const QUIRKS: readonly Quirk[] = [
       "reversal is expected and means nothing is left to do.",
   },
   {
+    id: "some-accounts-demand-a-dimension",
+    paths: ["/api/vouchers", "/api/reconciliation-rules"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [400],
+    note:
+      "Two posting fields are conditionally MANDATORY although both read as optional, and the API " +
+      "says so only in Norwegian, naming the line and nothing else:\n\n" +
+      '  400 "Linje 1: Konto 1320 må posteres med underkonto."   (needs subAccountId)\n' +
+      '  400 "Linje 1: Konto 1920 må posteres med bankkonto."    (needs companyBankId)\n\n' +
+      "The sub-account rule is the surprising one: an account that has ANY general sub-account " +
+      "requires one on every posting to it, INCLUDING an account whose only sub-account is called " +
+      '"Default" — which is the usual case. Measured on two accounts, one with a single sub-account ' +
+      "and one with two; both refused. So the field cannot be left out precisely where it looks " +
+      "harmless.\n\n" +
+      "Find the valid ids with GET /api/general-sub-accounts, or per account with " +
+      "GET /api/general-sub-accounts/accounts/{accountNumber}, which also returns a " +
+      '`selectableAccountNumber` of the form "1300/6229" — the account/sub-account pair as the ReAI ' +
+      "interface names it. reai_create_voucher pre-checks this and names the choices.\n\n" +
+      "Note the selector has THREE answers, not two: a list, an empty list, or " +
+      '400 "accountNumber 3000 does not support general sub-accounts" for an account that cannot ' +
+      "have them at all. The 400 is a clear no rather than a failure to work around.",
+  },
+  {
+    id: "a-sub-account-cannot-be-removed",
+    paths: ["/api/general-sub-accounts", "/api/general-sub-accounts/{id}"],
+    kind: "irreversible",
+    note:
+      "A general sub-account is permanent. There is no DELETE — measured, " +
+      "DELETE /api/general-sub-accounts/{id} answers 405 — and PUT accepts only `name`: sending " +
+      'accountNumber answers 400 "Unknown field: accountNumber", so it cannot be moved to another ' +
+      "ledger account either. Create/update asymmetry of the same shape as the salary wage lines.\n\n" +
+      "Creating one also changes how its ACCOUNT behaves for everybody: once an account has any " +
+      "sub-account, every posting to it must name one, so adding the first sub-account to an account " +
+      "breaks any routine that posts to it without a subAccountId.",
+  },
+  {
     id: "three-roles-are-the-same-role",
     // /api/users/permissions is here because the last paragraph is specifically about it — the
     // quirk warned that the catalogue omits the self-scoped codes while not being attached to the

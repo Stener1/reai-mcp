@@ -360,7 +360,9 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_get_voucher` | One voucher with postings and attachments | read |
 | `reai_list_postings` | Ledger postings, filterable; reports `canDelete` and `lockReasons` | read |
 | `reai_general_ledger` | Hovedbok: per-account opening balance, postings, closing balance | read |
-| `reai_create_voucher` | Book a voucher; balance validated locally first | **irreversible** |
+| `reai_create_voucher` | Book a voucher; balance validated locally first, and postings to an account that requires a **sub-account** are refused with the choices named | **irreversible** |
+| `reai_list_sub_accounts` · `reai_sub_accounts_for_account` | General sub-accounts (*underkonti*) — the named parts a ledger account is split into, and where `subAccountId` comes from | read |
+| `reai_create_sub_account` · `reai_rename_sub_account` | Add a part to an account, or rename one. Creating cannot be undone — there is no `DELETE` | **irreversible** / reversible |
 | `reai_delete_voucher` | Delete a voucher, if the period is still open | **irreversible** |
 
 ### Sales
@@ -556,11 +558,11 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 130 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 134 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
-REAI_TOOLSETS=bookkeeping          # 15 tools
-REAI_TOOLSETS=bookkeeping,sales    # 38 tools
+REAI_TOOLSETS=bookkeeping          # 19 tools
+REAI_TOOLSETS=bookkeeping,sales    # 42 tools
 REAI_TOOLSETS=purchase             # 33 tools
 REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
@@ -568,7 +570,7 @@ REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 130
+(unset)                            # all 134
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -579,7 +581,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **93 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **95 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
@@ -629,6 +631,30 @@ Browse them with `reai_api_notes`, or read the highlights:
 - Account numbers and VAT codes are **tenant-specific** — look them up, never assume.
 - `daysUntilDue` is mandatory on orders and offers, so the API can never apply the customer's own terms by itself. The curated tools read the customer's terms for you and report which source they used.
 - Deep links need the tenant: `https://app.reai.no/vouchers/123?tenantId=2634`. The tools return these already formed.
+
+#### Two posting fields that are not optional, whatever they are called
+
+`reai_create_voucher` has always accepted `subAccountId` and `companyBankId`, described as "Optional general sub-account id" and "Link the posting to a company bank account". Measured, both are **conditionally mandatory**, and the API's refusal is a bare Norwegian `400` naming only the line:
+
+```
+POST /api/vouchers  → 400 "Linje 1: Konto 1320 må posteres med underkonto."
+POST /api/vouchers  → 400 "Linje 1: Konto 1920 må posteres med bankkonto."
+```
+
+An account that has **any** sub-account requires one on every posting — even when the only one is called `Default`, which is the case on most of them. So the field was documented as optional precisely for the accounts where leaving it out cannot work, and there was no tool to discover a valid id with.
+
+`reai_create_voucher` now reads the sub-account list once, before sending, and refuses with the actual choices:
+
+```
+Nothing was sent. 1 posting(s) are on an account that requires a general sub-account (underkonto),
+and none was given:
+
+  line 1, account 1320 → subAccountId 6231 (Default)
+```
+
+A failed lookup does **not** block the write. This document has understated requirements before, and refusing a voucher because a helper read failed would be the check doing harm — the API stays the authority, and its `400` is enriched by the quirk registry either way. The bank rule is documented rather than pre-checked, because nothing in the company-bank response says which ledger account each bank belongs to, so which accounts demand it cannot be established locally.
+
+Sub-accounts are also **permanent**: `DELETE /api/general-sub-accounts/{id}` answers `405`, and `PUT` accepts only `name` (`accountNumber` answers `400 "Unknown field: accountNumber"`), so one cannot be removed or moved. Adding the *first* sub-account to an account changes that account's rules for everyone posting to it, and `reai_create_sub_account` says so when that is what you are about to do.
 
 Where a curated tool exists, it enforces what it can locally so you get an explanation instead of a `400`: `reai_create_voucher` checks the debit/credit balance and reports the exact imbalance, `reai_create_supplier_invoice` checks cost-line signs against the document type, and `reai_apply_reconciliation_rules` refuses to run without a bounded period.
 

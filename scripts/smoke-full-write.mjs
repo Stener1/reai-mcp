@@ -1813,6 +1813,11 @@ async function main() {
       // re-archives, measured. They were hidden past the truncation cut of the whole-list query
       // until the sweep started asking per name prefix, which is what found them.
       suppliers: [5631, 5632, 5642, 5645],
+      // A general sub-account created while measuring the posting rules, before there were tools
+      // for them. There is NO DELETE on that resource — measured, 405 — and PUT accepts only
+      // `name`, so it cannot be removed or moved. Renamed to say what it is; it will sit on account
+      // 1300 of this tenant permanently.
+      "sub-accounts": [6312],
     };
     // Deliberately mixed anchoring, which the first version had by accident: `^` bound only to the
     // `zz` alternative and everything else matched anywhere. Review flagged that as a false-positive
