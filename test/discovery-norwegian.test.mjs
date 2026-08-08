@@ -244,6 +244,91 @@ test("the definite plural resolves too", () => {
   }
 });
 
+/**
+ * The shortest real stem, which the length guards excluded by one character.
+ *
+ * `lån` (loan) folds to `lan`, so `lånet` folds to `lanet` — five characters, and the guards read
+ * `base.length > 5`. Codex found it on #88. Measured before the fix: `lån` ranked GET /api/loans
+ * first, `lånet` returned NOTHING, and `saldo på lånet` returned company-banks, departments and
+ * salary-payments — it lost the loan endpoint entirely rather than merely reordering.
+ *
+ * `lan` is the only three-character stem among the 176 synonym keys that takes a consonant-stem
+ * definite (`vat`, `mva`, `ehf` are abbreviations and `owe` is a verb), so this row IS the class.
+ * The guards are gone rather than lowered: the gate — stem must be a synonym key — is the whole
+ * protection, and no key is shorter than three characters, so there is nothing for a length to add.
+ */
+test("a three-letter stem reaches the definite rules", () => {
+  for (const query of ["lånet", "lanet", "saldo på lånet", "lånene"]) {
+    assert.ok(
+      rankOf(query, "GET /api/loans") >= 0,
+      `"${query}" found no loan endpoint — a three-letter stem is being excluded again`,
+    );
+  }
+  // Rank equality with the indefinite, for the reason the test above gives.
+  assert.equal(rankOf("lånet", "GET /api/loans"), rankOf("lån", "GET /api/loans"));
+});
+
+/**
+ * The one-character suffix needs a higher floor than the rest, and Codex caught why on #95.
+ *
+ * A single -n strips one character, so it turns every four-letter word into a three-letter one — and
+ * three-letter keys are exactly what removing the length guards set out to reach. With one uniform
+ * floor, `vatn` (Nynorsk for water) stemmed to the known key `vat` and returned the VAT endpoints,
+ * and `owen` stemmed to `owe`, so **"faktura til owen" — an invoice to a person — ranked the customer
+ * LEDGER above /api/invoices**. That is the concrete harm; the dictionary examples are only how it
+ * was noticed.
+ *
+ * Four for -n and three for the rest, and the asymmetry is not a fudge: every real Norwegian -n
+ * definite has an -e stem, so adding -n to each three-letter key gives `vatn`, `mvan`, `owen`, `ehfn`,
+ * `lann` — not one of which is a definite form of it.
+ */
+test("a one-character suffix does not strip a four-letter word", () => {
+  for (const query of ["vatn", "owen", "vatn og avløp"]) {
+    assert.equal(
+      searchOperations({ query, limit: 3 }).length,
+      0,
+      `"${query}" derived a three-letter key it has nothing to do with`,
+    );
+  }
+  // The case that actually matters: a name must not outrank the noun next to it.
+  const at = rankOf("faktura til owen", "GET /api/invoices");
+  assert.ok(at === 0, `"faktura til owen" ranks GET /api/invoices at ${at + 1}, behind the ledger`);
+  // And the -n rule still does its job on the class it exists for.
+  for (const [query, want] of [
+    ["kunden", "GET /api/ledger/customer"],
+    ["ordren", "GET /api/orders"],
+    ["avtalene", "GET /api/agreements"],
+  ]) {
+    assert.ok(rankOf(query, want) >= 0, `"${query}" should still find ${want}`);
+  }
+});
+
+/**
+ * The plural definite of a CONSONANT stem is -ene, and fixing the singular is what made its absence
+ * obvious: `utgiften` resolved while `utgiftene` returned nothing. The -e nouns were already covered
+ * by the -ne rule because their stem keeps its own -e (`kunde` -> `kundene`), which is exactly why
+ * this gap survived — the class looked handled.
+ *
+ * Measured before the rule: all six of these returned NOTHING.
+ */
+test("the consonant-stem definite plural resolves", () => {
+  for (const [query, want] of [
+    ["utgiftene", "GET /api/expenses"],
+    ["dokumentene", "GET /api/documents"],
+    ["vedleggene", "GET /api/attachments/{id}"],
+    ["produktene", "GET /api/products"],
+    ["lånene", "GET /api/loans"],
+    ["kontoene", "GET /api/chart-of-accounts/accounts"],
+  ]) {
+    assert.ok(rankOf(query, want) >= 0, `"${query}" should find ${want}`);
+  }
+});
+
+// A gate test was drafted here and deleted: "a suffix rule only fires on a stem the table knows"
+// below already covers it, and more strictly — it asserts the top 3 rather than mere presence, and it
+// names the three queries the ungated rule measurably broke. Dropping the gate fails that test and
+// both third-corpus score floors; it did not fail the draft, which is what settled it.
+
 test("a short word ending in -n survives, though nothing currently distinguishes the guard", () => {
   // `lån` is three characters and ends in -n, so the length guard on the rule exists to stop it being
   // stripped to two. Said plainly: relaxing that guard breaks NO query I can find, because `lån` still

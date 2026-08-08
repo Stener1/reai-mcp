@@ -1517,12 +1517,12 @@ function lookupForms(token: string): string[] {
     // to NOTHING, a quarter of the keys in the table below. Measured: "endre kunden" and "vis ordren"
     // returned no endpoint at all while their indefinite forms ranked correctly.
     //
-    // Both the singular -n and the plural -ne. The length guards are cheap sanity and nothing more —
-    // review verified that removing them entirely leaves all tests green, because the GATE below is
-    // what protects a short word like `lan` (loan): stripping it would give `la`, which is not a key,
-    // so no form is derived either way. An earlier version of this comment claimed the length was
-    // what kept `lan`, which was the same mistake a previous review caught in this repo: a comment
-    // asserting that something is load-bearing when it cannot be reached.
+    // Both the singular -n and the plural -ne. There are no length guards, because the GATE below is
+    // the whole protection: a stem that is not a synonym key derives nothing. Two earlier versions of
+    // this comment got that wrong in opposite directions — one claimed the length kept a short word
+    // like `lan` safe (it could not be reached), the next claimed removing the guards changed nothing
+    // (it fixed `lånet`, which the guards were silently breaking). The length was never a precaution;
+    // it was an off-by-one on the shortest real stem.
     // Only when the stem is a word this table KNOWS. Stripping -n from anything long enough was the
     // first version and it double-counted: `documentation` also produced `documentatio`, which
     // matchStrength then matched against the same endpoint token twice, and "product documentation"
@@ -1530,8 +1530,41 @@ function lookupForms(token: string): string[] {
     // rule existed. Review caught it. A derived form that is not a synonym key buys nothing here and
     // can only distort, so the gate is the point rather than a precaution.
     const known = (stem: string) => Object.prototype.hasOwnProperty.call(TERM_SYNONYMS, stem);
-    if (base.endsWith("ne") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
-    if (base.endsWith("n") && base.length > 4 && known(base.slice(0, -1))) add(base.slice(0, -1));
+    // No length guard, and that is the fix rather than an omission. The guards used to read
+    // `base.length > 5`, which excluded exactly the three-letter consonant stems: `lån` folds to
+    // `lan`, so its definite `lånet` folds to `lanet` — five characters, one short. Measured before
+    // the change: `lån` returned GET /api/loans first, `lånet` returned NOTHING, and `saldo på lånet`
+    // returned company-banks, departments and salary-payments, i.e. it lost the loan endpoint
+    // entirely. Found by Codex on #88; the comment right above claimed the guards were "cheap sanity
+    // and nothing more", which was true of what they let through and false about what they blocked.
+    // The gate below is the whole protection: a stem that is not a key derives nothing.
+    // `minStem` is per suffix, because the single -n is the one that needs protecting and Codex
+    // caught it: with a uniform floor, `vatn` (Nynorsk for water) stems to the known key `vat` and
+    // returned the VAT endpoints, and `owen` stems to `owe` — so "faktura til owen", an invoice to a
+    // person, ranked the customer LEDGER above /api/invoices. A one-character suffix strips one
+    // character, so it turns any four-letter word into a three-letter one, and three-letter keys are
+    // exactly what this change set out to reach. The two rules pull in opposite directions and the
+    // floor has to distinguish them.
+    //
+    // Four for -n, three for the rest, and neither is arbitrary: every real Norwegian -n definite has
+    // an -e stem (`kunde`, `ordre`, `avtale`, `leieavtale`), so nothing legitimate needs a
+    // three-letter stem there — adding -n to each three-letter key gives `vatn`, `mvan`, `owen`,
+    // `ehfn`, `lann`, not one of which is a definite form of it. The -et/-en/-ene rules DO need three
+    // (`lanet`, `lanene`), and no key is shorter than three characters, so the floor can never be the
+    // thing that blocks a real stem.
+    const definite = (suffix: string, minStem = 3) => {
+      if (!base.endsWith(suffix)) return;
+      const stem = base.slice(0, -suffix.length);
+      if (stem.length >= minStem && known(stem)) add(stem);
+    };
+    definite("ne");
+    definite("n", 4);
+    // And the plural definite of a CONSONANT stem, which is -ene: `lånene`, `utgiftene`,
+    // `dokumentene`, `kontoene`, `vedleggene`, `produktene`. Fixing the singular above made the
+    // asymmetry obvious — `utgiften` resolved and `utgiftene` returned nothing, though the -ne rule
+    // already handled the -e nouns (`kundene`, `ordrene`) because their stem keeps its -e. Same gate,
+    // so `scene` and `hygiene` derive nothing: `sc` and `hygi` are not keys.
+    definite("ene");
     // The consonant-stem definites, -en and -et, which are the BIGGER class and were left out of the
     // first version: `reiseregningen`, `beholdningen`, `kontoen`, `utgiften`, `dokumentet` and
     // `vedlegget` all returned nothing at all. Some definite forms of this class already resolved
@@ -1541,8 +1574,18 @@ function lookupForms(token: string): string[] {
     // Safe by the same gate, which is what makes extending cheap: the stem has to be a key, so
     // `token`, `given`, `budget` and `asset` derive nothing because `tok`, `giv`, `budg` and `ass` are
     // not words this table knows.
-    if (base.endsWith("en") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
-    if (base.endsWith("et") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
+    definite("en");
+    definite("et");
+    // The English plural, and the one derivation here with NO known-stem gate. Raised as an
+    // asymmetry worth a deliberate decision rather than an accident, so it was measured: gating it on
+    // `known` changes no corpus score at all, and over 34 plural queries it moves only the THIRD
+    // result, six times, never the first or second (`customers` swaps contact-persons for
+    // POST /api/customers; `warehouses` is arguably improved). Removing the rule entirely changes
+    // exactly the same six. So the gate is left off, with the reason rather than by omission: a
+    // Norwegian definite stem is only useful if it is a synonym key, since that is the table it is
+    // reaching for, while an English plural stem is matched against ENDPOINT path tokens — `warehouse`
+    // earns its keep against `/api/warehouses` whether or not the synonym table has heard of it.
+    // Gating it would silently narrow it to the table.
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];

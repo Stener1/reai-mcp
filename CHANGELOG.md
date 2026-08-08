@@ -42,6 +42,41 @@ All notable changes to `reai-mcp`. Format loosely follows
   searches the whole documentation corpus and counts the rows it checked (34 today), so emptiness
   fails instead of passing quietly. Mutation-verified: removing the README from the corpus it searches
   reports *"only 0 documented rows named an irreversible tool"* rather than passing.
+- **A length guard excluded the shortest real stem, and the definite plural of every consonant stem
+  was missing.** Codex found the first on #88 and it was still open: the definite-form rules read
+  `base.length > 5`, and `lån` (loan) folds to `lan`, so `lånet` folds to `lanet` — five characters,
+  one short. Measured before the fix: `lån` ranked `GET /api/loans` first, `lånet` returned **nothing
+  at all**, and `saldo på lånet` returned company-banks, departments and salary-payments, so it lost
+  the loan endpoint rather than merely reordering it.
+  - The single guard is replaced by a **per-suffix floor**, not lowered: three characters of stem for
+    `-et`/`-en`/`-ne`/`-ene` and four for the one-character `-n` (see the Codex finding below for why
+    that one is different). The gate — the remaining stem must be a synonym key — is still the real
+    protection, and since no key is shorter than three characters (`vat`, `mva`, `owe`, `ehf`, `lan`),
+    the floor can never be what blocks a legitimate stem. Two earlier versions of the comment above
+    these rules got this wrong in opposite directions: one claimed the length kept a short word like
+    `lan` safe, which was unreachable, and the next claimed removing the guards changed nothing, which
+    was wrong in exactly the way Codex found.
+  - Fixing the singular made the sibling gap obvious: **`-ene`, the plural definite of a consonant
+    stem, had no rule at all.** `utgiften` resolved while `utgiftene` returned nothing. The -e nouns
+    were already covered because their stem keeps its own -e (`kunde` → `kundene`), which is exactly
+    why this survived — the class looked handled. Measured before: `lånene`, `utgiftene`,
+    `dokumentene`, `kontoene`, `vedleggene` and `produktene` all returned nothing; all six now resolve.
+  - **Removing the guards went one step too far, and Codex caught that too, on this PR.** A single -n
+    strips one character, so it turns every four-letter word into a three-letter one — and three-letter
+    keys are precisely what this change reaches for. `vatn` (Nynorsk for water) stemmed to the known
+    key `vat` and returned the VAT endpoints; `owen` stemmed to `owe`, so *"faktura til owen"* — an
+    invoice to a person — ranked the customer **ledger** above `/api/invoices`. The floor is now per
+    suffix: four for `-n`, three for the rest. Not a fudge — every real Norwegian `-n` definite has an
+    `-e` stem, so adding `-n` to each three-letter key gives `vatn`, `mvan`, `owen`, `ehfn`, `lann`,
+    none of which is a definite form of it.
+  - Three mutations verified separately: restoring the length guard fails only the three-letter-stem
+    test, removing `-ene` fails that one and the plural test, and dropping the gate fails the
+    pre-existing gate test plus both third-corpus score floors — which is also the evidence that the
+    corpus floors do real work.
+  - A fourth test was drafted for the gate and **deleted rather than kept**: the existing
+    "a suffix rule only fires on a stem the table knows" already covers it and more strictly, and
+    dropping the gate did not fail the draft. A test that survives the mutation it was written for is
+    not coverage.
 
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
