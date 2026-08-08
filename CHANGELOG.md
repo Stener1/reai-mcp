@@ -9,30 +9,46 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **Nine core Norwegian bookkeeping terms reached the wrong endpoint family, or nothing at all.** The
-  escape hatch is the only route to the 143 public operations no curated tool covers, and it is reached by
-  searching — so a term that does not resolve is a capability an agent cannot use. `merverdiavgift`, the
-  name on the Norwegian tax form, returned **nothing**, while the abbreviation `mva` reached
-  `/api/vat-codes`. `arsoppgjor`, `aarsoppgjor` and `arsavslutning` returned nothing while `arsregnskap`
-  was mapped and `/api/annual-accounts` exists. `postering`, `posteringer` and `posteringsgruppe` reached
-  `/api/invoice-reception-documents`, while `/api/postings` carries **nine** uncovered operations.
-  `periodisering` reached the VAT-return endpoints.
-  - Found by probing 34 standard accounting terms written from the DOMAIN rather than from the synonym
-    table, so a miss is a gap rather than a tautology: 22 landed, and only these nine had an existing
-    target. That distinction did the work — `hovedbok` "missed" by returning `/api/ledger/general` and
-    `kontoplan` by returning `/api/chart-of-accounts`, both **exactly right and my expectation wrong**, and
-    three more named families this API does not have, so they cannot be judged at all.
-    `test/discovery-heldout.test.mjs` records why the care is needed: "fixing" a ranker to reach endpoints
-    that do not exist makes it worse while the tests go greener.
-  - `periodisering: ["voucher"]` is labelled in the source as a **judgement, not a measurement** — an
-    accrual is booked as a manual voucher in Norwegian practice — so a later reader who disagrees is
-    arguing about accounting rather than about the ranker.
-  - `arsoppgjor` maps to the `annual-accounts` path token and deliberately NOT to `accounts`, which appears
-    in chart-of-accounts, general-sub-accounts and company bank accounts.
-  - Two tests: the nine terms must reach their family, and **every asserted family must exist in the spec**,
-    so the test cannot chase a phantom. Each synonym verified load-bearing by removing it and watching the
-    test fail; the phantom guard verified by pointing a term at a family that does not exist.
-
+- **Nine core Norwegian bookkeeping terms reached the wrong endpoint, or nothing at all.** The escape hatch
+  is how an agent reaches operations no curated tool covers, and it is reached by searching — so a term that
+  does not resolve costs it the endpoint it was looking for. `merverdiavgift`, the name on the Norwegian tax
+  form, returned **nothing**, while the abbreviation `mva` reached `/api/vat-codes`. `arsoppgjor`,
+  `aarsoppgjor` and `arsavslutning` returned nothing while `arsregnskap` was mapped. `postering`,
+  `posteringer` and `posteringsgruppe` reached `/api/invoice-reception-documents`. `periodisering` reached
+  the VAT-return endpoints.
+  - **Two motivating claims in the first version of this entry were false, and are corrected rather than
+    dropped.** It said no curated tool covers `/api/postings` or `/api/annual-accounts`. Both are false:
+    `reai_list_postings` wraps `GET /api/postings`, and annual-accounts has exactly ONE operation, which
+    `reai_get_annual_accounts` wraps — so the reason given for four of the nine cases was wrong. What was
+    measured still stands: a query in the country's standard bookkeeping words returned nothing or the wrong
+    resource. Found by the independent review of PR #118.
+  - Found by probing 34 standard accounting terms written from the DOMAIN rather than from the synonym table,
+    so a miss is a gap rather than a tautology: 22 landed, and only these nine had an existing target. That
+    distinction did the work — `hovedbok` "missed" by returning `/api/ledger/general` and `kontoplan` by
+    returning `/api/chart-of-accounts`, both **exactly right and my expectation wrong**, and three more named
+    families this API does not have. The corpus is committed as `DOMAIN_PROBE`: the first version reported its
+    headline number from a scratch file that no longer existed, which a reviewer cannot check.
+  - `periodisering: ["voucher"]` was defended as "a judgement about Norwegian practice" the API had no opinion
+    on. **The API has an opinion**: `accrualEnabled`, `accrualPeriod`, `accrualPeriodCount` and
+    `accrualAccountNumber` are first-class fields on supplier-invoice cost lines and order lines, so
+    periodisering is a flag on a line rather than a manual voucher. The review found that by grepping for the
+    word, which I had not done before writing a comment that declared the question closed. It still maps to
+    `voucher`, because `fieldNamesOf` excludes request-body fields so `["accrual"]` would match nothing — the
+    comment now calls it the best REACHABLE answer rather than the correct one. English `accrual`,
+    `accruals` and `periodisation` were empty and are mapped too.
+  - **Two of the nine entries were dead code, and "each synonym verified load-bearing" was false** — I checked
+    four of them. `posteringer` is derived by lookupForms' `-er` rule and `merverdiavgiften` by the
+    definite-suffix rule; both removed. The plural in `postering: ["posting", "postings"]` **demoted the
+    curated operation**, putting `/api/postings/groups` above the `GET /api/postings` that
+    `reai_list_postings` wraps; dropped. And `"mva"` in the merverdiavgift list matches nothing in any of the
+    430 operations while inflating the coverage multiplier — 18.9 with it, 19.18 without.
+  - `arsoppgjor` maps to the `annual-accounts` path token and deliberately NOT to `accounts`, which appears in
+    chart-of-accounts, general-sub-accounts and company bank accounts.
+  - The tests assert **method and exact path**, not a prefix. The review repointed `merverdiavgift` at
+    `vat-returns` — three filing WRITES — and the prefix version still passed, in a repository whose ranking
+    design exists to stop neutral nouns surfacing writes. The phantom guard needs an exact operation too: it
+    previously accepted `/api/vat`, and even `/api`, as "a family that exists". Both defeats re-verified as
+    caught. Regression checked at rank level across 96 held-out queries: **not one moved a single rank.**
 
 - **The deployment served guidance that had already been measured false, and nothing could have noticed.** PR #115 corrected two agent-facing quirks — one told agents a `+47` prefix is REJECTED on
   a supplier phone, one said foreign numbers are stored "exactly as sent", and both are wrong. Those
