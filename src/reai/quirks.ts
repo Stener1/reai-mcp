@@ -125,9 +125,14 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
-      "this tenant. /api/share-investments is the exception worth knowing: it returns 403 with an " +
-      "ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
-      "here the same way — the module is off.",
+      "this tenant. /api/share-investments is the exception worth knowing: when it refuses it does so " +
+      "with an ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
+      "here the same way — the module is off.\n\n" +
+      "Which is a CONDITIONAL, and worth stating because an earlier version of this note read as though " +
+      "share investments were gated outright: re-measured 2026-08-08, GET /api/share-investments answers " +
+      "200 with an empty list on both test tenants, so the module is on for them. Projects is the one " +
+      'that is genuinely off on both — 403 "Project module is disabled" — which also puts timesheets out ' +
+      "of reach, since they require a projectId.",
   },
   {
     id: "date-range-required",
@@ -1516,6 +1521,74 @@ export const QUIRKS: readonly Quirk[] = [
       "The `include` parameter is the only array query parameter in the API and uses " +
       "style=form, explode=false — i.e. ?include=summary,pending_postings, comma-joined rather than " +
       "a repeated key. This server handles that for you.",
+  },
+  {
+    id: "share-investment-event-posts-a-voucher",
+    paths: ["/api/share-investments/{id}/events"],
+    methods: ["POST"],
+    kind: "irreversible",
+    note:
+      "This POSTS TO THE LEDGER. Creating the investment itself posts nothing — measured, the voucher " +
+      "count was 0 before and 0 after — but an EVENT books a voucher in its own SH series and the " +
+      "response carries its `voucherId`. Measured on tenant 2783: a DIVIDEND of 1000 produced voucher " +
+      '30997 "SH1-2026 Utbytte …" with postings on 1920 and 8071.\n\n' +
+      "There is no DELETE for an event: the document has GET and POST on this path and nothing else. " +
+      "The only undo is on the VOUCHER, and there it answers {\"outcome\":\"reversed\"} rather than " +
+      '"deleted" — measured — which books two offsetting postings and leaves the original in place. The ' +
+      "voucher then vanishes from GET /api/vouchers while still reading 200 by id, so a caller checking " +
+      "the list concludes the posting is gone when four postings remain. Net effect on the accounts is " +
+      "zero; the trace is permanent.\n\n" +
+      "So an event is a real accounting entry. Get it right the first time rather than expecting to " +
+      "tidy up afterwards.",
+  },
+  {
+    id: "share-investment-with-events-cannot-be-deleted",
+    paths: ["/api/share-investments/{id}"],
+    methods: ["DELETE"],
+    statuses: [400],
+    kind: "irreversible",
+    note:
+      'A 400 "Aksjeposten har registrerte transaksjoner og kan ikke slettes." means the position has ' +
+      "events and the API will not remove it. There is no way to remove the events either, so the " +
+      "record is PERMANENT from its first event onward.\n\n" +
+      "The trap is that an opening position IS an event. Passing openingQuantity, openingCostAmount and " +
+      "openingDate to POST /api/share-investments silently creates a PURCHASE event — measured: event " +
+      "42, quantity 100, pricePerUnit derived as 500 from 50000/100 — so an investment created with an " +
+      "opening balance can never be deleted, and nothing in the create response says so. Clearing those " +
+      "fields with a later PUT does NOT remove the event; measured, it answered 200 and the event " +
+      "stayed.\n\n" +
+      "Create the position WITHOUT an opening balance if you may need to remove it, and add the purchase " +
+      "as an explicit event once you are sure. One share investment on the write test tenant is " +
+      "unremovable because this was learned the hard way; it is labelled as a probe.",
+  },
+  {
+    id: "share-investment-event-needs-a-settlement-account",
+    paths: ["/api/share-investments/{id}/events"],
+    methods: ["POST"],
+    statuses: [400],
+    kind: "validation",
+    note:
+      'A 400 "Velg verdipapirkontoen transaksjonen ble gjort opp mot." is asking for `companyBankId` — ' +
+      '"choose the securities account the transaction was settled against". The document marks NOTHING ' +
+      "required on this body, so nothing warns you, and the message is Norwegian. Measured: a DIVIDEND " +
+      "with eventType, eventDate, amount and feeAmount was refused, and the same body with a " +
+      "companyBankId answered 201.\n\n" +
+      "reai_list_company_banks gives the id. A tenant with no company bank cannot record an event at all.",
+  },
+  {
+    id: "share-investment-put-requires-more-than-the-document-says",
+    paths: ["/api/share-investments/{id}"],
+    methods: ["PUT"],
+    kind: "shape",
+    note:
+      "The document says `required: [name]`. The API also requires `instrumentType`: measured, " +
+      'PUT {name} answered 400 "Validation failed" with fieldErrors[].field "instrumentType", and ' +
+      "adding it answered 200.\n\n" +
+      "And this PUT REPLACES. In the same measurement `ticker` went from \"ZZ\" to null because the body " +
+      "omitted it. `quantity`, `costPrice` and `assetAccountNumber` survived — they are derived from the " +
+      "events and from creation, not settable here — so checking one of those and concluding the record " +
+      "is intact would be wrong. Send every descriptive field you want to keep: ticker, isin, " +
+      "organizationNumber, withinExemptionMethod, companyBankId.",
   },
   {
     id: "loan-type-and-perspective-are-constrained-pairs",

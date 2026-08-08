@@ -92,6 +92,46 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Share investments measured, before building anything for them — and the measuring cost a permanent
+  record in a real company, which is the finding.** Two roadmap domains recorded as "module-disabled"
+  turned out not to be: `GET /api/share-investments` and `GET /api/documents` both answer **200 with an
+  empty list** on both test tenants. Only Projects is genuinely off (`403 "Project module is disabled"`,
+  which also puts Timesheets out of reach since they need a `projectId`) along with accountant-clients
+  (`403 "only available for accountant tenants"`). The `module-gating` quirk read as though share
+  investments were gated outright; it now states the measurement and keeps the 403 guidance as the
+  conditional it is.
+- Four quirks from driving the domain on tenant 2783 (114 total), all four undocumented:
+  - **An EVENT posts to the ledger; the investment itself does not.** Voucher count 0 before and after
+    creating a position, then a `DIVIDEND` of 1000 booked voucher `SH1-2026` with postings on 1920 and
+    8071 — share investments have their own voucher series, and the event response carries its
+    `voucherId`. There is no `DELETE` for an event: the document has `GET` and `POST` on that path and
+    nothing else.
+  - **An investment with any event can never be deleted** — `400 "Aksjeposten har registrerte
+    transaksjoner og kan ikke slettes."` — and *an opening position is an event*. Passing
+    `openingQuantity`/`openingCostAmount`/`openingDate` to the create silently produces a `PURCHASE`
+    event (measured: quantity 100, `pricePerUnit` derived as 500 from 50000/100), so a position created
+    with an opening balance is permanent from birth, and nothing in the response says so. Clearing those
+    fields afterwards does not remove the event: the PUT answered 200 and the event stayed.
+  - **An event needs a settlement account, and says so only in Norwegian**:
+    `400 "Velg verdipapirkontoen transaksjonen ble gjort opp mot."` is asking for `companyBankId`, which
+    the document marks as required nowhere.
+  - **`PUT` requires `instrumentType`** although the document says `required: [name]` — measured, 400
+    with `fieldErrors[].field: "instrumentType"` — and it replaces: `ticker` went from `"ZZ"` to null by
+    omission, while `quantity`, `costPrice` and `assetAccountNumber` survived because they are derived
+    rather than settable. So checking one of those and concluding the record is intact would be wrong.
+  - Also measured: `assetAccountNumber` is derived at creation as **1810**, the same derive-once pattern
+    as the loan accounts.
+- **One consequence to own.** Learning the deletion rule required creating a position, and the position
+  is now unremovable on tenant 2783 — the API offers no way to delete its events. It is renamed
+  `zz-UNREMOVABLE reai-mcp probe 2026-08-08 — safe to ignore` so anyone who meets it knows what it is.
+  The ledger is neutral: the dividend voucher's own delete answered `{"outcome":"reversed"}`, which
+  booked two offsetting postings, so the four postings net to zero — and that voucher now reads 200 by id
+  while being absent from `GET /api/vouchers`, the same invisible-reversal shape this repository already
+  records for expenses. Nothing else was left behind: 0 loans, 0 creditors, 0 debtors, 0 employees,
+  0 expenses, 0 company banks, 0 vouchers listed.
+
+### Added
+
 - **Loans: five curated tools, and four constraints the spec does not state.** `/api/loans` had no
   curated coverage and was listed as blocked on "no data" — both test companies have zero loans. With
   a write tenant available the domain could be *measured* instead of guessed, which is the only way any
