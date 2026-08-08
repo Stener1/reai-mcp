@@ -261,6 +261,13 @@ All notable changes to `reai-mcp`. Format loosely follows
       carry its stored `holidayAllowanceEarningYear` onto a code the API refuses it
       on — built out of a field the caller never mentioned. The message says that,
       and says to pass `holidayAllowanceEarningYear: null` in the same call.
+    - Since the tool now reads the run anyway, it also refuses to change a line on a
+      run that is no longer `under_process` — a wage line altered after the voucher
+      is posted would leave the line and the ledger disagreeing. Said honestly in
+      the refusal: that the API would also reject it is **inferred** from the
+      completion description, not measured, because producing such a run means
+      filing the a-melding. The message names `reai_request` for anyone who has
+      decided otherwise.
     - The write suite asserts **both halves in one run**: the curated tool
       preserves the comment through an update that never mentions it, and a raw
       `PUT` in the same session clears it. The precondition ("the line was created

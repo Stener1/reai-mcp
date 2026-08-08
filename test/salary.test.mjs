@@ -533,3 +533,28 @@ test("clearing the year in the same call as the type change goes through", async
   assert.equal(calls[1].body.holidayAllowanceEarningYear, null);
   assert.equal(calls[1].body.specificationCode, "COMMISSION");
 });
+
+// The update already reads the run for the merge, so the status is free — and a wage line changed
+// on a run whose voucher is posted would leave the line and the ledger disagreeing.
+test("changing a line on a run that is no longer a draft is refused before the PUT", async () => {
+  for (const status of ["unpaid", "complete", "reversed"]) {
+    const { calls, result, text } = await run(
+      "reai_update_salary_line",
+      { id: 1360, wageSpecId: 7, specificationCode: "COMMISSION", quantity: 1, rate: 1000 },
+      (req) =>
+        req.method === "GET"
+          ? {
+              ...runRecord({ status }),
+              employees: [{ employeeId: 987, wageSpecs: [{ id: 7, comment: "x" }] }],
+            }
+          : runRecord(),
+    );
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${status}: no PUT may be issued`);
+    assert.equal(result.isError, true);
+    assert.match(text, new RegExp(status));
+    // It says the refusal is this server's caution rather than a measured API rule, and names the
+    // way through — the repo's standing rule about not dressing an inference as a measurement.
+    assert.match(text, /was not established/);
+    assert.match(text, /reai_request PUT/);
+  }
+});

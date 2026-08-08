@@ -406,6 +406,26 @@ const updateSalaryLine = defineTool({
       path: `/api/salary-payments/${id}`,
       tenantId: resolvedTenant,
     });
+    // The read is already happening for the merge, so the run's status is in hand for free. Using
+    // it turns a raw 400 into a sentence that says what state the run is in — and refuses rather
+    // than letting a wage line drift out of step with a voucher that is already posted.
+    //
+    // Stated honestly: that the API rejects this is INFERRED from the completion description, not
+    // measured, because producing a completed run requires filing the a-melding. If the inference
+    // is wrong, this refusal is the only thing in the way and it names the way around it.
+    const runStatus = current.data?.status;
+    if (runStatus !== undefined && runStatus !== "under_process") {
+      return fail(
+        `Salary run ${id} has status ${JSON.stringify(runStatus)}, not under_process. Nothing was ` +
+          `sent.\n\n` +
+          `${describeStatus(typeof runStatus === "string" ? runStatus : undefined)}\n\n` +
+          `Changing a wage line on a run whose voucher is already posted would leave the line and ` +
+          `the ledger disagreeing. This server refuses rather than find out on real books; whether ` +
+          `the API would also refuse was not established, since producing such a run means filing ` +
+          `the a-melding. If you have decided otherwise, reai_request PUT ` +
+          `/api/salary-payments/${id}/wage-specs/${wageSpecId} will do it.`,
+      );
+    }
     const stored = current.data?.employees
       ?.flatMap((e) => e.wageSpecs ?? [])
       .find((line) => line.id === wageSpecId);
