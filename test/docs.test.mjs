@@ -310,3 +310,29 @@ test("no symlink is tracked in git", async () => {
     .map((line) => line.split("\t")[1]);
   assert.deepEqual(tracked, [], "these are tracked symlinks — almost certainly a local convenience");
 });
+
+// The same mistake with a different mode, and it happened again while writing PR #93: an agent was
+// given its own git worktree under `.claude/worktrees/`, and `git add -A` staged it as mode 160000 —
+// a gitlink, i.e. a submodule pointing at a commit that exists in no remote. A clone would fail to
+// initialise it and CI would not care, exactly like the symlink. `.gitignore` now covers that path,
+// but the mode is the durable guard: this repository has no submodules, so any gitlink is an
+// accident.
+test("no gitlink is tracked in git", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  // Mode 160000 is git's mode for a commit object embedded in a tree.
+  const tracked = execFileSync("git", ["ls-files", "-s"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.startsWith("160000"))
+    .map((line) => line.split("\t")[1]);
+  assert.deepEqual(tracked, [], "these are tracked gitlinks — a submodule nobody can fetch");
+  // And the file that is supposed to prevent it says so, so removing the rule fails here rather
+  // than silently waiting for the next `git add -A`.
+  const { readFileSync } = await import("node:fs");
+  assert.match(
+    readFileSync(new URL("../.gitignore", import.meta.url), "utf8"),
+    /^\.claude\/worktrees\/$/m,
+    ".gitignore no longer ignores agent worktrees, which is how a gitlink gets staged",
+  );
+});

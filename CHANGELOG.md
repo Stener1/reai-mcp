@@ -124,6 +124,71 @@ All notable changes to `reai-mcp`. Format loosely follows
     "a suffix rule only fires on a stem the table knows" already covers it and more strictly, and
     dropping the gate did not fail the draft. A test that survives the mutation it was written for is
     not coverage.
+- **The tenant boundary asked the OpenAPI spec for permission to check.** A connection bound to one
+  company at authorization time must not address another, and `reai_request` can name a tenant in
+  four places: the header, the path, the query and the body. The gate read the spec to find where a
+  tenant *was declared*, which left three holes, each reachable:
+  - **An unresolvable path checked nothing at all** — `if (!op) return []`. Unknown paths are
+    deliberately permitted here (the API decodes and normalises before routing, so refusing what
+    this server cannot resolve would refuse legitimate calls), which made the one gate that must not
+    depend on resolution the only one that did.
+  - **An undeclared query parameter was invisible even on a resolved path.** `GET /api/vouchers`
+    declares `startDate`, `endDate`, `voucherType`, `registeredBy`, `includeReversed` — and no
+    tenant parameter, so `?tenantId=<other>` was not looked at. The spec declares what the API
+    documents, not what it reads.
+  - **The body was never read**, so `POST /api/x {"tenantId": <other>}` passed the boundary.
+  - Now the path segments, every query key and the whole body (at depth, through arrays, and
+    through a `tenant` object's own `id`) are scanned regardless of what the spec says. Each hole
+    mutation-tested separately: restoring the give-up-on-unresolved line, removing the query scan
+    and removing the body walk each fail their own test and nothing else.
+  - **None of the three currently reaches another company's books.** Measured against the live API
+    on 2026-08-08 with a read-only probe on tenant 2634 and a nonexistent tenant id: `tenantId`,
+    `tenant_id`, `tenant` and `companyId` in the query are all ignored, a body tenant id is ignored,
+    and a duplicate `X-Tenant-Id` does not displace the first — 57 vouchers returned in every case.
+    That is upstream behaviour nobody here controls or is told about when it changes, and this gate
+    is the promise the consent page makes to a user, so it fails closed on the request rather than
+    trusting ReAI to keep ignoring it.
+  - **The key vocabulary is narrow, and the narrowness is measured rather than guessed.** A plain
+    `/tenant/i` over the spec's own field names matches `tenantNoticeMonths` (a small integer — a
+    rental agreement with three months' notice would have read as "tenant 3"), `tenantPhone` (eight
+    digits), `enkOwnerPersonIdentifierOnTenant` (eleven) and `tenantBirthDate`, so it would have
+    refused ordinary writes. `companyId` is excluded for a stronger reason: it is a different id
+    space — `Tenant` itself has a `companyId`, and `CustomerRes`, `SupplierRes` and
+    `SubscriptionServiceRecipientRes` each carry one for a counterparty. A boundary that fires on
+    innocent bodies gets switched off. There is a test asserting a body carrying all six of those
+    fields goes through.
+  - **Four ways through it survived the first version, all found by Codex on the PR and each
+    demonstrated end to end — the request reached the client — before being fixed.** The unifying
+    mistake was reading the request the way JavaScript reads it rather than the way the upstream Java
+    does:
+    - `{ tenantId: [5002] }`. The query schema permits arrays and `ReaiClient.buildUrl` comma-joins
+      them, so a single-element array is transmitted as exactly `tenantId=5002` while the scan saw an
+      array and ignored it. Arrays are walked now, at any nesting, in query and body alike.
+    - `"+5002"` and `" 5002 "`. `Integer.parseInt` accepts a leading `+` and a container trims, so
+      both address the same company while failing `/^\d+$/`.
+    - `"٥٠٠٢"` — Arabic-Indic digits, which `parseInt` also accepts. Rather than reimplement Java's
+      numeric parsing and get it subtly wrong, an all-decimal-digit string that is not ASCII is kept
+      as its raw text: it can never equal the bound tenant, so it is always refused. Failing closed on
+      a spelling nobody legitimate uses costs nothing.
+    - A body nested **deeper than eight levels**, and a path in a router-normalised form such as
+      `/api/accountant-clients;v=1/5002`. The depth ceiling was a bypass rather than a safeguard — an
+      instruction to add one more wrapper — so it is gone, and the traversal is an explicit stack so
+      that removing it cannot trade a bypass for a stack overflow. The path scan now runs over every
+      `routedPathForms` variant, which the rest of the handler already reasoned about; a matrix
+      parameter is the percent-encoding trick in a different alphabet.
+    - Each fix mutation-tested on its own, and there is a mirror test asserting the spelling rules do
+      not refuse `-5002`, `0`, `"not-a-number"`, or the bound tenant echoed back in any spelling.
+  - Not keyed on risk, which is unchanged but now asserted: a *read* across the boundary is the
+    disclosure the boundary exists to prevent.
+  - Also deleted a doc comment the code it described had left behind, above `tenantIdsInRequest`.
+
+- **A gitlink nearly reached main, the same way the `node_modules` symlink did.** An agent working in
+  its own git worktree under `.claude/worktrees/` was staged by `git add -A` as mode 160000 — a
+  submodule pointing at a commit that exists in no remote, so a clone cannot initialise it and CI
+  does not care. Caught before merge this time, by the tracked-file audit written after the symlink.
+  `.gitignore` now covers the path, and there is a guard on the mode: this repository has no
+  submodules, so any gitlink is an accident, and the test also asserts the `.gitignore` rule still
+  exists rather than waiting for the next `git add -A` to find out.
 
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
