@@ -371,7 +371,15 @@ test("every tool that wraps a replacement declares the read it depends on", () =
       paths.some(([m]) => m === "GET"),
       `${name} merges, so it must declare the GET it reads`,
     );
-    assert.ok(paths.some(([m]) => m === "PUT"), `${name} should declare its PUT`);
+    // The WRITE, whichever verb it is. This asserted "PUT" specifically while the filter above
+    // admitted PATCH too, so the first GET+PATCH merge to arrive failed a test that had selected
+    // it deliberately. reai_set_employee_bank_account and reai_add_employment_line are that case:
+    // PATCH /api/employees/{id} is a real patch, but its employmentLines field replaces, so the
+    // read-merge-write shape is needed on a PATCH.
+    assert.ok(
+      paths.some(([m]) => m === "PUT" || m === "PATCH"),
+      `${name} should declare the write it merges into`,
+    );
   }
 });
 

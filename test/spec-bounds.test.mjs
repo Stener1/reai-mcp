@@ -265,10 +265,18 @@ test("the operations this sweep skips are the ones we know about", () => {
     const exposes = Object.keys(constraints).some((field) => resolveInput(tool.inputSchema, field));
     if (!exposes && Object.keys(constraints).length > 0) seen.add(`${tool.name}: ${method} ${path}`);
   }
-  // Four, not five: the purchase template declares no constraints at all, so there is nothing
-  // for this sweep to skip on it. Measured rather than assumed — the first version of this list
-  // had five and the test said so.
+  // Six: four agreement templates plus the two single-concern employee tools. The purchase
+  // template declares no constraints at all, so there is nothing for this sweep to skip on it —
+  // measured rather than assumed, since the first version of this list had five and said so.
   const expected = [
+    // Both take PATCH /api/employees/{id} and expose exactly ONE concern each — the salary
+    // account, and the employment lines. The constrained fields on that endpoint are `name`
+    // (maxLength 75) and `phone` (30), and neither tool accepts either, which is the point of
+    // their being separate tools: a payment destination is not changed while fixing a postal
+    // code. So there is nothing here for the sweep to bound. reai_create_employee and
+    // reai_update_employee DO expose both and are checked normally.
+    "reai_add_employment_line: PATCH /api/employees/{id}",
+    "reai_set_employee_bank_account: PATCH /api/employees/{id}",
     "reai_update_agreement: PUT /api/agreements/accounting-services/{id}",
     "reai_update_agreement: PUT /api/agreements/employee-contract/{id}",
     "reai_update_agreement: PUT /api/agreements/rent-agreement/{id}",

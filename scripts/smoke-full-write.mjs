@@ -886,6 +886,8 @@ async function main() {
 
     // An employee is the precondition for a run, and its bank account is the precondition for
     // creating one at all. Two are made: one payable, one deliberately without an account.
+    // The curated tools now own this. The raw POST is kept for the UNBANKED employee below, so
+    // both the tool path and the raw path stay exercised in one run.
     const makeEmployee = async (label, extra) => {
       // The NAME is timestamped, not only the email: an employee name is unique per tenant
       // (409 "Ansatt med dette navnet finnes allerede"), so a record stranded by an earlier
@@ -910,20 +912,190 @@ async function main() {
       return { res, id, data: res.isError ? undefined : jsonOf(res) };
     };
 
-    const payable = await makeEmployee("Paid", { accountNumber: "15201353103" });
+    // --- Employee master data, through the curated tools ----------------------
+    //
+    // Payroll's precondition is an employee with a bank account, so this runs first and hands its
+    // employee to the payroll section below. Everything here was measured before it was written:
+    // the PATCH really patches, `employmentLines` inside it does not, and an unparseable phone is
+    // stored as null with a 200.
+    console.log("\n  Employee master data:");
+    const empStamp = `${Date.now()}`.slice(-7);
+    const createdEmp = await client.callTool({
+      name: "reai_create_employee",
+      arguments: {
+        name: `Zz Master ${empStamp}`,
+        email: `zz-master-${empStamp}@example.invalid`,
+        phone: "22 33 44 55",
+        dateOfEmployment: "2026-01-01",
+        city: "Oslo",
+        postalCode: "0150",
+      },
+    });
+    const empData = createdEmp.isError ? undefined : jsonOf(createdEmp);
+    const empId = empData?.id;
+    if (Number.isInteger(empId)) created.salaryEmployeeIds.push(empId);
+    report(
+      "reai_create_employee",
+      !createdEmp.isError && Number.isInteger(empId),
+      empId ? `id=${empId}` : textOf(createdEmp).slice(0, 180),
+    );
+    report(
+      "a plain Norwegian number is normalised to E.164, and the tool says so",
+      empData?.phone === "+4722334455" && /normalised/.test(textOf(createdEmp)),
+      `phone=${JSON.stringify(empData?.phone ?? null)}`,
+    );
+    report(
+      "a new employee has no bank account, so payroll would refuse them",
+      (empData?.bankAccount ?? null) === null &&
+        /cannot be included in a salary run/.test(textOf(createdEmp)),
+      `bankAccount=${JSON.stringify(empData?.bankAccount ?? null)}`,
+    );
+
+    if (Number.isInteger(empId)) {
+      const setAccount = await client.callTool({
+        name: "reai_set_employee_bank_account",
+        arguments: { id: empId, accountNumber: "15201353103" },
+      });
+      report(
+        "reai_set_employee_bank_account reports an ADD, and splits the number",
+        !setAccount.isError &&
+          jsonOf(setAccount)?.iban === "NO1615201353103" &&
+          /ADDED/.test(textOf(setAccount)),
+        firstLineOf(textOf(setAccount)),
+      );
+      const repoint = await client.callTool({
+        name: "reai_set_employee_bank_account",
+        arguments: { id: empId, accountNumber: "15060012345" },
+      });
+      report(
+        "changing it again reports a REPOINT, naming both accounts",
+        !repoint.isError &&
+          /REPOINTED/.test(textOf(repoint)) &&
+          /NO1615201353103/.test(textOf(repoint)) &&
+          /NO9815060012345/.test(textOf(repoint)),
+        firstLineOf(textOf(repoint)),
+      );
+
+      // Two lines added one at a time. The second is the one that matters: if `employmentLines`
+      // were sent naively the first would be gone, and the create already made one, so a correct
+      // run ends with three.
+      const lineCount = async () => {
+        const r = await client.callTool({
+          name: "reai_get_employee",
+          arguments: { id: empId, includePersonalData: true },
+        });
+        const relations = r.isError ? undefined : jsonOf(r)?.employmentRelations;
+        return Array.isArray(relations)
+          ? relations.flatMap((rel) => rel.employmentLines ?? []).length
+          : undefined;
+      };
+      const linesAtStart = await lineCount();
+      report(
+        "creating an employee already made one employment line",
+        linesAtStart === 1,
+        `lines=${linesAtStart}`,
+      );
+      for (const [label, line] of [
+        ["a salary line from the start date", { fromDate: "2026-01-01", percentage: 100, annualSalary: 600000 }],
+        ["a raise from June", { fromDate: "2026-06-01", percentage: 80, annualSalary: 500000 }],
+      ]) {
+        const added = await client.callTool({
+          name: "reai_add_employment_line",
+          arguments: { id: empId, ...line },
+        });
+        report(`reai_add_employment_line: ${label}`, !added.isError, firstLineOf(textOf(added)));
+      }
+      const linesAfter = await lineCount();
+      report(
+        "every earlier line survived — the field replaces, so this is the whole point",
+        linesAfter === 3,
+        `${linesAtStart} + 2 = ${linesAfter} (3 expected)`,
+      );
+
+      // A line before employment start: refused locally, and the existing lines must be intact.
+      const tooEarly = await client.callTool({
+        name: "reai_add_employment_line",
+        arguments: { id: empId, fromDate: "2025-06-01", percentage: 50 },
+      });
+      report(
+        "a line dated before employment start is refused without calling the API",
+        tooEarly.isError === true && /cannot start before the employment does/.test(textOf(tooEarly)),
+        firstLineOf(textOf(tooEarly)),
+      );
+      report(
+        "the refusal cost nothing — the lines are still there",
+        (await lineCount()) === 3,
+        `lines=${await lineCount()}`,
+      );
+
+      // The patch really patches: change the city and check that the account, phone and lines
+      // are all still what they were. This is the claim the tool text makes.
+      const patched = await client.callTool({
+        name: "reai_update_employee",
+        arguments: { id: empId, city: "Bergen", postalCode: "5003" },
+      });
+      const afterPatch = patched.isError ? undefined : jsonOf(patched);
+      // The account is read through reai_get_employee with includePersonalData, because the write
+      // tools redact it — asserting on the redacted value would be asserting on the placeholder.
+      const unredacted = await client.callTool({
+        name: "reai_get_employee",
+        arguments: { id: empId, includePersonalData: true },
+      });
+      const ibanAfterPatch = unredacted.isError ? undefined : jsonOf(unredacted)?.bankAccount?.iban;
+      report(
+        "reai_update_employee changes only what it was given",
+        !patched.isError &&
+          afterPatch?.address?.city === "Bergen" &&
+          afterPatch?.phone === "+4722334455" &&
+          ibanAfterPatch === "NO9815060012345" &&
+          (await lineCount()) === 3,
+        `city=${afterPatch?.address?.city} phone=${JSON.stringify(afterPatch?.phone ?? null)} ` +
+          `iban=${JSON.stringify(ibanAfterPatch ?? null)} lines=${await lineCount()}`,
+      );
+
+      // And the silent one. The number is set, so this is not a vacuous check.
+      const badPhone = await client.callTool({
+        name: "reai_update_employee",
+        arguments: { id: empId, phone: "nonsense" },
+      });
+      report(
+        "an unparseable phone answers 200 and stores null — and the tool says so",
+        !badPhone.isError &&
+          (jsonOf(badPhone)?.phone ?? null) === null &&
+          /DID NOT SURVIVE/.test(textOf(badPhone)),
+        `phone=${JSON.stringify(jsonOf(badPhone)?.phone ?? null)}`,
+      );
+      await client.callTool({
+        name: "reai_update_employee",
+        arguments: { id: empId, phone: "22334455" },
+      });
+    }
+
+    // Reuses the employee the master-data section built, rather than making a second one: it
+    // already has an account, and payroll's precondition is exactly that.
+    const payable = { id: empId, data: empData };
     report(
       "a test employee exists, with a bank account",
       Number.isInteger(payable.id),
-      payable.id ? `id=${payable.id}` : textOf(payable.res).slice(0, 160),
+      payable.id ? `id=${payable.id}` : "no employee was created above",
     );
     // The renamed-and-split response field. A caller that compares what it sent to the
     // `accountNumber` it reads back concludes the write failed; this pins why.
+    // The create response is the one checked here: accountNumber was NOT passed to it, so the
+    // absence of a flat field is read from a record that has a bankAccount by now — read it fresh.
+    const payableNow = Number.isInteger(payable.id)
+      ? await client.callTool({
+          name: "reai_get_employee",
+          arguments: { id: payable.id, includePersonalData: true },
+        })
+      : undefined;
+    const payableRecord = payableNow && !payableNow.isError ? jsonOf(payableNow) : undefined;
     report(
       "accountNumber goes in flat and comes back split under bankAccount",
-      payable.data?.bankAccount?.bankCode === "1520" &&
-        payable.data?.bankAccount?.accountNumber === "1353103" &&
-        payable.data?.accountNumber === undefined,
-      JSON.stringify(payable.data?.bankAccount ?? payable.data ?? null).slice(0, 160),
+      payableRecord?.bankAccount?.bankCode === "1506" &&
+        payableRecord?.bankAccount?.accountNumber === "0012345" &&
+        payableRecord?.accountNumber === undefined,
+      JSON.stringify(payableRecord?.bankAccount ?? null).slice(0, 160),
     );
 
     const unbanked = await makeEmployee("Unbanked", {});
@@ -1144,11 +1316,7 @@ async function main() {
     for (const employeeId of created.salaryEmployeeIds) {
       await attempt(
         `test employee ${employeeId} deleted`,
-        () =>
-          client.callTool({
-            name: "reai_request",
-            arguments: { method: "DELETE", path: `/api/employees/${employeeId}`, tenantId },
-          }),
+        () => client.callTool({ name: "reai_delete_employee", arguments: { id: employeeId } }),
         (r) => firstLineOf(textOf(r)),
       );
     }

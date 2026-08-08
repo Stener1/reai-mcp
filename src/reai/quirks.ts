@@ -591,6 +591,67 @@ export const QUIRKS: readonly Quirk[] = [
       "is 50%: a 1 × 5000 COMMISSION line produced payableAmount 2500 and totalTaxDeducted 2500.",
   },
   {
+    id: "employee-patch-really-patches-except-one-field",
+    paths: ["/api/employees/{id}"],
+    methods: ["PATCH"],
+    kind: "shape",
+    note:
+      "This is a REAL patch, which in this API is the exception: measured, a PATCH carrying only " +
+      "`phone` left city, postalCode, addressPart1, bankAccount, dateOfEmployment and the " +
+      "employment lines exactly as they were. Company banks, creditors, agreements, subscriptions " +
+      "and salary wage lines all replace; this one does not.\n\n" +
+      "With one exception INSIDE it. `employmentLines` is a FULL REPLACEMENT: an employee with two " +
+      "lines, PATCHed with one, came back with one — the other gone, and the survivor recreated " +
+      "with a NEW id. So adding a raise as a single-line PATCH deletes the employment history, " +
+      "which the a-melding reports. Read the current lines and send them back with the new one. " +
+      "`employmentLines: []` clears every line; `employmentLines: null` leaves them ALONE (measured " +
+      "on an employee that had one, so it is not a vacuous reading of an already-empty list).\n\n" +
+      "One validation rule on those lines, measured: a line whose fromDate is BEFORE the employee's " +
+      'dateOfEmployment is refused with 400 "Ansettelseslinje N: Fra-dato kan ikke være før ' +
+      'ansettelsesstart". The N counts position in the REQUEST array, not a line id. The rejection ' +
+      "is atomic — the lines already on the employee all survived it — so a refused write is safe, " +
+      "but it is easy to hit: an employee created without a start date has one of TODAY, and any " +
+      "historical line then predates it.\n\n" +
+      "And null does NOT mean \"clear\" here in general, whatever the field types suggest — only the " +
+      "fields whose own descriptions say so behave that way. Measured: endDateOfEmployment: null " +
+      "cleared a stored date, while phone: null, email: null and accountNumber: null were all " +
+      "silently IGNORED, the stored values still there afterwards. So there is no way to REMOVE a " +
+      'phone or an email through this endpoint; an empty email answers 409 "Employee email is ' +
+      'required". A fødselsnummer is checksum-validated (400 "Ugyldig fødselsnummer"), and so is an ' +
+      'account number — "12345" answers 400 naming the expected BBAN length, and a non-numeric one ' +
+      '"must contain only digits".',
+  },
+  {
+    id: "employee-phone-is-normalised-or-silently-nulled",
+    paths: ["/api/employees", "/api/employees/{id}"],
+    methods: ["POST", "PATCH"],
+    kind: "gotcha",
+    note:
+      "`phone` is stored in E.164 and the parser is generous: \"22 33 44 55\", \"0047 22334455\" " +
+      'and "+4722334455" all store as "+4722334455", and "+1 415 555 0100" stores as ' +
+      '"+14155550100". What it does with a value it CANNOT parse is the problem — it stores NULL, ' +
+      "answers 200, and says nothing. Measured: \"nonsense\" replaced a stored \"+4722334455\" " +
+      "with null. So a phone write can destroy the number that was there with no error at all; " +
+      "read the field back rather than trusting the status.\n\n" +
+      "Note this differs from suppliers, where a \"+47\" prefix is REJECTED outright. Same-looking " +
+      "field, opposite handling.",
+  },
+  {
+    id: "employee-create-is-not-a-blank-record",
+    paths: ["/api/employees"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "Only name and email are required, but what comes back is not an empty shell. Measured with " +
+      "exactly those two fields: `dateOfEmployment` was set to TODAY, and an employment relation " +
+      "containing ONE employment line was created automatically, typed " +
+      "`ordinaertArbeidsforhold` with every other field null. Employment and its start date are " +
+      "what the a-melding reports, so today's date is a fact about the company's filings rather " +
+      "than a placeholder — pass the real one.\n\n" +
+      "Also measured: `address.countryCode` comes back as two SPACES (\"  \") rather than null or " +
+      '"NO" when no address is given, so do not compare it against "" or treat it as absent.',
+  },
+  {
     id: "employee-name-must-be-unique",
     paths: ["/api/employees"],
     methods: ["POST"],

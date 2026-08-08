@@ -9,9 +9,91 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**109 tools**: 102 across ten accounting domains, plus 7 always-on.
+**114 tools**: 107 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **Employee master data** (5 tools) — `reai_create_employee`,
+  `reai_update_employee`, `reai_set_employee_bank_account`,
+  `reai_add_employment_line`, `reai_delete_employee`. Payroll shipped first,
+  which made the gap plain: a salary run cannot be created until every included
+  employee has a bank account, and the only way to give one was a raw `PATCH` on
+  a payment destination.
+  - `PATCH /api/employees/{id}` is a **real patch** — verified by changing `phone`
+    alone and finding city, postal code, street, bank account, start date and
+    employment lines all untouched. Worth stating because it makes this endpoint
+    the exception: company banks, creditors, agreements, subscriptions and salary
+    wage lines all replace.
+  - **Except `employmentLines`, which replaces.** An employee with two lines,
+    PATCHed with one, came back with one: the other gone, the survivor recreated
+    with a new id. So "add a raise from June" written the obvious way deletes the
+    employment history, which the a-melding reports. `reai_add_employment_line`
+    reads the existing lines and sends them back **with their ids** so rows are
+    updated rather than recreated, and refuses if the history cannot be read.
+    `employmentLines: []` clears every line; `employmentLines: null` leaves them
+    alone — measured on an employee that had one, so not a vacuous reading of an
+    already-empty list.
+  - A line dated **before** the employee's `dateOfEmployment` is refused with
+    `400 "Ansettelseslinje N: Fra-dato kan ikke være før ansettelsesstart"`, where
+    N counts position in the request array rather than naming a line. The tool
+    already reads the employee, so it checks locally and says which two dates
+    conflict. The API's rejection is atomic — the existing lines survived it.
+  - `phone` is normalised to E.164 and an **unparseable value is stored as `null`
+    with a 200 and no error**: `"nonsense"` silently replaced a stored
+    `"+4722334455"`. `"22 33 44 55"`, `"0047 22334455"` and `"+1 415 555 0100"`
+    all normalise fine, so the rule is the parser, not the format. Both write
+    tools read the phone back and say plainly when it did not survive. Note
+    suppliers *reject* a `+47` prefix — same-looking field, opposite handling.
+  - Creating an employee with only name and email is **not** a blank record:
+    `dateOfEmployment` defaults to today and an employment relation with one empty
+    line is created automatically, typed `ordinaertArbeidsforhold`. Employment is
+    what the a-melding reports, so the create says so when it had to default.
+  - `reai_set_employee_bank_account` is separate from the update so a payment
+    destination is never changed while fixing a postal code, and
+    `reai_update_employee` does not accept the field at all. It reads the account
+    before and after and reports **ADDED** versus **REPOINTED** with both IBANs,
+    because a repoint deserves to be seen rather than inferred.
+  - `reai_delete_employee` hard-deletes: 204, no body, no archive branch, no
+    undelete — and `409` once anything references them, including an empty draft
+    salary run. For someone who has left, `endDateOfEmployment` is usually what is
+    wanted, and the tool says so.
+
+  - `null` does **not** mean "clear" on this endpoint in general, whatever the
+    field types suggest — only the fields whose own descriptions say so.
+    `endDateOfEmployment: null` cleared a stored date; `phone: null`,
+    `email: null` and `accountNumber: null` were all silently **ignored**, with the
+    stored values still in place afterwards. So there is no way to remove a phone
+    or an email here, and an empty email answers `409 "Employee email is
+    required"`. The tools say that rather than offering a null that would do
+    nothing while reporting a change.
+  - Both `nationalIdentityNumber` and `accountNumber` are validated: an invalid
+    fødselsnummer answers `400 "Ugyldig fødselsnummer"` (checksummed), `"12345"`
+    answers `400` naming the expected BBAN length, and a non-numeric account
+    answers `"must contain only digits"`.
+  - `reai_set_employee_bank_account` **verifies what was stored** before saying the
+    destination changed. A 200 is not evidence here — the same API stores an
+    unparseable phone as `null` and answers 200 — so the tool compares the digits
+    it sent against `bankCode + accountNumber` (which concatenate back exactly,
+    measured) or the IBAN tail, and flags a mismatch or a missing account as an
+    error result while still returning what was stored.
+  - `reai_add_employment_line` checks **every** relation's `employmentLines`, not
+    just the outer array. A relation whose lines were `null` or some other shape was
+    being flattened to zero and then written over — and since the field replaces,
+    that deletes whatever the malformed relation held. An empty array is readable
+    and still accepted.
+
+### Fixed
+
+- **Redacting an absent field stated something false.** An employee with no salary
+  account came back as `bankAccount: "[redacted — pass includePersonalData: true
+  to see it]"`, which reads as "there is one, you just cannot see it" — while the
+  same response said they had none and could not be included in a salary run. The
+  write suite caught the contradiction. `redact` now leaves `null` alone, matching
+  `personalFieldsIn`, which had always skipped absent values.
+- `test/merge-tools.test.mjs` selected merge tools by "declares a GET **and** a
+  PUT or PATCH" and then asserted specifically `PUT`, so the first GET+PATCH merge
+  to arrive failed a test that had deliberately selected it. It asserts the write
+  verb it filtered on now.
 
 - **Agreements toolset** (5 tools) — leases, employment contracts, purchase and
   service agreements: list, read, change terms, read signers, delete. Measured on
