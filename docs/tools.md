@@ -202,3 +202,27 @@ The smaller undocumented things: `assetAccountNumber` is derived at creation and
 `withinExemptionMethod` is fritaksmetoden. Whether a holding qualifies has real tax consequences and is not something this server can determine, so the flag is stored as given and the tool says so rather than defaulting.
 
 **The Nordnet import is deliberately not curated.** `POST /api/share-investments/import/nordnet` takes a file and creates transactions in bulk; every one is an event, so it posts, and every position it touches becomes permanent. One call turning into an unknown number of irreversible postings is not something to hand an agent casually, and `reai_request` reaches it for anyone who means it.
+
+## Manual bank reconciliation
+
+`reai_get_bank_reconciliation` covers the accounts ReAI syncs. This is the other kind, and until now the only route to it was `reai_request`: an account whose `providerType` is manual has no transaction feed, so reconciling means asserting the closing balance from a paper statement and letting the API compare it with the books.
+
+Where a manual account comes from is not obvious, and it matters: **a company bank created through this API is manual.** Measured — `POST /api/company-banks` answers with `manual: true` and a `displayName` ending "[Manual]". Tenant 2634's three accounts are all `providerType: "ztl"`, so they belong to the synced tool; anything an agent creates belongs here.
+
+The state machine, measured end to end:
+
+| state | statement balance | difference | locked | `canClose` | `canReopen` |
+|---|---|---|---|---|---|
+| fresh | `null` | `null` | false | false | false |
+| balance set, agrees with the books | 0 | 0 | false | **true** | false |
+| closed | 0 | 0 | **true** | false | **true** |
+| reopened | 0 | 0 | false | true | false |
+| balance set, does **not** agree | 500 | **500** | false | **false** | false |
+
+Two things fall out of the last row. `difference` is the statement minus the books, and `canClose` is false whenever it is non-zero — a month that does not balance cannot be closed, which is the point of the exercise. And the API states both permissions itself, so no tool here has to guess: the read tool reports `canClose` and `canReopen` as the API's answers rather than as inferences.
+
+**Only one month is closable at a time, and it need not be the one you asked for.** Measured with today at 2026-08-08: closing the current month answered `409 "Godkjenning er kun tilgjengelig for 2026-07."` — naming the month the API *will* accept — and a future month answered the same, while an earlier month fell through to the balance check instead. So reconciliation runs in order and a month that has not ended cannot be closed. The refusal carries its own answer, so the tool reads the nominated month out of it rather than leaving the caller with a Norwegian sentence.
+
+The field for the balance is `bankStatementEndingBalance`; any other name is refused with `400 "Validation failed"` naming it. Both refusals on the transitions are Norwegian and describe states rather than mistakes: closing without a balance answers `409 "Angi sluttsaldoen før du lukker avstemmingen."` and reopening a month that is not locked answers `409 "Avstemmingen er ikke låst for <month>."`
+
+**Nothing here posts.** Across the whole flow — setting the balance, closing, reopening — the voucher count stayed at 0 and the posting count did not move. This is a lock on a period, not a booking, and reopening is available to the same caller who closed (`canReopen: true` immediately after), unlike a VAT period. The three writes are still classified `irreversible` to match the policy tier for `/api/manual-reconciliations` and the rest of the reconciliation family: a curated tool softer than `reai_request` for the same call is a hole, and a period lock is a control an accountant relies on rather than reference data. The read is unaffected.

@@ -396,8 +396,10 @@ function buildInstructions(
     "- There is NO endpoint that lists bank transactions. They are seen through " +
       "reai_get_bank_reconciliation for one account and one month (yyyy-MM), which is therefore the " +
       "entry point for any bank work — but that view is for bank-SYNCED accounts. An account with " +
-      'providerType "manual" is reconciled against a statement balance through ' +
-      "/api/manual-reconciliations/{id} instead.",
+      'providerType "manual" — which is what any account created through this API is — is reconciled ' +
+      "against a statement balance with reai_get_manual_reconciliation, reai_set_bank_statement_balance " +
+      "and reai_close_manual_reconciliation. Use those rather than the raw endpoint: they translate the " +
+      "Norwegian refusals, including the one that names which month the API will actually let you close.",
     "- Settling a VAT period locks the books for it; it does NOT file anything with Skatteetaten. " +
       "Never tell the user their VAT return has been submitted.",
     "- Supplier invoice COST LINES do not use the voucher sign convention: each line names its debit " +

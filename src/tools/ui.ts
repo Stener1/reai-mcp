@@ -78,7 +78,7 @@ const reconcileUi = defineTool({
     "Only meaningful for a bank account with a real feed. For providerType 'manual' this " +
     "endpoint is not the working view, or it will look reconciled when nothing has been " +
     "reconciled — a manual account reconciles against a statement balance through " +
-    "`reai_request GET /api/manual-reconciliations/{bankAccountId}?month=yyyy-MM`. Read that " +
+    "reai_get_manual_reconciliation, which also translates the Norwegian refusals. Read that " +
     "endpoint's quirk first: its 404 says \"Bankkonto ikke funnet\" for an account that exists " +
     "and simply is not manual, so it cannot be read literally.\n\n" +
     "Prefer reai_get_bank_reconciliation when you only need to read the state or answer a " +
@@ -150,7 +150,7 @@ const reconcileUi = defineTool({
         ` ${which} reported by the endpoint, so this is NOT an established reconciliation — ` +
         `unreported is not the same as nothing unmatched. Check the account has a bank feed with ` +
         `reai_list_company_banks: providerType 'manual' has no reconciliation view here, and ` +
-        `reconciles through reai_request on /api/manual-reconciliations/{bankAccountId} instead.`;
+        `reconciles through reai_get_manual_reconciliation instead.`;
     } else if (tx.rowsMissing || post.rowsMissing) {
       note +=
         ` The endpoint gave counts without the corresponding list, so the view cannot show ` +

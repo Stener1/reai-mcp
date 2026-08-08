@@ -509,6 +509,10 @@ test("the README's payment-routing table matches the classifier", async () => {
 const KEEPS_AN_EXPLICIT_ID = {
   reai_get_bank_reconciliation:
     "queries a PERIOD for an account (bankAccountId + month), rather than fetching a record by id",
+  reai_get_manual_reconciliation:
+    "the same shape as its synced sibling above: it queries a PERIOD for an account " +
+    "(bankAccountId + month) rather than fetching a record by id, and a manual reconciliation has no id " +
+    "of its own",
   reai_get_warehouse_inventory:
     "reports stock lines, which have no id of their own; warehouseId is an OPTIONAL filter and " +
     "omitting it reports across every warehouse, so `id` would name the wrong thing",
@@ -660,4 +664,235 @@ test("arguments that arm a send are refused when external sending is off", async
   // And the benign values stay benign on both axes.
   assert.equal(curatedArgsEscalate(subscriptionPaths, { outputMode: "create_order" }), undefined);
   assert.equal(curatedArgsEscalate(subscriptionPaths, { sendEhf: false }), undefined);
+});
+
+/**
+ * Manual bank reconciliation. Every state below was measured against the write test tenant before it was
+ * written down — see the module doc in src/tools/bankvat.ts for the table.
+ */
+test("the manual reconciliation tools report the API's own permissions, not guesses", async () => {
+  const { registeredTools } = await import("../dist/server.js");
+  const tool = (name) => {
+    const found = registeredTools.find((t) => t.name === name);
+    assert.ok(found, `${name} should exist`);
+    return found;
+  };
+  const textOf = (r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  const ctxFor = (data) => ({
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: { request: async () => ({ status: 200, data }), deepLink: () => "" },
+  });
+
+  // A month with no statement balance: nothing to compare, and closing is impossible.
+  const fresh = await tool("reai_get_manual_reconciliation").handler(
+    { bankAccountId: 1655, month: "2026-07" },
+    ctxFor({ bankAccountId: 1655, month: "2026-07", monthEndingBalance: 0, bankStatementEndingBalance: null, difference: null, reconciliationLocked: false, canClose: false, canReopen: false }),
+  );
+  assert.match(textOf(fresh), /No statement balance/);
+  assert.match(textOf(fresh), /cannot be closed/);
+  assert.match(textOf(fresh), /canClose=false/);
+
+  // A difference is the finding, and the tool must say not to make it disappear.
+  const mismatch = await tool("reai_get_manual_reconciliation").handler(
+    { bankAccountId: 1655, month: "2026-07" },
+    ctxFor({ month: "2026-07", monthEndingBalance: 0, bankStatementEndingBalance: 500, difference: 500, reconciliationLocked: false, canClose: false, canReopen: false }),
+  );
+  assert.match(textOf(mismatch), /difference is why this month cannot be closed/);
+  assert.match(textOf(mismatch), /rather than adjusting the statement figure/);
+
+  // Agreement: the API says canClose, and the tool passes that on rather than deciding for itself.
+  const agrees = await tool("reai_get_manual_reconciliation").handler(
+    { bankAccountId: 1655, month: "2026-07" },
+    ctxFor({ month: "2026-07", monthEndingBalance: 0, bankStatementEndingBalance: 0, difference: 0, reconciliationLocked: false, canClose: true, canReopen: false }),
+  );
+  assert.match(textOf(agrees), /canClose=true/);
+  assert.doesNotMatch(textOf(agrees), /cannot be closed/);
+
+  // Closing says what it did and did not do, and that it is undoable.
+  const closed = await tool("reai_close_manual_reconciliation").handler(
+    { bankAccountId: 1655, month: "2026-07" },
+    ctxFor({ month: "2026-07", bankStatementEndingBalance: 0, difference: 0, reconciliationLocked: true, canClose: false, canReopen: true }),
+  );
+  assert.match(textOf(closed), /Nothing was posted/);
+  assert.match(textOf(closed), /reai_reopen_manual_reconciliation can undo it/);
+  assert.match(textOf(closed), /canReopen=true/);
+});
+
+test("the manual reconciliation writes are not softer than the escape hatch", async () => {
+  const { registeredTools } = await import("../dist/server.js");
+  const { classifyRequest } = await import("../dist/policy.js");
+  for (const name of [
+    "reai_set_bank_statement_balance",
+    "reai_close_manual_reconciliation",
+    "reai_reopen_manual_reconciliation",
+  ]) {
+    const t = registeredTools.find((x) => x.name === name);
+    assert.equal(t.risk, "irreversible", `${name} must match the policy tier for /api/manual-reconciliations`);
+  }
+  assert.equal(classifyRequest("POST", "/api/manual-reconciliations/7/close"), "irreversible");
+  assert.equal(classifyRequest("PUT", "/api/manual-reconciliations/7/ending-balance"), "irreversible");
+  // The read stays a read, which is why gating the writes costs so little.
+  const read = registeredTools.find((x) => x.name === "reai_get_manual_reconciliation");
+  assert.equal(read.risk, "read");
+  // And the month argument is validated locally, so a bad shape does not become an upstream 400.
+  const { z } = await import("zod");
+  const monthSchema = z.object(read.inputSchema);
+  assert.equal(monthSchema.safeParse({ bankAccountId: 1, month: "2026-7" }).success, false);
+  assert.equal(monthSchema.safeParse({ bankAccountId: 1, month: "2026-13" }).success, false);
+  assert.equal(monthSchema.safeParse({ bankAccountId: 1, month: "2026-07" }).success, true);
+});
+
+test("the three Norwegian reconciliation refusals are translated, not passed through", async () => {
+  // Written after driving these live and watching the close hand back
+  // `409 "Angi sluttsaldoen før du lukker avstemmingen."` raw. Documenting a refusal and then forwarding
+  // it untranslated is the gap two reviews have caught elsewhere in this repo.
+  const { registeredTools } = await import("../dist/server.js");
+  const { ReaiApiError } = await import("../dist/reai/errors.js");
+  const textOf = (r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  const throwing = (err) => ({
+    config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+    session: {},
+    client: { request: async () => { throw err; }, deepLink: () => "" },
+  });
+  const tool = (name) => registeredTools.find((t) => t.name === name);
+
+  const cases = [
+    ["reai_close_manual_reconciliation", 409, "Angi sluttsaldoen før du lukker avstemmingen.", /reai_set_bank_statement_balance/],
+    ["reai_reopen_manual_reconciliation", 409, "Avstemmingen er ikke låst for 2026-07.", /nothing to reopen/],
+    ["reai_get_manual_reconciliation", 404, "Bankkonto ikke funnet", /AMBIGUOUS/],
+  ];
+  for (const [name, status, norwegian, expected] of cases) {
+    const err = new ReaiApiError({
+      status,
+      method: "POST",
+      path: "/api/manual-reconciliations/1657/close",
+      rawBody: JSON.stringify({ detail: norwegian }),
+      problem: { detail: norwegian },
+    });
+    const res = await tool(name).handler({ bankAccountId: 1657, month: "2026-07" }, throwing(err));
+    assert.equal(res.isError, true, `${name} should refuse`);
+    assert.match(textOf(res), expected, `${name} must explain, not forward the Norwegian`);
+    assert.doesNotMatch(textOf(res), /^ReAI (POST|GET|PUT)/m, `${name} still forwarded the raw API error`);
+  }
+
+  // The 404 translation names the way to settle the ambiguity, since the message alone cannot.
+  const err404 = new ReaiApiError({
+    status: 404, method: "GET", path: "/api/manual-reconciliations/1657",
+    rawBody: '{"detail":"Bankkonto ikke funnet"}', problem: { detail: "Bankkonto ikke funnet" },
+  });
+  const amb = await tool("reai_get_manual_reconciliation").handler({ bankAccountId: 1657, month: "2026-07" }, throwing(err404));
+  assert.match(textOf(amb), /reai_list_company_banks/);
+  assert.match(textOf(amb), /reai_get_bank_reconciliation/);
+
+  // Anything else propagates rather than being explained as one of these three.
+  const other = new ReaiApiError({ status: 409, method: "POST", path: "/api/manual-reconciliations/1657/close", rawBody: '{"detail":"Something else"}' });
+  await assert.rejects(
+    () => tool("reai_close_manual_reconciliation").handler({ bankAccountId: 1657, month: "2026-07" }, throwing(other)),
+    /Something else/,
+  );
+});
+
+test("the close refusal that nominates a different month says which one", async () => {
+  // `409 "Godkjenning er kun tilgjengelig for 2026-07."` — the refusal carries its own answer, and leaving
+  // it in Norwegian throws that away. Measured with today at 2026-08-08: the current month and a future one
+  // are both refused this way naming 2026-07, while an earlier month falls through to the balance check.
+  const { registeredTools } = await import("../dist/server.js");
+  const { ReaiApiError } = await import("../dist/reai/errors.js");
+  const textOf = (r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  const err = new ReaiApiError({
+    status: 409,
+    method: "POST",
+    path: "/api/manual-reconciliations/1658/close",
+    rawBody: '{"detail":"Godkjenning er kun tilgjengelig for 2026-07."}',
+    problem: { detail: "Godkjenning er kun tilgjengelig for 2026-07." },
+  });
+  const res = await registeredTools
+    .find((t) => t.name === "reai_close_manual_reconciliation")
+    .handler({ bankAccountId: 1658, month: "2026-08" }, {
+      config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+      session: {},
+      client: { request: async () => { throw err; }, deepLink: () => "" },
+    });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /only permits closing 2026-07/, "the nominated month is the answer");
+  assert.match(textOf(res), /2026-08 cannot be closed/, "and the month asked for has to be named too");
+  assert.match(textOf(res), /runs in order/);
+  assert.doesNotMatch(textOf(res), /Godkjenning/, "the Norwegian must not be all the caller gets");
+});
+
+test("a foreign-currency reconciliation labels its amounts", async () => {
+  // The API returns bankCurrency, tenantCurrency and bankInTenantCurrency, and a company bank can be
+  // created in any currency — so bare numbers would let an EUR statement balance read as kroner.
+  const { registeredTools } = await import("../dist/server.js");
+  const textOf = (r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  const read = (data) =>
+    registeredTools.find((t) => t.name === "reai_get_manual_reconciliation").handler(
+      { bankAccountId: 1, month: "2026-07" },
+      {
+        config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+        session: {},
+        client: { request: async () => ({ status: 200, data }), deepLink: () => "" },
+      },
+    );
+
+  const foreign = await read({
+    month: "2026-07", bankCurrency: "EUR", tenantCurrency: "NOK", bankInTenantCurrency: false,
+    monthEndingBalance: 100, bankStatementEndingBalance: 100, difference: 0, reconciliationLocked: false,
+    canClose: true, canReopen: false,
+  });
+  assert.match(textOf(foreign), /100 EUR/, "the amounts must carry their unit");
+  assert.match(textOf(foreign), /NOT in the tenant currency \(NOK\)/, "and say the books are in another");
+
+  const domestic = await read({
+    month: "2026-07", bankCurrency: "NOK", tenantCurrency: "NOK", bankInTenantCurrency: true,
+    monthEndingBalance: 0, bankStatementEndingBalance: 0, difference: 0, reconciliationLocked: false,
+    canClose: true, canReopen: false,
+  });
+  assert.match(textOf(domestic), /0 NOK/);
+  assert.doesNotMatch(textOf(domestic), /NOT in the tenant currency/, "no warning when it matches");
+});
+
+test("a 5xx carrying a state phrase is not reported as nothing having changed", async () => {
+  // A failed POST or PUT is the case this client treats as ambiguous and will not retry, so "Nothing was
+  // changed" is the one claim not to make. All three state translations are gated on 409, the status they
+  // were measured at.
+  const { registeredTools } = await import("../dist/server.js");
+  const { ReaiApiError } = await import("../dist/reai/errors.js");
+  const err = new ReaiApiError({
+    status: 500,
+    method: "POST",
+    path: "/api/manual-reconciliations/1/close",
+    rawBody: '{"detail":"Angi sluttsaldoen før du lukker avstemmingen."}',
+    problem: { detail: "Angi sluttsaldoen før du lukker avstemmingen." },
+  });
+  await assert.rejects(
+    () =>
+      registeredTools.find((t) => t.name === "reai_close_manual_reconciliation").handler(
+        { bankAccountId: 1, month: "2026-07" },
+        {
+          config: { boundTenantId: undefined, defaultTenantId: 2783, writeMode: "full", allowExternalSend: false },
+          session: {},
+          client: { request: async () => { throw err; }, deepLink: () => "" },
+        },
+      ),
+    /HTTP 500/,
+    "a 5xx must propagate as the ambiguous failure it is",
+  );
+});
+
+test("the session instructions and the UI tool point at the curated reconciliation tools", async () => {
+  // The tools landed and the guidance every session receives still named the raw endpoint, so an agent
+  // would route around them — and around the translations, which are the reason they exist.
+  const { readFileSync } = await import("node:fs");
+  const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  const ui = readFileSync(new URL("../src/tools/ui.ts", import.meta.url), "utf8");
+  for (const [label, text] of [["src/server.ts", server], ["src/tools/ui.ts", ui]]) {
+    assert.match(text, /reai_get_manual_reconciliation/, `${label} should name the curated tool`);
+    assert.doesNotMatch(
+      text,
+      /reai_request[^\n]*manual-reconciliations/,
+      `${label} still sends the caller to the raw endpoint`,
+    );
+  }
 });

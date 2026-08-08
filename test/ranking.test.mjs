@@ -5,7 +5,7 @@ import { searchOperations, matchStrength, fieldTokens } from "../dist/reai/spec.
 /**
  * Discovery ranking, measured rather than assumed.
  *
- * `reai_search_endpoints` is how an agent reaches the 152 operations no curated
+ * `reai_search_endpoints` is how an agent reaches the 148 operations no curated
  * tool covers, so its ranking is the difference between those being usable and
  * being theoretically present. Measured against natural-language questions — which
  * is how agents actually search — it started at 5 of 10 correct with 4 questions

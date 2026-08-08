@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReaiApiError } from "../reai/errors.js";
 import {
   defineTool,
   fail,
@@ -11,6 +12,7 @@ import {
   requireTenantId,
   tenantIdArg,
   type ToolDef,
+  type ToolResult,
   requiredName,
 } from "./registry.js";
 
@@ -868,7 +870,362 @@ const updateCompanyBank = defineTool({
   },
 });
 
+
+/**
+ * Manual bank reconciliation (manuell bankavstemming) — the four operations for an account with no feed.
+ *
+ * `reai_get_bank_reconciliation` covers the accounts ReAI syncs. This is the other kind, and until now the
+ * only route to it was `reai_request`: an account whose `providerType` is manual has no transaction feed,
+ * so reconciling means asserting the closing balance from a paper statement and letting the API compare it
+ * with the books.
+ *
+ * Worth knowing where a manual account comes from, because it is not obvious: **a company bank created
+ * through this API is manual.** Measured — `POST /api/company-banks` answered with `manual: true` and a
+ * `displayName` of "… [Manual]". Tenant 2634's three accounts are all `providerType: "ztl"`, i.e. synced,
+ * so they belong to the other tool; anything an agent creates belongs to this one.
+ *
+ * ## The state machine, measured end to end
+ *
+ * | state | statement balance | difference | locked | canClose | canReopen |
+ * |---|---|---|---|---|---|
+ * | fresh | null | null | false | false | false |
+ * | balance set, and it agrees with the books | 0 | 0 | false | **true** | false |
+ * | closed | 0 | 0 | **true** | false | **true** |
+ * | reopened | 0 | 0 | false | true | false |
+ * | balance set, and it does NOT agree | 500 | **500** | false | **false** | false |
+ *
+ * Two things fall out of that last row. `difference` is the statement minus the books, and **`canClose`
+ * is false whenever it is non-zero** — a month that does not balance cannot be closed, which is the whole
+ * point of the exercise. And the API states both permissions itself, so neither tool has to guess.
+ *
+ * The refusals are Norwegian, and both are states rather than mistakes: closing without a balance answers
+ * `409 "Angi sluttsaldoen før du lukker avstemmingen."`, and reopening a month that is not locked answers
+ * `409 "Avstemmingen er ikke låst for 2026-07."`
+ *
+ * ## Nothing here posts
+ *
+ * Measured across the whole flow — setting the balance, closing, reopening — the voucher count stayed at
+ * 0 and the posting count did not move. This is a lock on a period, not a booking. Reopening is available
+ * to the same caller who closed (`canReopen: true` immediately after), which is unlike a VAT period, so
+ * closing is not the one-way door it looks like.
+ */
+const RECONCILIATION_MONTH = z
+  .string()
+  .regex(/^\d{4}-(0[1-9]|1[0-2])$/, "month must be yyyy-MM, e.g. 2026-07")
+  .describe("The month being reconciled, yyyy-MM.");
+
+type ManualReconciliation = {
+  bankAccountId?: number;
+  bankAccountName?: string;
+  month?: string;
+  currencyCode?: string;
+  // The API returns all three, and the amounts below are in `bankCurrency` — which need not be the
+  // tenant's. A company bank can be created in any currency, so printing bare numbers would let an EUR
+  // statement balance read as kroner.
+  bankCurrency?: string;
+  tenantCurrency?: string;
+  bankInTenantCurrency?: boolean;
+  openingBalance?: number | null;
+  monthEndingBalance?: number | null;
+  bankStatementEndingBalance?: number | null;
+  difference?: number | null;
+  reconciliationLocked?: boolean;
+  canClose?: boolean;
+  canReopen?: boolean;
+};
+
+/** What the API itself says is possible, rather than what this server infers. */
+function describeReconciliation(r: ManualReconciliation): string {
+  const parts: string[] = [];
+  if (r.bankStatementEndingBalance === null || r.bankStatementEndingBalance === undefined) {
+    parts.push(
+      `No statement balance has been entered for ${r.month ?? "this month"}, so there is nothing to ` +
+        `compare and the month cannot be closed. Enter it with reai_set_bank_statement_balance.`,
+    );
+  } else {
+    const unit = r.bankCurrency ?? r.currencyCode ?? "";
+    const amount = (v: number | null | undefined) => (v === null || v === undefined ? "unknown" : `${v} ${unit}`.trim());
+    parts.push(
+      `Statement ${amount(r.bankStatementEndingBalance)}, books ${amount(r.monthEndingBalance)}, ` +
+        `difference ${amount(r.difference)}.` +
+        (r.bankInTenantCurrency === false
+          ? ` This account is NOT in the tenant currency (${r.tenantCurrency ?? "unknown"}), so those ` +
+            `figures are in ${unit || "the account's own currency"} and do not compare directly with the ` +
+            `rest of the books.`
+          : ``),
+    );
+    if (r.difference !== 0 && r.difference !== null && r.difference !== undefined) {
+      parts.push(
+        `That difference is why this month cannot be closed: the API only permits closing when the two ` +
+          `agree. Find the missing or duplicated transactions rather than adjusting the statement figure ` +
+          `to make it fit.`,
+      );
+    }
+  }
+  parts.push(
+    `The API reports locked=${r.reconciliationLocked ?? "unknown"}, canClose=${r.canClose ?? "unknown"}, ` +
+      `canReopen=${r.canReopen ?? "unknown"} — those are its own answers, not this server's guesses.`,
+  );
+  return parts.join("\n\n");
+}
+
+const NOT_MANUAL_HINT =
+  'A 404 "Bankkonto ikke funnet" here is ambiguous and usually does NOT mean the id is wrong: it is also ' +
+  "what a perfectly good account answers when it is not MANUAL. Check with reai_list_company_banks — if " +
+  "the account is in that list with providerType ztl, it has a feed and belongs to " +
+  "reai_get_bank_reconciliation instead.";
+
+
+/**
+ * The three Norwegian answers this domain gives, in words a caller can act on.
+ *
+ * Written after driving the tools live and watching `reai_close_manual_reconciliation` hand back
+ * `409 "Angi sluttsaldoen før du lukker avstemmingen."` raw. The description already explained that
+ * message; explaining a refusal in the documentation and then passing it through untranslated is the gap
+ * two reviews have caught on other tools in this repository, so it is closed here before a third.
+ *
+ * All three are STATES rather than mistakes, which is why each names the call that changes the state.
+ */
+function translateReconciliationError(
+  err: unknown,
+  ctx: { bankAccountId: number; month: string },
+): ToolResult | undefined {
+  if (!(err instanceof ReaiApiError)) return undefined;
+  const detail = `${err.problem?.detail ?? ""} ${err.rawBody ?? ""} ${err.message}`;
+
+  // Every state translation below is gated on 409, which is the status all three were measured at. A
+  // phrase-only match would convert a 5xx whose body happens to contain one of these sentences into a
+  // definitive "Nothing was changed" — and a failed POST or PUT is exactly the case this client treats as
+  // ambiguous and does not retry, so claiming nothing happened is the one thing not to say. The same
+  // lesson as scoping a quirk to its status.
+  const isState = err.status === 409;
+
+  if (isState && /Angi sluttsaldoen/i.test(detail)) {
+    return fail(
+      `${ctx.month} cannot be closed yet because no bank statement balance has been entered for account ` +
+        `${ctx.bankAccountId}. Nothing was changed.\n\n` +
+        `Enter it with reai_set_bank_statement_balance — the API compares that figure with the books and ` +
+        `only permits closing when they agree, so this refusal is a step missing rather than a problem ` +
+        `with the month.`,
+    );
+  }
+
+  // "Godkjenning er kun tilgjengelig for <month>." — approval is only available for one month, and the
+  // message carries WHICH, so the refusal contains its own answer. Measured on a fresh manual account with
+  // today at 2026-08-08: 2026-08 and 2026-09 both answered this naming 2026-07, while 2025-12 and 2026-07
+  // fell through to the missing-balance check instead. So the months are worked in order and the current
+  // one cannot be closed before it has ended.
+  const nominated = isState ? /Godkjenning er kun tilgjengelig for ([0-9]{4}-[0-9]{2})/i.exec(detail) : null;
+  if (nominated) {
+    return fail(
+      `${ctx.month} cannot be closed on account ${ctx.bankAccountId}: the API only permits closing ` +
+        `${nominated[1]} at the moment. Nothing was changed.\n\n` +
+        `Reconciliation runs in order, and a month that has not ended yet cannot be closed — measured, ` +
+        `both the current month and a future one are refused this way while an earlier month is not. ` +
+        `Close ${nominated[1]} first, with reai_get_manual_reconciliation to check it balances.`,
+    );
+  }
+
+  if (isState && /ikke låst/i.test(detail)) {
+    return fail(
+      `${ctx.month} is not locked for account ${ctx.bankAccountId}, so there is nothing to reopen. ` +
+        `Nothing was changed.\n\n` +
+        `reai_get_manual_reconciliation reports \`canReopen\`, which is the API's own answer to whether ` +
+        `this call would work — a false there means the month is already open.`,
+    );
+  }
+
+  if (err.status === 404 && /Bankkonto ikke funnet/i.test(detail)) {
+    return fail(
+      `Account ${ctx.bankAccountId} answered "Bankkonto ikke funnet", and that is AMBIGUOUS: it is what a ` +
+        `missing id says, and equally what a perfectly good account says when it is not MANUAL. Nothing ` +
+        `was changed.\n\n` +
+        `Settle it with reai_list_company_banks. If the id is in that list, the account has a bank feed — ` +
+        `reconcile it with reai_get_bank_reconciliation instead, since a synced account has no manual ` +
+        `reconciliation to read or close.`,
+    );
+  }
+  return undefined;
+}
+
+const getManualReconciliation = defineTool({
+  name: "reai_get_manual_reconciliation",
+  title: "Read a manual bank reconciliation",
+  description:
+    "The reconciliation status of a MANUAL bank account for one month: the opening balance, the closing " +
+    "balance according to the books, the balance you entered from the bank statement, and the difference " +
+    "between them.\n\n" +
+    "It also carries `canClose` and `canReopen`, which are the API's own answers about what is permitted — " +
+    "measured, `canClose` is false whenever the difference is non-zero, so a month that does not balance " +
+    "cannot be closed.\n\n" +
+    "For an account ReAI syncs, this is the wrong tool: use reai_get_bank_reconciliation. " +
+    NOT_MANUAL_HINT,
+  risk: "read",
+  apiPaths: [["GET", "/api/manual-reconciliations/{bankAccountId}"]],
+  inputSchema: {
+    bankAccountId: z.number().int().positive().describe("Company bank id, from reai_list_company_banks."),
+    month: RECONCILIATION_MONTH,
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    let res;
+    try {
+      res = await ctx.client.request<ManualReconciliation>({
+        method: "GET",
+        path: `/api/manual-reconciliations/${args.bankAccountId}`,
+        query: { month: args.month },
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+    } catch (err) {
+      const translated = translateReconciliationError(err, args);
+      if (translated) return translated;
+      throw err;
+    }
+    return ok(res.data ?? {}, { note: describeReconciliation(res.data ?? {}) });
+  },
+});
+
+const setStatementBalance = defineTool({
+  name: "reai_set_bank_statement_balance",
+  title: "Enter the bank statement closing balance",
+  description:
+    "Record what the bank statement says the account held at the end of the month, which is the figure " +
+    "the books get compared against. Nothing posts — measured across this whole flow, the voucher and " +
+    "posting counts did not move.\n\n" +
+    "The field the API wants is `bankStatementEndingBalance`; a body using any other name is refused with " +
+    '400 "Validation failed" naming it. Setting it is what makes closing possible at all: before it, ' +
+    'closing answers 409 "Angi sluttsaldoen før du lukker avstemmingen."\n\n' +
+    "Enter the statement figure, not a figure chosen to make the difference vanish. If the two disagree, " +
+    "the difference is the finding. " +
+    NOT_MANUAL_HINT,
+  // irreversible to match the policy tier for /api/manual-reconciliations, which classifies the whole
+  // prefix that way along with the rest of the reconciliation family. The measurement points the other
+  // way — nothing posts, and a close can be reopened by the same caller — and it is recorded rather than
+  // acted on, for the same reason as the loan prefix: a curated tool softer than reai_request for the same
+  // call is a hole, and period locks are a control an accountant relies on rather than reference data.
+  // The READ is unaffected, so what this costs is entering a statement balance in the default mode.
+  risk: "irreversible",
+  apiPaths: [["PUT", "/api/manual-reconciliations/{bankAccountId}/ending-balance"]],
+  inputSchema: {
+    bankAccountId: z.number().int().positive().describe("Company bank id, from reai_list_company_banks."),
+    month: RECONCILIATION_MONTH,
+    bankStatementEndingBalance: z
+      .number()
+      .describe("The closing balance from the bank statement. May be negative — an overdrawn account is a real state."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, bankAccountId, ...body } = args;
+    let res;
+    try {
+      res = await ctx.client.request<ManualReconciliation>({
+        method: "PUT",
+        path: `/api/manual-reconciliations/${bankAccountId}/ending-balance`,
+        body,
+        tenantId: requireTenantId(tenantId, ctx),
+      });
+    } catch (err) {
+      const translated = translateReconciliationError(err, { bankAccountId, month: args.month });
+      if (translated) return translated;
+      throw err;
+    }
+    const state = res.data ?? {};
+    return ok(state, {
+      note:
+        `Statement balance recorded for ${args.month}. Nothing was posted — this is a comparison figure, ` +
+        `not a booking.\n\n${describeReconciliation(state)}`,
+    });
+  },
+});
+
+const closeManualReconciliation = defineTool({
+  name: "reai_close_manual_reconciliation",
+  title: "Close a manual reconciliation month",
+  description:
+    "Lock a month once the statement and the books agree. Measured: this posts nothing, and it is " +
+    "reversible by the same caller — immediately after closing, the API reports `canReopen: true`, which " +
+    "is unlike a VAT period.\n\n" +
+    "**Only one month is closable at a time, and it is not necessarily the one you asked for.** Measured: " +
+    'a request for the current month answered 409 "Godkjenning er kun tilgjengelig for 2026-07." — naming ' +
+    "the month the API will accept — and a future month answered the same, while an earlier month fell " +
+    "through to the balance check instead. So reconciliation runs in order and a month that has not ended " +
+    "cannot be closed. This tool reads that month out of the refusal rather than leaving it in Norwegian.\n\n" +
+    "It will refuse unless the difference is zero. `canClose` on the read tool is the API's own answer to " +
+    'whether it will, and without a statement balance the refusal is 409 "Angi sluttsaldoen før du lukker ' +
+    'avstemmingen." A month that does not balance is a question about missing transactions, not about ' +
+    "this call.\n\n" + NOT_MANUAL_HINT,
+  risk: "irreversible",
+  apiPaths: [["POST", "/api/manual-reconciliations/{bankAccountId}/close"]],
+  inputSchema: {
+    bankAccountId: z.number().int().positive().describe("Company bank id, from reai_list_company_banks."),
+    month: RECONCILIATION_MONTH,
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    let res;
+    try {
+      res = await ctx.client.request<ManualReconciliation>({
+        method: "POST",
+        path: `/api/manual-reconciliations/${args.bankAccountId}/close`,
+        body: { month: args.month },
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+    } catch (err) {
+      const translated = translateReconciliationError(err, args);
+      if (translated) return translated;
+      throw err;
+    }
+    const state = res.data ?? {};
+    return ok(state, {
+      note:
+        `${args.month} is closed for this account. Nothing was posted — a reconciliation close is a lock ` +
+        `on the period, not a booking — and reai_reopen_manual_reconciliation can undo it.\n\n` +
+        describeReconciliation(state),
+    });
+  },
+});
+
+const reopenManualReconciliation = defineTool({
+  name: "reai_reopen_manual_reconciliation",
+  title: "Reopen a manual reconciliation month",
+  description:
+    "Unlock a month that was closed, so its statement balance can be corrected. Measured: available " +
+    "immediately after closing (`canReopen: true`) and posts nothing.\n\n" +
+    'Reopening a month that is not locked answers 409 "Avstemmingen er ikke låst for <month>." — a state, ' +
+    "not a mistake, and `canReopen` on the read tool says so in advance.\n\n" + NOT_MANUAL_HINT,
+  risk: "irreversible",
+  apiPaths: [["POST", "/api/manual-reconciliations/{bankAccountId}/reopen"]],
+  inputSchema: {
+    bankAccountId: z.number().int().positive().describe("Company bank id, from reai_list_company_banks."),
+    month: RECONCILIATION_MONTH,
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    let res;
+    try {
+      res = await ctx.client.request<ManualReconciliation>({
+        method: "POST",
+        path: `/api/manual-reconciliations/${args.bankAccountId}/reopen`,
+        body: { month: args.month },
+        tenantId: requireTenantId(args.tenantId, ctx),
+      });
+    } catch (err) {
+      const translated = translateReconciliationError(err, args);
+      if (translated) return translated;
+      throw err;
+    }
+    const state = res.data ?? {};
+    return ok(state, {
+      note: `${args.month} is open again for this account. Nothing was posted.\n\n${describeReconciliation(state)}`,
+    });
+  },
+});
+
 export const bankVatTools: ToolDef[] = [
+  getManualReconciliation,
+  setStatementBalance,
+  closeManualReconciliation,
+  reopenManualReconciliation,
   listCompanyBanks,
   createCompanyBank,
   deleteCompanyBank,
