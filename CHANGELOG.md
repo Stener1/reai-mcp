@@ -13,6 +13,47 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The `-en`/`-et` definite class too**, which the first version of this work left out and which is
+  the bigger of the two. `reiseregningen`, `beholdningen`, `kontoen`, `utgiften`,
+  `innbetalingen`, `dokumentet`, `vedlegget`, `tilgangen` and `refusjonen` all returned **nothing
+  at all**; they now reach expenses, inventory, the chart of accounts, the customer ledger,
+  documents, attachments, permissions and refunds respectively. Inflection invariance across the
+  whole synonym table is now **169 of 174 keys** whose definite form resolves as well as the bare
+  one.
+  - Free of regression by construction, which is what made extending cheap: the same gate applies,
+    so the stem must be a key. `token`, `given`, `budget` and `asset` derive nothing, because
+    `tok`, `giv`, `budg` and `ass` are not words this table knows. Verified against `main` on the
+    English cases the ungated rule had broken — `annual return`, `vat return`, `product
+    documentation`, `transaction product` all rank as they did before any of this.
+  - Both rules mutation-tested individually. The `-et` half had no test at first: removing it left
+    every other case passing.
+
+### Fixed
+
+- **Six findings from an independent review of the definite-form work**, all live:
+  - A comment claimed the length guard was what kept `lån` from being stripped. It is not — the
+    **gate** is, since `lå` is not a synonym key, and removing both length guards leaves the whole
+    suite green. That is the same failure this changelog credits an earlier review with catching: a
+    comment asserting something is load-bearing when it cannot be reached. The fix commit had
+    appended a new paragraph instead of correcting the false sentence.
+  - The definite-article test asserted `rank < 5` where every row ranks its target **first** in both
+    forms — four ranks of slack, in a test named "the definite article does not change the answer".
+    It asserts equality now, as the word-order test it cites as its model already did.
+  - One row was worse than nothing: it asserted `anleggsmidler`, the indefinite **plural**, which is
+    its own synonym key — so it passed on `main`, exercised neither rule, and read as if the
+    stem-changing class were covered. Replaced with live `-en` and `-et` cases; the real limit
+    (`anleggsmiddel` → `anleggsmidlet` drops a vowel) is stated where that row used to be.
+  - The gate test's second row was inert — identical top-3 with and without the gate. Replaced with
+    two cases the ungated rule actually broke, both of which had ranked the annual income-tax return
+    above the right answer.
+  - A test pinned a **create** as the answer to a **terminate**: *"si opp leieavtalen"* means
+    terminate a lease, and the asserted target creates one. Not a regression — `main` ranked it the
+    same — but a passing test made it ground truth. Rephrased to a question the endpoint can answer.
+  - "A quarter of the synonym keys" overstated the affected population: 44 of 176 keys end in `-e`,
+    but 25 of those are verbs, adjectives or plurals that take no definite article. The
+    definite-able `-e` nouns were **19 of 176**, roughly one key in ten.
+  - The third corpus's top-10 floor is ratcheted 23 → 24, locking in the case the rules earned.
+
 - **Norwegian definite forms resolve.** The definite article is a suffix, and it is how people
   actually speak: *"send fakturaen"*, *"endre kunden"*, *"si opp leieavtalen"* — nobody says
   *"send faktura"*. Most definite forms already worked by accident, because the compound-stem

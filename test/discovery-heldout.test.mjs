@@ -427,11 +427,13 @@ test("the third corpus holds its measured score of 19 in the top 3", () => {
   );
 });
 
-test("the third corpus reaches 23 of 27 within the top ten", () => {
+test("the third corpus reaches 24 of 27 within the top ten", () => {
   // Reported separately because the two say different things: top-3 is whether the agent sees the
   // right endpoint immediately, top-10 whether it is reachable at all without rephrasing.
   const hits = EVERYDAY.filter(([q, want]) =>
     searchOperations({ query: q, limit: 10 }).some((h) => h.path.startsWith(want)),
   );
-  assert.ok(hits.length >= 23, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
+  // 24 since the definite-form rules: `sett kunden som inaktiv` came into reach. Ratcheted so the
+  // gain cannot quietly disappear.
+  assert.ok(hits.length >= 24, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
 });

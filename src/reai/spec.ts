@@ -1482,9 +1482,12 @@ function lookupForms(token: string): string[] {
     // to NOTHING, a quarter of the keys in the table below. Measured: "endre kunden" and "vis ordren"
     // returned no endpoint at all while their indefinite forms ranked correctly.
     //
-    // Both the singular -n and the plural -ne, on a stem long enough that stripping cannot make a
-    // short word disappear: `lan` (loan) is 3 characters and must survive, and the guard is what
-    // keeps it.
+    // Both the singular -n and the plural -ne. The length guards are cheap sanity and nothing more —
+    // review verified that removing them entirely leaves all tests green, because the GATE below is
+    // what protects a short word like `lan` (loan): stripping it would give `la`, which is not a key,
+    // so no form is derived either way. An earlier version of this comment claimed the length was
+    // what kept `lan`, which was the same mistake a previous review caught in this repo: a comment
+    // asserting that something is load-bearing when it cannot be reached.
     // Only when the stem is a word this table KNOWS. Stripping -n from anything long enough was the
     // first version and it double-counted: `documentation` also produced `documentatio`, which
     // matchStrength then matched against the same endpoint token twice, and "product documentation"
@@ -1494,6 +1497,17 @@ function lookupForms(token: string): string[] {
     const known = (stem: string) => Object.prototype.hasOwnProperty.call(TERM_SYNONYMS, stem);
     if (base.endsWith("ne") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
     if (base.endsWith("n") && base.length > 4 && known(base.slice(0, -1))) add(base.slice(0, -1));
+    // The consonant-stem definites, -en and -et, which are the BIGGER class and were left out of the
+    // first version: `reiseregningen`, `beholdningen`, `kontoen`, `utgiften`, `dokumentet` and
+    // `vedlegget` all returned nothing at all. Some definite forms of this class already resolved
+    // because the compound-stem rule finds the stem inside them, but only where that stem happens to
+    // be a compound element; a plain noun like `utgift` is not one.
+    //
+    // Safe by the same gate, which is what makes extending cheap: the stem has to be a key, so
+    // `token`, `given`, `budget` and `asset` derive nothing because `tok`, `giv`, `budg` and `ass` are
+    // not words this table knows.
+    if (base.endsWith("en") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
+    if (base.endsWith("et") && base.length > 5 && known(base.slice(0, -2))) add(base.slice(0, -2));
     if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) add(base.slice(0, -1));
   }
   return [...forms];
