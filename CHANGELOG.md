@@ -11,6 +11,36 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 **141 tools**: 134 across ten accounting domains, plus 7 always-on.
 
+### Fixed
+
+- **The invoice-delivery gate read only one direction, and the other one was reachable
+  through a curated tool.** `invoiceEmail: "attacker@example.com"` escalated to
+  `irreversible` and needed `full` mode; `invoiceEmail: ""` on the same endpoint stayed
+  `reversible` and went through in the default mode. Same field, same disclosure axis, and
+  both decide which human receives the next invoice — one a chosen address, the other
+  whatever the API falls back to.
+  - Reachable, not theoretical: `reai_update_customer` is declared `reversible`, accepts
+    `invoiceEmail` as a plain string, and forwards `""` unchanged. Measured against
+    `PATCH /api/customers/{id}` on tenant 2783, `""` cleared the stored address, `null` was
+    a **no-op** that left it in place, and `" "` answered `400 "Validation failed"`. So the
+    value that empties a billing address is the one that looks like a typo, and the
+    deliberate-looking one does nothing. Both forms escalate now, because the gate is about
+    what the caller asked for and the endpoints do not agree about which form works — the
+    same divergence the lead endpoints show.
+  - **Omission counts on a replacement.** `PUT /api/orders/{id}` stores what the body leaves
+    out as empty, so dropping `invoiceEmail` empties it exactly as sending `""` would, with
+    less to see. The omitted-field set is now computed before the write policy runs rather
+    than only inside the warning gate below it, so waiving the warning with
+    `clearOmittedFields` no longer waives the escalation.
+  - No new false positives: a `POST` that names an empty address is not a redirect and stays
+    `reversible`, an omitted field on a `PATCH` changes nothing (PATCH really patches here),
+    and an unrelated omitted field is not this axis's business. `classifyInvoiceDelivery`
+    takes the method as a required parameter so the compiler names every call site that has
+    to decide, rather than a default deciding wrong for one of them.
+  - The parity sweep in `test/writes.test.mjs` — "a curated tool cannot do what
+    `reai_request` would refuse" — now runs in the clearing direction too, so the next tool
+    to accept one of these fields inherits the guard.
+
 ### Added
 
 - **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,

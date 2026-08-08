@@ -291,6 +291,66 @@ test("a curated tool cannot do what reai_request would refuse for the same body"
   assert.ok(checked >= 2, `expected to find escalating fields on curated tools, found ${checked}`);
 });
 
+// The same parity, in the direction the axis used to be blind to. Setting an invoiceEmail escalated;
+// EMPTYING one did not, on either side at first — and once the escape hatch learned to refuse it, a
+// curated tool that still accepted it would be the same worst-case bug as above with the sign
+// flipped. Written as parity rather than as a policy claim on purpose: whatever reai_request refuses
+// for a body, the curated tool must refuse for the same arguments, whichever way the rule goes.
+test("a curated tool cannot EMPTY what reai_request would refuse to empty", async () => {
+  const { allTools } = await import("../dist/server.js");
+  const { curatedArgsEscalate, classifyPaymentRouting, classifyInvoiceDelivery, isAllowed, strictestRisk } =
+    await import("../dist/policy.js");
+
+  const FIELDS = ["iban", "bankAccountNumber", "swiftCode", "bban", "invoiceEmail"];
+  // Both forms, because the API does not agree with itself about which one empties a field: measured
+  // on PATCH /api/customers/{id}, "" cleared the invoice email and null was a no-op.
+  const CLEARING = ["", null];
+
+  let checked = 0;
+  for (const tool of allTools) {
+    for (const field of Object.keys(tool.inputSchema ?? {})) {
+      if (!FIELDS.includes(field)) continue;
+      for (const value of CLEARING) {
+        const args = { id: 1, [field]: value };
+        const viaEscapeHatch = (tool.apiPaths ?? []).some(
+          ([method, path]) =>
+            strictestRisk(
+              classifyPaymentRouting("reversible", path, args, method),
+              classifyInvoiceDelivery("reversible", method, path, args),
+            ) === "irreversible",
+        );
+        if (!viaEscapeHatch) continue;
+        checked += 1;
+
+        const escalated = curatedArgsEscalate(tool.apiPaths ?? [], args);
+        assert.ok(
+          escalated && escalated.risk === "irreversible",
+          `${tool.name} accepts ${field}: ${JSON.stringify(value)} but does not escalate — ` +
+            `reai_request would refuse the same body`,
+        );
+        assert.equal(
+          isAllowed(escalated.risk, "reversible"),
+          false,
+          `${tool.name} escalates on emptying ${field} but it is still permitted in reversible mode`,
+        );
+      }
+    }
+  }
+  // reai_update_customer and reai_update_subscription both take invoiceEmail, in two forms each.
+  assert.ok(checked >= 4, `expected curated tools that can empty a gated field, found ${checked}`);
+});
+
+// Reachability, which parity alone does not establish: a rule about a value the schema rejects
+// protects nothing. This is the exposure as an agent would actually hit it.
+test("the value that empties an invoice email is one the curated tool really accepts", async () => {
+  const { registeredTools } = await import("../dist/server.js");
+  const tool = registeredTools.find((t) => t.name === "reai_update_customer");
+  // "" is accepted by the schema AND is the form measured to clear the stored address, which is what
+  // made this reachable in the default mode rather than theoretical.
+  assert.equal(tool.inputSchema.invoiceEmail.safeParse("").success, true);
+  assert.equal(tool.risk, "reversible", "the tool is still ordinary master-data work by default");
+});
+
 // The scoping matters as much as the rule: `accountNumber` on a supplier is a bank
 // account, and on a bookkeeping tool it is a chart-of-accounts code like 4300.
 // Matching on the field name alone would refuse ordinary ledger work.

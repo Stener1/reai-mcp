@@ -20,7 +20,7 @@ import {
   classifyPaymentRouting,
   inPaymentRoutingScope,
   classifyInvoiceDelivery,
-  invoiceDeliveryFields,
+  invoiceDeliveryChanges,
   escalatingBodyFields,
   paymentRoutingFields,
   transmittingBodyFields,
@@ -489,10 +489,23 @@ const request = defineTool({
     // details is reversible as a RECORD and irreversible as a PAYMENT, and the loss
     // happens later when a human pays the invoice in the ReAI UI.
     const routingRisk = classifyPaymentRouting(bodyRisk, decoded, args.body, args.method);
+    // The fields a REPLACEMENT body leaves out, worked out once here and used twice: by the
+    // delivery axis just below, and by the omission gate further down. Computed this early because
+    // omitting `invoiceEmail` from a PUT empties it exactly as sending null would, and the write
+    // policy has to know that before it decides whether the call is allowed at all — the gate
+    // downstream can be waived with clearOmittedFields, and waiving the warning must not also
+    // waive the escalation.
+    //
+    // Both path forms, because the API decodes before routing and this server does not: an encoded
+    // path resolves to no operation, and a gate that resolves nothing refuses nothing.
+    const routedOp = resolveRoutedOperation(method, path, decoded);
+    const omission = routedOp
+      ? omittedReplacementFields(routedOp, args.body)
+      : { fields: [], documented: 0 };
     // And invoice delivery, which is the same shape of harm with a different
     // consequence: reversible as a record, permanent as a disclosure. Kept apart so
     // the refusal names the right thing to go and check.
-    const risk = classifyInvoiceDelivery(routingRisk, decoded, args.body);
+    const risk = classifyInvoiceDelivery(routingRisk, method, decoded, args.body, omission.fields);
     // Named whenever the call actually repoints a destination, not only when doing so is
     // what escalated it. On a path that is ALREADY irreversible — creating a supplier
     // invoice, say — classifyPaymentRouting returns before it looks at the body, so
@@ -502,12 +515,12 @@ const request = defineTool({
     const routing = paymentRoutingFields(args.body).length > 0 && inPaymentRoutingScope(decoded, args.method)
       ? paymentRoutingFields(args.body)
       : [];
-    const delivery = risk !== routingRisk ? invoiceDeliveryFields(args.body) : [];
+    const delivery = risk !== routingRisk ? invoiceDeliveryChanges(method, args.body, omission.fields) : [];
     const escalated =
       routing.length > 0
         ? [`${routing.join(", ")} (this changes where a payment will go)`]
         : delivery.length > 0
-          ? [`${delivery.join(", ")} (this changes where invoices are delivered)`]
+          ? [`${delivery.join("; ")} (this changes where invoices are delivered)`]
           : bodyRisk !== pathRisk
             ? escalatingBodyFields(args.body)
             : [];
@@ -558,11 +571,8 @@ const request = defineTool({
     // After the policy checks: a call that write mode already refuses should be refused for that
     // reason, which is the more fundamental one.
     if (args.clearOmittedFields !== true) {
-      // Both forms, because the API decodes before routing and this server does not: an encoded
-      // path resolves to no operation, and a gate that resolves nothing refuses nothing. Same
-      // reasoning as the write policy two blocks up, which takes the stricter of the two risks.
-      const op = resolveRoutedOperation(method, path, decoded);
-      const omitted = op ? omittedReplacementFields(op, args.body) : { fields: [], documented: 0 };
+      // Resolved once, above the write policy, because the delivery axis needs the same answer.
+      const omitted = omission;
       if (omitted.fields.length > 0) {
         return okText(
           `${method} ${path} REPLACES the record, and this body leaves out ` +

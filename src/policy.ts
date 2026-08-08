@@ -841,13 +841,78 @@ const INVOICE_DELIVERY_PATHS: readonly RegExp[] = [
   /^\/api\/subscriptions(\/|$)/,
 ];
 
-/** Invoice-delivery fields present in a body, for use in error messages. */
+/** Invoice-delivery fields present in a body with a value, for use in error messages. */
 export function invoiceDeliveryFields(body: unknown): string[] {
   return presentFields(inspectableObjects(body), INVOICE_DELIVERY_FIELDS);
 }
 
-/** Escalate a call that redirects where invoices are delivered. */
-export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unknown): Risk {
+/**
+ * Delivery fields a body EMPTIES: named, but with null or a blank string.
+ *
+ * Split out because the axis was blind in one direction. `presentFields` requires a non-empty
+ * value, so `invoiceEmail: "attacker@example.com"` escalated and needed `full` mode, while
+ * `invoiceEmail: null` on the same endpoint stayed `reversible` and went through in the default
+ * mode. Same field, same axis, and both change which human receives the next invoice — one to a
+ * chosen address, the other to whatever the API falls back to. Only one of them was gated.
+ *
+ * `undefined` deliberately does not count. After JSON it is indistinguishable from absent, and
+ * absence is handled separately, by `omitted` below.
+ *
+ * Both null and the empty string count, even though only one of them clears anything. Measured
+ * against `PATCH /api/customers/{id}` on tenant 2783, seeding an address and sending each form:
+ * `invoiceEmail: ""` cleared it, `invoiceEmail: null` was a no-op that left the address in place,
+ * and `invoiceEmail: " "` answered 400 "Validation failed". So the value that empties a billing
+ * address is the one that looks like a mistake, and the deliberate-looking one does nothing.
+ *
+ * This gate is about the CALLER'S INTENT, which is why both are escalated. Someone who wants the
+ * address left alone omits the field; someone who names it with an empty value is asking for it to
+ * go. Whether this API honours that differs by endpoint — the same divergence the lead endpoints
+ * show, where PATCH ignores null and the PUT setters clear on it — and a guard that only covered the
+ * form that happens to work today would reopen the moment another endpoint honoured the other one.
+ */
+export function invoiceDeliveryClearedFields(body: unknown): string[] {
+  return [
+    ...new Set(
+      inspectableObjects(body).flatMap((candidate) =>
+        Object.entries(candidate)
+          .filter(
+            ([key, value]) =>
+              INVOICE_DELIVERY_FIELDS.has(key.toLowerCase()) &&
+              (value === null || (typeof value === "string" && value.trim() === "")),
+          )
+          .map(([key]) => key),
+      ),
+    ),
+  ];
+}
+
+/** Whether a method can overwrite a value that is already stored. */
+function replacesStoredValues(method: string): boolean {
+  const upper = method.toUpperCase();
+  return upper === "PUT" || upper === "PATCH";
+}
+
+/**
+ * Escalate a call that changes where invoices are delivered — in either direction.
+ *
+ * The method is a required parameter, not an option with a default, and that is deliberate: the
+ * clearing rule below must not apply to a POST. Creating an order with an explicit
+ * `invoiceEmail: null` redirects nothing, so escalating it would be the same false positive this
+ * file already records fixing twice — a safe call refused in the mode people point at a live
+ * business. Making the parameter required means the compiler names every call site that has to
+ * decide, instead of a default quietly deciding for it.
+ *
+ * `omitted` carries the field names a REPLACEMENT body leaves out, which only the caller can work
+ * out because it needs the spec. On a PUT that replaces the record, omitting `invoiceEmail` empties
+ * it exactly as sending null would — the same consequence with less to see.
+ */
+export function classifyInvoiceDelivery(
+  pathRisk: Risk,
+  method: string,
+  path: string,
+  body: unknown,
+  omitted: readonly string[] = [],
+): Risk {
   // Only a reversible write can be escalated, the same rule classifyWithBody applies
   // and states: "blocking a read because a stray field was passed alongside it would be
   // a false positive". These two guarded on irreversible alone, so a GET carrying an
@@ -856,7 +921,39 @@ export function classifyInvoiceDelivery(pathRisk: Risk, path: string, body: unkn
   // it was reachable, and it blocked exactly the safe operation.
   if (pathRisk !== "reversible") return pathRisk;
   if (!pathForms(path).some((n) => INVOICE_DELIVERY_PATHS.some((re) => re.test(n)))) return pathRisk;
-  return invoiceDeliveryFields(body).length > 0 ? "irreversible" : pathRisk;
+  if (invoiceDeliveryFields(body).length > 0) return "irreversible";
+  if (!replacesStoredValues(method)) return pathRisk;
+  if (invoiceDeliveryClearedFields(body).length > 0) return "irreversible";
+  const omittedDelivery = omitted.filter((name) => INVOICE_DELIVERY_FIELDS.has(name.toLowerCase()));
+  return omittedDelivery.length > 0 && method.toUpperCase() === "PUT" ? "irreversible" : pathRisk;
+}
+
+/**
+ * Every way a call can change invoice delivery, with the direction, for error messages.
+ *
+ * One function rather than three call sites assembling their own lists, because the message and the
+ * classification disagreeing about WHY a call was refused is a bug this repo has already shipped
+ * once — a refusal naming `iban` for a body that also armed a send.
+ */
+export function invoiceDeliveryChanges(
+  method: string,
+  body: unknown,
+  omitted: readonly string[] = [],
+): string[] {
+  const changes: string[] = [];
+  const set = invoiceDeliveryFields(body);
+  if (set.length > 0) changes.push(`${set.join(", ")} set to a new address`);
+  if (replacesStoredValues(method)) {
+    const cleared = invoiceDeliveryClearedFields(body);
+    if (cleared.length > 0) changes.push(`${cleared.join(", ")} emptied`);
+    if (method.toUpperCase() === "PUT") {
+      const dropped = omitted.filter((name) => INVOICE_DELIVERY_FIELDS.has(name.toLowerCase()));
+      if (dropped.length > 0) {
+        changes.push(`${dropped.join(", ")} left out of a body that replaces the record, which empties it`);
+      }
+    }
+  }
+  return changes;
 }
 
 function presentFields(
@@ -1016,12 +1113,20 @@ export function curatedArgsEscalate(
         "confirm the new bank details against something outside this conversation",
       );
     }
-    if (classifyInvoiceDelivery("reversible", path, args) === "irreversible") {
+    if (classifyInvoiceDelivery("reversible", method, path, args) === "irreversible") {
+      const cleared = invoiceDeliveryClearedFields(args);
+      const isClearing = invoiceDeliveryFields(args).length === 0 && cleared.length > 0;
       add(
-        invoiceDeliveryFields(args),
-        "this changes where invoices are delivered — every future invoice goes to that " +
-          "address, and the disclosure happens later, when someone issues one normally",
-        "confirm the address with the customer through a channel you already trust",
+        isClearing ? cleared : invoiceDeliveryFields(args),
+        isClearing
+          ? "this empties where invoices are delivered — future invoices stop going to the " +
+            "address someone chose, and go wherever the API falls back to instead, which is not " +
+            "visible until one is issued"
+          : "this changes where invoices are delivered — every future invoice goes to that " +
+            "address, and the disclosure happens later, when someone issues one normally",
+        isClearing
+          ? "check with whoever set that address why it is there before removing it"
+          : "confirm the address with the customer through a channel you already trust",
       );
     }
     // The same body fields the escape hatch escalates on. This helper checked payment
