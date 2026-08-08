@@ -605,3 +605,63 @@ test("the domain probe still measures what the change reported", async () => {
   // empty, and pointing it somewhere would be the confident-wrong-answer failure this repo names.
   assert.deepEqual(empty, ["remittering"], `unexpected empty results: ${empty.join(", ")}`);
 });
+
+/**
+ * Round two of the vocabulary work, from the ~30 still-empty terms the review of PR #118 listed.
+ *
+ * Nine mapped, fifteen deliberately not — and the ratio is the point. The previous round's lesson was that
+ * four of nine justifications were overstated, so each candidate here was checked against what the spec
+ * actually contains before anything was added, and the refusals are recorded in `src/reai/spec.ts` beside
+ * the additions so the next reader does not re-derive the same wrong answers.
+ *
+ * `kredit` is the one worth naming: the closest match is `/api/creditors`, which is loan counterparties,
+ * not the credit side of a posting. Mapping it would have repeated the `avslutt` mistake — a word pointed
+ * at an endpoint that shares its letters and not its meaning — which is why that entry is a refusal.
+ *
+ * Two of the nine fix a CONFIDENT WRONG ANSWER rather than an empty one, which is the worse failure:
+ * `aga` reached a bank-reconciliation voucher POST while the unabbreviated `arbeidsgiveravgift` reached
+ * salary-payments, and `inngaende` — as in "inngående faktura", a supplier invoice — reached `/api/invoices`,
+ * the customer side of the ledger.
+ */
+const ROUND_TWO = [
+  ["fordring", "GET /api/ledger/customer", "nothing"],
+  ["fordringer", "GET /api/ledger/customer", "nothing"],
+  ["inngaende", "GET /api/supplier-invoices", "/api/invoices — the OPPOSITE side of the ledger"],
+  ["aga", "GET /api/salary-payments", "POST /api/bank-reconciliations/{bankAccountId}/vouchers"],
+  ["anskaffelseskost", "GET /api/assets", "nothing"],
+  ["driftskostnader", "GET /api/expenses", "nothing"],
+  ["dimensjon", "GET /api/departments", "nothing"],
+];
+
+test("round-two vocabulary reaches the exact operation it names", async () => {
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const failures = [];
+  for (const [term, wanted, was] of ROUND_TWO) {
+    const hits = searchOperations({ query: term, limit: 5 }).map((h) => `${h.method} ${h.path}`);
+    const at = hits.indexOf(wanted);
+    if (at < 0 || at > 1) {
+      failures.push(`${term} -> wanted ${wanted} first or second, got ${hits.slice(0, 3).join(", ") || "(nothing)"} (before: ${was})`);
+    }
+  }
+  assert.deepEqual(failures, [], failures.join("\n  "));
+});
+
+test("round-two operations all exist", async () => {
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const operations = new Set(getSpecIndex().operations.map((o) => `${o.method} ${o.path}`));
+  for (const [term, wanted] of ROUND_TWO) {
+    assert.ok(operations.has(wanted), `${term} is asserted to reach ${wanted}, which this spec has no operation for`);
+  }
+});
+
+test("the refused terms stay refused, and `kredit` above all", async () => {
+  // A regression here would be someone mapping one of these on the same reasoning that was rejected. The
+  // assertion is specifically that `kredit` does NOT reach /api/creditors: that is the false friend, and a
+  // future mapping of it would be a confident wrong answer about the credit side of a posting.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const creditHits = searchOperations({ query: "kredit", limit: 5 }).map((h) => h.path);
+  assert.ok(
+    !creditHits.some((p) => p.startsWith("/api/creditors")),
+    `kredit must not reach /api/creditors — that is loan counterparties, not the credit side. Got ${creditHits.join(", ")}`,
+  );
+});

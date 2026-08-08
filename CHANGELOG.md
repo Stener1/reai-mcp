@@ -9,6 +9,39 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Round two of the Norwegian vocabulary work: nine terms mapped, fifteen deliberately refused.** The
+  review of PR #118 listed ~30 terms that returned nothing; that PR's own lesson was that four of nine
+  justifications had been overstated, so each candidate here was checked against what the spec actually
+  contains before anything was added, and **the refusals are recorded in the source beside the additions**
+  so the next reader does not re-derive the same wrong answers.
+  - **Two of the nine fix a confident wrong answer rather than an empty one**, which is the worse failure.
+    `aga` reached `POST /api/bank-reconciliations/{bankAccountId}/vouchers` while the unabbreviated
+    `arbeidsgiveravgift` correctly reached `/api/salary-payments`. And `inngaende` — as in "inngående
+    faktura", a **supplier** invoice — reached `/api/invoices`, the customer side of the ledger.
+  - Also mapped: `fordring`/`fordringer` → the customer ledger, `anskaffelseskost` → the asset register,
+    `driftskostnader` → expenses, `termin` → VAT returns, `kontonummer` → account lookup, and `dimensjon` →
+    departments (labelled a judgement: there is no `/api/dimensions`, and a department is what a posting is
+    analysed by here).
+  - **`kredit` is refused, and it is the one worth naming.** Its closest match is `/api/creditors` — loan
+    counterparties, not the credit side of a posting. Mapping it would have repeated the `avslutt` mistake
+    exactly: a word pointed at an endpoint that shares its letters and not its meaning. A test asserts it
+    never reaches `/api/creditors`.
+  - Fourteen more refused with reasons in the source: `debet`, `egenkapital`, `omsetning`, `utbytte`,
+    `varekostnad`, `permisjon`, `fravaer`, `sykepenger`, `trekk`, `kid`/`kidnummer`, `valutakurs` (its only
+    match is an INTERNAL operation), `saldobalanse`, `arsberetning`, `generalforsamling`, `styre`.
+  - **`betalingsbetingelser` was mapped and then removed**, which is worth recording. The target exists and
+    is public — `POST /invoice/setting/daysUntilDue`, and querying `daysuntildue` directly reaches it — but
+    the synonym is outvoted by compound decomposition: the word splits into `betaling` + `betingelser`,
+    `betaling` maps to payment, and the payment endpoints win. Measured rather than assumed, and removed
+    rather than left looking effective. The English "payment terms" fails the same way.
+  - Two refinements caught by measuring rather than by reading: mapping `fordring` to `["receivable",
+    "ledger"]` put the **asset** ledger first, because "receivable" matches nothing in this spec — a
+    receivable is the customer ledger, so the entity had to be named. And `anskaffelseskost → ["asset"]`
+    ranked the asset LEDGER above the register that actually carries the figure.
+  - Regression checked at rank level across **388 queries** drawn from every committed ranking corpus: two
+    lists changed, and both are the `inngående faktura` correction.
+
+
 - **Nine core Norwegian bookkeeping terms reached the wrong endpoint, or nothing at all.** The escape hatch
   is how an agent reaches operations no curated tool covers, and it is reached by searching — so a term that
   does not resolve costs it the endpoint it was looking for. `merverdiavgift`, the name on the Norwegian tax

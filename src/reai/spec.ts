@@ -1369,6 +1369,66 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // actually creates a posting nowhere: a write verb pointed at unrelated mutations, which is the failure
   // the rest of this table is written to avoid. Codex caught it on PR #118. Measured: the bare `postering`
   // still ranks GET /api/postings first, and "opprett postering" now ranks POST /api/vouchers first.
+  // --- Round two, from the review of PR #118, which listed ~30 still-empty terms -----------------------
+  //
+  // Worked one at a time against what the spec actually contains, because the previous round's lesson was
+  // that four of nine justifications were overstated. NINE are mapped below; FIFTEEN are deliberately not,
+  // and the reasons are recorded after them — a term with no honest destination is dropped, which is the
+  // standing rule here (see `nedskriv`).
+  //
+  // Two of the nine fix a CONFIDENT WRONG ANSWER rather than an empty one, which is the worse failure:
+  //   `aga` reached POST /api/bank-reconciliations/{bankAccountId}/vouchers, while the unabbreviated
+  //   `arbeidsgiveravgift` correctly reaches /api/salary-payments.
+  //   `inngaende` — as in "inngående faktura", a SUPPLIER invoice — reached /api/invoices, i.e. the
+  //   customer invoices, which is the opposite side of the ledger.
+  // "customer" as well as "ledger": mapping to ledger alone put GET /api/ledger/asset first, because
+  // "receivable" matches nothing in this spec and the asset ledger outscored the customer one. A
+  // receivable IS the customer ledger, so the entity has to be named.
+  fordring: ["ledger", "customer"],
+  fordringer: ["ledger", "customer"],
+  inngaende: ["supplier-invoice"],
+  aga: ["salary-payment"],
+  kontonummer: ["account"],
+  // "assets" as well, so the register outranks the asset LEDGER: acquisition cost is a field on the asset
+  // record, and /api/ledger/asset reports movements rather than carrying the figure.
+  anskaffelseskost: ["asset", "assets"],
+  driftskostnader: ["expense"],
+  termin: ["vat-return"],
+  // A JUDGEMENT, labelled: "dimensjon" is the general accounting term for the tag a posting is analysed
+  // by, and in this API that is a department. There is no /api/dimensions.
+  dimensjon: ["department"],
+  //
+  // NOT mapped, and each for a stated reason. Left here because the next reader will otherwise re-derive
+  // the same list and reach for the same wrong answers:
+  //
+  //   debet, kredit          The two sides of an entry. `kredit` is a FALSE FRIEND: the closest match is
+  //                          /api/creditors, which is loan counterparties, not the credit side of a
+  //                          posting. Mapping it would repeat the `avslutt` mistake exactly.
+  //   egenkapital, omsetning, utbytte     Equity, turnover, dividend. No endpoint reports any of them.
+  //   varekostnad            Cost of goods sold is a computed figure, not a resource here.
+  //   permisjon, fravaer     Leave and absence. This API has no absence model at all.
+  //   sykepenger             Sick pay is a salary COMPONENT; /api/salary-payments is the disbursement, so
+  //                          mapping it would answer a benefits question with a payment run.
+  //   trekk                  Withholding. Reached /api/tax-returns, which is the annual income-tax return,
+  //                          not a salary deduction. No endpoint.
+  //   kid, kidnummer         A payment reference FIELD on a body, never a resource.
+  //   valutakurs             Only /currency/search matches, and that operation is INTERNAL — so there is
+  //                          no public destination, and it is a currency list rather than a rate anyway.
+  //   saldobalanse           Trial balance. No such endpoint; it currently reaches /api/tax-returns/{year},
+  //                          which is wrong, and there is nothing to point it at instead.
+  //   arsberetning           The directors' report. Not in this API.
+  //   generalforsamling      Reaches /api/general-sub-accounts on a spurious "general". No AGM endpoint
+  //                          exists, so there is no mapping that would improve it.
+  //   styre                  Board. Only /onboarding/company-search matches, on the Brreg lookup.
+  //   betalingsbetingelser   Payment terms. The target exists and is public — POST
+  //                          /invoice/setting/daysUntilDue — and querying "daysuntildue" directly reaches
+  //                          it. The synonym still does not work: compound decomposition splits the word
+  //                          into `betaling` + `betingelser`, `betaling` maps to payment, and the payment
+  //                          endpoints outscore the setting. So the mapping was removed rather than left
+  //                          in place looking effective. Measured, not assumed: with
+  //                          `betalingsbetingelser: ["daysuntildue"]` the top hit was still
+  //                          GET /api/invoices/{id}/payments. The English "payment terms" fails the same
+  //                          way and for the same reason.
   postering: ["posting", "voucher"],
   posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],
