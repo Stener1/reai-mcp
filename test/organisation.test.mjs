@@ -202,7 +202,7 @@ test("departments send only the field the API accepts", async () => {
 });
 
 test("the toolset is registered, read-only where it should be, and transmits nothing", () => {
-  assert.equal(organisationTools.length, 8);
+  assert.equal(organisationTools.length, 13);
   for (const t of organisationTools) {
     assert.ok(registeredTools.includes(t), `${t.name} must be inside the invariant sweeps`);
     assert.ok(!t.transmits, `${t.name} must not leave the tenant`);

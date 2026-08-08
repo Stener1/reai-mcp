@@ -392,6 +392,16 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_employees` | Everyone on the payroll, as a summary — the `id` is the `employeeId` postings, the ledger and expenses take | read |
 | `reai_get_employee` | One full record. The national identity number and bank account are **redacted** unless `includePersonalData` is set | read |
 | `reai_employee_ledger` | What is owed to or from each employee, with the postings behind it. `isOpenPosting` widens the window back to 2000, so an unsettled refund from last year is not hidden | read |
+| `reai_create_employee` · `reai_update_employee` | Add and edit people. Passing `accountNumber` to the create escalates it to a payment-destination change; the update does not accept that field at all | reversible |
+| `reai_set_employee_bank_account` | Set or change where a salary lands — a payment destination, and the sharpest one here. Reads the account before and after, so a *repoint* is visible rather than inferred | irreversible |
+| `reai_add_employment_line` | Record a salary level, percentage or occupation code from a date. Reads the existing lines and writes them back with yours, because the field replaces | irreversible |
+| `reai_delete_employee` | Hard delete — no archive branch and no undelete. `409` once any work data references them, including an empty draft salary run | reversible |
+
+Employee master data is where this API's usual habit reverses, and it is worth stating in both directions. `PATCH /api/employees/{id}` is a **real patch** — verified by changing `phone` alone and finding city, postal code, street, bank account, start date and employment lines all untouched — which makes it the exception here, since company banks, creditors, agreements, subscriptions and salary wage lines all replace.
+
+But `employmentLines` inside that patch **is** a replacement. An employee with two lines, PATCHed with one, came back with one: the other was gone and the survivor had a *new id*. So "add a raise from June" written the obvious way deletes the employment history, which is why `reai_add_employment_line` exists and `reai_update_employee` refuses the field.
+
+Two more measured on the live tenant. Creating an employee with nothing but a name and an email is **not** a blank record: `dateOfEmployment` defaults to today and an employment relation with one empty line is created automatically, typed `ordinaertArbeidsforhold` — and employment is what the a-melding reports, so that date is not cosmetic. And `phone` is normalised to E.164 (`"22 33 44 55"` and `"0047 22334455"` both become `"+4722334455"`, a foreign number is fine) while an **unparseable** value is stored as `null` with a `200` and no error — `"nonsense"` silently replaced a stored number — so the tools read the phone back and say so when it did not survive.
 
 Projects are the obvious omission here, and deliberate: the Project module is disabled on every ReAI tenant this repo can reach, so `GET /api/projects` answers `403 "Project module is disabled"` and nothing about the success path could be verified. `reai_list_postings` and `reai_general_ledger` still take a `projectId` for tenants that have the module — you just have to find the id through `reai_request`.
 
@@ -488,19 +498,19 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 109 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 114 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
 REAI_TOOLSETS=bookkeeping,sales    # 37 tools
 REAI_TOOLSETS=purchase             # 23 tools
-REAI_TOOLSETS=organisation         # 15 tools
+REAI_TOOLSETS=organisation         # 20 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 109
+(unset)                            # all 114
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -511,7 +521,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **82 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **85 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 
