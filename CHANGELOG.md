@@ -7,6 +7,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **Contact persons on a customer** — `reai_list_customer_contacts`, `reai_get_customer_contact`,
+  `reai_create_customer_contact`, `reai_update_customer_contact`, `reai_delete_customer_contact`. The named
+  humans, as opposed to the customer record's own email and phone, which belong to the company. **172 tools**:
+  165 across thirteen accounting domains, plus 7 always-on.
+  - Measured against the live API on tenant 2783, every probe record deleted afterwards, and most of it is
+    not in the spec. **Contacts can only be added to COMPANY customers** — a private one is refused with 400
+    "Contact persons can only be added to company customers", which is exactly what an agent hits after
+    creating a private customer and trying to name someone on it; the tool says so in those words and points
+    at `reai_update_customer`. **Phone numbers are normalised, not merely validated**: `90123456` and
+    `004790123456` both come back `+4790123456`, so the spec's "E.164 format" describes the stored value, not
+    the input, and the tool reports the renormalisation rather than letting it look like a silent edit. An
+    invalid Norwegian number is refused in Norwegian, translated here.
+  - On the update, `null` and omitting leave a field unchanged while `""` clears it — which the spec does say,
+    and which is easy to verify wrongly: clear a field first and `null` then reports "unchanged" whichever the
+    API does. Each case was run from a freshly populated contact. A blank name is refused rather than treated
+    as a clear.
+  - The suite's own guards caught two things on the way in, both worth more than the tools. The
+    path-placeholder sweep could not attribute `{id}` in `/api/customers/{id}/contact-persons/...` to a
+    `customerId` argument, so `resolveArg` now resolves a placeholder against the **owning path segment** —
+    structure, not domain knowledge, and it generalises to every nested resource in this API. That also
+    attributed two placeholders previously listed as unattributable, `reai_create_offer {id}` and
+    `reai_create_order {id}`, whose bounds had never been swept and now are; one entry is left on that list.
+
 ## Unreleased
 
 ### Fixed

@@ -603,24 +603,47 @@ test("the probe sees refinements, not the schema underneath them", () => {
  * justified the skip as avoiding "a guess about which argument feeds which placeholder", which is
  * sound for a tool with two candidate ids and wrong for a tool with one.
  */
-function resolveArg(tool, params, parameter) {
+function resolveArg(tool, params, parameter, path) {
   const exact = tool.inputSchema?.[parameter.name];
   if (exact) return exact;
   const idArgs = Object.keys(tool.inputSchema ?? {}).filter(
     (name) => /Id$/i.test(name) && name !== "tenantId",
   );
   if (params.length === 1 && idArgs.length === 1) return tool.inputSchema[idArgs[0]];
+
+  // A nested sub-resource names its parent in the path, so the OWNER of a `{...}` is the segment
+  // before it: `/api/customers/{id}/contact-persons/{contactPersonId}` says `{id}` is a customer.
+  // Singularise that segment, append `Id`, and the argument is attributable by structure — no
+  // domain knowledge, and it generalises to every nested resource in this API rather than being a
+  // rule about one tool. Added when the customer-contact tools arrived: naming their arguments
+  // `customerId`/`contactPersonId` is clearer for a caller than a bare `id` that means the parent,
+  // and without this rule the clearer names cost the sweep its attribution.
+  if (path) {
+    const segments = path.split("/").filter(Boolean);
+    const index = segments.indexOf(`{${parameter.name}}`);
+    const owner = index > 0 ? segments[index - 1] : undefined;
+    if (owner && !owner.startsWith("{")) {
+      const singular = owner.replace(/ies$/, "y").replace(/s$/, "");
+      const camel = singular.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      const candidate = `${camel}Id`;
+      const match = Object.keys(tool.inputSchema ?? {}).find(
+        (name) => name.toLowerCase() === candidate.toLowerCase(),
+      );
+      if (match) return tool.inputSchema[match];
+    }
+  }
   return undefined;
 }
 
 /** Placeholders no rule can attribute, listed so the set cannot grow in silence. */
 const UNRESOLVED_PATH_ARGS = [
   // Derives the lead id internally from orgNumber, so no argument feeds the placeholder at all.
+  // The only one left. reai_create_offer and reai_create_order were here too, on the reasoning that
+  // attributing their `{id}` "would be domain knowledge, not structure" — but the owning-segment rule
+  // in resolveArg does it structurally: `{id}` in `/api/customers/{id}/...` is a customer, and both
+  // tools take `customerId`. Two bounds that were never swept are now swept, which is the point of
+  // pinning this list rather than trusting the skip.
   "reai_convert_lead {id}",
-  // Both take customerId AND projectId, and {id} here belongs to a preflight GET /api/customers/{id}.
-  // Attributing it would be domain knowledge, not structure. Sorted, since the assertion sorts.
-  "reai_create_offer {id}",
-  "reai_create_order {id}",
 ];
 
 function pathOperations() {
@@ -654,7 +677,7 @@ test("no tool refuses a path value the API accepts", () => {
   let checked = 0;
   for (const { tool, method, path, params } of pathOperations()) {
     for (const parameter of params) {
-      const arg = resolveArg(tool, params, parameter);
+      const arg = resolveArg(tool, params, parameter, path);
       if (!arg) continue;
       checked += 1;
       const schema = parameter.schema;
@@ -712,7 +735,7 @@ test("a path id below the spec's floor is refused locally", () => {
   let checked = 0;
   for (const { tool, method, path, params } of pathOperations()) {
     for (const parameter of params) {
-      const arg = resolveArg(tool, params, parameter);
+      const arg = resolveArg(tool, params, parameter, path);
       if (!arg || parameter.schema.exclusiveMinimum !== 0 || parameter.schema.type !== "integer") continue;
       checked += 1;
       for (const bad of [0, -1]) {
@@ -764,9 +787,9 @@ test("the int32 ceiling is deliberately not enforced, and that is recorded here"
   // if someone decides the ceilings ARE worth 67 edits, this test is what they have to change, and
   // the reasoning is one scroll away.
   const beyondInt32 = new Set();
-  for (const { tool, params } of pathOperations()) {
+  for (const { tool, params, path } of pathOperations()) {
     for (const parameter of params) {
-      const arg = resolveArg(tool, params, parameter);
+      const arg = resolveArg(tool, params, parameter, path);
       if (!arg || parameter.schema.format !== "int32") continue;
       // Unique tool+argument, not occurrences. Counting occurrences meant `reai_update_agreement.id`
       // alone contributed six, so ceilings could have been added to 59 of the 67 arguments while the
@@ -822,9 +845,9 @@ test("every path placeholder is either swept or listed as unattributable", () =>
   // green. Eight of those eleven are now resolved structurally; the remaining three are named.
   const unresolved = [];
   let resolved = 0;
-  for (const { tool, params } of pathOperations()) {
+  for (const { tool, params, path } of pathOperations()) {
     for (const parameter of params) {
-      if (resolveArg(tool, params, parameter)) resolved += 1;
+      if (resolveArg(tool, params, parameter, path)) resolved += 1;
       else unresolved.push(`${tool.name} {${parameter.name}}`);
     }
   }

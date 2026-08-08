@@ -14,7 +14,7 @@ import { searchOperations } from "../dist/reai/spec.js";
  * together, so the word a user types is often a compound whose meaning lives in one half —
  * lønn+kjøring, vare+lager, lager+beholdning — which no plural or diacritic rule reaches.
  *
- * The escape hatch is how an agent gets at the 148 operations no curated tool covers, so a
+ * The escape hatch is how an agent gets at the 143 operations no curated tool covers, so a
  * query that returns nothing is the difference between a capable agent and a stuck one.
  */
 

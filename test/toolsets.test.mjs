@@ -554,6 +554,12 @@ const KEEPS_AN_EXPLICIT_ID = {
   reai_get_warehouse_inventory:
     "reports stock lines, which have no id of their own; warehouseId is an OPTIONAL filter and " +
     "omitting it reports across every warehouse, so `id` would name the wrong thing",
+  reai_get_customer_contact:
+    "a contact person is nested under a customer, so the tool takes TWO ids and one of them has to " +
+    "carry a qualifier. `customerId` trips this sweep whichever way the other is spelled, so the " +
+    "choice was made for the OTHER guard: naming it `contactPersonId` matches the path placeholder, " +
+    "which is what makes its `.positive()` bound attributable to the spec sweep in spec-bounds " +
+    "rather than unpinned",
 };
 
 // Seven getters took `id` and the three added in the last two iterations took `<noun>Id`.
