@@ -7,6 +7,29 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **`scripts/audit-messages.mjs` — a check on whether the API still says what this repository claims it
+  says.** Five consecutive iterations found a false *measured* claim in shipped guidance (the phone rule
+  three times, `skipRegistryLookup`, a quirk telling agents to strip a correct `+47`, a 404 translation
+  asserting the wrong thing). Every one was found by accident or by review; none by the suite. The reason
+  is structural: twelve places in `src/` match on the **text** of a ReAI error, the unit tests stub that
+  text, and so they keep passing against a string the API no longer produces. This repository shipped
+  exactly that once — a quirk quoting `"…kan skrives uten +"` against a live `"…kan skrives uten +47."`.
+  - Every case is a request built to be **refused**, which is what makes it safe against a real tenant:
+    a rejected write creates nothing. It carries the write scripts' `REAI_WRITE_TEST_TENANTS` guard
+    anyway, because a probe wrong in the other direction would write for real. First run: **9 of 9
+    triggerable messages unchanged, 0 drifted.**
+  - It reports **three** outcomes, and the third is why it can be trusted. Two of its own probes first
+    reported `DRIFT` because the voucher body was missing `postings[].postingDate` and then
+    `postings[].currency` — the API was complaining about the *request* and never evaluated the account
+    rule being checked. A two-outcome audit would have sent someone to rewrite two regexes that were
+    correct, so `INCONCLUSIVE` says `do NOT touch` the file and names the probe as the thing to fix.
+  - `test/message-drift.test.mjs` keeps it complete: it fails if a text-matching regex is added to `src/`
+    without a probe, or if an exemption names a regex that no longer exists. Both mutations verified. The
+    four exemptions each state the missing test data rather than shrugging — tenant 2783 has no loans and
+    no manual company bank account.
+
 ### Fixed
 
 - **One phone rule, measured, replacing three accounts of it — one of which was false and told agents

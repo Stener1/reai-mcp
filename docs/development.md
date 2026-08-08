@@ -64,7 +64,43 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 # WRITES TO THE GENERAL LEDGER. Posts and deletes a real voucher.
 REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/smoke-full-write.mjs --tenant 1234 --i-understand-this-posts-to-real-books
+
+# Does the API still say what we claim it says? Every case is designed to FAIL.
+REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
+  node scripts/audit-messages.mjs --tenant 1234
 ```
+
+### Why `audit-messages.mjs` exists
+
+Twelve places in `src/` turn a ReAI error into something an agent can act on by matching its **text** —
+a Norwegian validation message becomes an explanation and a next step. Each of those matches is a
+silent dependency on upstream wording: rephrase the message and the translation stops firing, the
+agent gets raw Norwegian, and nothing fails, because the unit tests stub the error and keep passing
+against a string the API no longer produces. This repository shipped exactly that once, a quirk quoting
+`"…kan skrives uten +"` against a live `"…kan skrives uten +47."`.
+
+Every case is a request built to be **refused**, which is what makes it safe against a real tenant: a
+rejected write creates nothing. Three cases need a customer to exist; they create one, delete it in a
+`finally`, and shout if the deletion did not take. It carries the same `REAI_WRITE_TEST_TENANTS` guard
+as the write scripts, because a probe that is wrong in the *other* direction would write for real.
+
+It reports **three** outcomes, and the third is what makes it trustworthy:
+
+| outcome | meaning |
+|---|---|
+| `OK` | the shipped regex matches what came back |
+| `DRIFT` | the request reached the rule and the wording changed — act on this |
+| `INCONCLUSIVE` | the request never reached the rule, so the code is not the problem |
+
+That distinction was not theoretical. Two probes here first reported `DRIFT` because the voucher body
+was missing `postings[].postingDate`, then `postings[].currency` — the API was complaining about the
+*request* and never evaluated the account rule. A two-outcome audit would have sent someone to rewrite
+two regexes that were perfectly correct, so an inconclusive result says `do NOT touch` the file.
+
+`test/message-drift.test.mjs` keeps the audit honest in the other direction: it fails if a new
+text-matching regex is added to `src/` without a probe, or if an exemption names a regex that no longer
+exists. The exemptions each say what test data is missing — today, four are blocked on tenant 2783
+having no loans and no manual company bank account.
 
 **Both write scripts refuse to run unless the tenant is listed in `REAI_WRITE_TEST_TENANTS`.** A tenant id on the command line is not consent — the tenant has to be declared safe to write to, out of band, in the environment. This exists because passing the wrong `--tenant` was once all it took to post a voucher into a live business's books. They also clean up in a `finally` so a mid-run failure still removes what was created, and report loudly enough to act on when they cannot.
 
