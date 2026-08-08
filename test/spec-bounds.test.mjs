@@ -71,6 +71,19 @@ function scalarConstraints(schema, seen = new Set(), depth = 0) {
   for (const key of ["maximum", "minimum", "maxLength", "minLength", "pattern", "enum"]) {
     if (schema[key] !== undefined) c[key] = schema[key];
   }
+  // OpenAPI 3.1 writes many bounds EXCLUSIVELY, and this document does it 28 times on query
+  // parameters alone — `exclusiveMinimum: 0` on every id filter. Reading only the inclusive keys
+  // dropped those parameters entirely, so a plain z.number().int() accepting 0 and negative ids
+  // stayed green. Normalised to the inclusive form the probe already understands: exclusiveMinimum 0
+  // is minimum 1 for an integer, and the probe then tries 0.
+  if (typeof schema.exclusiveMinimum === "number" && c.minimum === undefined) {
+    c.minimum = schema.exclusiveMinimum + (schema.type === "integer" ? 1 : 0);
+    if (schema.type !== "integer") c.exclusiveMinimumValue = schema.exclusiveMinimum;
+  }
+  if (typeof schema.exclusiveMaximum === "number" && c.maximum === undefined) {
+    c.maximum = schema.exclusiveMaximum - (schema.type === "integer" ? 1 : 0);
+    if (schema.type !== "integer") c.exclusiveMaximumValue = schema.exclusiveMaximum;
+  }
   const refs = [schema.$ref, ...(schema.oneOf ?? []).map((o) => o.$ref)].filter(Boolean);
   for (const ref of refs) {
     const name = ref.split("/").pop();
@@ -148,6 +161,14 @@ function violationsOf(c) {
   const out = [];
   if (typeof c.maximum === "number") out.push([`above maximum ${c.maximum}`, c.maximum + 1]);
   if (typeof c.minimum === "number") out.push([`below minimum ${c.minimum}`, c.minimum - 1]);
+  // For a non-integer exclusive bound, the excluded VALUE itself is the interesting probe: the
+  // spec says "greater than 0", so 0 must be rejected while 0.0001 is fine.
+  if (typeof c.exclusiveMinimumValue === "number") {
+    out.push([`equal to the excluded minimum ${c.exclusiveMinimumValue}`, c.exclusiveMinimumValue]);
+  }
+  if (typeof c.exclusiveMaximumValue === "number") {
+    out.push([`equal to the excluded maximum ${c.exclusiveMaximumValue}`, c.exclusiveMaximumValue]);
+  }
   if (typeof c.maxLength === "number" && c.maxLength < 5000) {
     out.push([`longer than maxLength ${c.maxLength}`, "x".repeat(c.maxLength + 1)]);
   }
@@ -210,8 +231,17 @@ function queryOperations() {
       const constraints = {};
       for (const parameter of op.parameters ?? []) {
         if (parameter.in !== "query" || !parameter.schema) continue;
-        const bound = scalarConstraints(parameter.schema);
-        if (bound && Object.keys(bound).length > 0) constraints[parameter.name] = bound;
+        // An ARRAY parameter keeps its constraints on `items` — /api/bank-reconciliations'
+        // `include` has its allowed values as an enum there — so probing the outer schema found
+        // nothing and swapping the tool's z.array(z.enum(...)) for plain strings would have stayed
+        // green. Merged, with the item bounds winning, since they are the ones a value must satisfy.
+        const bound = {
+          ...scalarConstraints(parameter.schema),
+          ...(parameter.schema.items ? scalarConstraints(parameter.schema.items) : {}),
+        };
+        if (Object.keys(bound).length > 0) {
+          constraints[parameter.name] = { ...bound, isArray: parameter.schema.type === "array" };
+        }
       }
       if (Object.keys(constraints).length > 0) out.push({ tool, method, path, constraints });
     }
@@ -220,15 +250,18 @@ function queryOperations() {
 }
 
 /**
- * Query parameters a tool exposes under a DIFFERENT name than the spec uses.
+ * Constrained query parameters a tool exposes under a DIFFERENT name than the spec uses.
  *
- * The sweep matches by name, so a renamed argument is invisible to it — the same limitation the
- * body sweep has. Recorded rather than left implicit, because "the sweep found nothing" should not
- * be read as "there is nothing" for a parameter it never looked at.
+ * Keyed `tool.specParameterName` → the tool's own argument name, and the sweep RESOLVES through it
+ * rather than merely listing it. That distinction is the whole point: the first version held one
+ * entry that said the tool and the spec agreed on the name — documenting nothing — while the sweep
+ * went on skipping genuinely renamed parameters in silence. A map that records a blind spot without
+ * closing it is worse than no map, because it reads as coverage.
+ *
+ * Empty today, and asserted below to contain only real renames of genuinely constrained parameters,
+ * so it cannot fill up with decoration again.
  */
-const RENAMED_QUERY_ARGS = {
-  "reai_list_accounts.query": "exposed as `query`, matching the spec — listed to show this map is not empty by accident",
-};
+const RENAMED_QUERY_ARGS = {};
 
 test("the query sweep sees a useful number of operations, not zero", () => {
   // A sweep that resolves nothing passes silently, which is the failure mode this repo keeps
@@ -245,10 +278,17 @@ test("no tool accepts a QUERY argument the API's schema rejects", () => {
   const problems = [];
   for (const { tool, constraints } of queryOperations()) {
     for (const [name, bound] of Object.entries(constraints)) {
-      const schema = resolveInput(tool.inputSchema, name);
-      if (!schema) continue; // not exposed, or exposed under another name — see RENAMED_QUERY_ARGS
+      const renamed = RENAMED_QUERY_ARGS[`${tool.name}.${name}`];
+      const schema = resolveInput(tool.inputSchema, renamed ?? name);
+      // Not exposed at all is fine — a tool need not offer every filter. Exposed under another name
+      // is what RENAMED_QUERY_ARGS is for, and the entry above is what makes it checkable instead of
+      // skipped.
+      if (!schema) continue;
       for (const [label, value] of violationsOf(bound)) {
-        if (schema.safeParse?.(value)?.success === true) {
+        // A value that violates an ITEM constraint has to be offered as a one-element array, or the
+        // probe tests the wrong thing and passes for the wrong reason.
+        const probe = bound.isArray === true ? [value] : value;
+        if (schema.safeParse?.(probe)?.success === true) {
           problems.push(`${tool.name}.${name}: accepts a value ${label}`);
         }
       }
@@ -273,14 +313,52 @@ test("the query sweep would catch the case that prompted it", () => {
   assert.equal(schema.safeParse("x".repeat(201)).success, false);
 });
 
-test("every RENAMED_QUERY_ARGS entry names a real tool and argument", () => {
-  for (const [key, reason] of Object.entries(RENAMED_QUERY_ARGS)) {
+test("an ARRAY query parameter's item constraints are resolved", () => {
+  // /api/bank-reconciliations keeps `include`'s allowed values as an enum on schema.items, so
+  // probing the outer schema found nothing at all. There is no violation to catch today —
+  // reai_get_bank_reconciliation already uses z.array(z.enum(...)) — which is precisely why this
+  // asserts the CONSTRAINT is resolved rather than that some tool is currently wrong. Verified the
+  // other way round by mutation: replacing that enum with z.array(z.string()) makes the sweep fail,
+  // which is the regression it exists to catch.
+  const recon = queryOperations().find((o) => o.tool.name === "reai_get_bank_reconciliation");
+  assert.ok(recon, "reai_get_bank_reconciliation should resolve query constraints");
+  const include = recon.constraints.include;
+  assert.ok(include, "`include` carries an item enum and must be resolved");
+  assert.ok(Array.isArray(include.enum) && include.enum.length >= 3, JSON.stringify(include));
+  assert.equal(include.isArray, true, "and it must be marked an array, or the probe tests a bare value");
+});
+
+test("every RENAMED_QUERY_ARGS entry is a real rename of a constrained parameter", () => {
+  for (const [key, toolArg] of Object.entries(RENAMED_QUERY_ARGS)) {
     const [name, ...rest] = key.split(".");
+    const specName = rest.join(".");
     const tool = registeredTools.find((t) => t.name === name);
     assert.ok(tool, `unknown tool: ${name}`);
-    assert.ok(resolveInput(tool.inputSchema, rest.join(".")), `${key} is not an argument`);
-    assert.ok(String(reason).length > 25, `${key} needs a reason`);
+    // A genuine RENAME: the tool must not already expose the spec's own name, or the entry is
+    // decoration — which is exactly what the first version of this map contained.
+    assert.ok(
+      !resolveInput(tool.inputSchema, specName),
+      `${key} is not a rename: ${name} already exposes "${specName}"`,
+    );
+    assert.ok(resolveInput(tool.inputSchema, toolArg), `${key} → "${toolArg}" is not an argument`);
+    // And the spec parameter must actually be constrained, or there is nothing for the sweep to do.
+    const constrained = queryOperations().some(
+      (o) => o.tool.name === name && o.constraints[specName] !== undefined,
+    );
+    assert.ok(constrained, `${key} names no constrained query parameter`);
   }
+});
+
+test("a renamed parameter would be CHECKED, not skipped", () => {
+  // The map is empty, so the mechanism is proved against a synthetic entry rather than left to be
+  // trusted the first time a rename appears. reai_list_postings exposes `voucherId`; pretend the
+  // spec called it something else and confirm the resolution finds the tool's argument.
+  const postings = queryOperations().find((o) => o.tool.name === "reai_list_postings");
+  assert.ok(postings, "reai_list_postings should resolve query constraints");
+  const map = { "reai_list_postings.someOtherName": "voucherId" };
+  const resolved = resolveInput(postings.tool.inputSchema, map["reai_list_postings.someOtherName"]);
+  assert.ok(resolved, "the rename map must resolve to the tool's own argument");
+  assert.equal(resolved.safeParse(0).success, false, "and the resolved schema is the bounded one");
 });
 
 test("the sweep reaches inside arrays, which is where the motivating bug lived", () => {

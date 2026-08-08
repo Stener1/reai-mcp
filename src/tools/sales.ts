@@ -729,7 +729,7 @@ const listOrders = defineTool({
         'Filter by order status. With "open" the date window is widened automatically — see the ' +
           "note on startDate.",
       ),
-    customerId: z.number().int().optional().describe("Filter by customer."),
+    customerId: z.number().int().positive().optional().describe("Filter by customer."),
     orderNumber: z.string().optional().describe("Filter by order number."),
     externalReference: z
       .string()
@@ -888,7 +888,7 @@ const listOffers = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/offers"]],
   inputSchema: {
-    customerId: z.number().int().optional().describe("Filter by customer."),
+    customerId: z.number().int().positive().optional().describe("Filter by customer."),
     offerNumber: z.string().optional().describe("Filter by offer number."),
     startDate: isoDate
       .optional()
@@ -1000,7 +1000,7 @@ const listInvoices = defineTool({
       .optional()
       .describe("Filter by whether the due date has passed."),
     type: z.enum(["all", "invoice", "credit_note"]).optional().describe("Filter by document type."),
-    customerId: z.number().int().optional().describe("Filter by customer."),
+    customerId: z.number().int().positive().optional().describe("Filter by customer."),
     invoiceNumber: z.string().optional().describe("Filter by invoice number."),
     startDate: isoDate.optional().describe("Inclusive start date."),
     endDate: isoDate.optional().describe("Inclusive end date."),

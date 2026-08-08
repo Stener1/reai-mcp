@@ -28,10 +28,25 @@ All notable changes to `reai-mcp`. Format loosely follows
     rather than passing on zero, and one asserts it would catch the case that prompted
     it (`reai_search_leads.query` at 200). Removing any of the three bounds from the
     source fails it — verified by mutation, not assumed.
-  - `RENAMED_QUERY_ARGS` records the sweep's own blind spot: it matches by name, so an
-    argument exposed under a different name than the spec's is invisible to it. "The
-    sweep found nothing" must not be read as "there is nothing" for a parameter it never
-    looked at.
+  - **Exclusive bounds were being dropped entirely.** OpenAPI 3.1 writes many bounds as
+    `exclusiveMinimum`, and this document does it 28 times on query parameters alone —
+    every id filter. `scalarConstraints` read only the inclusive keys, so those
+    parameters vanished from the sweep and **twelve more violations** were hiding behind
+    it: `voucherId`, `customerId`, `supplierId`, `projectId`, `employeeId` and
+    `companyBankId` filters declared `z.number().int()` without `.positive()`, accepting
+    0 and negative ids. All fixed.
+  - **Array parameters keep their constraints on `items`.** `/api/bank-reconciliations`
+    holds `include`'s allowed values as an enum there, so probing the outer schema found
+    nothing — replacing that tool's `z.array(z.enum(…))` with plain strings would have
+    left the sweep green. There is no violation today, so the fix is proven the other
+    way round: weakening the tool makes the sweep fail.
+  - `RENAMED_QUERY_ARGS` now **resolves** through the map instead of merely listing it.
+    Its first version held a single entry stating that the tool and the spec agreed on
+    the name — documenting nothing — while the sweep went on skipping genuine renames in
+    silence. A map that records a blind spot without closing it is worse than no map,
+    because it reads as coverage. It is empty, asserted to contain only real renames of
+    genuinely constrained parameters, and the resolution mechanism is proved against a
+    synthetic entry so it is not first exercised in anger.
 
 - **Leads** (2 read tools) — `reai_search_leads` and `reai_get_lead`. The last
   substantial uncovered domain with real data on it, and it is not what the name
