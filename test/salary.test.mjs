@@ -1,0 +1,327 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { salaryTools } from "../dist/tools/salary.js";
+import { registeredTools, destructiveHintFor } from "../dist/server.js";
+import { classifyRequest, classifyTransmission } from "../dist/policy.js";
+import { quirksFor } from "../dist/reai/quirks.js";
+import { z } from "zod";
+
+const tool = (name) => {
+  const found = salaryTools.find((t) => t.name === name);
+  assert.ok(found, `${name} is not registered`);
+  return found;
+};
+
+/**
+ * Drives a tool the way a client does: the arguments go through the tool's own input schema first.
+ *
+ * Not a formality. Calling `handler` directly accepts any argument names at all, and a test written
+ * against invented ones passes while the real tool rejects them — which happened: this file
+ * exercised `reai_create_salary_run` with periodFrom/periodTo for a whole iteration, green, and the
+ * live run answered "Required at period, Required at paymentDate" the first time a client called it.
+ *
+ * `responses` may be a function of (request, callNumber) — the delete reads before writing.
+ * `raw` skips validation, for the checks that are about what the HANDLER sends regardless of what
+ * the schema would have stripped.
+ */
+async function run(name, args, responses, { status = 200, raw = false } = {}) {
+  const calls = [];
+  const withTenant = { tenantId: 2783, ...args };
+  const validated = raw ? withTenant : z.object(tool(name).inputSchema).parse(withTenant);
+  const result = await tool(name).handler(
+    validated,
+    {
+      client: {
+        request: async (req) => {
+          calls.push(req);
+          const data = typeof responses === "function" ? responses(req, calls.length) : responses;
+          return { data, status };
+        },
+        deepLink: () => "link",
+      },
+      config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+      session: {},
+    },
+  );
+  return { calls, result, text: result.content.find((c) => c.type === "text").text };
+}
+
+const runRecord = (overrides = {}) => ({
+  id: 1360,
+  number: "2026-1",
+  status: "under_process",
+  payableAmount: 0,
+  totalTaxDeducted: 0,
+  voucherId: null,
+  employees: [],
+  ...overrides,
+});
+
+test("every salary tool is registered on the server and carries a risk", () => {
+  const registered = new Map(registeredTools.map((t) => [t.name, t]));
+  assert.equal(salaryTools.length, 7);
+  for (const t of salaryTools) {
+    assert.ok(registered.has(t.name), `${t.name} missing from the server`);
+    assert.ok(["read", "reversible", "irreversible"].includes(t.risk), `${t.name}: ${t.risk}`);
+  }
+});
+
+test("the two reads are reads; everything that changes payroll is irreversible", () => {
+  assert.equal(tool("reai_list_salary_runs").risk, "read");
+  assert.equal(tool("reai_get_salary_run").risk, "read");
+  for (const name of [
+    "reai_create_salary_run",
+    "reai_add_salary_line",
+    "reai_update_salary_line",
+    "reai_delete_salary_line",
+    "reai_delete_salary_run",
+  ]) {
+    assert.equal(tool(name).risk, "irreversible", name);
+    assert.equal(destructiveHintFor(tool(name)), true, `${name} should hint destructive`);
+  }
+});
+
+// The whole reason this toolset stops where it does. `/complete` posts the voucher, creates
+// payslips, creates one employee payment each and starts the a-melding submission. A curated
+// tool for it would be a one-line way to pay people and file with the state, so there isn't one
+// — and this test fails if a later edit adds one.
+test("no curated salary tool can complete a run or register its payment", () => {
+  const forbidden = [/\/complete$/, /register-payment$/, /payment-date$/];
+  for (const t of registeredTools) {
+    for (const [method, path] of t.apiPaths ?? []) {
+      for (const re of forbidden) {
+        assert.ok(
+          !re.test(path),
+          `${t.name} reaches ${method} ${path}, which this server deliberately leaves to reai_request`,
+        );
+      }
+    }
+  }
+});
+
+test("completing a run and filing the a-melding are external transmissions", () => {
+  // So `full` write mode alone does not reach them: REAI_ALLOW_EXTERNAL_SEND has to be lifted too.
+  assert.equal(
+    classifyTransmission("POST", "/api/salary-payments/1360/complete", undefined),
+    "external",
+  );
+  assert.equal(classifyTransmission("POST", "/api/amelding/submit", undefined), "external");
+  // Opening or deleting a draft is local accounting, not a transmission.
+  assert.equal(classifyTransmission("POST", "/api/salary-payments", undefined), "none");
+  assert.equal(classifyTransmission("DELETE", "/api/salary-payments/1360", undefined), "none");
+});
+
+test("payroll writes classify as irreversible on the write axis", () => {
+  for (const [method, path] of [
+    ["POST", "/api/salary-payments"],
+    ["POST", "/api/salary-payments/1360/wage-specs"],
+    ["PUT", "/api/salary-payments/1360/wage-specs/7"],
+    ["DELETE", "/api/salary-payments/1360/wage-specs/7"],
+    ["DELETE", "/api/salary-payments/1360"],
+  ]) {
+    assert.equal(classifyRequest(method, path), "irreversible", `${method} ${path}`);
+  }
+});
+
+test("a run is created with the dates and employees given, and nothing else", async () => {
+  const { calls, text } = await run(
+    "reai_create_salary_run",
+    { period: "2026-08", paymentDate: "2026-08-31", employeeIds: [987] },
+    runRecord(),
+    { status: 201 },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].path, "/api/salary-payments");
+  assert.deepEqual(calls[0].body.employeeIds, [987]);
+  assert.equal(calls[0].body.period, "2026-08");
+  assert.equal(calls[0].body.paymentDate, "2026-08-31");
+  assert.equal(calls[0].tenantId, 2783);
+  // The measured facts a caller acts on: it is a draft, and it posted nothing.
+  assert.match(text, /under_process/);
+  assert.match(text, /voucher/i);
+});
+
+test("omitting employeeIds is not passing nobody — the tool says so", () => {
+  const t = tool("reai_create_salary_run");
+  const described = JSON.stringify(t.inputSchema.employeeIds?._def?.description ?? "");
+  assert.match(described + t.description, /every employee|all employees/i);
+});
+
+for (const name of ["reai_add_salary_line", "reai_update_salary_line"]) {
+  test(`${name} refuses holidayAllowanceEarningYear on a non-holiday line without calling out`, async () => {
+    const { calls, result, text } = await run(
+      name,
+      {
+        id: 1360,
+        wageSpecId: 7,
+        employeeId: 987,
+        specificationCode: "COMMISSION",
+        quantity: 1,
+        rate: 5000,
+        holidayAllowanceEarningYear: 2025,
+      },
+      runRecord(),
+    );
+    assert.equal(calls.length, 0, "nothing may be sent");
+    assert.equal(result.isError, true);
+    assert.match(text, /HOLIDAY_ALLOWANCE/);
+    assert.match(text, /COMMISSION/);
+  });
+
+  test(`${name} lets the field through on a HOLIDAY_ALLOWANCE line`, async () => {
+    // The refusal above must be the handler's, not the schema's — a schema that rejected the
+    // value would make the explanation unreachable, which has bitten this server twice.
+    const parsed = tool(name).inputSchema.holidayAllowanceEarningYear.safeParse(2025);
+    assert.equal(parsed.success, true);
+    const { calls } = await run(
+      name,
+      {
+        id: 1360,
+        wageSpecId: 7,
+        employeeId: 987,
+        specificationCode: "HOLIDAY_ALLOWANCE",
+        quantity: 1,
+        rate: 5000,
+        holidayAllowanceEarningYear: 2025,
+      },
+      runRecord(),
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.holidayAllowanceEarningYear, 2025);
+  });
+}
+
+// Deliberately `raw`: the guarantee is that the HANDLER builds the body field by field, so a
+// stray argument cannot ride along even if schema stripping ever stopped catching it.
+test("adding a line sends employeeId; updating one must not (measured: 400)", async () => {
+  const line = {
+    id: 1360,
+    wageSpecId: 7,
+    employeeId: 987,
+    specificationCode: "COMMISSION",
+    quantity: 1,
+    rate: 5000,
+  };
+  const added = await run("reai_add_salary_line", line, runRecord(), { raw: true });
+  assert.equal(added.calls[0].method, "POST");
+  assert.equal(added.calls[0].body.employeeId, 987);
+  assert.ok(!("wageSpecId" in added.calls[0].body), "the create takes no line id");
+
+  const updated = await run("reai_update_salary_line", line, runRecord(), { raw: true });
+  assert.equal(updated.calls[0].method, "PUT");
+  assert.equal(updated.calls[0].path, "/api/salary-payments/1360/wage-specs/7");
+  assert.ok(
+    !("employeeId" in updated.calls[0].body),
+    "UpdateSalaryWageSpecReq rejects employeeId — sending it answers 400",
+  );
+});
+
+test("deleting a run reads its status first and refuses anything but a draft", async () => {
+  for (const status of ["unpaid", "complete", "reversed"]) {
+    const { calls, result, text } = await run(
+      "reai_delete_salary_run",
+      { id: 1360 },
+      runRecord({ status }),
+    );
+    assert.equal(calls.length, 1, `${status}: only the read may happen`);
+    assert.equal(calls[0].method, "GET");
+    assert.equal(result.isError, true);
+    assert.match(text, new RegExp(status));
+    assert.match(text, /Nothing was\s+deleted/);
+    // It says how to proceed deliberately rather than pretending the door is shut.
+    assert.match(text, /reai_request DELETE \/api\/salary-payments\/1360/);
+  }
+});
+
+test("an unreadable run is not assumed to be a draft", async () => {
+  for (const data of [undefined, null, "nope", {}, { unrelated: 1 }, []]) {
+    const { calls, result, text } = await run("reai_delete_salary_run", { id: 1360 }, data);
+    assert.equal(calls.length, 1, `${JSON.stringify(data)}: no DELETE may be issued`);
+    assert.equal(result.isError, true);
+    assert.match(text, /status is unknown|could not be read/);
+  }
+});
+
+test("deleting a draft run goes through, and says why the ledger is safe", async () => {
+  const { calls, result, text } = await run("reai_delete_salary_run", { id: 1360 }, (req) =>
+    req.method === "GET" ? runRecord() : null,
+  );
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.path}`),
+    ["GET /api/salary-payments/1360", "DELETE /api/salary-payments/1360"],
+  );
+  assert.match(text, /ledger is unaffected/);
+});
+
+test("deleting a line hits the line, not the run", async () => {
+  const { calls } = await run(
+    "reai_delete_salary_line",
+    { id: 1360, wageSpecId: 7 },
+    runRecord({ payableAmount: 0 }),
+  );
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.path}`),
+    ["DELETE /api/salary-payments/1360/wage-specs/7"],
+  );
+});
+
+test("the list handler survives a response that is not an array", async () => {
+  // The live API has answered with an envelope here before; a `.filter` on that used to throw.
+  for (const data of [[], null, { data: [] }, { items: [runRecord()] }]) {
+    const { result } = await run("reai_list_salary_runs", {}, data);
+    assert.equal(result.isError, undefined, JSON.stringify(data));
+  }
+});
+
+test("the list handler counts drafts when it does get rows", async () => {
+  const { text } = await run("reai_list_salary_runs", {}, [
+    runRecord({ id: 1 }),
+    runRecord({ id: 2, status: "complete" }),
+  ]);
+  assert.match(text, /1 still under_process/);
+});
+
+test("the payroll quirks are attached where a caller meets them", () => {
+  const ids = (m, p) => quirksFor(m, p).map((q) => q.id);
+  assert.ok(
+    ids("POST", "/api/salary-payments").includes("salary-run-needs-employee-bank-accounts"),
+    "the bank-account precondition is the normal first failure — it must be on the create",
+  );
+  assert.ok(
+    ids("POST", "/api/salary-payments/{id}/complete").includes(
+      "salary-complete-does-everything-at-once",
+    ),
+  );
+  for (const m of ["POST", "PUT"]) {
+    assert.ok(
+      ids(m, "/api/salary-payments/{id}/wage-specs").includes(
+        "salary-wage-line-create-and-update-differ",
+      ) ||
+        ids(m, "/api/salary-payments/{id}/wage-specs/{wageSpecId}").includes(
+          "salary-wage-line-create-and-update-differ",
+        ),
+      m,
+    );
+  }
+  // The employee bank account is the precondition for payroll, and its field is renamed and
+  // split in the response — a caller verifying its own write needs to know before it panics.
+  for (const [m, p] of [
+    ["POST", "/api/employees"],
+    ["PATCH", "/api/employees/{id}"],
+    ["GET", "/api/employees/{id}"],
+  ]) {
+    assert.ok(
+      ids(m, p).includes("employee-account-goes-in-flat-and-comes-back-split"),
+      `${m} ${p}`,
+    );
+  }
+});
+
+test("the tool text names the a-melding consequence rather than only refusing", () => {
+  const all = salaryTools.map((t) => `${t.description} ${t.title}`).join("\n");
+  assert.match(all, /a-melding/i);
+  assert.match(all, /payslip/i);
+  assert.match(all, /bank account/i);
+});

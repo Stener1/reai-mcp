@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**102 tools**: 95 across nine accounting domains, plus 7 always-on.
+**109 tools**: 102 across ten accounting domains, plus 7 always-on.
 
 ### Added
 
@@ -219,6 +219,74 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Also recorded: the API NORMALISES a SWIFT code, storing `"DNBANOKKXXX"` as
     `"DNBANOKK"`. A merge that echoes it back is unaffected, but a caller comparing
     what it sent to what is stored would otherwise read that as a failed write.
+
+- **Payroll toolset** (7 tools) — salary runs and their wage lines, and
+  deliberately nothing that completes one. Measured on the test tenant by creating
+  an employee, giving it a bank account, running a period, adding and removing a
+  line, and deleting the run.
+  - **Completing a run is not a tool.** By its own description
+    `POST /api/salary-payments/{id}/complete` posts the voucher, creates payslips,
+    creates one employee payment per payable employee against a company bank, and
+    starts the **A-melding submission to Skatteetaten** — after which withholding
+    tax and employer contributions are registered automatically. It is already
+    classified irreversible AND external, and it stays on `reai_request` for the
+    same reason `subscriptions/generate-due` does: it is what an agent reaches for
+    to "finish payroll", and it is where a mistake is widest. Its `manualPayment`
+    flag is the same dual-mode trap as the supplier payment.
+  - A run **cannot be created** until every included employee has a bank account:
+    `400 "Følgende ansatte mangler bankkonto"`, naming them. Employees are created
+    without one, so this is the normal first failure.
+  - Creating a run **posts nothing** — the ledger count did not move and
+    `voucherId` stayed null, which is why `reai_delete_salary_run` can say a draft
+    is safe to delete. It refuses anything not still `under_process`, because what
+    deleting a completed run does could not be produced without enabling sending.
+  - **Half the gross was withheld**: a 5000 COMMISSION line produced 2500 payable
+    at `taxDeductionRate: 50`, which is what this API applies with no tax card. A
+    payable amount is not take-home, and the read tool says so when every rate is 50.
+  - The wage-line endpoints are asymmetric: create **requires** `employeeId`,
+    update **rejects** it (measured, `400 "Unknown field: employeeId"`), so a line
+    cannot be moved between employees. Both curated tools now build their request
+    body field by field rather than spreading their arguments, so a stray argument
+    cannot ride into the one endpoint that refuses it. Lines derived from expense postings cannot be edited at all — which
+    is also why a fresh run is not empty, and why adding pay without reading it
+    first is how the same wages go out twice.
+  - `holidayAllowanceEarningYear` is refused locally on any line that is not
+    HOLIDAY_ALLOWANCE, which is what the spec says and what the API enforces.
+  - `reai_delete_salary_run` refuses when the run cannot be READ back, not only
+    when its status is wrong. "Probably a draft" is not a basis for deleting
+    payroll.
+  - Employee master data carries two traps of its own, both now quirks. The request
+    field is `accountNumber` and takes the whole number; the response field is
+    `bankAccount`, an object, with it **split** — `"15201353103"` in reads back as
+    `{ bankCode: "1520", accountNumber: "1353103", iban: "NO1615201353103" }`, and
+    `EmployeeRes` has no flat `accountNumber` at all, so a caller verifying its own
+    write by comparing that field concludes it failed. And an employee **name** must
+    be unique per tenant (`409 "Ansatt med dette navnet finnes allerede"`).
+  - An employee referenced by nothing but an **empty draft** salary run cannot be
+    deleted: `409 "Employee cannot be deleted because related work data exists"`.
+    Delete the run first and the same call answers `204`.
+- **`scripts/smoke-full-write.mjs` now covers payroll** (13 checks), which it
+  previously listed as untested. The draft half only: create a run, add, change and
+  remove a wage line, delete the run, with the voucher count compared across the
+  whole section so "a draft posts nothing" is measured rather than asserted, and
+  the refusal at `/complete` asserted before anything is written. Completing a run
+  stays untested and says so.
+  - Writing it produced the bug it exists to catch, twice over. A rename left
+    `created.salaryRunId = run.id` reading `runId = run.id` **above** that local's
+    own `const`, so the assignment threw in the temporal dead zone — after the run
+    had been created. The cleanup then had nothing recorded, stranded a draft run
+    on the live tenant, and the employee attached to it could not be deleted
+    either. The recording now sits on its own line before the local, and the run is
+    deleted before its employees.
+  - The test employee's **name** is timestamped too, not just its email: with a
+    fixed name, one stranded record blocks every later run with a `409` reported
+    against the wrong check.
+- `test/salary.test.mjs` (20 tests). Its harness runs every tool's arguments
+  through the tool's **own input schema** before calling the handler, because
+  calling a handler directly accepts any argument names at all: this file tested
+  `reai_create_salary_run` with invented `periodFrom`/`periodTo` for a full
+  iteration, green, and the live API answered "Required at period, Required at
+  paymentDate" the first time a real client called it.
 
 ### Fixed
 

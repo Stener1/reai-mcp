@@ -472,9 +472,23 @@ The five **create** endpoints are deliberately not curated: their bodies run to 
 
 What the API does **not** check: Norwegian tenancy law caps a deposit at six months' rent (husleieloven § 3-5), and § 9-3's three-year minimum for a fixed-term *residential* lease means a shorter one counts as indefinite unless a statutory ground applies — not that it is rejected. A deposit of 9 999 999 against a rent of 10 000 was accepted, and so was a four-month fixed term with no reason. This server does not enforce either: that would be inventing law, on a template that also covers storage and other non-residential lets. The tools say so instead.
 
-Anything not listed — leads, projects, salary, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+### Payroll
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_salary_runs` · `reai_get_salary_run` | Which periods have been run, what each pays, and each employee's wage lines | read |
+| `reai_create_salary_run` | Open a run for a period. Arrives as a **draft** — measured, it posts no voucher | **irreversible** |
+| `reai_add_salary_line` · `reai_update_salary_line` · `reai_delete_salary_line` | Manual wage lines on a draft run | **irreversible** |
+| `reai_delete_salary_run` | Delete a run. **Refuses** anything not still `under_process` | **irreversible** |
 
-If 102 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+**Completing a run is deliberately not a tool.** `POST /api/salary-payments/{id}/complete` does all of this in one call, by its own description: posts the voucher, creates payslips, creates *one employee payment per payable employee* against a company bank, and starts the **A-melding submission to Skatteetaten** — after which withholding tax and employer contributions are registered automatically. It is classified irreversible **and** external, so it needs `REAI_WRITE_MODE=full` *and* `REAI_ALLOW_EXTERNAL_SEND`, and it stays on `reai_request` for the same reason `subscriptions/generate-due` does: it is what an agent reaches for to "finish payroll", and it is where a mistake is widest. Its `manualPayment` flag is the same dual-mode trap as the supplier payment.
+
+Three things measured on a live tenant. A run **cannot be created** until every included employee has a bank account — `400 "Følgende ansatte mangler bankkonto"`, naming them, and employees are created without one. Creating a run **posts nothing**: the ledger count did not move and `voucherId` stayed null, so a draft is safe to delete. And **half the gross was withheld** — a 5000 line produced 2500 payable at `taxDeductionRate: 50`, which is what this API applies when there is no tax card, so a payable amount is not take-home.
+
+The wage-line endpoints are asymmetric in a way worth knowing: create **requires** `employeeId` and update **rejects** it (measured, `400`), so a line cannot be moved between employees. Lines derived from expense postings cannot be edited at all — which is also why a fresh run is not empty, and why adding pay to one without reading it first is how the same wages go out twice.
+
+Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
+
+If 109 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
@@ -485,10 +499,11 @@ REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
-(unset)                            # all 102
+REAI_TOOLSETS=salary               # 14 tools
+(unset)                            # all 109
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses` and `agreements`; listing all nine is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
@@ -496,7 +511,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **74 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **80 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

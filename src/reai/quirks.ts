@@ -490,6 +490,97 @@ export const QUIRKS: readonly Quirk[] = [
       "mapping and the merge; a raw caller has to do both.",
   },
   {
+    id: "salary-complete-does-everything-at-once",
+    paths: ["/api/salary-payments/{id}/complete"],
+    methods: ["POST"],
+    kind: "irreversible",
+    note:
+      "The most consequential single call in this API, and its own description says why: it " +
+      '"finalizes the salary payment, creates its voucher and payslips, and creates one employee ' +
+      'payment per payable employee using the selected company bank. For Norwegian tenants, the ' +
+      'same A-melding validation and asynchronous submission flow as the web application is ' +
+      'started." Once Skatteetaten accepts, withholding tax and employer contribution payments are ' +
+      "registered automatically. So one call posts to the ledger, schedules real transfers to real " +
+      "people, and files with the state.\n\n" +
+      "manualPayment is the same dual-mode flag as on a supplier-invoice payment: false schedules " +
+      "the transfers, true records them as already made. companyBankId is required either way. " +
+      "There is deliberately no curated tool for this — the refusal here names what it would have " +
+      "done, which is the point.",
+  },
+  {
+    id: "salary-run-needs-employee-bank-accounts",
+    paths: ["/api/salary-payments"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [400],
+    note:
+      'Refused with 400 "Følgende ansatte mangler bankkonto: <names>" — Norwegian for "the ' +
+      'following employees are missing a bank account" — when any INCLUDED employee has none, and ' +
+      "it names them. Employees are created without one, so this is the normal first failure: set " +
+      "it with `accountNumber` on POST /api/employees or PATCH /api/employees/{id}.\n\n" +
+      "Two more things measured here. Omitting employeeIds includes EVERY employee, so passing " +
+      "nothing is not passing nobody. And creating a run posts NO voucher — the count did not move " +
+      "and voucherId stayed null; the voucher is made at completion, which is why a run in status " +
+      "under_process can be deleted without touching the ledger.",
+  },
+  {
+    id: "salary-wage-line-create-and-update-differ",
+    paths: [
+      "/api/salary-payments/{id}/wage-specs",
+      "/api/salary-payments/{id}/wage-specs/{wageSpecId}",
+    ],
+    methods: ["POST", "PUT"],
+    kind: "shape",
+    note:
+      "CreateSalaryWageSpecReq REQUIRES employeeId; UpdateSalaryWageSpecReq does not accept it, and " +
+      'sending it answers 400 "Unknown field: employeeId". A line belongs to the employee it was ' +
+      "created for and cannot be moved. The update replaces the line, so send it as it should " +
+      "end up.\n\n" +
+      "Lines derived from EXPENSE POSTINGS cannot be changed at all — the API says so on the update " +
+      "endpoint. That is also why a fresh run is not empty: it arrives pre-populated from the " +
+      "period's expense postings, and adding the same pay again is how wages go out twice.\n\n" +
+      "The response is the whole run with tax recalculated. On a tenant with no tax cards the rate " +
+      "is 50%: a 1 × 5000 COMMISSION line produced payableAmount 2500 and totalTaxDeducted 2500.",
+  },
+  {
+    id: "employee-name-must-be-unique",
+    paths: ["/api/employees"],
+    methods: ["POST"],
+    kind: "validation",
+    statuses: [409],
+    note:
+      'Two employees cannot share a NAME: 409 "Ansatt med dette navnet finnes allerede" (an ' +
+      "employee with this name already exists). Not the email, the name — so real namesakes need " +
+      "distinguishing, and a leftover test record blocks the name until someone deletes it.",
+  },
+  {
+    id: "employee-with-work-data-cannot-be-deleted",
+    paths: ["/api/employees/{id}"],
+    methods: ["DELETE"],
+    kind: "gotcha",
+    statuses: [409],
+    note:
+      '409 "Employee cannot be deleted because related work data exists" — measured with nothing ' +
+      "but an EMPTY DRAFT salary run referencing them, so the bar for \"work data\" is low and the " +
+      "message does not say what the data is. Delete the salary run first and the same DELETE " +
+      "answers 204. If a payroll run has been completed the employee is presumably permanent, " +
+      "which is what a payroll record should be.",
+  },
+  {
+    id: "employee-account-goes-in-flat-and-comes-back-split",
+    paths: ["/api/employees", "/api/employees/{id}"],
+    methods: ["POST", "PATCH", "GET"],
+    kind: "shape",
+    note:
+      "The request field is `accountNumber` and takes the whole number; the response field is " +
+      "`bankAccount`, an OBJECT, with the number split. Measured: sending accountNumber " +
+      '"15201353103" reads back as bankAccount { employeeBankAccountId, countryCode: "NO", ' +
+      'bankCode: "1520", accountNumber: "1353103", currency: "NOK", iban: "NO1615201353103" }. So a ' +
+      "caller checking the write by comparing `accountNumber` sees \"1353103\" against what it " +
+      "sent and concludes it failed; read `bankAccount.iban`, or reassemble bankCode + " +
+      "accountNumber. Note EmployeeRes has no flat accountNumber at all.",
+  },
+  {
     id: "swift-code-is-normalised",
     paths: ["/api/company-banks", "/api/company-banks/{id}"],
     methods: ["POST", "PUT"],
