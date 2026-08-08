@@ -631,6 +631,23 @@ function pathForms(...paths: ReadonlyArray<string | undefined>): string[] {
 
 const RISK_SEVERITY: Record<Risk, number> = { read: 0, reversible: 1, irreversible: 2 };
 
+/**
+ * The stricter of two write ceilings.
+ *
+ * Counterpart to strictestRisk below, and it lived in src/http.ts as a module-private helper — which
+ * meant the most consequential decision in remote mode had nothing testing it. That file exports
+ * nothing and is spawned as a process, so the only way to reach it was to start a real server.
+ *
+ * What it decides: a grant is sealed at authorization time and refreshable for weeks, so an operator
+ * who redeploys with a tighter REAI_WRITE_MODE would otherwise keep serving the old, wider ceiling to
+ * every outstanding token. Taking the narrower of the two on every request means the operator's switch
+ * wins immediately — and equally, that a user who narrowed their own grant on the consent page is
+ * never widened back by a permissive server.
+ */
+export function narrowerWriteMode(a: WriteMode, b: WriteMode): WriteMode {
+  return WRITE_MODES.indexOf(a) <= WRITE_MODES.indexOf(b) ? a : b;
+}
+
 /** The more severe of two readings of the same request. */
 export function strictestRisk(a: Risk, b: Risk): Risk {
   return RISK_SEVERITY[a] >= RISK_SEVERITY[b] ? a : b;

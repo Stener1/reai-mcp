@@ -345,3 +345,42 @@ test("raw-token passthrough still works with no tenant configured", async () => 
     child.kill("SIGKILL");
   }
 });
+
+// The re-clamp at the /mcp entry point, end to end.
+//
+// A grant is sealed at authorization time and refreshable for weeks; the operator's REAI_WRITE_MODE is
+// whatever the deployment runs now. src/http.ts takes the narrower of the two on every request, and
+// until this test nothing checked that it did — policy.ts covers the arithmetic, but removing the call
+// site and trusting the grant left every test green. That is the mutation an ordinary refactor could
+// make.
+//
+// This server runs REAI_WRITE_MODE=read-only, so a grant claiming `full` must still see no writing tool.
+test("a grant claiming a wider mode than the server does not get it", async () => {
+  const wide = accessToken({ ...TENANTED, writeMode: "full" });
+  const res = await mcpPost({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, wide);
+  const text = await res.text();
+  assert.equal(res.status, 200, "tools/list should be accepted: " + text.slice(0, 200));
+
+  // The transport answers as JSON or as SSE frames; take whichever carries the result.
+  const payloads = text
+    .split("\n")
+    .map((line) => (line.startsWith("data:") ? line.slice(5).trim() : line.trim()))
+    .filter((line) => line.startsWith("{") || line.startsWith("["))
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        return [];
+      }
+    });
+  const listed = payloads.find((p) => p.result && Array.isArray(p.result.tools));
+  assert.ok(listed, "no tools/list result in the response: " + text.slice(0, 300));
+
+  const names = listed.result.tools.map((t) => t.name);
+  assert.ok(names.length > 0, "read-only still exposes the reads");
+  const writers = names.filter((n) =>
+    /^reai_(create|update|delete|set|add|book|match|reverse|unarchive|convert|approve|log|save|register|apply|adjust|rename|credit|write)/.test(n),
+  );
+  assert.deepEqual(writers, [], "a read-only server served writing tools to a grant claiming full");
+});

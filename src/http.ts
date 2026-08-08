@@ -21,7 +21,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
 import { loadConfig, lastForwardedValue, type ServerConfig } from "./config.js";
-import { WRITE_MODES, type WriteMode } from "./policy.js";
+import { narrowerWriteMode } from "./policy.js";
 import { Sealer } from "./auth/crypto.js";
 import {
   CodeReplayGuard,
@@ -345,7 +345,7 @@ async function handleMcp(
   // for hours (refreshable for weeks). Without this, an operator who redeploys
   // with a tighter REAI_WRITE_MODE would keep serving the old, wider mode to
   // every outstanding token, and key rotation would be the only real remedy.
-  const effectiveWriteMode = narrower(grant.writeMode, config.writeMode);
+  const effectiveWriteMode = narrowerWriteMode(grant.writeMode, config.writeMode);
 
   // A fresh server and transport per request. Stateless mode keeps the deployment
   // horizontally scalable, which matters on platforms that scale to zero.
@@ -417,10 +417,6 @@ async function handleMcp(
 }
 
 /** The more restrictive of two write modes. */
-function narrower(a: WriteMode, b: WriteMode): WriteMode {
-  return WRITE_MODES.indexOf(a) <= WRITE_MODES.indexOf(b) ? a : b;
-}
-
 /**
  * The canonical public URL. A configured PUBLIC_URL always wins; otherwise it is
  * inferred from forwarding headers, which is what a platform like Cloud Run

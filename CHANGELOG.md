@@ -30,6 +30,26 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
+  authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
+  `REAI_WRITE_MODE` is whatever the deployment runs now. `src/http.ts` takes the **narrower** of the
+  two on every request, which is right in both directions: an operator who redeploys tighter has it
+  apply immediately to tokens that already exist, and a user who narrowed their own grant on the
+  consent page is never widened back by a permissive server. Nothing asserted any of it.
+  - The helper was module-private in `src/http.ts`, a file that exports nothing and is spawned as a
+    process, so reaching it meant starting a real server. It now lives in `policy.ts` as
+    `narrowerWriteMode`, beside `strictestRisk`, which is the same idea for risks.
+  - Three guards, each mutation-tested. The arithmetic, in both directions and symmetrically.
+    The composition — tightening the deployment really does remove the irreversible tools a wider
+    grant could otherwise see. And, end to end through `/mcp`, a grant claiming `full` against a
+    `read-only` server: dropping the re-clamp at the call site made the arithmetic tests stay green
+    and this one fail with *"a read-only server served writing tools to a grant claiming full"*.
+    That is the mutation an ordinary refactor could make.
+  - Checked and found already correct, recorded so it is not re-litigated: a **refresh** cannot widen
+    a narrowed grant (it reissues the sealed grant unchanged), a refresh is bound to its client, an
+    untenanted grant cannot be refreshed at all, and the refresh chain is bounded by an absolute TTL
+    measured from the original authorization rather than from the last refresh.
+
 - **Three documentation assertions pinned the docs architecture to one file.** They exist to
   guarantee that something is *documented* — that all 146 tools are listed where a reader will
   find them, that the enforced transport limits are written down, that the payment-routing table
