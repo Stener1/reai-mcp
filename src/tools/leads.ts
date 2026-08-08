@@ -25,6 +25,16 @@ import { defineTool, isoDate, ok, requireTenantId, tenantIdArg, type ToolDef } f
  * otherwise — it reports what came back and whether more exists.
  */
 
+/** Lead state as the DETAIL response carries it — nested, unlike the flattened search row. */
+type LeadState = {
+  id?: number | null;
+  status?: string | null;
+  notes?: string | null;
+  followUpAt?: string | null;
+  convertedCustomerId?: number | null;
+  convertedAt?: string | null;
+};
+
 type LeadRow = {
   id?: number | null;
   orgNumber?: string;
@@ -38,6 +48,8 @@ type LeadRow = {
   registeredAt?: string | null;
   status?: string | null;
   followUpAt?: string | null;
+  /** Only on the detail response. The search row flattens these to the top level instead. */
+  lead?: LeadState | null;
 };
 
 type LeadPage = {
@@ -67,7 +79,11 @@ const searchLeads = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/leads"]],
   inputSchema: {
-    query: z.string().optional().describe("Free-text match on company name or organisation number."),
+    query: z
+      .string()
+      .max(200, "The API caps query at 200 characters.")
+      .optional()
+      .describe("Free-text match on company name or organisation number."),
     leadFilter: z
       .enum(["all", "saved", "unsaved"])
       .optional()
@@ -85,13 +101,19 @@ const searchLeads = defineTool({
       .describe("Whether the lead has any contact events recorded."),
     legalFormCode: z
       .string()
+      .max(500, "The API caps legalFormCode at 500 characters.")
       .optional()
       .describe('Comma-separated Brreg legal-form codes, e.g. "AS,ENK,NUF".'),
     industryCodePrefix: z
       .string()
+      .max(500, "The API caps industryCodePrefix at 500 characters.")
       .optional()
       .describe('Comma-separated Brreg industry-code prefixes, e.g. "62" for IT services.'),
-    city: z.string().optional().describe("Comma-separated city names. Exact match, case-insensitive."),
+    city: z
+      .string()
+      .max(1000, "The API caps city at 1000 characters.")
+      .optional()
+      .describe("Comma-separated city names. Exact match, case-insensitive."),
     hasAccountant: z
       .boolean()
       .optional()
@@ -181,7 +203,10 @@ const getLead = defineTool({
     "measured, a search row comes back with id null and " +
     "`GET /api/leads/null` answers 400 \"Failed to convert 'id' with value: 'null'\". The " +
     "organisation number is present on every row whether the company has been saved as a lead or " +
-    "not, so it is the only handle that always works.",
+    "not, so it is the only handle that always works.\n\n" +
+    "Note the two endpoints do not agree on shape: this one nests lead state under a `lead` object " +
+    "(id, status, notes, followUpAt, convertedCustomerId), while a search ROW flattens id and status " +
+    "to the top level. Measured on a live response, and worth knowing if you read the body directly.",
   risk: "read",
   apiPaths: [["GET", "/api/leads/org/{orgNumber}"]],
   inputSchema: {
@@ -197,20 +222,33 @@ const getLead = defineTool({
       path: `/api/leads/org/${encodeURIComponent(args.orgNumber)}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    const lead = res.data ?? {};
-    const saved = lead.id !== null && lead.id !== undefined;
-    return ok(lead, {
+    const record = res.data ?? {};
+    // The DETAIL response nests lead state under `lead` (LeadRes.lead: LeadStateRes) while a SEARCH
+    // row flattens id/status to the top level. Reading the top level here reported every saved lead
+    // as untouched — and the test missed it by mocking the search shape, which is the trap: two
+    // endpoints in one domain with different shapes for the same fields. Both are read, detail first.
+    const state: LeadState = record.lead ?? {
+      id: record.id,
+      status: record.status,
+      followUpAt: record.followUpAt,
+    };
+    const saved = state.id !== null && state.id !== undefined;
+    return ok(record, {
       note:
-        `${lead.companyName ?? args.orgNumber}${lead.city ? ` (${lead.city})` : ""}: ` +
+        `${record.companyName ?? args.orgNumber}${record.city ? ` (${record.city})` : ""}: ` +
         (saved
-          ? `a SAVED lead, id ${lead.id}, status ${JSON.stringify(lead.status ?? null)}` +
-            (lead.followUpAt ? `, follow-up ${lead.followUpAt}` : "") +
+          ? `a SAVED lead, id ${state.id}, status ${JSON.stringify(state.status ?? null)}` +
+            (state.followUpAt ? `, follow-up ${state.followUpAt}` : "") +
+            (state.convertedCustomerId
+              ? `, already converted to customer ${state.convertedCustomerId}`
+              : ``) +
             `.`
-          : `a register entry with NO lead state on this tenant — id is null, so nothing here has ` +
-            `been worked. Writing a note, status or follow-up is what turns it into a saved lead.`) +
-        (lead.hasAccountant === false
+          : `a register entry with NO lead state on this tenant — its lead.id is null, so nothing ` +
+            `here has been worked. Writing a note, status or follow-up is what turns it into a ` +
+            `saved lead.`) +
+        (record.hasAccountant === false
           ? `\n\nBrreg lists no accountant for this company.`
-          : lead.hasAccountant === true
+          : record.hasAccountant === true
             ? `\n\nBrreg lists an accountant for this company.`
             : ``),
     });

@@ -151,10 +151,63 @@ test("the quirk carries the register/records distinction and both traps", () => 
   assert.match(q.note, /Failed to convert/);
   assert.match(q.note, /no\s+TOTAL/);
   assert.match(q.note, /Validation failed/);
-  // descendants, so the sub-paths inherit it.
-  assert.ok(
-    quirksFor("GET", "/api/leads/org/{orgNumber}")
-      .map((x) => x.id)
-      .includes("leads-are-the-company-register-not-your-records"),
-  );
+  // EXACT, not descendants: this note is about the collection's envelope and pageSize, neither of
+  // which the detail endpoints have. Attached to descendants it gave confident, wrong response
+  // guidance for them.
+  const detail = quirksFor("GET", "/api/leads/org/{orgNumber}").map((x) => x.id);
+  assert.ok(!detail.includes("leads-are-the-company-register-not-your-records"));
+  assert.ok(detail.includes("lead-detail-nests-what-the-search-flattens"));
+});
+
+// The P1 from review, and the reason it survived my own test: I mocked the flattened SEARCH row for
+// a DETAIL response. LeadRes nests lead state under `lead`, so reading the top level reported every
+// saved lead as untouched — coincidentally right for an untouched company, wrong for a worked one.
+test("the get tool reads lead state from the nested `lead` object", async () => {
+  const saved = await run("reai_get_lead", { orgNumber: "938225605" }, {
+    orgNumber: "938225605",
+    companyName: "AARSKOG ELEKTRO HOLDING AS",
+    city: "FITJAR",
+    hasAccountant: true,
+    lead: { id: 55, status: "active", followUpAt: "2026-09-01", convertedCustomerId: null },
+    contactEvents: [],
+  });
+  assert.match(saved.text, /a SAVED lead, id 55, status "active", follow-up 2026-09-01/);
+  assert.ok(!/NO lead state/.test(saved.text));
+
+  // An untouched company still RETURNS the object, with every field null — measured live.
+  const untouched = await run("reai_get_lead", { orgNumber: "938225605" }, {
+    orgNumber: "938225605",
+    companyName: "AARSKOG ELEKTRO HOLDING AS",
+    lead: { id: null, status: null, notes: null, followUpAt: null },
+    contactEvents: [],
+  });
+  assert.match(untouched.text, /NO lead state on this tenant — its lead.id is null/);
+
+  // A converted lead names the customer it became.
+  const converted = await run("reai_get_lead", { orgNumber: "938225605" }, {
+    orgNumber: "938225605",
+    lead: { id: 55, status: "converted", convertedCustomerId: 4242 },
+  });
+  assert.match(converted.text, /already converted to customer 4242/);
+});
+
+test("and still works if a response ever arrives flattened", async () => {
+  // The search row shape, kept as a fallback rather than assumed impossible — two endpoints in one
+  // domain already disagree, so a third shape is not unthinkable.
+  const { text } = await run("reai_get_lead", { orgNumber: "938225605" }, {
+    orgNumber: "938225605",
+    id: 55,
+    status: "active",
+  });
+  assert.match(text, /a SAVED lead, id 55/);
+});
+
+test("the documented query-parameter maxima are enforced locally", () => {
+  // These are QUERY parameters, which test/spec-bounds.test.mjs does not sweep — it walks write
+  // bodies — so this class of mismatch was invisible to it and had to be caught by reading.
+  const shape = tool("reai_search_leads").inputSchema;
+  for (const [field, cap] of [["query", 200], ["legalFormCode", 500], ["industryCodePrefix", 500], ["city", 1000]]) {
+    assert.equal(shape[field].safeParse("x".repeat(cap)).success, true, `${field} at ${cap}`);
+    assert.equal(shape[field].safeParse("x".repeat(cap + 1)).success, false, `${field} over ${cap}`);
+  }
 });
