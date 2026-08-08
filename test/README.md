@@ -101,6 +101,33 @@ calling the API — where all three fail and the population floors did not.
 The question to ask of any floor: *if the thing this test examines silently stopped happening, would
 this number change?* A count of the population answers no. A count of the work answers yes.
 
+Searching the rest of the suite for the same shape — a `continue` on a runtime or spec-derived
+condition rather than on a property of the tool — turned up four more sweeps and two things worth
+knowing:
+
+- **`archive.test.mjs` was already right**, and better than a floor: it asserts `checked === 11`
+  exactly, so both a loss and an unnoticed gain fail.
+- **The two payment-destination sweeps had no floor at all.** Renaming the whole routing field set
+  makes both examine zero operations and pass. They now floor at 8 of 11. Stated precisely, because
+  the first version of this note overclaimed: that same rename fails *seven other tests* in the file,
+  so the floors are defence in depth for the pair rather than a hole in the payment guard.
+- **`replacement-clears.test.mjs`** floors the spec-derived population its two sweeps share (4 PUTs
+  carrying a destination, 3 that can clear one by omission).
+
+One more mistake worth recording, since it is the same error a third time: the first floor written
+here was `>= 12`, from instrumenting the shared helper and counting **16** — the helper is called by
+four tests, so that was four times the real population of 4. The floor failed immediately on a green
+tree, which is the only reason it was caught. **Instrument the value the test uses, not the number of
+times a line runs.**
+
+### Floors go stale
+
+`policy.test.mjs` floored its escalating-fields census at 14 against a measured 16. The census is 25
+now, and the mixed-risk count 18 against a floor of 9 — 56% and 50%, back to catching only the
+collapse the tightening was meant to rule out. Nobody loosened them; the codebase grew around them.
+Re-measure when adding tools of the kind a floor counts, and state today's number in the message so
+the drift is visible in the failure rather than buried in a comment.
+
 ### Choosing the threshold
 
 A floor at 1 only catches total collapse, which the rest of the suite already catches. The rule used

@@ -1114,11 +1114,13 @@ test("a tool with escalating fields is annotated destructive", async () => {
     // made it a failure rather than a category.
     if (tool.risk === "reversible") mixed += 1;
   }
-  // Near the real census (16 escalating, 11 mixed at the time of writing) rather than the ~5x
-  // slack the old floors carried: with `>= 3` this could have lost thirteen tools and stayed green,
-  // which makes the count decorative rather than a guard.
-  assert.ok(escalating >= 14, `expected ~16 tools with escalating fields, found ${escalating}`);
-  assert.ok(mixed >= 9, `expected ~11 mixed-risk tools, found ${mixed}`);
+  // Re-measured: the census was 16 escalating / 11 mixed when these floors were written and is 25/18
+  // now, so `>= 14` and `>= 9` had drifted to 56% and 50% — back to catching only a collapse, which
+  // is what they were tightened to avoid. **A floor written against yesterday's census is slack
+  // today.** Both are now floor(0.75 x measured), and re-measuring belongs with any change that adds
+  // tools carrying an escalating field.
+  assert.ok(escalating >= 18, `expected ~25 tools with escalating fields, found ${escalating}`);
+  assert.ok(mixed >= 13, `expected ~18 mixed-risk tools, found ${mixed}`);
 });
 
 /**

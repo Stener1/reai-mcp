@@ -75,7 +75,18 @@ test("the sweep still finds the shape it is about", () => {
 
 test("every full-replacement PUT that can lose a payment destination is irreversible", () => {
   const exposed = [];
-  for (const { path, clearable } of replacementsCarryingADestination()) {
+  // Exercise floor: the sweep is over spec-derived data, so a rename in ROUTING or in the spec's
+  // field names leaves it iterating nothing. Four PUTs carry a destination and three of those can
+  // clear one by omission — thin enough that losing any of it should be loud. See test/README.md.
+  // (Measured per call: an earlier draft floored this at 12 by counting the helper's skips across
+  // every test that calls it, which is four times the real population. The test caught it.)
+  const replacements = replacementsCarryingADestination();
+  assert.ok(replacements.length >= 3, `only ${replacements.length} PUTs carry a destination (of 4 today)`);
+  assert.ok(
+    replacements.filter((r) => r.clearable.length > 0).length >= 2,
+    "no PUT can clear a destination by omission any more — re-check the sweep before trusting it",
+  );
+  for (const { path, clearable } of replacements) {
     if (clearable.length === 0) continue; // required, so it cannot be omitted
     if (classifyRequest("PUT", concrete(path)) !== "irreversible") {
       exposed.push(`${path} can clear ${clearable.join(", ")} by omission`);

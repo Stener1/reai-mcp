@@ -264,11 +264,13 @@ const NOT_A_DESTINATION_PATH = {
 // repo has relaxed once already.
 test("every write path that accepts a routing field is refused in the default mode", () => {
   const unprotected = [];
+  let examined = 0;
   for (const { method, path, fields, locations } of writeOperations()) {
     const routing = [...fields].filter((f) => paymentRoutingFieldNames.has(f.toLowerCase()));
     if (routing.length === 0) continue;
     if (`${method} ${path}` in NOT_A_DESTINATION_PATH) continue;
 
+    examined += 1;
     const target = concrete(path);
     for (const field of routing) {
       // Probed at the location the API really puts it, not flattened to the top level.
@@ -281,16 +283,24 @@ test("every write path that accepts a routing field is refused in the default mo
     }
   }
   assert.deepEqual(unprotected, [], "a payment destination is not caught by the payment-routing layer");
+  // Exercise floor, not a population floor: this sweep skips any operation without a routing field,
+  // so if `paymentRoutingFieldNames` or the spec's field names drift it examines nothing and passes.
+  // Eleven operations carry one today. Measured on a rename of the whole field set: this sweep and
+  // its sibling below went vacuous, while seven other tests in this file failed — so the floor is
+  // defence in depth for the pair, not a hole in the payment guard. See test/README.md.
+  assert.ok(examined >= 8, `only ${examined} routing-carrying operations examined (of 11 today)`);
 });
 
 // Belt and braces: whatever the routing layer says, the call must actually be refused in
 // the default mode as the server assembles it.
 test("no write carrying a payment destination is permitted in the default mode", () => {
   const permitted = [];
+  let examined = 0;
   for (const { method, path, fields, locations } of writeOperations()) {
     const routing = [...fields].filter((f) => paymentRoutingFieldNames.has(f.toLowerCase()));
     if (routing.length === 0) continue;
     if (`${method} ${path}` in NOT_A_DESTINATION_PATH) continue;
+    examined += 1;
     const target = concrete(path);
     for (const field of routing) {
       const body = bodyAt((locations.get(field) ?? [field])[0], "12345678903");
@@ -300,6 +310,7 @@ test("no write carrying a payment destination is permitted in the default mode",
     }
   }
   assert.deepEqual(permitted, [], "a payment destination can be written in the default write mode");
+  assert.ok(examined >= 8, `only ${examined} routing-carrying operations examined (of 11 today)`);
 });
 
 // The exemptions are claims about the API, so check them rather than trusting the comment.
