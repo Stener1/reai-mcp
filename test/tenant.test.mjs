@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { ReaiClient } from "../dist/reai/client.js";
 import assert from "node:assert/strict";
 import { resolveTenantId, requireTenantId } from "../dist/tools/registry.js";
 
@@ -74,6 +75,22 @@ test("requireTenantId still explains itself when no tenant is available at all",
  * the first. That is upstream behaviour nobody here controls or gets told about when it
  * changes, and this gate is what the consent page promises a user. So it fails closed on
  * the request instead.
+ *
+ * Re-probed the same day on `GET /api/company-banks`, which discriminates cleanly — tenant 2634
+ * holds three company banks and 2783 holds none — so an accidental crossing is visible rather
+ * than inferred. Bound to 2783, every spelling stayed at zero rows:
+ *
+ *   ?tenantId=2634 / ?tenant=2634 / ?clientTenantId=2634   200, rows=0  (ignored)
+ *   ;tenantId=2634  (matrix parameter)                     400          (rejected outright)
+ *   /api/company-banks/2634                                404 "Company bank not found"
+ *                                                                       (read as a RECORD id)
+ *   Tenant-Id: 2634 / X-Tenant: 2634                       200, rows=0  (only X-Tenant-Id binds)
+ *   X-Tenant-Id: 2634                                      200, rows=3  (the control)
+ *
+ * The path result is why the spec is consulted for path parameters and nowhere else: upstream reads
+ * a trailing number as a record id, so a scan that refused every tenant-shaped path segment would
+ * refuse `/api/customers/2634` — an ordinary call. The boundary can only know which segment names a
+ * company by being told, which is what the spec does.
  */
 async function requestWithBound(args, boundTenantId = 4711) {
   const { registeredTools } = await import("../dist/server.js");
@@ -244,4 +261,60 @@ test("the spelling rules do not refuse an ordinary value", async () => {
     assert.doesNotMatch(text, /bound to tenant 4711, and this request names/, `refused: ${JSON.stringify(query)}`);
     assert.equal(sent.length, 1, `not sent: ${JSON.stringify(query)}`);
   }
+});
+
+/**
+ * The boundary's last line of defence, which nothing pinned.
+ *
+ * `resolveTenantId` decides WHICH tenant, and `reai_request` refuses a request that names another
+ * one — but all of that is upstream of a single line in ReaiClient.request that assigns
+ * `X-Tenant-Id` after spreading `opts.headers`. Move the spread after the assignment, which is
+ * exactly what tidying that object invites, and a caller-supplied header wins. Measured on
+ * 2026-08-08: with the two lines swapped, 859 tests passed.
+ *
+ * Two separate ways to lose it, so two tests: precedence, and the case-insensitivity of HTTP header
+ * names versus the case-SENSITIVITY of object keys — `{ "x-tenant-id": "9999" }` does not collide
+ * with `headers["X-Tenant-Id"]`, so both would be transmitted. Upstream answers 400 to a duplicate
+ * X-Tenant-Id (measured against the live API), so that direction fails closed, but only by luck:
+ * a boundary should not depend on the other end rejecting an ambiguity we sent.
+ */
+function clientCapturingHeaders(defaultTenantId = 2783) {
+  const sent = [];
+  const client = new ReaiClient({
+    token: "t",
+    defaultTenantId,
+    fetchImpl: async (_url, init) => {
+      sent.push(init?.headers ?? {});
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  return { client, sent };
+}
+
+const tenantHeaders = (headers) =>
+  Object.entries(headers)
+    .filter(([k]) => k.toLowerCase() === "x-tenant-id")
+    .map(([, v]) => String(v));
+
+test("a caller-supplied header cannot displace the bound tenant", async () => {
+  const { client, sent } = clientCapturingHeaders(2783);
+  await client.request({
+    method: "GET",
+    path: "/api/company-banks",
+    headers: { "X-Tenant-Id": "2634" },
+  });
+  assert.deepEqual(tenantHeaders(sent[0]), ["2783"], "the caller's tenant header must not be sent");
+});
+
+test("and it cannot smuggle one past in a different case", async () => {
+  const { client, sent } = clientCapturingHeaders(2783);
+  await client.request({
+    method: "GET",
+    path: "/api/company-banks",
+    // Lowercase, so it does not collide with the key the client sets. Both would go on the wire.
+    headers: { "x-tenant-id": "2634", "X-Request-Extra": "kept" },
+  });
+  assert.deepEqual(tenantHeaders(sent[0]), ["2783"], "exactly one tenant header, and it is the bound one");
+  // And the filter is narrow: every other caller header still arrives.
+  assert.equal(sent[0]["X-Request-Extra"], "kept");
 });

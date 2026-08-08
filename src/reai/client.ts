@@ -124,7 +124,17 @@ export class ReaiClient {
       Authorization: `Bearer ${this.token}`,
       Accept: opts.binary ? "*/*" : "application/json",
       "User-Agent": "reai-mcp",
-      ...opts.headers,
+      // The tenant header is NOT part of what a caller may supply. Dropped by lowercased name
+      // rather than by relying on the assignment below, for two reasons: HTTP header names are
+      // case-insensitive but object keys are not, so a caller's `x-tenant-id` would survive
+      // alongside the one set here and be transmitted as a second header (upstream answers 400 to
+      // a duplicate, so that direction fails closed -- but only by luck). And the assignment order
+      // was the boundary's last line of defence: moving this spread after it, exactly the sort of
+      // tidy-up a formatter or a refactor invites, let a caller override the bound tenant with the
+      // entire test suite still green. test/tenant.test.mjs pins it now.
+      ...Object.fromEntries(
+        Object.entries(opts.headers ?? {}).filter(([k]) => k.toLowerCase() !== "x-tenant-id"),
+      ),
     };
     if (tenantId !== undefined) headers["X-Tenant-Id"] = String(tenantId);
 
