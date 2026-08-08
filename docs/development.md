@@ -68,6 +68,13 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 # Does the API still say what we claim it says? Every case is designed to FAIL.
 REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/audit-messages.mjs --tenant 1234
+
+# Does it still STORE what we claim it stores? Creates records, deletes them.
+REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
+  node scripts/audit-storage.mjs --tenant 2783
+
+# How many storage claims exist, and how many are probed?
+npm run audit:census
 ```
 
 ### Why `audit-messages.mjs` exists, and what it does not cover
@@ -126,6 +133,49 @@ text-reading dependency is added to `src/` without a probe, or if an exemption n
 longer exists. It covers four shapes — `/re/.test`, `/re/.exec`, `.includes`/`.startsWith`/`.endsWith`
 on any receiver, and `case "…":` — because the first version saw only the first and was demonstrably
 blind to the rest, including `loans.ts`'s wrong-table diagnosis, which needed no test data at all.
+
+### `audit-storage.mjs`: the half the message audit cannot reach
+
+`audit-messages.mjs` checks the wording of **refusals**, and says so plainly: every case there is a
+request built to fail, so nothing observes what the API *accepts, normalises or stores*. Two of the five
+false claims that motivated it live in that gap — `skipRegistryLookup` drifts on a `201`, and the phone
+rule was wrong three times about what gets **stored**.
+
+So this one writes. That difference dictates the design: only customers, which delete cleanly and which
+`classifyRequest` calls reversible; everything recorded in `created` and removed in a `finally`; a record
+that cannot be confirmed deleted **fails the run**; and the token's reachable tenants verified before
+anything is written, since a single-tenant token ignores `X-Tenant-Id`. A test asserts it never writes to
+`/api/vouchers`, `/api/share-investments` or `/api/general-sub-accounts` — the three paths the message
+audit had to have removed from it.
+
+**Every case reads the record back**, and that is not caution for its own sake — three of the first eight
+compared the POST echo, in the very family whose constant ends "read the created record back whenever the
+name or address matters". A
+create can echo a field it silently dropped. `phone` is not a create field — `reai_create_customer` says
+so — and the first version of these probes sent it to `POST /api/customers` and reported **four DRIFTs
+against `PHONE_RULE`, all `stored null`**, when the value had never been written at all. The phone claims
+go through `PATCH` now, and a test pins that.
+
+Each case names the **constant** that makes its claim, a marker phrase from it, and — the part a marker
+cannot do — the **value that text predicts**. A phrase survives a rewrite that reverses its meaning: the
+review of PR #115 replaced `PHONE_RULE` with text saying the *opposite* of every phone claim while keeping
+all four markers, and the guard passed 4/4. Text that predicts `+46701234567` cannot simultaneously claim
+foreign numbers are rewritten to `+47`, so each probe pins the literal too, and markers must be at least
+twelve characters (`marker: "e"` passed the first version).
+
+**On completeness, the first version was a cop-out.** It said the population "cannot be measured
+mechanically" because a storage claim is prose. It can be measured, roughly: the claims live in exactly
+two places — `description:`/`.describe()` in `src/tools/*.ts` and `note:` in `src/reai/quirks.ts` — and
+`npm run audit:census` counts them. Today: **129 agent-facing literals assert something about what is
+stored; 12 are probed.** That ratio is printed rather than asserted, because a keyword sweep over prose is
+a lower bound and pinning it would be false precision — but hiding it made 11-of-many look like coverage.
+The cheap unprobed ones are named in the header of `test/storage-drift.test.mjs`, including the flagship
+claim of `reai_create_customer` ("the name you send is then DISCARDED") on the **default**, no-flag path.
+
+First run: **12 of 12 claims verified**, including that the `skipRegistryLookup` override is a stale
+internal directory rather than Brønnøysundregistrene — and that one asks the registry live rather than
+hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
+ReAI merely *updated* its directory, which would confirm the account rather than refute it.
 
 ## A note on `npm audit`
 
