@@ -1316,19 +1316,44 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   arsavslutning: ["annual-accounts"],
   // The formal name of MVA. `mva` was mapped and this was not, so a query written the way a tax form
   // writes it returned nothing.
-  merverdiavgift: ["vat", "mva"],
-  merverdiavgiften: ["vat", "mva"],
+  // No "mva" in the value list: the string appears in ZERO of the 430 operations' path, tag, summary,
+  // description or id, and synonym expansion is not recursive — so it can never match, while it inflates
+  // `resourceCount` and shrinks the coverage multiplier. Measured by the review of PR #118:
+  // "merverdiavgift pa faktura" scored /api/vat-codes at 18.9 with it and 19.18 without. No flip today,
+  // a self-inflicted penalty regardless.
+  //
+  // And no `merverdiavgiften` entry: `definite("en")` in lookupForms already derives it, so the entry was
+  // dead. The first version of this change claimed every synonym here was "verified load-bearing by
+  // removing it and watching the test fail"; two were not, and this is one.
+  merverdiavgift: ["vat"],
   // `postering`/`posteringer` — a posting, the core unit of double-entry bookkeeping — reached
   // /api/invoice-reception-documents and /api/attachments, while /api/postings carries nine operations
   // that no curated tool covers, so the escape hatch is the only route to them. Low collision risk: this
   // API has no other "posting" family, and the English "posting group" query already ranks first.
-  // A JUDGEMENT, not a measurement, and flagged as one: an accrual in Norwegian bookkeeping is booked as
-  // a manual voucher, so that is where a query about it should land. What it did instead was reach the
-  // VAT-return endpoints, which is wrong by any reading. If a later reader disagrees about the
-  // destination, the argument is about accounting rather than about the ranker.
+  // A REACHABILITY compromise, and the first version of this comment got the reason wrong. It claimed the
+  // destination was "a judgement about Norwegian practice" that the API had no opinion on. The API has an
+  // opinion: `accrualEnabled`, `accrualPeriod`, `accrualPeriodCount` and `accrualAccountNumber` are
+  // first-class fields on supplier-invoice cost lines and order lines — periodisering is a flag on a line,
+  // not a manual voucher. The review of PR #118 found that by grepping for the word, which I had not done.
+  //
+  // It still maps to `voucher`, for a reason that has to be stated rather than dressed up: `fieldNamesOf`
+  // deliberately excludes request-BODY fields from the searchable text, so `["accrual"]` would match
+  // nothing at all and the query would go back to returning the VAT-return endpoints. Voucher is the best
+  // REACHABLE answer, not the correct one. If body fields ever become searchable, this should point at
+  // /api/supplier-invoices and /api/orders instead.
   periodisering: ["voucher"],
-  postering: ["posting", "postings"],
-  posteringer: ["posting", "postings"],
+  // The same concept in English, which was left empty while the Norwegian was fixed — the same gap class
+  // the change was about, one language over.
+  accrual: ["voucher"],
+  accruals: ["voucher"],
+  periodisation: ["voucher"],
+  // "posting" only. Adding the plural put GET /api/postings/groups above GET /api/postings — and
+  // /api/postings is the one operation in the family a curated tool already wraps (reai_list_postings), so
+  // the plural demoted the answer most likely to be wanted. Measured by the review of PR #118: with
+  // ["posting"] alone the collection wins 18 to 17. `posteringer` needs no entry of its own — the `-er`
+  // rule in lookupForms reaches this one, which is the second entry the "verified load-bearing" claim
+  // covered and should not have.
+  postering: ["posting"],
   posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],
   balanse: ["balance"],

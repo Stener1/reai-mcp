@@ -503,61 +503,89 @@ test("teaching it interest did not cost it rent", () => {
 });
 
 /**
- * Core bookkeeping vocabulary that reached the wrong family, or nothing at all.
+ * Core bookkeeping vocabulary that reached the wrong endpoint, or nothing at all.
  *
- * Found by probing the ranker with 34 standard Norwegian accounting terms written from the DOMAIN rather
- * than from the synonym table — so a miss is a gap, not a tautology. Twenty-two of the 34 landed; these
- * nine did not, and each has an existing target, which is what separates a gap from a wrong expectation.
+ * Found by probing the ranker with the 34 standard Norwegian accounting terms in DOMAIN_PROBE below,
+ * written from the domain rather than from the synonym table — so a miss is a gap, not a tautology. The
+ * corpus is committed because the first version of this change reported "22 of 34 landed" from a scratch
+ * file that no longer existed, which is not a measurement a reviewer can check.
  *
- * The distinction mattered: `hovedbok` "missed" by returning `/api/ledger/general` and `kontoplan` by
- * returning `/api/chart-of-accounts` — both exactly right, my expectation wrong. Three more named families
- * this API does not have (`/api/trial-balance`, `/api/income-statement`, `/api/reports`), so they cannot be
- * judged at all. Only the nine below were real, and `test/discovery-heldout.test.mjs` says why that care is
- * required: "original queries named endpoints that do not exist, and 'fixing' the ranker to reach them"
- * is how a ranker gets worse while a test gets greener.
+ * Separating gaps from bad expectations was the work. `hovedbok` "missed" by returning
+ * `GET /api/ledger/general` and `kontoplan` by returning `/api/chart-of-accounts` — both exactly right,
+ * my expectation wrong. Three more named families this API does not have. `test/discovery-heldout.test.mjs`
+ * records why the care is required: "fixing" a ranker to reach endpoints that do not exist makes it worse
+ * while the tests go greener.
  *
- * Why it matters beyond tidiness: `/api/postings` carries nine operations and `/api/annual-accounts` one,
- * and NO curated tool covers any of them — the escape hatch is the only route, and it is reached by
- * searching. A Norwegian accountant asking for MVA by the name on the tax form got nothing back.
+ * Two claims the first version made about WHY these matter were false, and are corrected here rather than
+ * quietly dropped. It said no curated tool covers `/api/postings` or `/api/annual-accounts`:
+ * `reai_list_postings` covers `GET /api/postings`, and annual-accounts has exactly one operation which
+ * `reai_get_annual_accounts` covers. So the argument is not "unreachable capability" — it is that a
+ * Norwegian query for the country's standard bookkeeping words returned nothing or the wrong resource,
+ * which is bad on its own terms and was measured.
+ *
+ * Assertions are on METHOD AND EXACT PATH, not a path prefix. The review of PR #118 repointed
+ * `merverdiavgift` at `vat-returns` — three filing WRITES — and the prefix-based version still passed, in a
+ * repository whose whole ranking design exists to stop neutral nouns surfacing writes.
  */
-const VOCABULARY_GAPS = [
-  // term, the path prefix a competent answer must reach, what it returned before
-  ["merverdiavgift", "/api/vat", "nothing at all, while the abbreviation `mva` reached /api/vat-codes"],
-  ["arsoppgjor", "/api/annual-accounts", "nothing, while `arsregnskap` was mapped"],
-  ["aarsoppgjor", "/api/annual-accounts", "nothing — the aa transliteration was unmapped"],
-  ["arsavslutning", "/api/annual-accounts", "nothing"],
-  ["aarsregnskap", "/api/annual-accounts", "/api/ledger/general — å folds to a, not aa"],
-  ["postering", "/api/postings", "/api/invoice-reception-documents"],
-  ["posteringer", "/api/postings", "/api/invoice-reception-documents"],
-  ["posteringsgruppe", "/api/postings", "/api/invoice-reception-documents"],
-  ["periodisering", "/api/vouchers", "the VAT-return endpoints"],
+
+/** The corpus behind "22 of 34", committed so the number can be re-derived. */
+export const DOMAIN_PROBE = [
+  "postering", "posteringer", "posteringsgruppe", "bilag", "bilagsnummer", "hovedbok",
+  "saldobalanse", "resultatregnskap", "balanse", "kontoplan", "merverdiavgift", "mva-melding",
+  "kundefordringer", "leverandorgjeld", "reskontro", "avstemming", "periodisering", "avskrivning",
+  "anleggsmidler", "lonnskjoring", "feriepenger", "arbeidsgiveravgift", "a-melding", "kreditnota",
+  "purring", "inkasso", "utgaende faktura", "inngaende faktura", "remittering", "arsoppgjor",
+  "apningsbalanse", "driftsmidler", "lagerbeholdning", "timeliste",
 ];
 
-test("core Norwegian bookkeeping terms reach the family they name", async () => {
+const VOCABULARY_GAPS = [
+  // term, the operation a competent answer must reach FIRST-OR-SECOND, what it returned before
+  ["merverdiavgift", "GET /api/vat-codes", "nothing at all, while the abbreviation `mva` reached it"],
+  ["arsoppgjor", "GET /api/annual-accounts/{year}", "nothing, while `arsregnskap` was mapped"],
+  ["aarsoppgjor", "GET /api/annual-accounts/{year}", "nothing — the aa transliteration was unmapped"],
+  ["arsavslutning", "GET /api/annual-accounts/{year}", "nothing"],
+  ["aarsregnskap", "GET /api/annual-accounts/{year}", "/api/ledger/general — a folds from a, never aa"],
+  ["postering", "GET /api/postings", "/api/invoice-reception-documents"],
+  ["posteringer", "GET /api/postings", "/api/invoice-reception-documents"],
+  ["posteringsgruppe", "GET /api/postings/groups", "/api/invoice-reception-documents"],
+  ["periodisering", "GET /api/vouchers", "the VAT-return endpoints"],
+  ["accrual", "GET /api/vouchers", "nothing — the English form was left empty"],
+  ["accruals", "GET /api/vouchers", "nothing"],
+];
+
+test("core bookkeeping terms reach the exact operation they name", async () => {
   const { searchOperations } = await import("../dist/reai/spec.js");
   const failures = [];
   for (const [term, wanted, was] of VOCABULARY_GAPS) {
-    const hits = searchOperations({ query: term, limit: 5 });
-    const at = hits.findIndex((h) => h.path.startsWith(wanted));
-    if (at < 0 || at >= 3) {
-      failures.push(
-        `${term} -> wanted ${wanted} in the top 3, got ${hits.slice(0, 3).map((h) => h.path).join(", ") || "(nothing)"} ` +
-          `(before the fix: ${was})`,
-      );
+    const hits = searchOperations({ query: term, limit: 5 }).map((h) => `${h.method} ${h.path}`);
+    // Top TWO, and the exact operation. Prefixes let a filing write satisfy a query about VAT codes.
+    const at = hits.indexOf(wanted);
+    if (at < 0 || at > 1) {
+      failures.push(`${term} -> wanted ${wanted} first or second, got ${hits.slice(0, 3).join(", ") || "(nothing)"} (before: ${was})`);
     }
   }
-  assert.deepEqual(failures, [], `these terms stopped reaching their family:\n  ${failures.join("\n  ")}`);
+  assert.deepEqual(failures, [], `these terms stopped reaching their operation:\n  ${failures.join("\n  ")}`);
 });
 
-test("every gap term names a family that exists, so the test cannot chase a phantom", async () => {
-  // The guard on the guard. A term "fixed" to reach an endpoint the API does not have would pass the test
-  // above forever while helping nobody — which is the trap discovery-heldout.test.mjs records paying for.
+test("every asserted operation exists, so the test cannot chase a phantom", async () => {
+  // The guard on the guard, and the first version did not work: it checked a path PREFIX, so `/api/vat`
+  // and even `/api` passed while being the path of no operation at all. An exact method+path match is the
+  // only form that cannot be satisfied by a family that does not exist.
   const { getSpecIndex } = await import("../dist/reai/spec.js");
-  const paths = getSpecIndex().operations.map((o) => o.path);
+  const operations = new Set(getSpecIndex().operations.map((o) => `${o.method} ${o.path}`));
   for (const [term, wanted] of VOCABULARY_GAPS) {
-    assert.ok(
-      paths.some((p) => p.startsWith(wanted)),
-      `${term} is asserted to reach ${wanted}, which no operation in this spec has`,
-    );
+    assert.ok(operations.has(wanted), `${term} is asserted to reach ${wanted}, which this spec has no operation for`);
   }
+});
+
+test("the domain probe still measures what the change reported", async () => {
+  // 22 of 34 landed before the fix; the nine gaps and three phantom families account for the rest. This
+  // asserts the corpus is intact and every term still resolves to SOMETHING or is a known phantom — it
+  // does not re-assert the 22, because that number describes the state before a change now merged.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  assert.equal(DOMAIN_PROBE.length, 34, "the corpus behind the reported measurement must stay at 34");
+  const empty = DOMAIN_PROBE.filter((t) => searchOperations({ query: t, limit: 1 }).length === 0);
+  // `remittering` has no destination in this API — there is no payments family — so it is expected to be
+  // empty, and pointing it somewhere would be the confident-wrong-answer failure this repo names.
+  assert.deepEqual(empty, ["remittering"], `unexpected empty results: ${empty.join(", ")}`);
 });
