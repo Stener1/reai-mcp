@@ -501,3 +501,63 @@ test("teaching it interest did not cost it rent", () => {
   const first = searchOperations({ query: "renter", limit: 1 }).map((h) => h.path)[0];
   assert.doesNotMatch(String(first), /rent-agreement/, "renter is interest, not rent");
 });
+
+/**
+ * Core bookkeeping vocabulary that reached the wrong family, or nothing at all.
+ *
+ * Found by probing the ranker with 34 standard Norwegian accounting terms written from the DOMAIN rather
+ * than from the synonym table — so a miss is a gap, not a tautology. Twenty-two of the 34 landed; these
+ * nine did not, and each has an existing target, which is what separates a gap from a wrong expectation.
+ *
+ * The distinction mattered: `hovedbok` "missed" by returning `/api/ledger/general` and `kontoplan` by
+ * returning `/api/chart-of-accounts` — both exactly right, my expectation wrong. Three more named families
+ * this API does not have (`/api/trial-balance`, `/api/income-statement`, `/api/reports`), so they cannot be
+ * judged at all. Only the nine below were real, and `test/discovery-heldout.test.mjs` says why that care is
+ * required: "original queries named endpoints that do not exist, and 'fixing' the ranker to reach them"
+ * is how a ranker gets worse while a test gets greener.
+ *
+ * Why it matters beyond tidiness: `/api/postings` carries nine operations and `/api/annual-accounts` one,
+ * and NO curated tool covers any of them — the escape hatch is the only route, and it is reached by
+ * searching. A Norwegian accountant asking for MVA by the name on the tax form got nothing back.
+ */
+const VOCABULARY_GAPS = [
+  // term, the path prefix a competent answer must reach, what it returned before
+  ["merverdiavgift", "/api/vat", "nothing at all, while the abbreviation `mva` reached /api/vat-codes"],
+  ["arsoppgjor", "/api/annual-accounts", "nothing, while `arsregnskap` was mapped"],
+  ["aarsoppgjor", "/api/annual-accounts", "nothing — the aa transliteration was unmapped"],
+  ["arsavslutning", "/api/annual-accounts", "nothing"],
+  ["aarsregnskap", "/api/annual-accounts", "/api/ledger/general — å folds to a, not aa"],
+  ["postering", "/api/postings", "/api/invoice-reception-documents"],
+  ["posteringer", "/api/postings", "/api/invoice-reception-documents"],
+  ["posteringsgruppe", "/api/postings", "/api/invoice-reception-documents"],
+  ["periodisering", "/api/vouchers", "the VAT-return endpoints"],
+];
+
+test("core Norwegian bookkeeping terms reach the family they name", async () => {
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const failures = [];
+  for (const [term, wanted, was] of VOCABULARY_GAPS) {
+    const hits = searchOperations({ query: term, limit: 5 });
+    const at = hits.findIndex((h) => h.path.startsWith(wanted));
+    if (at < 0 || at >= 3) {
+      failures.push(
+        `${term} -> wanted ${wanted} in the top 3, got ${hits.slice(0, 3).map((h) => h.path).join(", ") || "(nothing)"} ` +
+          `(before the fix: ${was})`,
+      );
+    }
+  }
+  assert.deepEqual(failures, [], `these terms stopped reaching their family:\n  ${failures.join("\n  ")}`);
+});
+
+test("every gap term names a family that exists, so the test cannot chase a phantom", async () => {
+  // The guard on the guard. A term "fixed" to reach an endpoint the API does not have would pass the test
+  // above forever while helping nobody — which is the trap discovery-heldout.test.mjs records paying for.
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const paths = getSpecIndex().operations.map((o) => o.path);
+  for (const [term, wanted] of VOCABULARY_GAPS) {
+    assert.ok(
+      paths.some((p) => p.startsWith(wanted)),
+      `${term} is asserted to reach ${wanted}, which no operation in this spec has`,
+    );
+  }
+});

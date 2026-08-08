@@ -1298,6 +1298,38 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   aksjer: ["share-investments"],
   apningsbalanse: ["opening-balances"],
   arsregnskap: ["annual-accounts"],
+  // The older double-a transliteration. foldDiacritics maps å to a rather than aa, so "årsregnskap"
+  // arrives as `arsregnskap` and is matched — but someone typing the aa convention directly was not, and
+  // reached /api/ledger/general instead.
+  aarsregnskap: ["annual-accounts"],
+  // `arsoppgjor` is the same thing in the language accountants actually use — the year-end process — and
+  // it returned NOTHING at all, as did `aarsoppgjor` and `arsavslutning`. `arsregnskap` was mapped and
+  // its synonym was not, which is the shape of gap a synonym table accumulates: the word someone thought
+  // of, not the word someone types. Measured before adding: `mva` reached /api/vat-codes while the formal
+  // `merverdiavgift` reached nothing, and /api/annual-accounts exists.
+  //
+  // Mapped to the hyphenated path token only, NOT to "accounts": that token is in chart-of-accounts,
+  // general-sub-accounts and company bank accounts, so "årsoppgjør" would have dragged the whole
+  // account surface up with it.
+  arsoppgjor: ["annual-accounts"],
+  aarsoppgjor: ["annual-accounts"],
+  arsavslutning: ["annual-accounts"],
+  // The formal name of MVA. `mva` was mapped and this was not, so a query written the way a tax form
+  // writes it returned nothing.
+  merverdiavgift: ["vat", "mva"],
+  merverdiavgiften: ["vat", "mva"],
+  // `postering`/`posteringer` — a posting, the core unit of double-entry bookkeeping — reached
+  // /api/invoice-reception-documents and /api/attachments, while /api/postings carries nine operations
+  // that no curated tool covers, so the escape hatch is the only route to them. Low collision risk: this
+  // API has no other "posting" family, and the English "posting group" query already ranks first.
+  // A JUDGEMENT, not a measurement, and flagged as one: an accrual in Norwegian bookkeeping is booked as
+  // a manual voucher, so that is where a query about it should land. What it did instead was reach the
+  // VAT-return endpoints, which is wrong by any reading. If a later reader disagrees about the
+  // destination, the argument is about accounting rather than about the ranker.
+  periodisering: ["voucher"],
+  postering: ["posting", "postings"],
+  posteringer: ["posting", "postings"],
+  posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],
   balanse: ["balance"],
   regnskap: ["accounting", "ledger"],
