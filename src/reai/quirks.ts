@@ -663,6 +663,48 @@ export const QUIRKS: readonly Quirk[] = [
       "breaks any routine that posts to it without a subAccountId.",
   },
   {
+    // Exact, NOT descendants. This note is about the collection: the envelope, the pagination and
+    // pageSize. Attached to descendants it also landed on GET /api/leads/org/{orgNumber} and
+    // /api/leads/{id}, which return a single LeadRes, accept no pageSize, and have no envelope — so
+    // discovery presented confident, wrong response guidance for the two detail endpoints. The part
+    // that DOES apply to them is the entry below.
+    id: "leads-are-the-company-register-not-your-records",
+    paths: ["/api/leads"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "This is not a list of records the tenant owns. GET /api/leads searches the Norwegian company " +
+      "register (Brønnøysund) and layers whatever lead state the tenant has on top — measured, every " +
+      "row of the default first page came back with id null and status null, i.e. companies nobody " +
+      "here has touched. `leadFilter` is what separates them: all | saved | unsaved.\n\n" +
+      "TWO ADDRESSING SCHEMES, and only one always works. /api/leads/{id} and " +
+      "/api/leads/org/{orgNumber} both exist, but an unsaved company has no id: " +
+      '`GET /api/leads/null` answers 400 "Failed to convert \'id\' with value: \'null\'". The ' +
+      "organisation number is on every row either way, so it is the handle to use.\n\n" +
+      "The envelope is {items, page, hasPrevious, hasNext, latestRegisteredAt} — a page marker and no " +
+      "TOTAL, so \"how many companies match\" cannot be answered from one call. And pageSize is " +
+      'capped at 200: 500 answers a bare 400 "Validation failed" that names no field.',
+  },
+  {
+    id: "lead-detail-nests-what-the-search-flattens",
+    paths: ["/api/leads/org/{orgNumber}", "/api/leads/{id}"],
+    methods: ["GET"],
+    kind: "shape",
+    note:
+      "The detail response and a search ROW disagree about where lead state lives, which is easy to " +
+      "miss because the two look alike otherwise. LeadRes nests it: " +
+      "`lead: { id, status, notes, email, phone, followUpAt, convertedCustomerId, convertedAt }`, " +
+      "measured on a live response. A row from GET /api/leads flattens `id` and `status` to the top " +
+      "level instead.\n\n" +
+      "So code that reads `id` at the top level of a detail response gets undefined and concludes " +
+      "the company has no lead state — which for an untouched company is coincidentally right and " +
+      "for a saved one is wrong. Read `lead.id`.\n\n" +
+      "An untouched company still returns the `lead` object, with every field null, rather than " +
+      "omitting it. `contactEvents` comes back as [].\n\n" +
+      "And /api/leads/{id} cannot address an untouched company at all: it has no id, so that path is " +
+      "only usable once something has been written. The org-number path always works.",
+  },
+  {
     id: "three-roles-are-the-same-role",
     // /api/users/permissions is here because the last paragraph is specifically about it — the
     // quirk warned that the catalogue omits the self-scoped codes while not being attached to the

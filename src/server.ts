@@ -24,6 +24,7 @@ import { warehouseTools } from "./tools/warehouses.js";
 import { agreementTools } from "./tools/agreements.js";
 import { accessTools } from "./tools/access.js";
 import { expenseTools } from "./tools/expenses.js";
+import { leadTools } from "./tools/leads.js";
 import { salaryTools } from "./tools/salary.js";
 import { subAccountTools } from "./tools/subaccounts.js";
 
@@ -37,7 +38,7 @@ export const SERVER_VERSION = "0.3.0";
  */
 export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   bookkeeping: [...bookkeepingTools, ...subAccountTools],
-  sales: salesTools,
+  sales: [...salesTools, ...leadTools],
   purchase: [...purchaseTools, ...expenseTools],
   bank: bankVatTools,
   organisation: [...organisationTools, ...accessTools],

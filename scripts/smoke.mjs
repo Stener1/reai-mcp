@@ -256,6 +256,14 @@ async function main() {
         { tenantId },
         (t) => /department\(s\)\.$/m.test(t) || /No departments\. That is not the same/.test(t),
       ],
+      // Leads. The register is the source, so this returns rows on any tenant — which makes it one
+      // of the few list checks with a guaranteed non-empty answer, and the assertion is on the
+      // sentence that refuses to invent a total.
+      [
+        "reai_search_leads",
+        { tenantId, pageSize: 3 },
+        (t) => /row\(s\) on page 1/.test(t) && /no total/.test(t) && !/UNKNOWN/.test(t),
+      ],
       // Access control. Every tenant has at least the owner, so unlike departments there IS a
       // non-empty answer to assert — and the role comparison is computed from the response, so
       // this checks the computation against whatever the live tenant actually returns.
