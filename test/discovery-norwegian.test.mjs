@@ -269,6 +269,41 @@ test("a three-letter stem reaches the definite rules", () => {
 });
 
 /**
+ * The one-character suffix needs a higher floor than the rest, and Codex caught why on #95.
+ *
+ * A single -n strips one character, so it turns every four-letter word into a three-letter one — and
+ * three-letter keys are exactly what removing the length guards set out to reach. With one uniform
+ * floor, `vatn` (Nynorsk for water) stemmed to the known key `vat` and returned the VAT endpoints,
+ * and `owen` stemmed to `owe`, so **"faktura til owen" — an invoice to a person — ranked the customer
+ * LEDGER above /api/invoices**. That is the concrete harm; the dictionary examples are only how it
+ * was noticed.
+ *
+ * Four for -n and three for the rest, and the asymmetry is not a fudge: every real Norwegian -n
+ * definite has an -e stem, so adding -n to each three-letter key gives `vatn`, `mvan`, `owen`, `ehfn`,
+ * `lann` — not one of which is a definite form of it.
+ */
+test("a one-character suffix does not strip a four-letter word", () => {
+  for (const query of ["vatn", "owen", "vatn og avløp"]) {
+    assert.equal(
+      searchOperations({ query, limit: 3 }).length,
+      0,
+      `"${query}" derived a three-letter key it has nothing to do with`,
+    );
+  }
+  // The case that actually matters: a name must not outrank the noun next to it.
+  const at = rankOf("faktura til owen", "GET /api/invoices");
+  assert.ok(at === 0, `"faktura til owen" ranks GET /api/invoices at ${at + 1}, behind the ledger`);
+  // And the -n rule still does its job on the class it exists for.
+  for (const [query, want] of [
+    ["kunden", "GET /api/ledger/customer"],
+    ["ordren", "GET /api/orders"],
+    ["avtalene", "GET /api/agreements"],
+  ]) {
+    assert.ok(rankOf(query, want) >= 0, `"${query}" should still find ${want}`);
+  }
+});
+
+/**
  * The plural definite of a CONSONANT stem is -ene, and fixing the singular is what made its absence
  * obvious: `utgiften` resolved while `utgiftene` returned nothing. The -e nouns were already covered
  * by the -ne rule because their stem keeps its own -e (`kunde` -> `kundene`), which is exactly why

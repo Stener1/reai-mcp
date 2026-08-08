@@ -61,6 +61,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     were already covered because their stem keeps its own -e (`kunde` → `kundene`), which is exactly
     why this survived — the class looked handled. Measured before: `lånene`, `utgiftene`,
     `dokumentene`, `kontoene`, `vedleggene` and `produktene` all returned nothing; all six now resolve.
+  - **Removing the guards went one step too far, and Codex caught that too, on this PR.** A single -n
+    strips one character, so it turns every four-letter word into a three-letter one — and three-letter
+    keys are precisely what this change reaches for. `vatn` (Nynorsk for water) stemmed to the known
+    key `vat` and returned the VAT endpoints; `owen` stemmed to `owe`, so *"faktura til owen"* — an
+    invoice to a person — ranked the customer **ledger** above `/api/invoices`. The floor is now per
+    suffix: four for `-n`, three for the rest. Not a fudge — every real Norwegian `-n` definite has an
+    `-e` stem, so adding `-n` to each three-letter key gives `vatn`, `mvan`, `owen`, `ehfn`, `lann`,
+    none of which is a definite form of it.
   - Three mutations verified separately: restoring the length guard fails only the three-letter-stem
     test, removing `-ene` fails that one and the plural test, and dropping the gate fails the
     pre-existing gate test plus both third-corpus score floors — which is also the evidence that the

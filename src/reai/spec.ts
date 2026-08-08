@@ -1538,13 +1538,27 @@ function lookupForms(token: string): string[] {
     // entirely. Found by Codex on #88; the comment right above claimed the guards were "cheap sanity
     // and nothing more", which was true of what they let through and false about what they blocked.
     // The gate below is the whole protection: a stem that is not a key derives nothing.
-    const definite = (suffix: string) => {
+    // `minStem` is per suffix, because the single -n is the one that needs protecting and Codex
+    // caught it: with a uniform floor, `vatn` (Nynorsk for water) stems to the known key `vat` and
+    // returned the VAT endpoints, and `owen` stems to `owe` — so "faktura til owen", an invoice to a
+    // person, ranked the customer LEDGER above /api/invoices. A one-character suffix strips one
+    // character, so it turns any four-letter word into a three-letter one, and three-letter keys are
+    // exactly what this change set out to reach. The two rules pull in opposite directions and the
+    // floor has to distinguish them.
+    //
+    // Four for -n, three for the rest, and neither is arbitrary: every real Norwegian -n definite has
+    // an -e stem (`kunde`, `ordre`, `avtale`, `leieavtale`), so nothing legitimate needs a
+    // three-letter stem there — adding -n to each three-letter key gives `vatn`, `mvan`, `owen`,
+    // `ehfn`, `lann`, not one of which is a definite form of it. The -et/-en/-ene rules DO need three
+    // (`lanet`, `lanene`), and no key is shorter than three characters, so the floor can never be the
+    // thing that blocks a real stem.
+    const definite = (suffix: string, minStem = 3) => {
       if (!base.endsWith(suffix)) return;
       const stem = base.slice(0, -suffix.length);
-      if (stem.length > 1 && known(stem)) add(stem);
+      if (stem.length >= minStem && known(stem)) add(stem);
     };
     definite("ne");
-    definite("n");
+    definite("n", 4);
     // And the plural definite of a CONSONANT stem, which is -ene: `lånene`, `utgiftene`,
     // `dokumentene`, `kontoene`, `vedleggene`, `produktene`. Fixing the singular above made the
     // asymmetry obvious — `utgiften` resolved and `utgiftene` returned nothing, though the -ne rule
