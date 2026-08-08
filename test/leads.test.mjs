@@ -575,3 +575,21 @@ test("reai_update_lead carries a null contact field as null, not as absent", asy
   const contact = fake.calls.find((c) => c.path.endsWith("/contact"));
   assert.deepEqual(contact.body, { email: "first@b.no", phone: null });
 });
+
+test("reai_update_lead does not create a lead in order to empty it", async () => {
+  // Clearing on a company with no lead state: the end state the caller wants is already the actual
+  // one, and the alternative is a POST /api/leads that produces state in response to a request to
+  // remove state.
+  const fake = fakeLead();
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, notes: null, followUpAt: null }, fake);
+  assert.notEqual(result.isError, true, "this is an answer, not a failure");
+  assert.equal(fake.calls.filter((c) => c.method !== "GET").length, 0, "nothing should be written");
+  assert.equal(fake.state.id, null, "no lead should have been created");
+  assert.match(text, /already empty/);
+
+  // But a SET on the same untouched company still creates it, which is the point of the tool.
+  const setting = fakeLead();
+  await runLive("reai_update_lead", { orgNumber: ORG, notes: null, status: "active" }, setting);
+  assert.notEqual(setting.state.id, null, "a set alongside a clear must still create the lead");
+  assert.equal(setting.state.status, "active");
+});

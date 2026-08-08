@@ -457,6 +457,22 @@ const updateLead = defineTool({
     const before = await readLeadState(ctx, tenantId, args.orgNumber);
     const calls: string[] = [];
 
+    // A request that only CLEARS things has nothing to do on a company with no lead state, and
+    // acting on it anyway would create a lead in order to empty it — state produced by a request to
+    // remove state. Reported as the answer it is rather than as an error, since the caller's
+    // intended end state is already the actual one.
+    const clearsOnly = (["notes", "email", "phone", "followUpAt"] as const).every(
+      (key) => !given(key) || args[key] === null,
+    );
+    if (!isSaved(before.state) && clearsOnly && !given("status")) {
+      return ok(before.record, {
+        note:
+          `${before.record.companyName ?? args.orgNumber} has no lead state on this tenant — ` +
+          `lead.id is null, so the fields you asked to clear are already empty. Nothing was written, ` +
+          `and in particular no lead was created just to empty it.`,
+      });
+    }
+
     // Save the lead first when it does not exist. Most writes would create it themselves, but
     // `PUT .../contact` does NOT: measured, it answers 200 against an unsaved company and leaves
     // lead.id null, so the email and phone are accepted and discarded. Doing this unconditionally

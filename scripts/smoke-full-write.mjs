@@ -1885,6 +1885,20 @@ async function main() {
           : `lead ${materialised.id}, email ${JSON.stringify(materialised.email)}`,
       );
 
+      // 4b. A clear-only request on a company with no lead state must not create one to empty it.
+      await callLead("reai_delete_lead", {});
+      const clearOnUnsaved = await callLead("reai_update_lead", { notes: null, followUpAt: null });
+      const stillUnsaved = await stateOf();
+      report(
+        "clearing fields on an untouched company creates no lead",
+        !clearOnUnsaved.isError && (stillUnsaved.id === null || stillUnsaved.id === undefined),
+        clearOnUnsaved.isError
+          ? firstLineOf(textOf(clearOnUnsaved))
+          : stillUnsaved.id
+            ? `CREATED lead ${stillUnsaved.id} in order to empty it`
+            : "no lead created",
+      );
+
       // 5. A contact event, which is append-only: nothing can remove it but deleting the lead.
       const logged = await callLead("reai_log_lead_contact", {
         contactedOn: today,
