@@ -457,7 +457,10 @@ const deleteProduct = defineTool({
     // because the PRODUCT their lines name was deleted first, and products have no unarchive
     // endpoint at all. Archived is the recoverable-looking outcome that is not recoverable.
     const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
-    return ok(res.data ?? { productId: args.id }, {
+    // `outcome: null` rather than a bare record, following reai_delete_voucher — see the comment
+    // there: a synthesized outcome beside an "unknown" note tells a structured reader the opposite
+    // of the prose.
+    return ok(res.data ?? { outcome: null, productId: args.id }, {
       note:
         outcome === "deleted"
           ? `Product ${args.id} was DELETED outright. Any ORDER whose lines still name it can now ` +
