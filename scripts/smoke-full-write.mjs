@@ -1814,7 +1814,17 @@ async function main() {
       // until the sweep started asking per name prefix, which is what found them.
       suppliers: [5631, 5632, 5642, 5645],
     };
-    const TEST_NAME = /^zz|reai-mcp|smoke|probe|walkthrough/i;
+    // Deliberately mixed anchoring, which the first version had by accident: `^` bound only to the
+    // `zz` alternative and everything else matched anywhere. Review flagged that as a false-positive
+    // risk, and it is — but making them all prefixes would have been wrong too, because the API's
+    // own `name` filter matches on SUBSTRING, and that is exactly how the four strays this sweep
+    // found were found: "Payprobe-…" and "Signprobe-…" contain "probe" without starting with it.
+    //
+    // So: `zz` is anchored, because as a substring it matches buzz, pizza and puzzle. The other four
+    // are distinctive enough to match anywhere, and on a tenant declared safe to write to a false
+    // positive costs one message asking a human to look, while a false negative is litter that hides
+    // forever — which is the failure this exists to prevent.
+    const TEST_NAME = /(?:^zz|reai-mcp|smoke|probe|walkthrough)/i;
     // Residue this suite CANNOT avoid, matched by name rather than id because the id differs per
     // tenant. The supplier invoice this suite posts can only be reversed, so its supplier keeps a
     // transaction and its delete archives — one archived supplier is the permanent, expected state.
@@ -1867,6 +1877,7 @@ async function main() {
         const allowed = new Set(KNOWN_UNRECOVERABLE[label] ?? []);
         const residuePattern = EXPECTED_RESIDUE[label];
         const strays = new Map();
+        const seen = new Set();
         let explained = 0;
         let truncated;
         // "byName" expands to one query per test prefix, in both the active and archived views.
@@ -1908,7 +1919,13 @@ async function main() {
           }
           for (const row of listOf(res) ?? []) {
             const id = row?.[idField];
-            if (allowed.has(id)) continue;
+            if (allowed.has(id)) {
+              // Counted as SEEN, so the summary reports what is actually still there. Printing the
+              // static list meant that after someone cleaned a record in the ReAI UI, the sweep would
+              // go on announcing it as live tenant state indefinitely.
+              seen.add(id);
+              continue;
+            }
             const residue = EXPECTED_RESIDUE[label];
             if (residue && fields.some((field) => residue.test(String(row?.[field] ?? "")))) {
               explained += 1;
@@ -1928,8 +1945,16 @@ async function main() {
               : strays.size === 0
               ? [
                   "clean",
-                  allowed.size > 0
-                    ? `${allowed.size} known-unrecoverable record(s): ${[...allowed].join(", ")}`
+                  seen.size > 0
+                    ? `${seen.size} known-unrecoverable record(s) still present: ${[...seen].join(", ")}`
+                    : "",
+                  // Named rather than silently dropped: an allowlist entry that no longer exists is
+                  // either a record someone cleaned up by hand, or an id that was wrong all along,
+                  // and both are worth one line so the list does not rot.
+                  truncated === undefined && allowed.size > seen.size
+                    ? `${allowed.size - seen.size} allowlisted id(s) no longer present ` +
+                      `(${[...allowed].filter((id) => !seen.has(id)).join(", ")}) — remove them from ` +
+                      `KNOWN_UNRECOVERABLE`
                     : "",
                   explained > 0 ? `${explained} expected residue row(s)` : "",
                 ]
