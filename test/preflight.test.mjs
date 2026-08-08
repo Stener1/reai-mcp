@@ -595,6 +595,13 @@ test("every response-shaping exemption names a real field and a real test", asyn
 });
 
 test("no read tool accepts an input it never sends", async () => {
+  // A population floor is not enough here. This sweep skips a tool three ways — it declares no
+  // sendable field, its handler refuses the argument combination locally, or the stub never reached
+  // the request — and a harness that stops reaching the request skips every one of them while the 76
+  // read tools stay there to be counted. Found by the independent review of PR #108: breaking tenant
+  // resolution took this sweep from 52 tools examined to 7, and it passed. So the floor counts the
+  // work, not the population. See test/README.md.
+  let exercised = 0;
   // Codex found `filterRestricted` declared on reai_list_accounts and silently
   // dropped, which is worse than not offering it: the tool promised to exclude
   // system-only accounts and did not. This sweeps for the same class across every
@@ -639,6 +646,7 @@ test("no read tool accepts an input it never sends", async () => {
       continue; // a tool that refuses this combination locally is not the target here
     }
     if (calls.length === 0) continue;
+    exercised += 1;
 
     // A field counts as used if its VALUE or its NAME shows up anywhere in any request
     // the handler made — query, path or body. Some fields legitimately choose an
@@ -655,6 +663,10 @@ test("no read tool accepts an input it never sends", async () => {
   }
 
   assert.deepEqual(dropped, [], `inputs accepted but never sent:\n  ${dropped.join("\n  ")}`);
+  assert.ok(
+    exercised >= 39,
+    `only ${exercised} read tools reached the request (of 52 today) — the sweep is skipping its subjects`,
+  );
 });
 
 test("constraints the descriptions promise are enforced, and no further", () => {

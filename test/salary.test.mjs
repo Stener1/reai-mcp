@@ -110,6 +110,11 @@ test("the two reads are reads; everything that changes payroll is irreversible",
 // tool for it would be a one-line way to pay people and file with the state, so there isn't one
 // — and this test fails if a later edit adds one.
 test("no curated salary tool can complete a run or register its payment", () => {
+  // An absence claim needs its population pinned, or it is satisfied by there being no salary tools at
+  // all — which is how it would read the day the toolset is renamed or fails to register. Emptying the
+  // tool corpus left this green, along with twenty-nine other sweeps.
+  const salaryTools = registeredTools.filter((t) => (t.apiPaths ?? []).some(([, p]) => /^\/api\/salary/.test(p)));
+  assert.ok(salaryTools.length >= 5, `only ${salaryTools.length} salary tools found — the claim below is about nothing`);
   const forbidden = [/\/complete$/, /register-payment$/, /payment-date$/];
   for (const t of registeredTools) {
     for (const [method, path] of t.apiPaths ?? []) {

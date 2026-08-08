@@ -106,8 +106,24 @@ test("every tool declares a risk the policy knows", () => {
 // is one-way. The annotation is the only thing left protecting a call the write mode allows,
 // so the sweep is mechanical rather than per-tool.
 test("every tool that deletes is annotated destructive", () => {
-  const undeclared = registeredTools
-    .filter((t) => t.name.startsWith("reai_delete_") || (t.apiPaths ?? []).some(([m]) => m === "DELETE"))
+  const deleting = registeredTools.filter(
+    (t) => t.name.startsWith("reai_delete_") || (t.apiPaths ?? []).some(([m]) => m === "DELETE"),
+  );
+  // The population first. This sweep asserts a property of the deleting tools, and a filter keyed on a
+  // NAME PREFIX is exactly the kind that stops matching after a rename — at which point the assertion
+  // below is about the empty set and passes for the wrong reason.
+  //
+  // But the filter is a DISJUNCTION, and 22 tools match the prefix while 23 match the method and none
+  // match the prefix without also matching the method. So a floor on the union is unfalsifiable by the
+  // rename it names: renaming every reai_delete_* to reai_remove_* leaves the total at 23. Found by the
+  // independent review of PR #108, whose sharper point is that emptying the corpus tests a floor's
+  // DENOMINATOR, not the predicate it claims to watch. Both halves are pinned separately.
+  const byPrefix = deleting.filter((t) => t.name.startsWith("reai_delete_"));
+  const byMethod = deleting.filter((t) => (t.apiPaths ?? []).some(([m]) => m === "DELETE"));
+  assert.ok(deleting.length >= 17, `only ${deleting.length} of 23 deleting tools found — the filter has stopped matching`);
+  assert.ok(byPrefix.length >= 16, `only ${byPrefix.length} of 22 tools match reai_delete_ — the prefix has stopped matching`);
+  assert.ok(byMethod.length >= 17, `only ${byMethod.length} of 23 tools declare a DELETE — the method match has stopped matching`);
+  const undeclared = deleting
     .filter((t) => t.destructive !== true && t.risk !== "irreversible")
     .map((t) => t.name);
   assert.deepEqual(
@@ -139,6 +155,12 @@ test("a curated tool accepting an arms-a-send field escalates like the escape ha
     automaticbillinggeneration: true,
     outputmode: "create_invoice",
   };
+  // Floor: if the exported list empties, every assertion below is about nothing and the
+  // send-arming check silently stops testing. See test/README.md.
+  assert.ok(
+    escalatingBodyFieldNames.length >= 3,
+    `only ${escalatingBodyFieldNames.length} escalating body fields — policy has stopped exporting them`,
+  );
   for (const name of escalatingBodyFieldNames) {
     assert.ok(name in arming, `no probe value for the escalating field ${name} — add one`);
     assert.equal(
@@ -215,9 +237,15 @@ test("no curated tool is more permissive than the escape hatch would be", () => 
   // tool declares the API paths it calls so this can be checked mechanically
   // rather than by eye, which is how the previous reviews had to do it.
   const rank = { read: 0, reversible: 1, irreversible: 2 };
+  // Work count, not a population count: this loop skips a tool that declares nothing, so a tool
+  // can leave the invariant by emptying its own list. The test above now forbids that, and this
+  // pins how many tools the invariant actually classified (161 of 168 today; the seven exempt
+  // ones are listed there).
+  let classified = 0;
 
   for (const tool of registeredTools) {
-    if (!tool.apiPaths) continue;
+    if (!tool.apiPaths?.length) continue;
+    classified += 1;
     for (const [method, path] of tool.apiPaths) {
       // Substitute the template parameters, since classifyRequest sees concrete paths.
       const concrete = path.replace(/\{[^}]+\}/g, "1");
@@ -234,9 +262,15 @@ test("no curated tool is more permissive than the escape hatch would be", () => 
 
 test("every curated tool declares the API paths it calls", () => {
   // Not decoration: an undeclared tool silently opts out of the check above.
+  //
+  // `?.length`, not `!t.apiPaths` — an EMPTY list satisfied the old form while opting the tool
+  // out of every invariant that iterates the declared paths. Found by the independent review of
+  // PR #108: setting `apiPaths: []` on reai_delete_reconciliation_rule and downgrading it from
+  // irreversible to reversible — an irreversible delete, now registered in the default write
+  // mode — left the entire suite green except one documentation count.
   const missing = allTools
     .filter((t) => !alwaysOnTools.includes(t) || t.name.startsWith("reai_whoami"))
-    .filter((t) => !t.apiPaths)
+    .filter((t) => !t.apiPaths?.length)
     .map((t) => t.name);
   const exempt = new Set([
     // Discovery reads the bundled spec, or targets a path chosen at call time and
@@ -319,7 +353,11 @@ test("every ledger-booking tool that takes a vatCode carries the tenant-specific
 // Issuing an invoice needs BOTH switches, and saying only "requires full" invites an
 // operator to set full and wonder why the tool is still missing.
 test("a transmitting tool names both switches it needs", async () => {
-  for (const tool of registeredTools.filter((t) => t.transmits === true)) {
+  const transmitting = registeredTools.filter((t) => t.transmits === true);
+  // The class first. This is the most consequential group on the server and the filter is a single flag:
+  // rename it, or drop it from a tool, and this sweep quietly covers nothing.
+  assert.ok(transmitting.length >= 3, `only ${transmitting.length} transmitting tools found — the filter has stopped matching`);
+  for (const tool of transmitting) {
     assert.match(
       tool.description,
       /REAI_ALLOW_EXTERNAL_SEND/,
@@ -534,15 +572,27 @@ test("every explicit-id exception is a real tool", () => {
 
 test("a getter that takes one record id calls it `id`", () => {
   const wrong = [];
+  let examined = 0;
+  let inspected = 0;
   for (const tool of registeredTools) {
     if (tool.risk !== "read" || !tool.name.startsWith("reai_get_")) continue;
+    examined++;
     if (tool.name in KEEPS_AN_EXPLICIT_ID) continue;
     const keys = Object.keys(tool.inputSchema ?? {}).filter((k) => k !== "tenantId");
+    if (keys.length > 0) inspected += 1;
     // Any spelling of an id-shaped name, so fooId and foo_id are both caught.
     const ids = keys.filter((k) => /(^|[a-z_])id$/i.test(k) && k !== "id");
     if (ids.length === 0) continue;
     wrong.push(`${tool.name}: ${ids.join(", ")}`);
   }
+  // Two counts, because they fail to different things. `examined` is the population — a rename or a
+  // risk-tier change stops the filter matching. `inspected` is the work: this sweep reads argument
+  // names out of `Object.keys(inputSchema)`, and anything that stops those keys being enumerable
+  // (moving them onto a shared prototype, for one) empties every `keys` array while the population
+  // stays at 25 and the sweep proves nothing. The review of PR #108 demonstrated exactly that, and
+  // it is why `examined` alone was never the guard I claimed it was.
+  assert.ok(examined >= 18, `only ${examined} of 25 reai_get_* read tools were examined — the filter has stopped matching`);
+  assert.ok(inspected >= 18, `only ${inspected} of 24 getters had any argument to inspect — the sweep is reading nothing`);
   assert.deepEqual(wrong, [], "a reai_get_* record fetch should take `id`, or be listed in KEEPS_AN_EXPLICIT_ID with a reason");
 });
 
@@ -589,8 +639,9 @@ test("the probe sees escalating fields nested inside an object-valued argument",
   const { ESCALATION_PROBES: probes, registeredTools } = await import("../dist/server.js");
 
   // The union is derived from the real sets, so a new escalating field cannot be added to the
-  // policy without becoming probeable here.
-  assert.ok(escalatingFieldNames.length >= 12, `expected the real field union; got ${escalatingFieldNames.length}`);
+  // policy without becoming probeable here. 13 today, so 12 is 92% — the review of PR #108 reported
+  // this one as 12 of 41 and slack; measured, it is not.
+  assert.ok(escalatingFieldNames.length >= 12, `expected the real field union of 13; got ${escalatingFieldNames.length}`);
   for (const name of ["depositaccountnumber", "rentaccountnumber", "iban", "sendehf"]) {
     assert.ok(escalatingFieldNames.includes(name), `${name} must be in the probeable union`);
   }

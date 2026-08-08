@@ -802,6 +802,12 @@ test("anything creatable in reversible mode is also deletable in it", async () =
   const { isAllowed } = await import("../dist/policy.js");
 
   const visible = allTools.filter((t) => isAllowed(t.risk, "reversible"));
+  // A floor, because this sweep narrows twice — by mode and by name prefix — and a filter that
+  // stops matching leaves the assertion below about the empty set. See test/README.md.
+  assert.ok(
+    visible.filter((t) => t.name.startsWith("reai_create_")).length >= 10,
+    `only ${visible.filter((t) => t.name.startsWith("reai_create_")).length} create tools visible in reversible mode`,
+  );
   const names = new Set(visible.map((t) => t.name));
   const gaps = visible
     .filter((t) => t.name.startsWith("reai_create_"))
@@ -825,7 +831,12 @@ test("every delete tool's endpoint is classified no worse than the tool claims",
   // not a mode — passing it as one is how this test first failed.
   const minimumMode = { read: "read-only", reversible: "reversible", irreversible: "full" };
 
-  for (const tool of allTools.filter((t) => t.name.startsWith("reai_delete_"))) {
+  const deleters = allTools.filter((t) => t.name.startsWith("reai_delete_"));
+  // A floor, because this sweep narrows and a narrowing filter that stops matching leaves the assertions
+  // below about the empty set. See test/README.md — the audit that found this class listed thirty sweeps
+  // passing with an emptied registry, and my first pass wrongly claimed this one had no filter to break.
+  assert.ok(deleters.length >= 16, `only ${deleters.length} reai_delete_* tools — the prefix has stopped matching`);
+  for (const tool of deleters) {
     const mode = minimumMode[tool.risk];
     assert.ok(mode, `${tool.name} has an unrecognised risk "${tool.risk}"`);
     for (const [method, path] of tool.apiPaths ?? []) {
@@ -1103,11 +1114,13 @@ test("a tool with escalating fields is annotated destructive", async () => {
     // made it a failure rather than a category.
     if (tool.risk === "reversible") mixed += 1;
   }
-  // Near the real census (16 escalating, 11 mixed at the time of writing) rather than the ~5x
-  // slack the old floors carried: with `>= 3` this could have lost thirteen tools and stayed green,
-  // which makes the count decorative rather than a guard.
-  assert.ok(escalating >= 14, `expected ~16 tools with escalating fields, found ${escalating}`);
-  assert.ok(mixed >= 9, `expected ~11 mixed-risk tools, found ${mixed}`);
+  // Re-measured: the census was 16 escalating / 11 mixed when these floors were written and is 25/18
+  // now, so `>= 14` and `>= 9` had drifted to 56% and 50% — back to catching only a collapse, which
+  // is what they were tightened to avoid. **A floor written against yesterday's census is slack
+  // today.** Both are now floor(0.75 x measured), and re-measuring belongs with any change that adds
+  // tools carrying an escalating field.
+  assert.ok(escalating >= 18, `expected ~25 tools with escalating fields, found ${escalating}`);
+  assert.ok(mixed >= 13, `expected ~18 mixed-risk tools, found ${mixed}`);
 });
 
 /**
