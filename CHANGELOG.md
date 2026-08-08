@@ -247,7 +247,25 @@ All notable changes to `reai-mcp`. Format loosely follows
     update **rejects** it (measured, `400 "Unknown field: employeeId"`), so a line
     cannot be moved between employees. Both curated tools now build their request
     body field by field rather than spreading their arguments, so a stray argument
-    cannot ride into the one endpoint that refuses it. Lines derived from expense postings cannot be edited at all — which
+    cannot ride into the one endpoint that refuses it.
+  - `PUT .../wage-specs/{wageSpecId}` is another member of the **full-replacement**
+    class, and this one was measured rather than inferred: a line carrying comment
+    `"PROBE COMMENT"` was PUT back with the same quantity, rate and code but no
+    comment field, and the comment came back `null` — confirmed on a re-read. So
+    `reai_update_salary_line` reads the line first and carries over what the caller
+    did not mention; **omit to keep, pass `null` to clear**. It refuses when the
+    line is not on the run, because a merge with no base is the replacement it
+    exists to prevent.
+    - The merge introduces one refusal of its own, which is the pattern this repo
+      has now seen twice: changing a `HOLIDAY_ALLOWANCE` line to another code would
+      carry its stored `holidayAllowanceEarningYear` onto a code the API refuses it
+      on — built out of a field the caller never mentioned. The message says that,
+      and says to pass `holidayAllowanceEarningYear: null` in the same call.
+    - The write suite asserts **both halves in one run**: the curated tool
+      preserves the comment through an update that never mentions it, and a raw
+      `PUT` in the same session clears it. The precondition ("the line was created
+      with a comment, so there is something to lose") is asserted first, so
+      "the comment survived" cannot pass on a line that never had one. Lines derived from expense postings cannot be edited at all — which
     is also why a fresh run is not empty, and why adding pay without reading it
     first is how the same wages go out twice.
   - `holidayAllowanceEarningYear` is refused locally on any line that is not

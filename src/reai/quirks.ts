@@ -577,8 +577,13 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "CreateSalaryWageSpecReq REQUIRES employeeId; UpdateSalaryWageSpecReq does not accept it, and " +
       'sending it answers 400 "Unknown field: employeeId". A line belongs to the employee it was ' +
-      "created for and cannot be moved. The update replaces the line, so send it as it should " +
-      "end up.\n\n" +
+      "created for and cannot be moved.\n\n" +
+      "The update is a FULL REPLACEMENT, measured: a line carrying comment \"PROBE COMMENT\" was " +
+      "PUT back with the same quantity, rate and code but no comment field, and the comment came " +
+      "back null — confirmed on a re-read, and reproduced in the write suite. comment and " +
+      "holidayAllowanceEarningYear are the two optional fields, so those are the two a raw PUT " +
+      "silently erases. reai_update_salary_line reads the line and carries over what the caller " +
+      "did not mention; a raw call has to send the line as it should END UP.\n\n" +
       "Lines derived from EXPENSE POSTINGS cannot be changed at all — the API says so on the update " +
       "endpoint. That is also why a fresh run is not empty: it arrives pre-populated from the " +
       "period's expense postings, and adding the same pay again is how wages go out twice.\n\n" +

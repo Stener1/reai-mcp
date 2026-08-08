@@ -1024,6 +1024,16 @@ async function main() {
             firstLineOf(textOf(withEmployee)),
           );
 
+          // The line was created WITH a comment and is updated WITHOUT one on purpose. The PUT
+          // replaces rather than patches — measured: a raw update omitting the field came back
+          // with comment null — so this asserts the tool's read-merge-write actually preserves it.
+          // The precondition is asserted first, because "the comment survived" passes trivially
+          // if there was never a comment to lose.
+          report(
+            "the line was created with a comment, so there is something to lose",
+            (withLine?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === STAMP,
+            `comment=${JSON.stringify(withLine?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
+          );
           const changed = await client.callTool({
             name: "reai_update_salary_line",
             arguments: {
@@ -1032,7 +1042,6 @@ async function main() {
               specificationCode: "COMMISSION",
               quantity: 1,
               rate: 2500,
-              comment: STAMP,
             },
           });
           const after = changed.isError ? undefined : jsonOf(changed);
@@ -1040,6 +1049,31 @@ async function main() {
             "reai_update_salary_line halves the line without employeeId",
             !changed.isError && (after?.payableAmount ?? 0) < (withLine?.payableAmount ?? 0),
             after ? `payable=${after.payableAmount}` : textOf(changed).slice(0, 200),
+          );
+          report(
+            "the comment survived an update that never mentioned it",
+            (after?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === STAMP,
+            `comment=${JSON.stringify(after?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
+          );
+          // And the raw PUT, the one a caller reaches for without the tool, still clears it. This
+          // is the measurement the merge exists for, made in the same run rather than quoted.
+          const rawPut = await client.callTool({
+            name: "reai_request",
+            arguments: {
+              method: "PUT",
+              path: `/api/salary-payments/${runId}/wage-specs/${wageSpecId}`,
+              body: { specificationCode: "COMMISSION", quantity: 1, rate: 2500 },
+              tenantId,
+            },
+          });
+          const wiped = rawPut.isError ? undefined : jsonOf(rawPut);
+          report(
+            "a RAW PUT omitting the comment clears it — which is why the tool merges",
+            !rawPut.isError &&
+              (wiped?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null) === null,
+            rawPut.isError
+              ? textOf(rawPut).slice(0, 160)
+              : `comment=${JSON.stringify(wiped?.employees?.[0]?.wageSpecs?.[0]?.comment ?? null)}`,
           );
 
           const removed = await client.callTool({

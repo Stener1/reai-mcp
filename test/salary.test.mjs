@@ -47,6 +47,29 @@ async function run(name, args, responses, { status = 200, raw = false } = {}) {
   return { calls, result, text: result.content.find((c) => c.type === "text").text };
 }
 
+/** A run carrying one wage line, which the update tool reads before replacing it. */
+const storedLine = (line = {}) => (req) =>
+  req.method === "GET"
+    ? runRecord({
+        employees: [
+          {
+            employeeId: 987,
+            wageSpecs: [
+              {
+                id: 7,
+                specificationCode: "COMMISSION",
+                quantity: 1,
+                rate: 5000,
+                comment: "STORED COMMENT",
+                holidayAllowanceEarningYear: null,
+                ...line,
+              },
+            ],
+          },
+        ],
+      })
+    : runRecord();
+
 const runRecord = (overrides = {}) => ({
   id: 1360,
   number: "2026-1",
@@ -150,6 +173,9 @@ test("omitting employeeIds is not passing nobody — the tool says so", () => {
 });
 
 for (const name of ["reai_add_salary_line", "reai_update_salary_line"]) {
+  // The update tool reads the line before replacing it, so it needs one to find; the add tool does
+  // not read at all and is unaffected by the extra GET response.
+  const responses = name === "reai_update_salary_line" ? storedLine() : runRecord();
   test(`${name} refuses holidayAllowanceEarningYear on a non-holiday line without calling out`, async () => {
     const { calls, result, text } = await run(
       name,
@@ -162,9 +188,12 @@ for (const name of ["reai_add_salary_line", "reai_update_salary_line"]) {
         rate: 5000,
         holidayAllowanceEarningYear: 2025,
       },
-      runRecord(),
+      responses,
     );
-    assert.equal(calls.length, 0, "nothing may be sent");
+    assert.ok(
+      !calls.some((c) => c.method !== "GET"),
+      "nothing may be WRITTEN — only the update tool's read is allowed",
+    );
     assert.equal(result.isError, true);
     assert.match(text, /HOLIDAY_ALLOWANCE/);
     assert.match(text, /COMMISSION/);
@@ -186,10 +215,11 @@ for (const name of ["reai_add_salary_line", "reai_update_salary_line"]) {
         rate: 5000,
         holidayAllowanceEarningYear: 2025,
       },
-      runRecord(),
+      responses,
     );
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].body.holidayAllowanceEarningYear, 2025);
+    const write = calls.find((c) => c.method !== "GET");
+    assert.ok(write, "the value must reach a real request");
+    assert.equal(write.body.holidayAllowanceEarningYear, 2025);
   });
 }
 
@@ -209,11 +239,12 @@ test("adding a line sends employeeId; updating one must not (measured: 400)", as
   assert.equal(added.calls[0].body.employeeId, 987);
   assert.ok(!("wageSpecId" in added.calls[0].body), "the create takes no line id");
 
-  const updated = await run("reai_update_salary_line", line, runRecord(), { raw: true });
-  assert.equal(updated.calls[0].method, "PUT");
-  assert.equal(updated.calls[0].path, "/api/salary-payments/1360/wage-specs/7");
+  const updated = await run("reai_update_salary_line", line, storedLine(), { raw: true });
+  const put = updated.calls.find((c) => c.method === "PUT");
+  assert.ok(put, "the update must issue a PUT");
+  assert.equal(put.path, "/api/salary-payments/1360/wage-specs/7");
   assert.ok(
-    !("employeeId" in updated.calls[0].body),
+    !("employeeId" in put.body),
     "UpdateSalaryWageSpecReq rejects employeeId — sending it answers 400",
   );
 });
@@ -418,4 +449,87 @@ test("both /salary aliases that transmit are gated on the send axis; payment-dat
     (q) => q.id === "salary-ctrl-aliases-have-no-documentation",
   );
   assert.match(quirk.note, /NOT gated as a send/);
+});
+
+// The PUT is a full replacement — measured on the test tenant, a line carrying comment
+// "PROBE COMMENT" updated without the comment field came back with comment null, confirmed on a
+// re-read. So the tool reads the line and carries over what the caller did not mention.
+test("changing a line's rate does not erase its comment", async () => {
+  const { calls, text } = await run("reai_update_salary_line", {
+    id: 1360,
+    wageSpecId: 7,
+    specificationCode: "COMMISSION",
+    quantity: 1,
+    rate: 2500,
+  }, storedLine({ comment: "KEEP ME", holidayAllowanceEarningYear: null }));
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["GET", "PUT"],
+    "the line has to be read before it is replaced",
+  );
+  const put = calls[1];
+  assert.equal(put.body.comment, "KEEP ME");
+  assert.equal(put.body.rate, 2500);
+  assert.match(text, /Written back unchanged/);
+  assert.match(text, /comment/);
+});
+
+test("an explicit null still clears — omission and null must not collapse", async () => {
+  const { calls, text } = await run("reai_update_salary_line", {
+    id: 1360,
+    wageSpecId: 7,
+    specificationCode: "COMMISSION",
+    quantity: 1,
+    rate: 2500,
+    comment: null,
+  }, storedLine({ comment: "GOODBYE" }));
+  assert.equal(calls[1].body.comment, null);
+  assert.ok(
+    !/Written back unchanged because you did not mention them: comment/.test(text),
+    "a field the caller cleared must not be reported as kept",
+  );
+});
+
+test("a line that is not on the run is refused rather than replaced blind", async () => {
+  const { calls, result, text } = await run(
+    "reai_update_salary_line",
+    { id: 1360, wageSpecId: 999, specificationCode: "COMMISSION", quantity: 1, rate: 1 },
+    storedLine(),
+  );
+  assert.deepEqual(calls.map((c) => c.method), ["GET"], "no PUT may be issued");
+  assert.equal(result.isError, true);
+  assert.match(text, /was not found on salary run 1360/);
+});
+
+// The refusal the merge itself introduced: changing a HOLIDAY_ALLOWANCE line to another code
+// would carry its stored year onto a code the API refuses it on — built out of a field the caller
+// never mentioned. The message has to say that, not just restate the rule.
+test("carrying a stored holiday year onto a non-holiday line is refused, and says why", async () => {
+  const { calls, result, text } = await run(
+    "reai_update_salary_line",
+    { id: 1360, wageSpecId: 7, specificationCode: "COMMISSION", quantity: 1, rate: 1000 },
+    storedLine({ specificationCode: "HOLIDAY_ALLOWANCE", holidayAllowanceEarningYear: 2025 }),
+  );
+  assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+  assert.equal(result.isError, true);
+  assert.match(text, /You did not pass that field/);
+  assert.match(text, /holidayAllowanceEarningYear: null/);
+});
+
+test("clearing the year in the same call as the type change goes through", async () => {
+  const { calls, result } = await run(
+    "reai_update_salary_line",
+    {
+      id: 1360,
+      wageSpecId: 7,
+      specificationCode: "COMMISSION",
+      quantity: 1,
+      rate: 1000,
+      holidayAllowanceEarningYear: null,
+    },
+    storedLine({ specificationCode: "HOLIDAY_ALLOWANCE", holidayAllowanceEarningYear: 2025 }),
+  );
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[1].body.holidayAllowanceEarningYear, null);
+  assert.equal(calls[1].body.specificationCode, "COMMISSION");
 });

@@ -352,15 +352,22 @@ const updateSalaryLine = defineTool({
   name: "reai_update_salary_line",
   title: "Change a wage line",
   description:
-    "Change a manual wage line on a run that is still under_process. Every field is replaced, so " +
-    "send the line as it should end up.\n\n" +
+    "Change a manual wage line on a run that is still under_process.\n\n" +
+    "The underlying PUT is a FULL REPLACEMENT: measured on the test tenant, a line carrying " +
+    'comment "PROBE COMMENT" was updated with the same quantity and rate but no comment field, and ' +
+    "the comment came back null — confirmed on a re-read. So this tool reads the line first and " +
+    "carries over what you do not mention. Omit a field to KEEP it; pass null to CLEAR it. " +
+    "quantity, rate and specificationCode are required by the API, so they are required here.\n\n" +
     "Note what this does NOT take: employeeId. The create endpoint requires it and the update " +
-    "endpoint rejects it — measured, sending it answers 400. A line belongs to the employee it was " +
-    "created for and cannot be moved.\n\n" +
+    'endpoint rejects it — measured, sending it answers 400 "Unknown field: employeeId". A line ' +
+    "belongs to the employee it was created for and cannot be moved.\n\n" +
     "Lines derived from EXPENSE POSTINGS cannot be changed at all; the API says so on this " +
     "endpoint. Only lines added by hand are editable.",
   risk: "irreversible",
-  apiPaths: [["PUT", "/api/salary-payments/{id}/wage-specs/{wageSpecId}"]],
+  apiPaths: [
+    ["GET", "/api/salary-payments/{id}"],
+    ["PUT", "/api/salary-payments/{id}/wage-specs/{wageSpecId}"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Salary run id."),
     wageSpecId: z
@@ -371,44 +378,103 @@ const updateSalaryLine = defineTool({
     specificationCode,
     quantity,
     rate,
-    comment: z.string().nullable().optional().describe("Shown on the payslip."),
+    comment: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("Shown on the payslip. Omit to keep the current one; pass null to clear it."),
     holidayAllowanceEarningYear: z
       .number()
       .int()
       .nullable()
       .optional()
-      .describe("Only allowed on a HOLIDAY_ALLOWANCE line."),
+      .describe(
+        "Only allowed on a HOLIDAY_ALLOWANCE line. Omit to keep the current value; null to clear it.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, id, wageSpecId } = args;
+    const resolvedTenant = requireTenantId(tenantId, ctx);
+
+    // Read before writing, because the PUT replaces rather than patches — measured: a line with a
+    // comment, updated without the comment field, came back with comment null. Reading the line and
+    // carrying over what the caller did not mention is the same shape used for company banks,
+    // creditors, agreements and subscriptions, all of which erased a field by omission first.
+    const current = await ctx.client.request<SalaryRun>({
+      method: "GET",
+      path: `/api/salary-payments/${id}`,
+      tenantId: resolvedTenant,
+    });
+    const stored = current.data?.employees
+      ?.flatMap((e) => e.wageSpecs ?? [])
+      .find((line) => line.id === wageSpecId);
+    if (stored === undefined) {
+      return fail(
+        `Wage line ${wageSpecId} was not found on salary run ${id}, so there is nothing to merge ` +
+          `over and nothing was sent. This PUT replaces the line, so writing without reading it ` +
+          `first is how a comment or a holiday-allowance year gets erased. Read the run with ` +
+          `reai_get_salary_run and check the wageSpecs ids — a line derived from an expense posting ` +
+          `is also not editable, and this run's status may no longer allow changes at all.`,
+      );
+    }
+
     // Listed field by field rather than spread from the arguments, because the ONE field that must
     // never reach this endpoint is a field the sibling create tool requires: employeeId answers 400
     // here. A spread would send whatever a caller passed and rely on schema stripping to save it.
+    //
+    // `undefined` means "not mentioned" and takes the stored value; an explicit null clears, which
+    // is the only way to clear either field, so the two cases must stay distinguishable.
+    const kept: string[] = [];
+    const carry = <T>(name: string, given: T | null | undefined, existing: unknown): T | null => {
+      if (given !== undefined) return given;
+      kept.push(name);
+      return (existing ?? null) as T | null;
+    };
     const body = {
       specificationCode: args.specificationCode,
       quantity: args.quantity,
       rate: args.rate,
-      comment: args.comment,
-      holidayAllowanceEarningYear: args.holidayAllowanceEarningYear,
+      comment: carry("comment", args.comment, stored.comment),
+      holidayAllowanceEarningYear: carry(
+        "holidayAllowanceEarningYear",
+        args.holidayAllowanceEarningYear,
+        stored.holidayAllowanceEarningYear,
+      ),
     };
     if (body.holidayAllowanceEarningYear != null && body.specificationCode !== "HOLIDAY_ALLOWANCE") {
+      // Two ways to get here, and they need different advice. Passing the year explicitly on a
+      // non-holiday line is a plain mistake. Carrying one over is a mistake this merge INTRODUCED:
+      // changing a HOLIDAY_ALLOWANCE line to another code while its stored year came along would
+      // build the one combination the API refuses, out of fields the caller never mentioned.
+      const carried = args.holidayAllowanceEarningYear === undefined;
       return fail(
-        `holidayAllowanceEarningYear is only allowed on a HOLIDAY_ALLOWANCE line, and this one is ` +
-          `${body.specificationCode}. Nothing was sent.`,
+        `holidayAllowanceEarningYear is only allowed on a HOLIDAY_ALLOWANCE line, and this one ` +
+          `would be ${body.specificationCode}. Nothing was sent.\n\n` +
+          (carried
+            ? `You did not pass that field — line ${wageSpecId} already carries ` +
+              `${JSON.stringify(body.holidayAllowanceEarningYear)}, and this tool keeps what you do ` +
+              `not mention. To change the line's type, clear the year in the same call: pass ` +
+              `holidayAllowanceEarningYear: null.`
+            : `The API refuses the combination, so it was not attempted.`),
       );
     }
     const res = await ctx.client.request<SalaryRun>({
       method: "PUT",
       path: `/api/salary-payments/${id}/wage-specs/${wageSpecId}`,
       body,
-      tenantId: requireTenantId(tenantId, ctx),
+      tenantId: resolvedTenant,
     });
     return ok(res.data, {
       note:
         `Line ${wageSpecId} in run ${id} is now ${args.quantity} × ${args.rate} as ` +
         `${args.specificationCode}. Run total: ${res.data?.payableAmount ?? "?"} payable, ` +
-        `${res.data?.totalTaxDeducted ?? "?"} withheld.`,
+        `${res.data?.totalTaxDeducted ?? "?"} withheld.` +
+        (kept.length > 0
+          ? `\n\nWritten back unchanged because you did not mention them: ${kept.join(", ")}. ` +
+            `This PUT replaces the line, so omitting a field would otherwise have cleared it — ` +
+            `pass null explicitly when clearing is what you want.`
+          : ``),
     });
   },
 });
