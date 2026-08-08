@@ -1408,10 +1408,14 @@ function translateContactError(err: unknown, customerId: number, contactPersonId
   }
   if (err.status === 400 && /gyldig telefonnummer/i.test(haystack)) {
     return new Error(
-      `The phone number was refused as not a valid Norwegian number. Norwegian numbers may be sent ` +
-        `bare (90123456), with 0047, or in E.164 (+4790123456) — all three are accepted and stored ` +
-        `as E.164 — but the digits themselves have to form a real number: a Norwegian one starts ` +
-        `with 4 or 9. The API's own message: ${detail}`,
+      `The phone number was refused as not a valid number. This field is INTERNATIONAL — measured, ` +
+        `+46701234567, +14155552671, +447911123456 and +4915112345678 are all accepted and stored ` +
+        `exactly as sent — so do not "fix" a foreign number by changing its country code.\n` +
+        `The shorthand is the Norwegian-only part: a Norwegian number may be sent bare (90123456) or ` +
+        `with 0047, and both are stored as +4790123456. Anything else needs its full country code, ` +
+        `because bare digits are read as Norwegian and a bare foreign number is refused.\n` +
+        `Note that this refusal is worded in Norwegian whatever the number's country, so the message ` +
+        `is not evidence that a Norwegian number was expected. The API's own words: ${detail}`,
     );
   }
   // The order of these two matters, and getting it wrong is how this shipped saying something false.
@@ -1522,9 +1526,12 @@ const createCustomerContact = defineTool({
     "says so in those terms and points at reai_update_customer instead.\n\n" +
     "Only `name` is required, and a blank or whitespace-only one is refused. Duplicate names are " +
     "allowed, so adding the same person twice creates two records.\n\n" +
-    "The phone number may be sent bare (90123456), with 0047, or in E.164 (+4790123456); all three " +
-    "are stored as E.164, so it will not come back exactly as sent. The digits still have to form a " +
-    "real Norwegian number.\n\n" +
+    "The phone field is international: a foreign E.164 number is accepted and stored as sent " +
+    "(+46701234567, +14155552671 and +447911123456 all verified). The shorthand is Norwegian-only — " +
+    "90123456 and 0047-prefixed forms are accepted and normalised to +4790123456 — so a non-Norwegian " +
+    "number needs its full country code, since bare digits are read as Norwegian. A rejection is " +
+    "worded in Norwegian regardless of the number's country, which is not evidence that a Norwegian " +
+    "one was expected.\n\n" +
     "Reversible: remove it again with reai_delete_customer_contact.",
   risk: "reversible",
   apiPaths: [["POST", "/api/customers/{id}/contact-persons"]],
@@ -1551,7 +1558,8 @@ const createCustomerContact = defineTool({
       .string()
       .optional()
       .describe(
-        "Phone number. Bare, 0047-prefixed and E.164 forms are all accepted and stored as E.164.",
+        "Phone number. Any country's E.164 form is accepted and stored as sent; the bare and " +
+          "0047-prefixed shorthands are Norwegian-only and normalise to +47.",
       ),
     tenantId: tenantIdArg,
   },

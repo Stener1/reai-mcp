@@ -68,12 +68,17 @@ test("a private customer is refused in the API's own terms, and pointed somewher
   );
 });
 
-test("the Norwegian phone refusal is translated, and says which forms are accepted", async () => {
+test("the phone refusal does not tell an agent to rewrite a foreign country code", async () => {
+  // Codex's finding on PR #110, and it is right: the field is INTERNATIONAL. Measured — +46701234567,
+  // +14155552671, +447911123456 and +4915112345678 are all accepted and stored exactly as sent — but
+  // a malformed foreign number is refused with the same Norwegian sentence. The first translation read
+  // that as "the number must be Norwegian and start with 4 or 9", which for a Swedish or American
+  // contact points the agent at the one part of the number that was fine.
   await assert.rejects(
     () =>
       run(
         "reai_create_customer_contact",
-        { customerId: 1, name: "Ada", phone: "12345678" },
+        { customerId: 1, name: "Ada", phone: "+46123" },
         {
           error: apiError(
             400,
@@ -82,8 +87,15 @@ test("the Norwegian phone refusal is translated, and says which forms are accept
         },
       ),
     (err) => {
-      assert.match(err.message, /bare \(90123456\)/);
-      assert.match(err.message, /E\.164/);
+      // Must not assert the number is Norwegian, or that it starts with 4 or 9.
+      assert.doesNotMatch(err.message, /not a valid Norwegian number/);
+      assert.doesNotMatch(err.message, /starts with 4 or 9/);
+      // Must say the field is international, and say so with evidence.
+      assert.match(err.message, /INTERNATIONAL/);
+      assert.match(err.message, /\+46701234567/);
+      assert.match(err.message, /do not "fix" a foreign number by changing its country code/);
+      // Must explain that the Norwegian wording is not a signal about the number's country.
+      assert.match(err.message, /worded in Norwegian whatever the number's country/);
       // And it keeps the API's own sentence, so a Norwegian-speaking operator sees what was said.
       assert.match(err.message, /Skriv inn et gyldig telefonnummer/);
       return true;
