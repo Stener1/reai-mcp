@@ -9,6 +9,29 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The deployment served guidance that had already been measured false, and nothing could have noticed.** PR #115 corrected two agent-facing quirks — one told agents a `+47` prefix is REJECTED on
+  a supplier phone, one said foreign numbers are stored "exactly as sent", and both are wrong. Those
+  commits merged; revision 00135 kept serving the old text to anything that called
+  `reai_describe_endpoint` or `reai_api_notes` — for **31 minutes**, measured. The first version of this
+  entry said "two days", which was invented and which the repository was not old enough for; it was 31
+  minutes because someone looked, not because anything checked. The deploy recorded no commit, so the only
+  way to ask "is
+  this current" was to compare a revision timestamp against `git log`, which cannot distinguish a commit
+  made before a deploy from one merged after it.
+  - `scripts/deploy-cloud-run.sh` now stamps `commit=<sha>` as a Cloud Run label, and marks it `-dirty`
+    rather than letting a label describe a build it does not match. `npm run check:deployed` reads it back.
+  - Drift is split by whether a client can READ it: agent-facing (`quirks.ts`, tool files, server
+    instructions, policy) exits non-zero; other `src/` changes and test-only changes are reported and pass.
+    That split names which commits a client can read rather than reporting a bare "stale". The first
+    version justified it with "six of the last seven merges were tests and scripts only" — asserted without
+    measuring, and wrong: the exported classifier gives **five agent-facing, two inert**, so this exits 1 on
+    most merges.
+  - The classifier is exported and `test/deployed-drift.test.mjs` calls it, rather than grepping the script
+    for a regex. Every guard in this repository that verified a script by pattern-matching its source has
+    since been defeated by a comment or a rename — three times in the last four PRs.
+  - Stated in the script and the docs: it cannot tell you the deployment WORKS. It compares a label against
+    `git log`; `smoke-http.mjs` is what answers the other question.
+
 - **Raised the storage floor from 12 claims to 17, starting with the two that carry real consequence.**
   The census exists to make the gap actionable rather than to make a number look good, so this worked
   through the list it names.

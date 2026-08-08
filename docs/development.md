@@ -184,6 +184,42 @@ internal directory rather than Brønnøysundregistrene — and that one asks the
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.
 
+## Is the deployment current?
+
+```bash
+npm run check:deployed
+```
+
+`scripts/deploy-cloud-run.sh` stamps `commit=<sha>` as a Cloud Run label; this reads it back and reports
+which commits the running service does not have. It exists because of a specific failure rather than a
+hypothetical: PR #115 corrected two quirks that had been **measured false** — agents were told a `+47`
+prefix is rejected on a supplier phone, and that foreign numbers are stored "exactly as sent". The commits
+merged and the live connector went on serving both to anything that called `reai_describe_endpoint`, for
+**31 minutes** — measured after the review of #117 caught the first version of this paragraph claiming "two
+days", which the repository was not old enough for. It was 31 minutes because someone looked, not because
+anything checked: the deploy recorded no commit, so "is this current" could only be answered by comparing a
+revision timestamp against `git log` — which cannot distinguish a commit made *before* the deploy from one
+merged *after* it.
+
+Drift is split by whether a client can read it, and only the first is an error:
+
+| class | files | verdict |
+|---|---|---|
+| `AGENT-FACING` | `src/reai/quirks.ts`, `src/tools/`, `src/server.ts`, `src/policy.ts` | exits **1** — deploy |
+| `BEHAVIOURAL` | other `src/` | reported, exit 0 — probably deploy |
+| `INERT` | tests, scripts, docs | reported, exit 0 — no deploy needed |
+
+That distinction is the point, though not for the reason first given here. "Six of the last seven merges
+touched only tests and scripts" was asserted without measuring; running the exported `classify()` over them
+gives **five agent-facing and two inert**. So this exits 1 on most merges, and its value is not being quiet
+— it is naming *which* commits a client can read, so the decision to deploy has a reason attached.
+
+**It cannot tell you the deployment works** — it compares a label against `git log`, nothing more. A
+revision can carry the right commit and still be broken; `scripts/smoke-http.mjs` is what answers that.
+`test/deployed-drift.test.mjs` exercises the classifier by calling it, because every guard in this
+repository that verified a script by pattern-matching its source has since been defeated by a comment or a
+rename.
+
 ## A note on `npm audit`
 
 The production tree is clean: `npm audit --omit=dev` reports nothing, and CI enforces that at `--audit-level=moderate` as a blocking step. Two advisories arrived through `@modelcontextprotocol/sdk` and both are resolved by `package.json` overrides — `fast-uri` pinned to 3.1.5 (HIGH, host confusion via a backslash authority introducer) and `hono` to 4.12.34 (MODERATE, ReDoS in CORS middleware).
