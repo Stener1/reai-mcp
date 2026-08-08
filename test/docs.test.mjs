@@ -201,3 +201,23 @@ test("tool counts stated in the changelog match the groups", () => {
     }
   }
 });
+
+// A `node_modules` SYMLINK reached main and nobody noticed. It was created in a git worktree so a
+// second checkout could share the installed dependencies, and `git add -A` committed it: `.gitignore`
+// held `node_modules/`, and a trailing slash matches a directory only, so a symlink of that name was
+// never ignored. What landed in a public repository was an absolute path into one developer's home
+// directory, and CI stayed green because `npm ci` replaced it — which is exactly why it survived.
+//
+// The gitignore gap is closed, but the general shape is worth a guard: nothing in this repository
+// should be a symlink, and a tracked symlink is almost always someone's local convenience escaping.
+test("no symlink is tracked in git", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  // Mode 120000 is git's mode for a symbolic link.
+  const tracked = execFileSync("git", ["ls-files", "-s"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.startsWith("120000"))
+    .map((line) => line.split("\t")[1]);
+  assert.deepEqual(tracked, [], "these are tracked symlinks — almost certainly a local convenience");
+});

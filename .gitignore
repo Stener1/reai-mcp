@@ -1,4 +1,9 @@
 node_modules/
+# Without the slash too. A trailing slash matches a DIRECTORY only, so a symlink named
+# node_modules slipped past it and got committed from a git worktree — an absolute path into
+# one developer's home directory, in a public repo. It survived CI because npm install
+# replaced it, which is exactly why nothing noticed.
+node_modules
 dist/
 *.log
 .env
