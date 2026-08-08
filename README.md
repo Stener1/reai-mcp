@@ -503,7 +503,7 @@ variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, `REA
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **121 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **122 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 143 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.

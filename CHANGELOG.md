@@ -91,6 +91,21 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`skipRegistryLookup` promised "use exactly the details supplied", and that is not safe.** Flagged
+  by the review of PR #112 and measured properly here, on five real organisation numbers with the flag
+  set: four were respected (Equinor, Symfoni, VN Norge, NAV — name kept, address left empty) and
+  `974761076` (Skatteetaten) was not, coming back with the registry's name **and** address and
+  overwriting an address supplied in the same request. Why that number differs is **not established** —
+  most likely a built-in company record for the tax authority, but nothing in the API exposes those, so
+  the note says hypothesis rather than fact. NAV is also a public agency and did respect the flag, so
+  that is not the rule either. The description now says what was measured and tells the caller to read
+  the record back; a flag that works four times in five is worse than one that never works, because the
+  caller stops checking.
+  - The first attempt at the new description **quoted the old promise while correcting it** — and the
+    new test caught it. An argument description is injected into the agent's context, where a skimmed
+    quotation reads as the claim, so the assertion is that the phrase is absent rather than merely
+    contradicted. Same lesson as the phone quirk, which now keeps its history at the end.
+
 - **The tenant boundary rested on the position of one line, and `Authorization` was never protected at
   all.** `ReaiClient.request` spread caller-supplied headers into its header object and assigned
   `X-Tenant-Id` afterwards, so the bound tenant won only because that assignment came second. Moving the

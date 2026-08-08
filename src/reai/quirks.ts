@@ -83,6 +83,26 @@ const EMPLOYEE_ACCOUNT_SPLIT_NOTE =
 
 export const QUIRKS: readonly Quirk[] = [
   {
+    id: "skip-registry-lookup-is-not-a-guarantee",
+    paths: ["/api/customers"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "skipRegistryLookup=true usually keeps the name and address you send, and leaves the address " +
+      "empty rather than filling it from Brønnøysundregistrene. It is not a guarantee. Measured on " +
+      "five real organisation numbers with the flag set: four were respected (Equinor 923609016, " +
+      "Symfoni 915772137, VN Norge 821083052, NAV 889640782 — name kept, address empty) and ONE was " +
+      "not. 974761076 (Skatteetaten) came back named \"Skatteetaten\" with the registry's address, " +
+      "flag or no flag, and it overwrote an address supplied in the same request.\n" +
+      "Why that number behaves differently is NOT established. The likely explanation is that ReAI " +
+      "carries a built-in company record for the tax authority, since every Norwegian tenant needs " +
+      "it as a counterparty — but nothing in this API exposes those records, so that stays a " +
+      "hypothesis rather than a fact. What follows either way: read the created customer back if the " +
+      "name or address matters, instead of assuming the request body is what was stored.\n" +
+      "Without the flag the registry always wins: all five came back with the registry's name, and " +
+      "the name is normalised to title case on top (\"Symfoni AS\" is stored \"Symfoni As\").",
+  },
+  {
     id: "customer-duplicate-org-number-reported-as-name",
     paths: ["/api/customers"],
     methods: ["POST"],

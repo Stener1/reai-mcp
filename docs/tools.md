@@ -262,3 +262,23 @@ The one genuine exception in the API is the **employee** phone, which stores an 
 **The 404 is ambiguous, and reading it wrongly is how this shipped saying something false.** `"Contact person with id=N not found for customer with id=C"` is the answer *both* when the contact never existed or was already deleted *and* when the id is real but belongs to a different customer — measured, the same sentence word for word, because ids are scoped to the tenant rather than to the customer. A missing customer is a different message, `"Customer with id=C not found."` The first version of the translation matched the customer sentence case-insensitively, which the contact sentence also contains, so the commonest failure on these endpoints was reported as "the customer does not exist in this tenant" about a customer that was fine. The tools now name both readings and tell you to settle it with the list.
 
 That ambiguity is also why the delete does not simply report a 404 as "already gone": a wrong `customerId` answers 404 while the contact survives, so claiming the job is done would be a guess. It reports what it knows — nothing was changed — and how to confirm which case it was.
+
+## What `skipRegistryLookup` actually does
+
+`reai_create_customer` looks a Norwegian company up in Brønnøysundregistrene from its `organizationNumber` and fills in the address, and the name you send is discarded in favour of the registry's. `skipRegistryLookup: true` is the documented way out, and its description promised "use exactly the details supplied".
+
+That promise is not safe. Measured on five real organisation numbers, **with the flag set**:
+
+| organisation number | company | name kept? | address |
+|---|---|---|---|
+| `923609016` | Equinor ASA | yes | empty |
+| `915772137` | Symfoni AS | yes | empty |
+| `821083052` | VN Norge AS | yes | empty |
+| `889640782` | NAV | yes | empty |
+| `974761076` | **Skatteetaten** | **no** — stored as `Skatteetaten` | **filled from the registry** |
+
+And on Skatteetaten the flag also **overwrote an address supplied in the same request**. Without the flag, all five came back with the registry's name, title-cased on top (`Symfoni AS` is stored `Symfoni As`).
+
+**Why that one number behaves differently is not established.** The likely explanation is that ReAI carries a built-in company record for the tax authority, since every Norwegian tenant needs it as a counterparty — but nothing in this API exposes those records, so it stays a hypothesis. NAV is also a public agency and *did* respect the flag, so "public bodies are special" is not the rule either.
+
+What follows regardless: **read the created customer back** if the name or address matters. A flag that works four times in five is worse than one that never works, because the caller stops checking.

@@ -465,3 +465,21 @@ test("the phone refusal does not claim to know which country was resolved", asyn
     },
   );
 });
+
+test("skipRegistryLookup is described as unreliable, because it is", async () => {
+  // The description promised "use exactly the details supplied". Measured on five real organisation
+  // numbers with the flag set: four respected it, and 974761076 (Skatteetaten) did not — it came back
+  // with the registry's name AND address, overwriting an address supplied in the same request. A flag
+  // that works four times in five is worse than one that never works, because the caller stops
+  // checking. The test pins that the description does not promise certainty and names the exception.
+  const { salesTools: tools } = await import("../dist/tools/sales.js");
+  const create = tools.find((t) => t.name === "reai_create_customer");
+  const flag = create.inputSchema.skipRegistryLookup.description;
+  // Not merely "does not claim it" — does not CONTAIN it. The first attempt at this description
+  // quoted the old promise while correcting it, and this assertion caught that: an argument
+  // description is injected into the agent's context, where a skimmed quotation reads as the claim.
+  assert.doesNotMatch(flag, /use exactly the details supplied/);
+  assert.match(flag, /NOT a guarantee/);
+  assert.match(flag, /974761076/, "the counterexample has to be named, or the warning is unusable");
+  assert.match(flag, /Read the created record back/);
+});
