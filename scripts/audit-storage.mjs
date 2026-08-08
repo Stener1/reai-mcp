@@ -122,40 +122,57 @@ const created = {};
 const createdSuppliers = {};
 let serial = 0;
 
-/** Every customer id present before this run, so anything new can be recognised as ours. */
-let baseline = new Set();
+/**
+ * Every id present before this run, PER RESOURCE, so anything new is ours regardless of its name.
+ *
+ * A baseline is needed because `created` is not sufficient: a create can succeed on the server and fail
+ * on the way back — a 502 from a proxy, the 30s timeout, an unparseable body — and then the id was never
+ * recorded, so the `finally` has nothing to delete. The review of PR #115 reproduced that with a proxy
+ * returning 502 after forwarding the create.
+ *
+ * The first baseline keyed the sweep on a FIXTURE NAME, and the review of PR #116 showed that cannot
+ * work here. Four probes exist precisely because the API OVERWRITES the name they send, so those records
+ * end up called "Skatteetaten", "Statens Innkrevingssentral", "Vn Norge As" and "Telenor Norge As" — the
+ * sweep was structurally unable to see them, and a proxy that dropped `id` left one on a real company's
+ * books beneath a line reading "sweep clean". Suppliers had no baseline at all, so both supplier probes
+ * leaked silently.
+ *
+ * So identity, not naming: anything present afterwards that was absent before came from this run.
+ */
+const baseline = { customers: new Set(), suppliers: new Set() };
 
-const FIXTURE_NAME = /^Zz Storage /;
+const RESOURCES = [
+  { key: "customers", path: "/api/customers", label: "customer" },
+  { key: "suppliers", path: "/api/suppliers", label: "supplier" },
+];
 
 /**
- * A baseline, because `created` is not sufficient on its own.
+ * Every page, not the first 200.
  *
- * A create can succeed on the server and fail on the way back — a 502 from a proxy, the 30s timeout, an
- * unparseable body — and then the id was never recorded, so the `finally` has nothing to delete and the
- * run still exits 0. The independent review of PR #115 reproduced exactly that with a proxy that
- * forwarded the create upstream and returned 502: customer 6180 was left active on a real tenant while
- * the script reported success.
- *
- * So the sweep below does not trust `created`. It re-lists the tenant and removes anything matching the
- * fixture name that was not there when the run started — which is the pattern smoke-full-write.mjs
- * already uses and this script had declined to copy.
+ * `?size=200` with no check for more was the first version. A truncated baseline is worse than a missing
+ * one: it makes a pre-existing record look new, and then the sweep deletes somebody else's row.
  */
-async function takeBaseline() {
-  const before = await call("GET", "/api/customers?size=200");
-  if (before.status !== 200) {
-    console.error(`Could not list customers to take a baseline (HTTP ${before.status}).`);
-    process.exit(2);
+async function listAll(path) {
+  const rows = [];
+  for (let page = 0; page < 50; page += 1) {
+    const res = await call("GET", `${path}?size=200&page=${page}`);
+    if (res.status !== 200) return { problem: `GET ${path} answered ${res.status}`, rows };
+    const batch = Array.isArray(res.body) ? res.body : (res.body?.content ?? []);
+    rows.push(...batch);
+    const last = Array.isArray(res.body) ? true : (res.body?.last ?? batch.length < 200);
+    if (last || batch.length === 0) return { rows };
   }
-  const rows = before.body?.content ?? before.body ?? [];
-  baseline = new Set(rows.map((r) => r.id));
-  const strays = rows.filter((r) => FIXTURE_NAME.test(r.name ?? ""));
-  if (strays.length > 0) {
-    console.error(
-      `Refusing to start: ${strays.length} record(s) matching the fixture name are already here ` +
-        `(${strays.map((r) => `${r.id} ${JSON.stringify(r.name)}`).join(", ")}).\n` +
-        `A previous run leaked. Remove them first, or the sweep cannot tell them from this run's.`,
-    );
-    process.exit(2);
+  return { problem: `${path} did not terminate after 50 pages`, rows };
+}
+
+async function takeBaseline() {
+  for (const { key, path, label } of RESOURCES) {
+    const before = await listAll(path);
+    if (before.problem) {
+      console.error(`Could not list ${label}s to take a baseline: ${before.problem}`);
+      process.exit(2);
+    }
+    baseline[key] = new Set(before.rows.map((r) => r.id));
   }
 }
 
@@ -375,14 +392,17 @@ const CASES = [
         return { problem: "could not read 971648198 from Brønnøysundregistrene to compare against" };
       }
       const stored = String(back.record.name);
+      // A fixed literal, not an interpolation of what was just read. The first version made `got` and
+      // `want` the same expression, which reduced the case to `stored !== registryName` and printed the
+      // comparison as if it were an expectation — the vacuous shape the review of PR #116 named.
+      if (!stored) return { got: "the stored name is empty", want: "differs from the registry" };
+      console.log(`              (stored ${JSON.stringify(stored)}, Brreg ${JSON.stringify(registryName)})`);
       return {
         got:
           stored.toLowerCase() === registryName.toLowerCase()
-            ? `matches the registry (${registryName})`
-            : `differs from the registry (stored ${JSON.stringify(stored)}, Brreg says ` +
-              `${JSON.stringify(registryName)})`,
-        want: `differs from the registry (stored ${JSON.stringify(stored)}, Brreg says ` +
-          `${JSON.stringify(registryName)})`,
+            ? "matches the registry"
+            : "differs from the registry",
+        want: "differs from the registry",
       };
     },
   },
@@ -515,9 +535,31 @@ const CASES = [
       created[key] = made.body.id;
       const back = await readBack(made.body.id);
       if (back.problem) return { problem: back.problem };
+      // NOT `stored !== sent`: the review of PR #116 proxied the read-back to return `name: null` and
+      // this reported OK — a name DESTROYED satisfying a claim that it is REPLACED. Two hazards with
+      // opposite fixes. So assert what the claim actually says: the stored name is the registry's.
+      const stored = back.record.name;
+      if (!stored) return { got: "the stored name is empty", want: "replaced with the registry's name" };
+      let registryName = null;
+      try {
+        const brreg = await fetch("https://data.brreg.no/enhetsregisteret/api/enheter/821083052", {
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (brreg.ok) registryName = (await brreg.json())?.navn ?? null;
+      } catch {
+        // reported as inconclusive rather than guessed at
+      }
+      if (!registryName) {
+        return { problem: "could not read 821083052 from Brønnøysundregistrene to compare against" };
+      }
+      // Title-cased on the way in, so compared case-insensitively — the repo documents that separately.
       return {
-        got: back.record.name === sent ? `kept ${JSON.stringify(sent)}` : "discarded",
-        want: "discarded",
+        got:
+          stored.toLowerCase() === registryName.toLowerCase()
+            ? "replaced with the registry's name"
+            : `stored ${JSON.stringify(stored)}, which is neither what I sent nor the registry's ` +
+              `${JSON.stringify(registryName)}`,
+        want: "replaced with the registry's name",
       };
     },
   },
@@ -580,6 +622,12 @@ const CASES = [
       const a = back.record.address ?? {};
       const stored = [a.addressPart1, a.postalCode, a.city].filter(Boolean).join(", ");
       if (stored === "Probegata 1, 0001, Probeby") return { got: "kept mine", want: "overwritten" };
+      // An address that is simply GONE is not an address overwritten with a wrong postcode, and the two
+      // have opposite fixes. The review of PR #116 proxied the read-back to return no address and this
+      // reported OK with the word "undefined" in the line, still counting toward the headline number.
+      if (!a.postalCode) {
+        return { got: "no address was stored at all", want: "overwritten with a different postcode" };
+      }
 
       // And it should disagree with the registry, which is what "wrong postcode" means.
       let registryPostcode = null;
@@ -589,21 +637,26 @@ const CASES = [
         });
         if (brreg.ok) {
           const body = await brreg.json();
-          registryPostcode =
-            body?.postadresse?.postnummer ?? body?.forretningsadresse?.postnummer ?? null;
+          // BOTH, because they disagree for this company — 1331 (postadresse) and 1360
+          // (forretningsadresse) — and preferring one made "differs from the registry" depend on which
+          // was present. "Wrong" has to mean wrong against every address the registry holds.
+          registryPostcode = [
+            body?.postadresse?.postnummer,
+            body?.forretningsadresse?.postnummer,
+          ].filter(Boolean);
         }
       } catch {
         // reported as inconclusive rather than guessed at
       }
-      if (!registryPostcode) {
-        return { problem: "could not read 976967631's postcode from Brønnøysundregistrene" };
+      if (!registryPostcode || registryPostcode.length === 0) {
+        return { problem: "could not read 976967631's postcode(s) from Brønnøysundregistrene" };
       }
+      const matchesRegistry = registryPostcode.includes(a.postalCode);
       return {
-        got:
-          a.postalCode === registryPostcode
-            ? `matches the registry (${registryPostcode})`
-            : `overwritten and differs from the registry (stored ${a.postalCode}, Brreg ${registryPostcode})`,
-        want: `overwritten and differs from the registry (stored ${a.postalCode}, Brreg ${registryPostcode})`,
+        got: matchesRegistry
+          ? `matches a registry postcode (${a.postalCode})`
+          : "overwritten with a postcode the registry does not hold",
+        want: "overwritten with a postcode the registry does not hold",
       };
     },
   },
@@ -677,9 +730,12 @@ async function main() {
       }
       if (result.problem) {
         inconclusive += 1;
+        // "could not create the fixture" was wrong for the registry cases, where the fixture was created
+        // and deleted fine and the fix is neither the probe nor the description — it is that Brreg was
+        // unreachable. The message says what actually failed.
         console.log(
-          `INCONCLUSIVE  ${probe.claim}\n              could not create the fixture: ${result.problem}\n` +
-            `              Fix the probe. This says nothing about ${probe.source}.`,
+          `INCONCLUSIVE  ${probe.claim}\n              ${result.problem}\n` +
+            `              Not verified either way. This says nothing about ${probe.source}.`,
         );
         continue;
       }
@@ -731,30 +787,60 @@ async function main() {
       }
     }
 
-    // The part `created` cannot cover: anything the server made that we never learned the id of.
-    try {
-      const after = await call("GET", "/api/customers?size=200");
-      const rows = after.body?.content ?? after.body ?? [];
-      const orphans = rows.filter((r) => !baseline.has(r.id) && FIXTURE_NAME.test(r.name ?? ""));
-      for (const orphan of orphans) {
-        const gone = await call("DELETE", `/api/customers/${orphan.id}`);
-        const removed = gone.status < 300 && gone.body?.outcome === "deleted";
-        if (!removed) leaked += 1;
-        console.error(
-          `  !! orphan ${orphan.id} ${JSON.stringify(orphan.name)} was created without its id ` +
-            `reaching this script — ${removed ? "removed by the sweep" : "COULD NOT REMOVE"}.`,
-        );
+    // The part `created` cannot cover: anything the server made whose id never reached this script.
+    // By IDENTITY against the baseline, for every resource written — the name-based version could not see
+    // the four probes whose names the API overwrites, nor suppliers at all.
+    for (const { key, path, label } of RESOURCES) {
+      try {
+        const after = await listAll(path);
+        if (after.problem) {
+          leaked += 1;
+          console.error(`  !! could not re-list ${label}s to sweep for orphans: ${after.problem}`);
+          continue;
+        }
+        const orphans = after.rows.filter((r) => !baseline[key].has(r.id));
+        for (const orphan of orphans) {
+          const gone = await call("DELETE", `${path}/${orphan.id}`);
+          const removed = gone.status < 300 && gone.body?.outcome === "deleted";
+          if (!removed) leaked += 1;
+          console.error(
+            `  !! orphan ${label} ${orphan.id} ${JSON.stringify(orphan.name)} was created without its ` +
+              `id reaching this script — ${removed ? "removed by the sweep" : "COULD NOT REMOVE"}.`,
+          );
+        }
+
+        // Re-read AFTER the deletions, which the first version did not: it re-filtered the same
+        // pre-delete rows, so "the tenant must end where it started" was never actually measured.
+        const settled = await listAll(path);
+        const remaining = settled.problem
+          ? null
+          : settled.rows.filter((r) => !baseline[key].has(r.id));
+        if (remaining === null) {
+          leaked += 1;
+          console.error(`  !! could not confirm the ${label} list settled: ${settled.problem}`);
+        } else if (remaining.length > 0) {
+          leaked += remaining.length;
+          console.error(
+            `  !! ${remaining.length} ${label}(s) beyond the baseline remain: ` +
+              remaining.map((r) => `${r.id} ${JSON.stringify(r.name)}`).join(", "),
+          );
+        } else {
+          console.log(`Sweep: ${label}s are back to the ${baseline[key].size} present before the run.`);
+        }
+      } catch (err) {
+        leaked += 1;
+        console.error(`  !! sweeping ${label}s threw: ${err.message}`);
       }
-      // And the tenant must end where it started, for our fixtures at least.
-      const stillOurs = rows.filter((r) => !baseline.has(r.id) && FIXTURE_NAME.test(r.name ?? "")).length;
-      if (stillOurs === 0 && orphans.length === 0) {
-        console.log("Sweep: no records beyond the baseline carry the fixture name.");
-      }
-    } catch (err) {
-      leaked += 1;
-      console.error(`  !! could not re-list customers to sweep for orphans: ${err.message}`);
     }
-    console.log(`\n${ok} unchanged, ${drift} drifted, ${inconclusive} inconclusive`);
+    console.log(`\n${ok} unchanged, ${drift} drifted, ${inconclusive} inconclusive (of ${CASES.length})`);
+    if (inconclusive > 0) {
+      console.error(
+        `\n${inconclusive} claim(s) could NOT be verified, so "${CASES.length} of ${CASES.length}" is ` +
+          `not what this run established. That is a non-zero exit on purpose: a third-party outage or a ` +
+          `broken probe silently downgrading the headline number is how a green run comes to mean less ` +
+          `than it says.`,
+      );
+    }
     if (drift > 0) {
       console.log(
         "\nA drifted storage claim means a tool description is telling agents something false about\n" +
@@ -764,19 +850,27 @@ async function main() {
     if (leaked > 0) {
       console.error(`\n${leaked} record(s) left on tenant ${tenantId}. Remove them.`);
     }
-    process.exit(drift > 0 || leaked > 0 ? 1 : 0);
+    // Exit codes distinguish the three: 1 = a claim is false or a record leaked, 3 = something could not
+    // be verified. The review of PR #116 stubbed Brønnøysundregistrene and watched "17 of 17" become 15
+    // with the run still green.
+    process.exit(drift > 0 || leaked > 0 ? 1 : inconclusive > 0 ? 3 : 0);
   }
 }
 
 // An interrupt mid-run would otherwise leave every fixture behind, since the `finally` never executes.
-// The handler cannot await, so it reports what to remove rather than pretending to remove it.
+// The handler cannot await, so it reports what to remove rather than pretending to remove it. BOTH maps
+// and the right label for each: the first version enumerated `created` only and called every entry a
+// customer, so an interrupt after a supplier probe left suppliers behind unreported.
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
-    const outstanding = Object.entries(created).filter(([, id]) => id);
+    const outstanding = [
+      ...Object.entries(created).map(([k, id]) => [k, id, "customer"]),
+      ...Object.entries(createdSuppliers).map(([k, id]) => [k, id, "supplier"]),
+    ].filter(([, id]) => id);
     if (outstanding.length > 0) {
       console.error(
         `\n${signal} with ${outstanding.length} fixture(s) still on tenant ${tenantId}:\n` +
-          outstanding.map(([k, id]) => `  ${k}: customer ${id}`).join("\n") +
+          outstanding.map(([k, id, label]) => `  ${k}: ${label} ${id}`).join("\n") +
           `\nRemove them by hand; an interrupted run cannot finish its own cleanup.`,
       );
     }
