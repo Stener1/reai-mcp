@@ -372,7 +372,8 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_list_orders` · `reai_get_order` | Orders and their lines | read |
 | `reai_list_offers` | Offers / quotes (*tilbud*) | read |
 | `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
-| `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data | reversible |
+| `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data. The delete **archives** instead when the customer has transactions, and reports which of the two happened | reversible |
+| `reai_unarchive_customer` | Bring an archived customer back. An archived one is invisible to the list unless you pass `archived: true` | reversible |
 | `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
 | `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
 | `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
@@ -393,7 +394,8 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 | `reai_deliver_expense` · `reai_approve_expense` · `reai_unapprove_expense` | Move a claim through open → for_approval → approved. Unapproving refuses while a voucher exists, and says which one to delete | **irreversible** |
 | `reai_book_expense_voucher` · `reai_delete_expense_voucher` | Post the expense to the ledger, and unlink it again. The delete is "delete **or** reverse" and reports which | **irreversible** |
 | `reai_reverse_expense` | Withdraw a claim. It is not deleted, and no visible field changes — see below | **irreversible** |
-| `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data. Changing bank details (`iban`, `bankAccountNumber`, `swiftCode`) escalates the call to irreversible — see below | reversible |
+| `reai_create_supplier` · `reai_update_supplier` · `reai_delete_supplier` | Supplier master data. Changing bank details (`iban`, `bankAccountNumber`, `swiftCode`) escalates the call to irreversible — see below. The delete **archives** instead when the supplier has transactions | reversible |
+| `reai_unarchive_supplier` | Bring an archived supplier back | reversible |
 | `reai_create_supplier_invoice` | Register a supplier invoice directly | **irreversible** |
 | `reai_register_supplier_invoice_payment` | Record paying a supplier | **irreversible** |
 
@@ -534,19 +536,19 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 123 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 125 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 15 tools
-REAI_TOOLSETS=bookkeeping,sales    # 37 tools
-REAI_TOOLSETS=purchase             # 32 tools
+REAI_TOOLSETS=bookkeeping,sales    # 38 tools
+REAI_TOOLSETS=purchase             # 33 tools
 REAI_TOOLSETS=organisation         # 20 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 123
+(unset)                            # all 125
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -557,7 +559,7 @@ Discovery works in Norwegian, which for this API is not a nicety. Measured on on
 
 Two causes. Most of the everyday vocabulary was missing. And Norwegian glues nouns together, so the word a user types is often a compound whose meaning lives in one half — `lønn+kjøring`, `vare+lager`, `lager+beholdning` — which no plural or diacritic rule reaches. Compound stems are matched at a word boundary with at least two characters left for the other element, because an unanchored search found `lønn` inside `kolonner` and `belønning`, and `lager` inside `slager`; `lønnsomhet` shares a root rather than merely containing one and is listed as an exception. `test/discovery-norwegian.test.mjs` holds the measurement, asserts English **ranks** rather than mere presence, and asserts that word order does not change the answer.
 
-An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **90 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
+An accounting API has more sharp edges than its schema admits, and most of what follows was learned from a rejected request rather than from reading the spec. Rather than leave that knowledge in commit messages, it lives in [`src/reai/quirks.ts`](src/reai/quirks.ts) as **92 quirks keyed to the operations they affect** — so they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the ~252 operations no curated tool covers.
 
 Browse them with `reai_api_notes`, or read the highlights:
 

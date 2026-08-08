@@ -368,8 +368,12 @@ const deleteCustomer = defineTool({
   title: "Delete or archive a customer",
   description:
     "Delete a customer. ReAI archives rather than deletes when the customer already has " +
-    "transactions, which keeps the audit trail intact — the response tells you which happened. " +
-    "Archiving is reversible via reai_request POST /api/customers/{id}/unarchive.",
+    "transactions, which keeps the audit trail intact, and answers " +
+    '{"outcome":"deleted"} or {"outcome":"archived"} to say which. This tool reads that and tells ' +
+    "you, because the two leave the tenant in very different states.\n\n" +
+    "An ARCHIVED customer is reversible with reai_unarchive_customer — measured. But archiving one " +
+    "whose ORDERS still exist is how those orders become permanently undeletable: they then answer " +
+    '500 "Referenced record is not accessible". Delete the dependents first.',
   risk: "reversible",
   apiPaths: [["DELETE", "/api/customers/{id}"]],
   destructive: true,
@@ -383,7 +387,24 @@ const deleteCustomer = defineTool({
       path: `/api/customers/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Customer ${args.id} deleted or archived (HTTP ${res.status}).`);
+    // Which of the two happened is the whole point of this endpoint, and reporting "deleted or
+    // archived" left the caller to guess. An archive is recoverable and leaves the record visible
+    // only under ?archived=true; a delete is not recoverable at all.
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    return ok(res.data ?? { customerId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Customer ${args.id} was DELETED outright — the record is gone, and there is nothing to ` +
+            `unarchive.`
+          : outcome === "archived"
+            ? `Customer ${args.id} was ARCHIVED, not deleted: it had transactions, so the audit ` +
+              `trail is kept. It is hidden from reai_list_customers unless you pass archived: true, ` +
+              `and reai_unarchive_customer brings it back.`
+            : `Customer ${args.id}: DELETE answered HTTP ${res.status} with no recognised outcome ` +
+              `(${JSON.stringify(outcome)}). This endpoint deletes OR archives and says which, so ` +
+              `with neither word present, which one happened is unknown — read it back with ` +
+              `reai_list_customers archived: true before assuming.`,
+    });
   },
 });
 
@@ -1236,10 +1257,54 @@ const registerInvoicePayment = defineTool({
   },
 });
 
+
+const unarchiveCustomer = defineTool({
+  name: "reai_unarchive_customer",
+  title: "Unarchive a customer",
+  description:
+    "Bring an archived customer back into use. ReAI archives rather than deletes a customer that " +
+    "has transactions, and an archived one is invisible to reai_list_customers unless you pass " +
+    "archived: true — so this is how a counterparty that was tidied away too eagerly is recovered.\n\n" +
+    "Measured on the test tenant: a customer reading archived: true answered 200 here and read " +
+    "back archived: false.\n\n" +
+    "One thing it does NOT fix, stated because it is the case that made this tool worth adding: an " +
+    "order whose customer was archived answers 500 \"Referenced record is not accessible\" on " +
+    "DELETE, and unarchiving the customer does not make that order deletable again — tried, the 500 " +
+    "persists. What blocks such an order is usually a deleted PRODUCT on its line, and products " +
+    "have no unarchive endpoint at all.",
+  risk: "reversible",
+  apiPaths: [["POST", "/api/customers/{id}/unarchive"]],
+  inputSchema: {
+    id: z
+      .number()
+      .int()
+      .positive()
+      .describe("Customer id. Find archived ones with reai_list_customers archived: true."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<{ archived?: boolean; name?: string }>({
+      method: "POST",
+      path: `/api/customers/${args.id}/unarchive`,
+      body: {},
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const stillArchived = res.data?.archived === true;
+    return ok(res.data ?? { customerId: args.id }, {
+      note: stillArchived
+        ? `Customer ${args.id} still reads archived: true after the call answered HTTP ` +
+          `${res.status}. Nothing was recovered — read it with reai_get_customer before relying on it.`
+        : `Customer ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
+          `back in reai_list_customers.`,
+    });
+  },
+});
+
 export const salesTools: ToolDef[] = [
   listCustomers,
   getCustomer,
   createCustomer,
+  unarchiveCustomer,
   updateCustomer,
   setCustomerAddress,
   deleteCustomer,

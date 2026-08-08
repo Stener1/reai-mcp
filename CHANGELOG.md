@@ -9,9 +9,38 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**123 tools**: 116 across ten accounting domains, plus 7 always-on.
+**125 tools**: 118 across ten accounting domains, plus 7 always-on.
 
 ### Added
+
+- **A stray sweep in the write suite**, and the reason it was needed. Eight orders
+  had been sitting on the test tenant since an ad-hoc subscription-billing probe,
+  along with the subscription that generated them, and nothing noticed for weeks.
+  The existing sweep only looks for records carrying *this run's* stamp, so it
+  could not have: the litter came from a different run.
+  - The new sweep matches the naming convention every test record here uses
+    (`Zz…`, `reai-mcp…`, `smoke…`, `probe…`) across the eleven domains the suite
+    touches, and **reports rather than deletes** — it is looking at records it did
+    not create, and removing those quietly would be a worse habit than leaving them.
+  - Records that genuinely cannot be removed are listed in `KNOWN_UNRECOVERABLE`
+    with the reason, and printed every run so they stay visible instead of becoming
+    background noise. Proven to fail: emptying that list turns the run red with
+    `LEFTOVER ORDERS 4105, 4104, …`.
+- **`reai_unarchive_customer` and `reai_unarchive_supplier`** — two uncovered
+  endpoints that are the documented recovery for a counterparty archived too
+  eagerly. The customer path was measured end to end (a customer reading
+  `archived: true` answered 200 and read back `archived: false`); the supplier path
+  is exercised by the write suite against the supplier it archives, then restored
+  and re-archived so the tenant is left as found.
+
+### Fixed
+
+- **`reai_delete_customer` and `reai_delete_supplier` said "deleted or archived"
+  without reading which.** Both endpoints answer `{"outcome":"deleted"}` or
+  `{"outcome":"archived"}`, and the difference is between an unrecoverable state and
+  a recoverable one. They now report it, name `archived: true` as the way to see an
+  archived record again, and point at the matching unarchive tool. An unrecognised
+  outcome is reported as unknown.
 
 - **Expense claims** (9 tools) — the whole state machine, which was 1 of 10 operations
   covered. `reai_get_expense`, `reai_create_expense`, `reai_update_expense`,

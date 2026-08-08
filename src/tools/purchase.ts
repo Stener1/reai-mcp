@@ -201,9 +201,12 @@ const deleteSupplier = defineTool({
   name: "reai_delete_supplier",
   title: "Delete or archive a supplier",
   description:
-    "Delete a supplier. Archiving is reversible via reai_request POST /api/suppliers/{id}/unarchive. " +
-    "ReAI archives instead of deleting when the supplier already has " +
-    "transactions, so the audit trail survives — the response says which happened.",
+    "Delete a supplier. ReAI archives instead of deleting when the supplier already has " +
+    "transactions, so the audit trail survives, and answers " +
+    '{"outcome":"deleted"} or {"outcome":"archived"} to say which — this tool reads it. Measured: a ' +
+    "supplier with no transactions came back \"deleted\", and an unarchive on it then answered 404, " +
+    "because there was nothing archived to restore.\n\n" +
+    "An ARCHIVED supplier is recoverable with reai_unarchive_supplier.",
   risk: "reversible",
   apiPaths: [["DELETE", "/api/suppliers/{id}"]],
   destructive: true,
@@ -217,7 +220,20 @@ const deleteSupplier = defineTool({
       path: `/api/suppliers/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Supplier ${args.id} deleted or archived (HTTP ${res.status}).`);
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    return ok(res.data ?? { supplierId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Supplier ${args.id} was DELETED outright — the record is gone, and there is nothing to ` +
+            `unarchive (that call would answer 404).`
+          : outcome === "archived"
+            ? `Supplier ${args.id} was ARCHIVED, not deleted: it had transactions, so the audit ` +
+              `trail is kept. It is hidden from reai_list_suppliers unless you pass archived: true, ` +
+              `and reai_unarchive_supplier brings it back.`
+            : `Supplier ${args.id}: DELETE answered HTTP ${res.status} with no recognised outcome ` +
+              `(${JSON.stringify(outcome)}). This endpoint deletes OR archives and says which, so ` +
+              `which one happened is unknown — read it back with reai_list_suppliers archived: true.`,
+    });
   },
 });
 
@@ -1060,10 +1076,51 @@ const setSupplierAddress = defineTool({
   },
 });
 
+
+const unarchiveSupplier = defineTool({
+  name: "reai_unarchive_supplier",
+  title: "Unarchive a supplier",
+  description:
+    "Bring an archived supplier back into use. ReAI archives rather than deletes a supplier with " +
+    "transactions, and an archived one is invisible to reai_list_suppliers unless you pass " +
+    "archived: true.\n\n" +
+    "The same endpoint shape as reai_unarchive_customer, which was measured end to end. This one " +
+    "is exercised in the write suite against the supplier that suite archives; a supplier with no " +
+    "transactions is DELETED instead, and unarchiving that answers 404 — measured, so a 404 here " +
+    "usually means the record was never archived in the first place.",
+  risk: "reversible",
+  apiPaths: [["POST", "/api/suppliers/{id}/unarchive"]],
+  inputSchema: {
+    id: z
+      .number()
+      .int()
+      .positive()
+      .describe("Supplier id. Find archived ones with reai_list_suppliers archived: true."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<{ archived?: boolean; name?: string }>({
+      method: "POST",
+      path: `/api/suppliers/${args.id}/unarchive`,
+      body: {},
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const stillArchived = res.data?.archived === true;
+    return ok(res.data ?? { supplierId: args.id }, {
+      note: stillArchived
+        ? `Supplier ${args.id} still reads archived: true after the call answered HTTP ` +
+          `${res.status}. Nothing was recovered — read it back before relying on it.`
+        : `Supplier ${args.id}${res.data?.name ? ` (${res.data.name})` : ""} is active again and ` +
+          `back in reai_list_suppliers.`,
+    });
+  },
+});
+
 export const purchaseTools: ToolDef[] = [
   listSuppliers,
   getSupplier,
   createSupplier,
+  unarchiveSupplier,
   updateSupplier,
   deleteSupplier,
   supplierLedger,

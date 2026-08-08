@@ -1647,11 +1647,39 @@ async function main() {
       );
     }
     if (created.supplierId) {
-      await attempt(
+      // The suite's supplier has an invoice, so its DELETE archives rather than deletes — which
+      // makes it the one place the unarchive endpoint can be exercised for real. Measured here
+      // rather than asserted from the customer's behaviour.
+      const supplierOutcome = await attempt(
         "supplier deleted or archived",
         () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
         (r) => textOf(r).slice(0, 90),
       );
+      // Only when it ARCHIVED. A supplier with no transactions is deleted outright and unarchiving
+      // that answers 404 — measured — so running this unconditionally would report a failure for
+      // the healthy case.
+      if (supplierOutcome && !supplierOutcome.isError && jsonOf(supplierOutcome)?.outcome === "archived") {
+        const restored = await attempt(
+          "an archived supplier can be brought back",
+          () => client.callTool({ name: "reai_unarchive_supplier", arguments: { id: created.supplierId } }),
+          (r) => firstLineOf(textOf(r)),
+        );
+        report(
+          "and it is in the plain supplier list again",
+          restored !== undefined &&
+            !restored.isError &&
+            (listOf(
+              await client.callTool({ name: "reai_list_suppliers", arguments: {} }),
+            ) ?? []).some((s) => s.id === created.supplierId),
+          restored?.isError ? firstLineOf(textOf(restored)) : "present",
+        );
+        // Put it back, so the suite leaves the tenant as it found it.
+        await attempt(
+          "re-archived after the check",
+          () => client.callTool({ name: "reai_delete_supplier", arguments: { id: created.supplierId } }),
+          (r) => `outcome=${JSON.stringify(jsonOf(r)?.outcome ?? null)}`,
+        );
+      }
     }
     if (created.creditorId) {
       await attempt(
@@ -1720,6 +1748,73 @@ async function main() {
           false,
           `COULD NOT VERIFY — check voucher ${created.voucherId} by hand: ${err?.message ?? err}`,
         );
+      }
+    }
+
+    // --- A sweep for test records this run did NOT create -------------------
+    //
+    // The stamp sweep below catches leaks from THIS run. It cannot catch leaks from any other, and
+    // that is the gap that actually bit: eight orders sat on this tenant from an ad-hoc probe until
+    // they were noticed by hand weeks later, along with the subscription that generated them. A
+    // stamp-based check would never have mentioned them.
+    //
+    // So this one matches on the naming convention every test record here uses instead, across the
+    // domains this suite touches. It REPORTS and never deletes: it is looking at records it did not
+    // create, and quietly removing those would be a worse habit than leaving them.
+    const KNOWN_UNRECOVERABLE = {
+      // Measured, and there is no way back: these orders were generated from subscription 223 by a
+      // subscription-billing probe, and their line references a PRODUCT that was later deleted.
+      // DELETE now answers 500 "Referenced record is not accessible". Unarchiving the customer does
+      // NOT help — tried, the 500 persists — and products have no unarchive endpoint at all (only
+      // customers and suppliers do). Subscription 223 in turn answers 409 "Kan ikke slette et
+      // abonnement som har generert faktureringshistorikk" because of those very orders, so neither
+      // can go. They need removing through the ReAI web UI, or they stay.
+      orders: [4098, 4099, 4100, 4101, 4102, 4103, 4104, 4105],
+      subscriptions: [223],
+    };
+    const TEST_NAME = /^zz|reai-mcp|smoke|probe|walkthrough/i;
+    const SWEPT = [
+      ["orders", "reai_list_orders", ["customerName", "comment"]],
+      ["customers", "reai_list_customers", ["name"]],
+      ["suppliers", "reai_list_suppliers", ["name"]],
+      ["products", "reai_list_products", ["name"]],
+      ["employees", "reai_list_employees", ["name"]],
+      ["expenses", "reai_list_expenses", ["title"]],
+      ["subscriptions", "reai_list_subscriptions", ["customerName"]],
+      ["company banks", "reai_list_company_banks", ["name"]],
+      ["warehouses", "reai_list_warehouses", ["name"]],
+      ["agreements", "reai_list_agreements", ["templateType", "signerEmail"]],
+      ["reconciliation rules", "reai_list_reconciliation_rules", ["matchText", "description"]],
+    ];
+    for (const [label, toolName, fields] of SWEPT) {
+      try {
+        const res = await client.callTool({ name: toolName, arguments: {} });
+        if (res.isError) {
+          report(`sweep: ${label}`, false, `could not be listed — ${firstLineOf(textOf(res))}`);
+          continue;
+        }
+        const rows = listOf(res) ?? [];
+        const allowed = new Set(
+          KNOWN_UNRECOVERABLE[label.replace(/ /g, "")] ?? KNOWN_UNRECOVERABLE[label] ?? [],
+        );
+        const strays = rows.filter(
+          (row) =>
+            !allowed.has(row.id) &&
+            fields.some((field) => TEST_NAME.test(String(row?.[field] ?? ""))),
+        );
+        report(
+          `sweep: no unexplained test ${label} left behind`,
+          strays.length === 0,
+          strays.length === 0
+            ? allowed.size > 0
+              ? `clean, apart from ${allowed.size} known-unrecoverable record(s): ${[...allowed].join(", ")}`
+              : "clean"
+            : `LEFTOVER ${label.toUpperCase()} ${strays.map((r) => r.id).join(", ")} — these were not ` +
+              `created by this run and are not on the known-unrecoverable list. Identify what made ` +
+              `them and remove them, or add them with the reason.`,
+        );
+      } catch (err) {
+        report(`sweep: ${label}`, false, `sweep threw — ${err?.message ?? err}`);
       }
     }
 
