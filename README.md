@@ -584,7 +584,7 @@ The wage-line endpoints are asymmetric in a way worth knowing: create **requires
 
 Anything not listed — leads, projects, opening balances, annual accounts — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 141 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 145 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
@@ -596,10 +596,11 @@ REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
 REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
-(unset)                            # all 141
+REAI_TOOLSETS=reference            # 11 tools
+(unset)                            # all 145
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements` and `salary`; listing all ten is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary` and `reference`; listing all eleven is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## API quirks worth knowing
 
@@ -721,6 +722,22 @@ npm run smoke        # read-only, end-to-end against the live API (needs a token
 ```
 
 Unit tests cover the write-policy classifier and spec search/describe, and need no network access or credentials.
+
+### Reference data and company state
+| Tool | Purpose | Risk |
+|---|---|---|
+| `reai_list_countries` | The country codes this API accepts, each with its default `currencyCode`. `query` filters **locally** — the endpoint takes no parameters | read |
+| `reai_list_currencies` | The currency codes this API accepts. Same local filter | read |
+| `reai_get_opening_balance` | The ledger position the books start from, or a plain answer that none is recorded | read |
+| `reai_get_annual_accounts` | Whether annual accounts were submitted for a fiscal year | read |
+
+**Shape is not membership**, which is why the code lists are worth a tool. Every `countryCode` argument on this server checks that a value is two uppercase letters and every `currencyCode` that it is three, because a pattern is all the spec documents. `UK` passes that check and is not a code this API takes — the United Kingdom is `GB` — so the local validation says yes and the API says no, which is the worst division of labour available. These two endpoints are the actual lists, and nothing pointed at them before.
+
+Neither documents a response schema. Almost nothing here does: measured, **12 of 430 operations** in this spec declare one, which is the reason this project's method is to measure a live response rather than to trust a shape. What the API returned is `{code, name, currencyCode}` for a country and `{code, name}` for a currency.
+
+**Two 404s that are answers, not failures.** `GET /api/opening-balances` answers `404 "Opening balance not found"` and `GET /api/annual-accounts/{year}` answers `404 "No annual-accounts submission exists"` when there is nothing recorded — measured on both test tenants. A 404 from a collection-shaped path is otherwise indistinguishable from a wrong path, a wrong tenant, or a switched-off module, and this server has watched all three conclusions get drawn from one. Both tools report the real answer, and *only* for the documented message: a 403, a 401 or a 500 still fails, because a tool that calls every error "nothing recorded" will report an outage as a fact about someone's books.
+
+Writing an opening balance is left to `reai_request` on purpose. It is ledger position, so setting one restates every comparative figure the books produce, and `DELETE /api/opening-balances` is documented as **"delete OR reverse"** — the family this repo has been caught by five times, where a reversal *posts* rather than removes. Neither test tenant has an opening balance to watch those endpoints on, so no curated tool here claims to know what they do.
 
 ### Running CI's checks locally
 

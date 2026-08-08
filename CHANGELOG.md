@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**141 tools**: 134 across ten accounting domains, plus 7 always-on.
+**145 tools**: 138 across eleven accounting domains, plus 7 always-on.
 
 ### Fixed
 
@@ -62,6 +62,32 @@ All notable changes to `reai-mcp`. Format loosely follows
   kept the shape its comment was written about.
 
 ### Added
+
+- **Reference data and company state (4 read tools), and a new `reference` toolset.**
+  `reai_list_countries`, `reai_list_currencies`, `reai_get_opening_balance`,
+  `reai_get_annual_accounts`.
+  - **Shape is not membership.** `countryCode` arguments are checked for being two
+    uppercase letters and `currencyCode` for three, because a pattern is all the spec
+    documents — so `UK` passes locally and fails at the API, where the United Kingdom is
+    `GB`. `GET /api/countries` and `GET /api/currencies` are the real lists and nothing
+    pointed at them. Each country carries its default `currencyCode`, measured; neither
+    endpoint documents a response schema, and nor do 418 of the other 430 operations in
+    this spec.
+  - `query` filters **locally**, since neither endpoint accepts a parameter. Recorded in
+    `SHAPES_THE_RESPONSE` with a test that proves the request is identical either way while
+    the output differs — otherwise it is a dropped input, which is the class that sweep
+    exists to catch. The exemption self-test now handles non-boolean fields; it only ever
+    looked for `field: true`.
+  - **Two 404s turned into answers.** `GET /api/opening-balances` answers
+    `404 "Opening balance not found"` and `GET /api/annual-accounts/{year}` answers
+    `404 "No annual-accounts submission exists"` — measured on both test tenants. A 404 on a
+    collection-shaped path is otherwise indistinguishable from a wrong path, a wrong tenant
+    or a disabled module. Narrowly: only the documented message becomes an answer, and a
+    403, 401 or 500 still fails, because a tool that reports every error as "nothing
+    recorded" turns an outage into a fact about the books.
+  - Opening-balance **writes stay on `reai_request`** and the tool says why: it is ledger
+    position, `DELETE` is documented "delete OR reverse", and neither test tenant has one to
+    watch those endpoints on.
 
 - **Lead writes (5 tools), and the reason they are not a thin wrapper.** `reai_save_lead`,
   `reai_update_lead`, `reai_log_lead_contact`, `reai_convert_lead`, `reai_delete_lead`.

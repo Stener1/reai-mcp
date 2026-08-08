@@ -721,6 +721,62 @@ async function main() {
       report("sendEhf escalation", false, String(err));
     }
 
+    // Reference data and the two 404s that are answers. Read-only, on whichever tenant this run
+    // targets: both were measured to behave identically, which is itself worth re-checking, since
+    // "no opening balance" is a claim about the books and a 403 would otherwise look the same.
+    console.log("  Reference data:");
+    try {
+      const countries = await client.callTool({ name: "reai_list_countries", arguments: { tenantId } });
+      const parsed = parseBody(textOf(countries));
+      const list = Array.isArray(parsed) ? parsed : [];
+      const gb = list.find((row) => row.code === "GB");
+      report(
+        "the country list arrives, with GB and a currency on every row",
+        list.length > 100 && gb?.currencyCode === "GBP" && list.every((r) => r.code?.length === 2 && r.currencyCode),
+        list.length === 0
+          ? `COULD NOT READ the country list: ${firstLine(textOf(countries))}`
+          : `${list.length} countries, GB -> ${gb?.currencyCode ?? "MISSING"}`,
+      );
+      // The local filter, which is the part a caller relies on to avoid guessing a code.
+      const filtered = await client.callTool({
+        name: "reai_list_countries",
+        arguments: { tenantId, query: "united kingdom" },
+      });
+      const named = /Send countryCode: "GB"/.test(textOf(filtered));
+      report("filtering names the code to send", named, named ? "GB" : firstLine(textOf(filtered)));
+    } catch (err) {
+      report("reference country list", false, String(err));
+    }
+
+    try {
+      const currencies = await client.callTool({ name: "reai_list_currencies", arguments: { tenantId } });
+      const parsedCurrencies = parseBody(textOf(currencies));
+      const list = Array.isArray(parsedCurrencies) ? parsedCurrencies : [];
+      report(
+        "the currency list arrives, all three-letter codes",
+        list.length > 100 && list.every((r) => r.code?.length === 3),
+        list.length === 0 ? `COULD NOT READ: ${firstLine(textOf(currencies))}` : `${list.length} currencies`,
+      );
+    } catch (err) {
+      report("reference currency list", false, String(err));
+    }
+
+    for (const [label, name, args, expected] of [
+      ["an absent opening balance reads as an answer, not an error", "reai_get_opening_balance", {}, /NO opening balance recorded/],
+      ["an unfiled year reads as an answer, not an error", "reai_get_annual_accounts", { year: 2025 }, /NO annual-accounts submission exists/],
+    ]) {
+      try {
+        const res = await client.callTool({ name, arguments: { tenantId, ...args } });
+        const text = textOf(res);
+        // Both halves: it must not be an error result, AND it must say the specific thing. A tool
+        // that swallowed a 403 would satisfy the first alone.
+        const answered = res.isError !== true && expected.test(text);
+        report(label, answered, answered ? "reported as the answer" : firstLine(text));
+      } catch (err) {
+        report(label, false, String(err));
+      }
+    }
+
     // Emptying an invoice-delivery address is the other direction of the same axis, and it is
     // deliberately NOT checked here. It cannot be: this suite runs read-only, where every write is
     // refused for being a write, so a refusal proves nothing about which rule fired — and the
