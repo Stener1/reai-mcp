@@ -553,6 +553,22 @@ const VOCABULARY_GAPS = [
   ["accruals", "GET /api/vouchers", "nothing"],
 ];
 
+/**
+ * The write-verb case, separate because it is about a DIFFERENT failure: a mapped noun pulling an
+ * imperative onto unrelated mutations. "opprett postering" ranked the six
+ * /api/postings/{customer,employee,supplier}/{close,open} period commands first — six mutations that have
+ * nothing to do with creating a posting — because this API has no POST /api/postings and a posting is in
+ * fact created by posting a voucher. Codex found it on PR #118.
+ */
+test("a write verb on a mapped noun reaches the operation that performs it", async () => {
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const hits = searchOperations({ query: "opprett postering", limit: 5 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(hits[0], "POST /api/vouchers", `got ${hits.slice(0, 3).join(", ")}`);
+  // And the bare noun must still reach the collection, which is what reai_list_postings wraps.
+  const bare = searchOperations({ query: "postering", limit: 3 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(bare[0], "GET /api/postings", `got ${bare.join(", ")}`);
+});
+
 test("core bookkeeping terms reach the exact operation they name", async () => {
   const { searchOperations } = await import("../dist/reai/spec.js");
   const failures = [];

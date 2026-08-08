@@ -1341,6 +1341,16 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // nothing at all and the query would go back to returning the VAT-return endpoints. Voucher is the best
   // REACHABLE answer, not the correct one. If body fields ever become searchable, this should point at
   // /api/supplier-invoices and /api/orders instead.
+  //
+  // A KNOWN LIMIT, measured rather than waved away. Codex pointed out on PR #118 that an unconditional
+  // `voucher` can swamp a more specific resource in a mixed query, and it does for one shape:
+  // "periodisering av mva-melding" returns ten voucher operations and no /api/vat-returns, while
+  // "mva-melding" alone ranks POST /api/vat-returns first. It does NOT happen for the realistic query —
+  // "periodisering av leverandorfaktura" ranks /api/supplier-invoices first, which is exactly right, and
+  // that is the phrase an accountant actually types. The mapping is kept because it turns a wrong bare
+  // answer (VAT returns) into a defensible one, and the damage is confined to a hyphenated abbreviation in
+  // a combination that is not a real accounting operation. Recorded so the next person weighing it has the
+  // measurement rather than the argument.
   periodisering: ["voucher"],
   // The same concept in English, which was left empty while the Norwegian was fixed — the same gap class
   // the change was about, one language over.
@@ -1353,7 +1363,13 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // ["posting"] alone the collection wins 18 to 17. `posteringer` needs no entry of its own — the `-er`
   // rule in lookupForms reaches this one, which is the second entry the "verified load-bearing" claim
   // covered and should not have.
-  postering: ["posting"],
+  // "voucher" as well as "posting", because a posting is CREATED by posting a voucher — this API has no
+  // POST /api/postings. Without it, "opprett postering" ranked the six
+  // /api/postings/{customer,employee,supplier}/{close,open} period commands first and the operation that
+  // actually creates a posting nowhere: a write verb pointed at unrelated mutations, which is the failure
+  // the rest of this table is written to avoid. Codex caught it on PR #118. Measured: the bare `postering`
+  // still ranks GET /api/postings first, and "opprett postering" now ranks POST /api/vouchers first.
+  postering: ["posting", "voucher"],
   posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],
   balanse: ["balance"],
