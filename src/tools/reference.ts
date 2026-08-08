@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ReaiApiError } from "../reai/errors.js";
 import {
   defineTool,
+  fiscalYear,
   ok,
   okList,
   requireTenantId,
@@ -319,15 +320,10 @@ const getAnnualAccounts = defineTool({
   apiPaths: [["GET", "/api/annual-accounts/{year}"]],
   idempotent: true,
   inputSchema: {
-    year: z
-      .number()
-      .int()
-      // The spec's own bounds: exclusiveMinimum 0, maximum 32767. An earlier floor of 2000 was an
-      // assumption about when ReAI's fiscal years start, and it rejected a legacy year the API would
-      // have answered — this server's rule is not to refuse what the API accepts.
-      .min(1, "The API declares exclusiveMinimum 0 for this parameter.")
-      .max(32767, "The API declares maximum 32767 for this parameter.")
-      .describe("Fiscal year, e.g. 2025. The API accepts 1 to 32767."),
+    // The SHARED fiscal-year schema, so this cannot drift from its two sibling tools again. It
+    // shipped here as a number while they took a four-digit string, which the path-parameter sweep
+    // in test/spec-bounds.test.mjs found.
+    year: fiscalYear.describe('Fiscal year, four digits, e.g. "2025".'),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -335,12 +331,15 @@ const getAnnualAccounts = defineTool({
     try {
       const res = await ctx.client.request<unknown>({
         method: "GET",
+        // No encodeURIComponent: `fiscalYear` admits four ASCII digits only, so there is nothing to
+        // encode, and its sibling reai_get_tax_return interpolates the same value raw. A no-op that
+        // looks like a safety measure is worse than its absence.
         path: `/api/annual-accounts/${args.year}`,
         tenantId,
       });
       const status = (res.data as { status?: string } | undefined)?.status;
       return ok(
-        { year: args.year, submissionExists: true, status: status ?? null, submission: res.data ?? null },
+        { year: Number(args.year), submissionExists: true, status: status ?? null, submission: res.data ?? null },
         {
           note:
             `A submission record EXISTS for ${args.year} on tenant ${tenantId}, with status ` +
@@ -355,7 +354,11 @@ const getAnnualAccounts = defineTool({
     } catch (err) {
       if (isNotFound(err, /no annual-accounts submission/i)) {
         return ok(
-          { year: args.year, submissionExists: false, status: null, submission: null },
+          // `Number(...)` so both branches agree with the API's own type: AnnualAccountsSubmissionRes
+          // declares year as an integer, and the argument is a four-digit string. Synthesizing a
+          // string here would have made a consumer's `year` field change type with the outcome —
+          // the same cross-branch inconsistency that `submissionExists` was fixed for.
+          { year: Number(args.year), submissionExists: false, status: null, submission: null },
           {
             note:
               `NO annual-accounts submission exists for ${args.year} on tenant ${tenantId}. That is ` +

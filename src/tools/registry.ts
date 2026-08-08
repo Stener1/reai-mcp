@@ -515,6 +515,36 @@ export function requireTenantId(explicit: number | undefined, ctx: ToolContext):
  * a subscription's service recipients — got a bare `z.string()` instead, so `"no"` was
  * accepted there and rejected by the API.
  */
+/**
+ * A fiscal year as this API takes it: four digits, and greater than zero.
+ *
+ * Shared rather than copied, which is the point. Three tools read the same fiscal year —
+ * reai_get_tax_return, reai_create_vat_return and reai_get_annual_accounts — and they disagreed:
+ * two took a four-digit string and the third, added later, took a number. An agent using two of them
+ * in one session had to guess. A test can compare three copies and did, but one definition cannot
+ * diverge in the first place.
+ *
+ * `"0000"` is refused. The spec declares `exclusiveMinimum: 0` on every one of these parameters, so
+ * year zero is a value the API rejects, and four digits alone admitted it — review caught that: the
+ * numeric schema the annual-accounts tool started with had refused 0, and the move to a string
+ * quietly let it back in on all three.
+ *
+ * Declared as a string because that is the type the spec gives these path parameters, and it removes
+ * the 2025-versus-"2025" question an agent otherwise has to answer per tool.
+ */
+export const fiscalYear = z
+  .string()
+  .regex(/^\d{4}$/, "Year must be four digits, e.g. 2026")
+  // Four digits AND at least 1000, which is stricter than "greater than zero" for a reason review
+  // found: `"0999"` passed a `> 0` refinement, and reai_get_annual_accounts converts the argument with
+  // `Number(...)` so its payload reported year 999 for a request to /api/annual-accounts/0999. A
+  // leading-zero year is not a fiscal year anybody has books for, and refusing it makes the conversion
+  // injective — the field a consumer keys on identifies the year that was asked for.
+  .refine(
+    (value) => Number(value) >= 1000,
+    "Year must be 1000 or later; a leading-zero year is not a fiscal year, and the API declares year > 0.",
+  );
+
 export const COUNTRY_CODE = z
   .string()
   .regex(/^[A-Z]{2}$/, 'Must be a two-letter uppercase ISO country code, e.g. "NO".');

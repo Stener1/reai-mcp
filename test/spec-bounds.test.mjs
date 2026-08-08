@@ -555,3 +555,281 @@ test("the probe sees refinements, not the schema underneath them", () => {
   // z.array(z.object({...}).refine(...)).
   assert.ok(at("reai_create_subscription", "subscriptionLines[].quantity"));
 });
+
+/**
+ * The third leg: PATH parameters.
+ *
+ * The two sweeps above walk request bodies and query strings. Path parameters went unchecked, and the
+ * first thing checking them found was that
+ * reai_get_annual_accounts shipped taking a NUMBER for the same fiscal year that
+ * reai_get_tax_return and reai_create_vat_return both take as a four-digit string. An agent using
+ * two of the three in one session had to guess which wanted `2025` and which wanted `"2025"`.
+ *
+ * An earlier version of this comment justified the sweep by calling a path parameter "the one input a
+ * caller cannot avoid". That is false in this very codebase, and the sweep's design depends on it
+ * being false: reai_customer_ledger, reai_supplier_ledger and reai_employee_ledger all take their id
+ * OPTIONALLY and switch endpoint when it is omitted, and reai_convert_lead covers
+ * POST /api/leads/{id}/convert while exposing no argument for {id} at all — it derives the id from an
+ * organisation number. Those are exactly the cases the resolver below has to reason about rather than
+ * assume away.
+ *
+ * Two things are deliberately NOT enforced here, and both are decisions rather than omissions:
+ *
+ *  1. **int32 ceilings.** 231 path parameters declare `format: int32` (167 distinct path+name pairs),
+ *     and 67 distinct tool arguments accept
+ *     2147483648. Adding `.max(2147483647)` to every id would be 67 edits for a value no caller
+ *     reaches by accident, and the API answers such a call with a clear `400 "Failed to convert
+ *     'id'"`. Membership of the int32 range is the API's to judge, the same division of labour
+ *     reai_list_countries documents for country codes: this server checks the SHAPE. Pinned as a
+ *     test below so the decision is visible rather than looking like a gap nobody noticed.
+ *  2. **The letter of `exclusiveMinimum: 0` on a string-typed year.** Three fiscal-year parameters
+ *     declare that, which taken literally would admit "1" and "40000". All three tools require four
+ *     digits instead. That is narrower than the spec and defensible — no company has books for year
+ *     5 — and it is different in kind from the floor of 2000 an earlier version of the
+ *     annual-accounts tool had, which excluded 1999, a year a real tenant could ask about.
+ */
+/**
+ * The tool argument that feeds a path placeholder.
+ *
+ * Exact name first. Then one structural rule: if the operation has exactly ONE path parameter and the
+ * tool has exactly ONE `…Id` argument, that argument is the one — there is nothing else it could be.
+ *
+ * This is not a nicety. Skipping every renamed placeholder left 11 of 109 path parameters unswept,
+ * and review proved the consequence: dropping `.positive()` from `assetId`, `departmentId` or
+ * `warehouseId` left seven tools accepting an id of 0 with all 750 tests green. The original comment
+ * justified the skip as avoiding "a guess about which argument feeds which placeholder", which is
+ * sound for a tool with two candidate ids and wrong for a tool with one.
+ */
+function resolveArg(tool, params, parameter) {
+  const exact = tool.inputSchema?.[parameter.name];
+  if (exact) return exact;
+  const idArgs = Object.keys(tool.inputSchema ?? {}).filter(
+    (name) => /Id$/i.test(name) && name !== "tenantId",
+  );
+  if (params.length === 1 && idArgs.length === 1) return tool.inputSchema[idArgs[0]];
+  return undefined;
+}
+
+/** Placeholders no rule can attribute, listed so the set cannot grow in silence. */
+const UNRESOLVED_PATH_ARGS = [
+  // Derives the lead id internally from orgNumber, so no argument feeds the placeholder at all.
+  "reai_convert_lead {id}",
+  // Both take customerId AND projectId, and {id} here belongs to a preflight GET /api/customers/{id}.
+  // Attributing it would be domain knowledge, not structure. Sorted, since the assertion sorts.
+  "reai_create_offer {id}",
+  "reai_create_order {id}",
+];
+
+function pathOperations() {
+  const out = [];
+  for (const tool of registeredTools) {
+    for (const [method, path] of tool.apiPaths ?? []) {
+      const item = SPEC.paths[path];
+      const op = item?.[method.toLowerCase()];
+      if (!op) continue;
+      const params = [...(item.parameters ?? []), ...(op.parameters ?? [])].filter(
+        (p) => p?.in === "path" && p.schema,
+      );
+      if (params.length > 0) out.push({ tool, method, path, params });
+    }
+  }
+  return out;
+}
+
+test("the path sweep sees a useful number of operations, not zero", () => {
+  const ops = pathOperations();
+  // Measured: well over a hundred tool operations carry a path parameter. A sweep that resolved
+  // nothing would pass in silence, which is the failure mode this file keeps naming.
+  // Near the measured 107, not far below it. A floor of 80 left 27 operations' worth of slack, and
+  // the previous iteration's lesson was that slack is where coverage disappears: `checked >= 8`
+  // against an actual 11 let three tools vanish from an audit.
+  assert.ok(ops.length >= 100, `only ${ops.length} tool operations resolved to path parameters`);
+});
+
+test("no tool refuses a path value the API accepts", () => {
+  const offenders = [];
+  let checked = 0;
+  for (const { tool, method, path, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = resolveArg(tool, params, parameter);
+      if (!arg) continue;
+      checked += 1;
+      const schema = parameter.schema;
+      const integer = schema.type === "integer";
+      // `exclusiveMinimum: 0` means "greater than zero" whatever the declared type; every parameter
+      // carrying it here is numeric in content, string-typed years included.
+      const smallestValid =
+        schema.exclusiveMinimum !== undefined
+          ? schema.exclusiveMinimum + 1
+          : schema.minimum !== undefined
+            ? schema.minimum
+            : undefined;
+      if (smallestValid === undefined) continue;
+      // Probe in the shape the SPEC declares, not in whatever shape a magic value happens to fit.
+      // The heuristic here was `arg.safeParse("2025").success || !arg.safeParse(2025).success`, which
+      // defaults to "string" whenever it cannot tell — so adding a `.max(100)` to a numeric id
+      // produced `refuses "1" which the spec allows` about an argument that accepts the number 1,
+      // naming both the wrong shape and the wrong problem.
+      const probe = schema.type === "string" ? String(smallestValid) : smallestValid;
+      // A four-digit convention legitimately refuses "1", so a year is not compared against the
+      // spec's floor directly — decision (2) in the comment above. It is NOT skipped outright,
+      // though, which is what an earlier version did: review found that `"0000"` slipped through all
+      // three fiscal-year tools precisely because this branch stopped looking. The floor still has to
+      // bite somewhere, so a year argument is required to refuse year zero and to accept a real one.
+      if (/^(year|fiscalYear)$/i.test(parameter.name)) {
+        if (arg.safeParse("0000").success) {
+          offenders.push(
+            `${tool.name}.${parameter.name} accepts "0000" on ${method} ${path}, and the spec ` +
+              `declares exclusiveMinimum 0`,
+          );
+        }
+        if (!arg.safeParse("2025").success) {
+          offenders.push(`${tool.name}.${parameter.name} refuses "2025" on ${method} ${path}`);
+        }
+        continue;
+      }
+      if (integer && !arg.safeParse(probe).success) {
+        offenders.push(
+          `${tool.name}.${parameter.name} refuses ${JSON.stringify(probe)} on ${method} ${path}, ` +
+            `which the spec allows (exclusiveMinimum ${schema.exclusiveMinimum ?? "-"}, minimum ${schema.minimum ?? "-"})`,
+        );
+      }
+    }
+  }
+  // 98 measured. Same reasoning as the operation floor above.
+  assert.ok(checked >= 90, `expected many path arguments to compare; checked ${checked}`);
+  assert.deepEqual(offenders, [], "these reject input the API would have accepted");
+});
+
+test("a path id below the spec's floor is refused locally", () => {
+  // The other direction, and the one that catches a missing `.positive()`: an id of 0 or -1 is a
+  // plausible agent mistake — an off-by-one, or a sentinel — and every id parameter in this API
+  // declares exclusiveMinimum 0.
+  const offenders = [];
+  let checked = 0;
+  for (const { tool, method, path, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = resolveArg(tool, params, parameter);
+      if (!arg || parameter.schema.exclusiveMinimum !== 0 || parameter.schema.type !== "integer") continue;
+      checked += 1;
+      for (const bad of [0, -1]) {
+        if (arg.safeParse(bad).success) {
+          offenders.push(`${tool.name}.${parameter.name} accepts ${bad} on ${method} ${path}`);
+        }
+      }
+    }
+  }
+  // 86 measured.
+  assert.ok(checked >= 80, `expected many integer path ids to check; checked ${checked}`);
+  assert.deepEqual(offenders, [], "these accept an id the API declares impossible");
+});
+
+test("every tool taking a fiscal year takes it the same way", () => {
+  // The inconsistency this sweep was written to catch, pinned as a property rather than as three
+  // separate bounds: whatever the convention is, all of them share it.
+  const yearTools = registeredTools.filter((t) => t.inputSchema?.year);
+  assert.ok(yearTools.length >= 3, `expected several tools taking a year; found ${yearTools.length}`);
+  const verdicts = yearTools.map((t) => ({
+    name: t.name,
+    shape: ["2025", "1999", "1", "20255", "", 2025]
+      .map((probe) => (t.inputSchema.year.safeParse(probe).success ? "y" : "n"))
+      .join(""),
+  }));
+  const shapes = new Set(verdicts.map((v) => v.shape));
+  assert.equal(
+    shapes.size,
+    1,
+    `tools disagree about how a fiscal year is passed: ${verdicts.map((v) => `${v.name}=${v.shape}`).join(", ")}`,
+  );
+  // And the shared convention is the four-digit string, which is what the spec declares the type as.
+  assert.equal(verdicts[0].shape, "yynnnn", `unexpected year convention ${verdicts[0].shape}`);
+
+  // A leading-zero year is refused by all of them. Four digits alone admitted "0000", which the spec
+  // rules out with exclusiveMinimum 0 — and a bare `> 0` refinement then still admitted "0999", which
+  // reai_get_annual_accounts converts with Number() and would have reported as year 999. The shared
+  // `fiscalYear` schema in registry.ts requires >= 1000, in one place rather than three.
+  for (const t of yearTools) {
+    for (const bad of ["0000", "0001", "0999"]) {
+      assert.equal(t.inputSchema.year.safeParse(bad).success, false, `${t.name} accepts year ${bad}`);
+    }
+    assert.equal(t.inputSchema.year.safeParse("1000").success, true, `${t.name} refuses year 1000`);
+  }
+});
+
+test("the int32 ceiling is deliberately not enforced, and that is recorded here", () => {
+  // Decision (1) above. This test exists so the absence is a choice on the record rather than a gap:
+  // if someone decides the ceilings ARE worth 67 edits, this test is what they have to change, and
+  // the reasoning is one scroll away.
+  const beyondInt32 = new Set();
+  for (const { tool, params } of pathOperations()) {
+    for (const parameter of params) {
+      const arg = resolveArg(tool, params, parameter);
+      if (!arg || parameter.schema.format !== "int32") continue;
+      // Unique tool+argument, not occurrences. Counting occurrences meant `reai_update_agreement.id`
+      // alone contributed six, so ceilings could have been added to 59 of the 67 arguments while the
+      // failure message still claimed none had been.
+      if (arg.safeParse(2147483648).success) beyondInt32.add(`${tool.name}.${parameter.name}`);
+    }
+  }
+  // Asserted as a RANGE, not a number, so ordinary tool churn does not fail it while a wholesale
+  // change of policy in either direction does.
+  assert.ok(
+    beyondInt32.size >= 60,
+    `int32 ceilings appear to have been added to path ids (${beyondInt32.size} of 67 still unbounded) — ` +
+      `if that was deliberate, delete this test and the reasoning above it`,
+  );
+});
+
+test("the manual-reconciliation 404 is recorded as ambiguous, not as a verdict", async () => {
+  // Measured while looking for a manual bank account to build tools against: there is none on either
+  // test tenant, and the endpoint's refusal for a SYNCED account names the wrong problem. Kept in
+  // this file because it is the other thing the path-parameter work turned up.
+  const { quirksFor } = await import("../dist/reai/quirks.js");
+  const quirk = quirksFor("GET", "/api/manual-reconciliations/{bankAccountId}").find(
+    (q) => q.id === "manual-reconciliation-404-means-not-manual-not-missing",
+  );
+  assert.ok(quirk, "the quirk should reach the endpoint it is about");
+  assert.match(quirk.note, /Bankkonto ikke funnet/);
+  // Ambiguous, not decided. The first version of this quirk said the 404 means "not manual", which
+  // would send a caller with a stale or foreign id to the synced endpoint instead of fixing the id.
+  // Both readings have to be named, and so does the way to tell them apart.
+  assert.match(quirk.note, /AMBIGUOUS/);
+  assert.match(quirk.note, /genuinely does not exist, or belongs to another tenant/);
+  // The REMEDY sentence specifically. Matching `reai_list_company_banks` anywhere was satisfied by an
+  // earlier, incidental mention ("appearing normally in reai_list_company_banks"), so deleting the
+  // actionable advice left the test green.
+  assert.match(quirk.note, /Settle it with reai_list_company_banks/);
+  assert.match(quirk.note, /providerType/);
+  assert.ok(
+    !/It means the account is not a MANUAL one/.test(quirk.note),
+    "the quirk must not state one reading as the answer",
+  );
+
+  // And the tool that sends callers there says so too, since that pointer is where they meet it.
+  const tool = registeredTools.find((t) => t.name === "reai_get_bank_reconciliation");
+  assert.match(tool.description, /Bankkonto ikke funnet/);
+  assert.match(tool.description, /ambiguous/);
+  assert.match(tool.description, /reai_list_company_banks/);
+});
+
+test("every path placeholder is either swept or listed as unattributable", () => {
+  // The skip is the sweep's only blind spot, so it is pinned rather than trusted. Review showed what
+  // an unpinned skip costs: 11 of 109 placeholders were unswept, and dropping `.positive()` from
+  // assetId, departmentId or warehouseId left seven tools accepting an id of 0 with the whole suite
+  // green. Eight of those eleven are now resolved structurally; the remaining three are named.
+  const unresolved = [];
+  let resolved = 0;
+  for (const { tool, params } of pathOperations()) {
+    for (const parameter of params) {
+      if (resolveArg(tool, params, parameter)) resolved += 1;
+      else unresolved.push(`${tool.name} {${parameter.name}}`);
+    }
+  }
+  assert.ok(resolved >= 100, `only ${resolved} placeholders resolved to an argument`);
+  assert.deepEqual(
+    [...new Set(unresolved)].sort(),
+    UNRESOLVED_PATH_ARGS,
+    "a placeholder became unattributable, or one of the listed three became attributable — either " +
+      "way the list above needs updating on purpose, because everything not on it is swept",
+  );
+});

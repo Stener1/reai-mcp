@@ -138,7 +138,7 @@ test("a documented 404 becomes the answer, for both status reads", async () => {
   assert.match(balance.text, /Not a wrong path, not a wrong tenant, not a disabled module/);
   assert.notEqual(balance.result.isError, true, "a 404 that means 'none' is not a failure");
 
-  const accounts = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+  const accounts = await run("reai_get_annual_accounts", { year: "2025" }, async () => {
     throw apiError(404, "No annual-accounts submission exists for this year", "/api/annual-accounts/2025");
   });
   assert.match(accounts.text, /NO annual-accounts submission exists for 2025/);
@@ -159,7 +159,7 @@ test("a NON-404 carrying the same words is still a failure", async () => {
   );
   await assert.rejects(
     () =>
-      run("reai_get_annual_accounts", { year: 2025 }, async () => {
+      run("reai_get_annual_accounts", { year: "2025" }, async () => {
         throw apiError(502, "gateway: HTTP 404 No annual-accounts submission exists");
       }),
     (err) => err instanceof ReaiApiError && err.status === 502,
@@ -186,7 +186,7 @@ test("any OTHER failure still fails, so an outage is never reported as an empty 
       `${thrown.message} must propagate unchanged`,
     );
     await assert.rejects(
-      () => run("reai_get_annual_accounts", { year: 2025 }, async () => { throw thrown; }),
+      () => run("reai_get_annual_accounts", { year: "2025" }, async () => { throw thrown; }),
       (err) => err === thrown,
     );
   }
@@ -215,7 +215,7 @@ test("the synthesized payloads carry the flag a consumer keys on, on both branch
   assert.equal(absentBody.recorded, false);
   assert.equal(absentBody.openingBalance, null);
 
-  const unfiled = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+  const unfiled = await run("reai_get_annual_accounts", { year: "2025" }, async () => {
     throw apiError(404, "No annual-accounts submission exists", "/api/annual-accounts/2025");
   });
   const unfiledBody = JSON.parse(unfiled.text.slice(unfiled.text.indexOf("{")));
@@ -228,7 +228,7 @@ test("an existing submission reports its status, not an invented submitted flag"
   // The API's states are incomplete, complete, signing, signed and submitted_in_other_system. There
   // is no "submitted", so a boolean would have to invent one — and "incomplete" is exactly the state
   // where a record exists and nothing has been filed.
-  const incomplete = await run("reai_get_annual_accounts", { year: 2025 }, async () => ({
+  const incomplete = await run("reai_get_annual_accounts", { year: "2025" }, async () => ({
     data: { year: 2025, status: "incomplete" },
     status: 200,
   }));
@@ -290,16 +290,33 @@ test("the global code lists work with no tenant selected, and send no tenant hea
   }
 });
 
-test("the year bound matches the spec rather than an assumption about fiscal years", () => {
-  // exclusiveMinimum 0, maximum 32767 in the spec. An earlier floor of 2000 rejected a legacy year
-  // the API would have answered, which is the one thing local validation must never do.
+test("the fiscal year is a four-digit string, the same as its two sibling tools", async () => {
+  // Found by the path-parameter sweep: this shipped as a NUMBER while reai_get_tax_return and
+  // reai_create_vat_return, which take the same fiscal year, both take a four-digit string. An agent
+  // using two of the three in one session had to guess which wanted 2025 and which wanted "2025".
+  const { registeredTools } = await import("../dist/server.js");
   const year = tool("reai_get_annual_accounts").inputSchema.year;
-  assert.equal(year.safeParse(1999).success, true, "a legacy fiscal year is the API's to refuse");
-  assert.equal(year.safeParse(1).success, true);
-  assert.equal(year.safeParse(32767).success, true);
-  assert.equal(year.safeParse(0).success, false);
-  assert.equal(year.safeParse(32768).success, false);
-  assert.equal(year.safeParse(2025.5).success, false);
+  assert.equal(year.safeParse("2025").success, true);
+  assert.equal(year.safeParse("1999").success, true, "a legacy fiscal year is not this server's to refuse");
+  assert.equal(year.safeParse(2025).success, false, "a number is not the shape the spec declares");
+  // "0999" among them: `Number("0999")` is 999, so admitting it would make the payload's `year` stop
+  // identifying the year requested — the round-trip the number conversion exists to preserve.
+  for (const bad of ["1", "20255", "", "abcd", "202 5", "0000", "0999"]) {
+    assert.equal(year.safeParse(bad).success, false, bad);
+  }
+
+  // And the property that matters more than any single bound: all three agree.
+  for (const name of ["reai_get_tax_return", "reai_create_vat_return"]) {
+    const sibling = registeredTools.find((t) => t.name === name);
+    assert.ok(sibling?.inputSchema?.year, `${name} should take a year`);
+    for (const probe of ["2025", "1999", "1", "20255"]) {
+      assert.equal(
+        sibling.inputSchema.year.safeParse(probe).success,
+        year.safeParse(probe).success,
+        `${name} and reai_get_annual_accounts disagree about ${JSON.stringify(probe)}`,
+      );
+    }
+  }
 });
 
 test("the filter is case-insensitive, which the description promises", async () => {
@@ -352,15 +369,21 @@ test("the code hint fires only on a single match", async () => {
 
 test("the documented phrase is found in the raw body too, not only in the message", async () => {
   // The annual-accounts 404 is documented as returning AnnualAccountsSubmissionRes, not a
-  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is the
-  // only place the phrase can appear. Both halves of the check are load-bearing.
+  // ProblemDetail — so if ReAI ever honours that, `problem.detail` is absent and the raw body is
+  // where the phrase would live.
+  //
+  // Honest about what this proves: review showed the `|| phrase.test(err.rawBody)` half of the check
+  // cannot currently be reached, because ReaiApiError.describe() already embeds rawBody in the
+  // message, so the message test matches first for every error the class can build. The half stays as
+  // defence against that rendering changing, and this test pins the OUTCOME rather than the branch —
+  // it would still catch the tool ceasing to recognise a body-only 404.
   const bodyOnly = new ReaiApiError({
     status: 404,
     method: "GET",
     path: "/api/annual-accounts/2025",
     rawBody: '{"message":"No annual-accounts submission exists for the fiscal year"}',
   });
-  const r = await run("reai_get_annual_accounts", { year: 2025 }, async () => {
+  const r = await run("reai_get_annual_accounts", { year: "2025" }, async () => {
     throw bodyOnly;
   });
   assert.match(r.text, /NO annual-accounts submission exists for 2025/);
