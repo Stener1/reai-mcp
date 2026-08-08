@@ -489,6 +489,164 @@ const CASES = [
       return { got: row?.phone, want: "+46701234567" };
     },
   },
+  {
+    claim: "WITHOUT the flag the registry name replaces yours — the default path agents take",
+    source: "reai_create_customer description",
+    marker: "The name you send is then DISCARDED",
+    mustPredict: "stores \"Skatteetaten\"",
+    // The flagship claim of the create tool, and it was unprobed while both flag cases were covered —
+    // named in the census as the most valuable gap. No skipRegistryLookup here on purpose.
+    run: async () => {
+      serial += 1;
+      const key = `customer${serial}`;
+      const sent = `Zz Storage Noflag ${serial} As`;
+      const made = await call("POST", "/api/customers", {
+        name: sent,
+        // NOT 974761076: the flag case above already created a customer named "Skatteetaten", and the
+        // second create collides on the organisation number — refused with
+        // "En kunde med navnet Skatteetaten finnes allerede", the quirk this repo documents about a
+        // duplicate org number being reported as a duplicate NAME. Reported INCONCLUSIVE, correctly, so
+        // this case uses a company no other case touches.
+        organizationNumber: "821083052", // VN Norge AS
+      });
+      if (made.status >= 300 || !made.body?.id) {
+        return { problem: `POST /api/customers answered ${made.status}: ${made.body?.detail ?? ""}` };
+      }
+      created[key] = made.body.id;
+      const back = await readBack(made.body.id);
+      if (back.problem) return { problem: back.problem };
+      return {
+        got: back.record.name === sent ? `kept ${JSON.stringify(sent)}` : "discarded",
+        want: "discarded",
+      };
+    },
+  },
+  {
+    claim: "an address you supply survives on an ordinary company with the flag set",
+    source: "SKIP_REGISTRY_LOOKUP_RULE",
+    marker: "keeps the name and address you send",
+    predictsEcho: true,
+    // The ADDRESS half of a claim whose name half was probed and whose address half was not — which the
+    // review of PR #115 pointed out is where the documented hazard actually lives.
+    run: async () => {
+      serial += 1;
+      const key = `customer${serial}`;
+      const made = await call("POST", "/api/customers", {
+        name: `Zz Storage Addr Keep ${serial} As`,
+        organizationNumber: "915772137", // Symfoni AS — measured to respect the flag
+        skipRegistryLookup: true,
+        addressPart1: "Probegata 1",
+        postalCode: "0001",
+        city: "Probeby",
+      });
+      if (made.status >= 300 || !made.body?.id) {
+        return { problem: `POST /api/customers answered ${made.status}: ${made.body?.detail ?? ""}` };
+      }
+      created[key] = made.body.id;
+      const back = await readBack(made.body.id);
+      if (back.problem) return { problem: back.problem };
+      const a = back.record.address ?? {};
+      return {
+        got: [a.addressPart1, a.postalCode, a.city].join(", "),
+        want: "Probegata 1, 0001, Probeby",
+      };
+    },
+  },
+  {
+    claim: "a directory counterparty overwrites the address you supply, with the WRONG postcode",
+    source: "SKIP_REGISTRY_LOOKUP_RULE",
+    marker: "976967631 with the wrong postcode",
+    mustPredict: "976967631",
+    // The hazard with real consequence: an agent could invoice to this address. The claim is specific —
+    // Brreg says 1331 Fornebu, ReAI stores 7900 Rørvik — so it is checkable against the registry rather
+    // than against a remembered string.
+    run: async () => {
+      serial += 1;
+      const key = `customer${serial}`;
+      const made = await call("POST", "/api/customers", {
+        name: `Zz Storage Addr Over ${serial} As`,
+        organizationNumber: "976967631",
+        skipRegistryLookup: true,
+        addressPart1: "Probegata 1",
+        postalCode: "0001",
+        city: "Probeby",
+      });
+      if (made.status >= 300 || !made.body?.id) {
+        return { problem: `POST /api/customers answered ${made.status}: ${made.body?.detail ?? ""}` };
+      }
+      created[key] = made.body.id;
+      const back = await readBack(made.body.id);
+      if (back.problem) return { problem: back.problem };
+      const a = back.record.address ?? {};
+      const stored = [a.addressPart1, a.postalCode, a.city].filter(Boolean).join(", ");
+      if (stored === "Probegata 1, 0001, Probeby") return { got: "kept mine", want: "overwritten" };
+
+      // And it should disagree with the registry, which is what "wrong postcode" means.
+      let registryPostcode = null;
+      try {
+        const brreg = await fetch("https://data.brreg.no/enhetsregisteret/api/enheter/976967631", {
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (brreg.ok) {
+          const body = await brreg.json();
+          registryPostcode =
+            body?.postadresse?.postnummer ?? body?.forretningsadresse?.postnummer ?? null;
+        }
+      } catch {
+        // reported as inconclusive rather than guessed at
+      }
+      if (!registryPostcode) {
+        return { problem: "could not read 976967631's postcode from Brønnøysundregistrene" };
+      }
+      return {
+        got:
+          a.postalCode === registryPostcode
+            ? `matches the registry (${registryPostcode})`
+            : `overwritten and differs from the registry (stored ${a.postalCode}, Brreg ${registryPostcode})`,
+        want: `overwritten and differs from the registry (stored ${a.postalCode}, Brreg ${registryPostcode})`,
+      };
+    },
+  },
+  {
+    claim: "countryCode defaults to NO when omitted",
+    source: "reai_create_customer countryCode argument",
+    marker: "Defaults to \"NO\"",
+    mustPredict: "Defaults to \"NO\"",
+    // Cheap, named in the census, and it settles a question the description does not: whether that
+    // default is the API's or this server's. Nothing is sent, so the answer is upstream's.
+    run: async () => {
+      const made = await makeCustomer();
+      if (made.problem) return { problem: made.problem };
+      const back = await readBack(made.id);
+      if (back.problem) return { problem: back.problem };
+      return { got: back.record.address?.countryCode ?? null, want: "NO" };
+    },
+  },
+  {
+    claim: "the same phone rule holds on a SUPPLIER, the fourth field it governs",
+    source: "PHONE_RULE",
+    marker: "canonicalised to E.164",
+    mustPredict: "sent bare or 0047-prefixed becomes +47",
+    run: async () => {
+      serial += 1;
+      const key = `supplier${serial}`;
+      const made = await call("POST", "/api/suppliers", { name: `Zz Storage Supp Phone ${serial} As` });
+      if (made.status >= 300 || !made.body?.id) {
+        return { problem: `POST /api/suppliers answered ${made.status}: ${made.body?.detail ?? ""}` };
+      }
+      createdSuppliers[key] = made.body.id;
+      const patched = await call("PATCH", `/api/suppliers/${made.body.id}`, { phone: "90123456" });
+      if (patched.status >= 300) {
+        return {
+          rejected: `PATCH supplier phone="90123456" was REFUSED with HTTP ${patched.status}: ` +
+            `${patched.body?.detail ?? ""}`,
+        };
+      }
+      const back = await call("GET", `/api/suppliers/${made.body.id}`);
+      if (back.status !== 200) return { problem: `GET /api/suppliers/${made.body.id} → ${back.status}` };
+      return { got: back.body.phone, want: "+4790123456" };
+    },
+  },
 ];
 
 let ok = 0;

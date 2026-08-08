@@ -36,11 +36,18 @@ import { QUIRKS } from "../dist/reai/quirks.js";
  * repository keeps paying for. What IS asserted is that every probe binds to text that still predicts
  * what it measures, which is the part a unit test can actually know.
  *
- * Still unprobed and cheap, named so the list is actionable rather than a shrug: the address half of the
- * two skip-lookup claims (a separate resource, `PUT /api/customers/{id}/address`), `countryCode`
- * defaulting to NO, contact-person and lead phone fields, and the no-flag registry discard — the DEFAULT
- * path agents take, whose "the name you send is then DISCARDED" is the flagship claim of
- * `reai_create_customer` and is not probed here.
+ * That list was written to be worked through, and this round did: the **no-flag registry discard** (the
+ * default path, and the flagship claim of `reai_create_customer`), the **address half** of both
+ * skip-lookup claims including the wrong-postcode hazard, `countryCode` defaulting to NO, and the phone
+ * rule on a **supplier** and a **contact person** — four of the five fields it governs.
+ *
+ * The address-overwrite case is the one with real consequence: an agent could invoice to that address.
+ * It is verified against Brønnøysundregistrene rather than a remembered string — stored postcode 7900
+ * against the registry's 1331 — because "wrong" is a claim about the registry, not about a constant.
+ *
+ * Still unprobed and cheap: the lead phone field (the fifth `PHONE_RULE` consumer), `reai_update_lead`'s
+ * own normalisation note, and the employee phone's silent-null behaviour, which `organisation.ts` measured
+ * and documented but nothing re-checks. `npm run audit:census` prints the ratio.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +62,9 @@ const SOURCES = {
   "reai_create_supplier description": purchaseTools.find((t) => t.name === "reai_create_supplier")
     .description,
   "customer-name-title-cased quirk": QUIRKS.find((q) => q.id === "customer-name-title-cased").note,
+  "reai_create_customer countryCode argument": salesTools.find(
+    (t) => t.name === "reai_create_customer",
+  ).inputSchema.countryCode.description,
 };
 
 /**
@@ -76,10 +86,18 @@ function auditCases() {
     cases.push({
       claim,
       source: /source:\s*"([^"]+)"/.exec(chunk)?.[1],
-      marker: /marker:\s*"([^"]+)"/.exec(chunk)?.[1],
+      // Double- OR single-quoted, because a marker containing a quoted value reads better in single
+      // quotes and the first extractor silently saw no marker at all — reported as "declares no marker",
+      // which at least failed loudly rather than passing.
+      marker: (/marker:\s*"((?:[^"\\]|\\.)+)"/.exec(chunk) ?? /marker:\s*'([^']+)'/.exec(chunk))?.[1]?.replace(
+        /\\"/g,
+        '"',
+      ),
       // Allows escaped quotes inside the literal: a predicted value like `comes back "Acme As"` is
       // exactly the kind of distinctive string worth pinning, and the first regex could not see it.
-      mustPredict: /mustPredict:\s*"((?:[^"\\]|\\.)+)"/.exec(chunk)?.[1]?.replace(/\\"/g, '"'),
+      mustPredict: (
+        /mustPredict:\s*"((?:[^"\\]|\\.)+)"/.exec(chunk) ?? /mustPredict:\s*'([^']+)'/.exec(chunk)
+      )?.[1]?.replace(/\\"/g, '"'),
       predictsEcho: /predictsEcho:\s*true/.test(chunk),
       // A GET after the write counts, however it is spelled — the supplier case reads back with a plain
       // call() because suppliers are not customers. What matters is that something is read, not which
@@ -96,8 +114,8 @@ test("every storage probe names a real source, and the source still PREDICTS wha
   // is the count itself. A case removed on purpose is a one-character edit here, which is the point.
   assert.equal(
     cases.length,
-    12,
-    `expected 12 storage cases, extracted ${cases.length} — either a case was added without updating ` +
+    17,
+    `expected 17 storage cases, extracted ${cases.length} — either a case was added without updating ` +
       `this number, or the extraction has stopped matching`,
   );
 
