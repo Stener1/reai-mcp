@@ -1736,14 +1736,18 @@ async function main() {
       );
     }
     if (created.bankId) {
+      // Through the CURATED tool, so its reading of the {outcome} envelope is exercised against the
+      // live API rather than only in a unit test. It used to go through reai_request, which is why
+      // this check's own label said "deleted or archived" — the thing the endpoint tells you.
       await attempt(
-        "company bank deleted or archived",
-        () =>
-          client.callTool({
-            name: "reai_request",
-            arguments: { method: "DELETE", path: `/api/company-banks/${created.bankId}`, tenantId },
-          }),
-        (r) => textOf(r).slice(0, 90),
+        "company bank deleted, and which happened is reported",
+        () => client.callTool({ name: "reai_delete_company_bank", arguments: { id: created.bankId, tenantId } }),
+        (r) => {
+          const text = textOf(r);
+          return /was (DELETED|ARCHIVED)/.test(text)
+            ? firstLineOf(text)
+            : `NO OUTCOME REPORTED — ${firstLineOf(text)}`;
+        },
       );
     }
     if (created.voucherId) {

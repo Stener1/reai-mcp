@@ -152,7 +152,24 @@ const deleteCompanyBank = defineTool({
       path: `/api/company-banks/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Company bank account ${args.id} deleted or archived (HTTP ${res.status}).`);
+    // Same as the counterparty deletes: the endpoint's 200 is ApiLifecycleOutcomeRes and says which
+    // happened. It matters here because a company bank is where money moves FROM — an archived one
+    // is still referenced by every payment made through it, while a deleted one leaves those
+    // references pointing at nothing.
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    return ok(res.data ?? { companyBankId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Company bank ${args.id} was DELETED outright — the record is gone, and nothing can ` +
+            `unarchive it.`
+          : outcome === "archived"
+            ? `Company bank ${args.id} was ARCHIVED, not deleted: payments already made through it ` +
+              `still reference it, so the audit trail is kept. It stays out of the default ` +
+              `reai_list_company_banks view.`
+            : `Company bank ${args.id}: the DELETE returned HTTP ${res.status} with no recognised ` +
+              `outcome (${JSON.stringify(outcome)}). Which of the two happened is NOT established — ` +
+              `check reai_list_company_banks before assuming.`,
+    });
   },
 });
 

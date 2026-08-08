@@ -450,7 +450,30 @@ const deleteProduct = defineTool({
       path: `/api/products/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data ?? `Product ${args.id} deleted or archived (HTTP ${res.status}).`);
+    // "deleted or archived" was what this said, and the endpoint tells you which: its 200 is
+    // documented as ApiLifecycleOutcomeRes, `{outcome: deleted|archived|reversed}`. The difference
+    // matters more here than almost anywhere else in this API, because a product is the reference
+    // that strands other records — eight orders on the test tenant are permanently undeletable
+    // because the PRODUCT their lines name was deleted first, and products have no unarchive
+    // endpoint at all. Archived is the recoverable-looking outcome that is not recoverable.
+    const outcome = (res.data as { outcome?: string } | undefined)?.outcome;
+    return ok(res.data ?? { productId: args.id }, {
+      note:
+        outcome === "deleted"
+          ? `Product ${args.id} was DELETED outright. Anything whose lines still name it — an order, ` +
+            `an invoice — can now never be deleted through the API: every DELETE on those answers ` +
+            `500 "Referenced record is not accessible", and there is no product unarchive endpoint ` +
+            `to restore the reference with. Remove dependents BEFORE their master data.`
+          : outcome === "archived"
+            ? `Product ${args.id} was ARCHIVED, not deleted: something references it, so the audit ` +
+              `trail is kept. It is hidden from the default reai_list_products view. Note that ` +
+              `products have NO unarchive endpoint, so this is not a state you can reverse through ` +
+              `the API either — it is just a state where the references still resolve.`
+            : `Product ${args.id}: the DELETE returned HTTP ${res.status} with no recognised outcome ` +
+              `(${JSON.stringify(outcome)}). Whether it was deleted or archived is NOT established, ` +
+              `so check with reai_list_products and reai_list_products with archived: true before ` +
+              `assuming either.`,
+    });
   },
 });
 

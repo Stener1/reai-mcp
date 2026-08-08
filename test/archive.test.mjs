@@ -154,3 +154,138 @@ test("the archive-visibility quirk names the filter that works and the one that 
     assert.ok(tool(name).inputSchema.archived, `${name} should take an archived filter`);
   }
 });
+
+/**
+ * Every curated tool on an endpoint documented to answer `{outcome}` must read it.
+ *
+ * This repo has fixed the same bug five separate times, one endpoint at a time: customers, suppliers,
+ * salary runs, expense vouchers, expenses. Each fix reported "deleted or archived" until someone
+ * noticed, and each was found by hand. The spec has said which all along — `ApiLifecycleOutcomeRes`
+ * is `{outcome: deleted|archived|reversed}` and **nineteen** operations declare it as their 200 — so
+ * the sixth instance was always going to be found the same slow way.
+ *
+ * It was: an audit against the spec turned up reai_delete_product and reai_delete_company_bank, both
+ * still answering "deleted or archived (HTTP 200)". The product one is the worst of the set, since a
+ * deleted product is what strands orders permanently and products have no unarchive endpoint.
+ *
+ * Driven from the spec rather than from a list, so a new tool on any of the nineteen inherits the
+ * requirement, and a twentieth endpoint gaining the envelope is covered the day it does.
+ */
+test("a curated tool on an {outcome} endpoint reports which outcome happened", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const spec = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../spec/reai-openapi.json", import.meta.url)), "utf8"),
+  );
+
+  // The operations whose success response is the lifecycle envelope. Read from every content type:
+  // this spec declares 368 of its responses under the wildcard, and only 12 under application/json.
+  const outcomeOps = new Set();
+  for (const [path, item] of Object.entries(spec.paths ?? {})) {
+    for (const [method, op] of Object.entries(item)) {
+      const ok = op?.responses?.["200"] ?? op?.responses?.["201"];
+      const schema = Object.values(ok?.content ?? {}).find((c) => c?.schema)?.schema;
+      if (schema?.$ref?.endsWith("ApiLifecycleOutcomeRes")) outcomeOps.add(`${method.toUpperCase()} ${path}`);
+    }
+  }
+  assert.ok(outcomeOps.size >= 15, `expected the lifecycle envelope on many endpoints, saw ${outcomeOps.size}`);
+
+  // What the handler DOES, not what its description says: a tool can describe the two outcomes
+  // beautifully and still report "one of these happened". The observable is the note it produces for
+  // each outcome value, so drive it three times and require deleted and archived to differ.
+  //
+  // Arguments are built from each tool's OWN schema. The first version hardcoded `id: 7`, and three
+  // tools that take departmentId, assetId and warehouseId threw on every call — identical error text,
+  // which the comparison then read as identical notes and reported as three tools ignoring the
+  // outcome. They were doing it correctly. A test that accuses the innocent is worse than no test, so
+  // "could not exercise" is now its own outcome, asserted separately and loudly.
+  const sentinelFor = (name, schema) => {
+    const def = schema?._def?.innerType?._def ?? schema?._def ?? {};
+    if (Array.isArray(def.values) && def.values.length > 0) return def.values[0];
+    if (def.typeName === "ZodBoolean") return true;
+    if (def.typeName === "ZodNumber") return 7;
+    if (/date/i.test(name)) return "2026-03-04";
+    return `Zz ${name}`;
+  };
+
+  const offenders = [];
+  const unexercised = [];
+  let checked = 0;
+  for (const t of registeredTools) {
+    const hits = (t.apiPaths ?? []).filter(([method, path]) => outcomeOps.has(`${method} ${path}`));
+    if (hits.length === 0) continue;
+    checked += 1;
+
+    const args = { tenantId: 2783 };
+    for (const [field, schema] of Object.entries(t.inputSchema ?? {})) {
+      if (field === "tenantId") continue;
+      args[field] = sentinelFor(field, schema);
+    }
+
+    const notes = new Map();
+    const failures = [];
+    for (const outcome of ["deleted", "archived", "reversed"]) {
+      try {
+        const validated = z.object(t.inputSchema).parse(args);
+        const result = await t.handler(validated, {
+          client: {
+            request: async (req) => ({
+              // Only the DELETE answers the envelope; a preflight read gets a plausible record.
+              data:
+                req.method === "DELETE"
+                  ? { outcome }
+                  : { id: 7, name: "Zz", status: "under_process", archived: false },
+              status: 200,
+            }),
+            deepLink: () => "link",
+          },
+          config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+          session: {},
+        });
+        // The NOTE, not the whole text. ok() echoes the response body underneath, and that body
+        // contains the outcome field itself — so comparing full text let the pre-fix version pass:
+        // `{"outcome":"deleted"}` and `{"outcome":"archived"}` differ without the tool having said
+        // anything about either. The prose above the body is where a tool states what happened, and
+        // for a tool that never wrote one it is empty for all three, which is exactly the finding.
+        const text = result.content.find((c) => c.type === "text")?.text ?? "";
+        const bodyStart = text.search(/^[[{]/m);
+        notes.set(outcome, (bodyStart >= 0 ? text.slice(0, bodyStart) : text).trim());
+      } catch (err) {
+        failures.push(`${outcome}: ${err?.message ?? err}`);
+      }
+    }
+
+    if (notes.size < 3) {
+      unexercised.push(`${t.name} — ${failures.join(" | ").slice(0, 200)}`);
+      continue;
+    }
+    // Deleted and archived are the two that mean opposite things for recoverability. If the tool
+    // produces the same text for both, it did not read the outcome.
+    if (notes.get("deleted") === notes.get("archived")) {
+      offenders.push(`${t.name} (${hits.map(([m, p]) => `${m} ${p}`).join(", ")})`);
+    }
+  }
+
+  assert.deepEqual(
+    unexercised,
+    [],
+    "these could not be driven at all, so this test proves nothing about them — fix the harness",
+  );
+  assert.ok(checked >= 8, `expected several curated tools on these endpoints, found ${checked}`);
+  assert.deepEqual(
+    offenders,
+    [],
+    "these call an endpoint that says whether it deleted or archived, and report the same thing either way",
+  );
+});
+
+test("the two tools this audit caught now name the consequence, not just the outcome", () => {
+  // Naming the outcome is half of it. What a caller needs is what the outcome MEANS here, and for
+  // products it is unusually sharp: archived is recoverable-looking and not recoverable, because
+  // products have no unarchive endpoint.
+  const product = tool("reai_delete_product").description;
+  assert.ok(product, "reai_delete_product should exist");
+  for (const pattern of [/deleted or archived/i]) {
+    assert.ok(!pattern.test(product), "the description should no longer hedge between the two");
+  }
+});

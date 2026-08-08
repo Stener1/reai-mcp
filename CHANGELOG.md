@@ -13,6 +13,36 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Two more tools were reporting "deleted or archived" on endpoints that say which.**
+  `reai_delete_product` and `reai_delete_company_bank` returned literally
+  `"deleted or archived (HTTP 200)"`. Both endpoints' 200 is documented as
+  `ApiLifecycleOutcomeRes` — `{outcome: deleted | archived | reversed}` — and **19
+  operations declare it**. This repo had already fixed the same bug five separate times,
+  one endpoint at a time, each found by hand: customers, suppliers, salary runs, expense
+  vouchers, expenses.
+  - The product one is the sharpest of the set. A deleted product is what strands other
+    records permanently — eight orders on the test tenant can never be deleted because the
+    product their lines name was deleted first — and products have **no unarchive
+    endpoint**, so "archived" is the recoverable-looking outcome that is not recoverable.
+    Both tools now say which happened and what it means.
+  - **A spec-driven audit replaces finding these by hand.** `test/archive.test.mjs` now
+    reads every operation whose 2xx schema is the lifecycle envelope, drives every curated
+    tool on one three times — once per outcome value — and requires `deleted` and `archived`
+    to produce different prose. A twentieth endpoint gaining the envelope, or a new tool on
+    any of the nineteen, inherits the requirement.
+  - The audit caught two flaws in itself before it caught anything real, both worth
+    recording. It compared the tool's **whole output**, which includes the echoed response
+    body — and that body contains the outcome field, so the pre-fix version passed for a
+    difference it had no part in producing; it now compares only the note. And it built
+    arguments as `{id}`, so three tools taking `departmentId`, `assetId` and `warehouseId`
+    threw identically and were reported as ignoring the outcome when they were reading it
+    correctly. "Could not exercise" is now its own assertion, because a test that accuses
+    the innocent is worse than no test.
+  - The full-write suite deletes the company bank through the curated tool now rather than
+    `reai_request`, so the fix is exercised live. Its own label had said "deleted or
+    archived" for the same reason the tools did.
+
+
 - **The invoice-delivery gate read only one direction, and the other one was reachable
   through a curated tool.** `invoiceEmail: "attacker@example.com"` escalated to
   `irreversible` and needed `full` mode; `invoiceEmail: ""` on the same endpoint stayed
