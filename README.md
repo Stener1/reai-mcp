@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **156 tools**: 149 curated across twelve accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **163 tools**: 156 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **116 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -420,6 +420,22 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 
 `reference` is also unique per company — another Norwegian-only `400`, explained in English by the tool.
 
+### Share investments
+
+| Tool | What it does | Risk |
+|---|---|---|
+| `reai_list_share_investments` | The portfolio, each position with its derived asset account and current `quantity`/`costPrice` — both computed from its events. `query` filters **locally** | read |
+| `reai_get_share_investment` | One position | read |
+| `reai_list_share_investment_events` | Purchases, sales, dividends, capital repayments and write-downs, with the `voucherId` each one booked | read |
+| `reai_create_share_investment` | Record a position. Posts **nothing** — measured, the voucher count did not move | irreversible |
+| `reai_update_share_investment` | Change the descriptive fields. Reads and merges, because the `PUT` replaces and also requires `instrumentType`, which the spec does not list as required | irreversible |
+| `reai_add_share_investment_event` | **Posts to the ledger** — its own `SH` voucher series | irreversible |
+| `reai_delete_share_investment` | Remove a position that has no events. With any event, the refusal is final | irreversible |
+
+**An opening balance makes the position permanent, and the create tool will not do it by accident.** `openingQuantity`, `openingCostAmount` and `openingDate` look like record fields; they silently create a `PURCHASE` event, and a position with any event can never be deleted — the API refuses, and nothing removes an event. Clearing the fields later does not undo it. So an opening balance requires `acceptPermanentPosition: true`, the only argument here whose job is to make someone stop and think. One position on the write test tenant is unremovable because this was learned in the other order.
+
+**An event posts; the position does not.** Measured: a `DIVIDEND` of 1000 booked `SH1-2026` on accounts 1920 and 8071. There is no `DELETE` for an event, and deleting its voucher answers `{"outcome":"reversed"}` rather than `"deleted"` — offsetting postings are booked, the original stays, and the voucher then vanishes from the voucher list while still reading by id. Net effect zero, trace permanent. The Nordnet bulk import is deliberately **not** curated: one call, an unknown number of postings. All of it: [docs/tools.md](docs/tools.md#share-investments).
+
 **The counterparties live here, not with suppliers.** `creditorId` and `debtorId` appear exactly once each in the whole API document, both on `LoanRes` — nothing else references either — so a creditor is not a payables concept in ReAI, it is one end of a loan. They used to sit in `purchase`, which meant a caller who enabled only `loans` could not create the counterparty its own tools require. **Names are not unique on either side**: two debtors with the same name were created as separate ids, so list before creating and choose by id.
 
 **The three loan writes** — `reai_create_loan`, `reai_update_loan`, `reai_delete_loan` — are `irreversible` even though a loan record posts nothing (measured, the voucher count did not move), because the record is the basis for later interest and repayment postings and the measurement came from a company with no loan history to lose. Everything else in this table is a read or a `reversible` counterparty write, so the loan **reads** are available in every mode.
@@ -432,11 +448,11 @@ Each of these wraps a `PUT` that replaces rather than patches, on a record carry
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count in this README is the default 156, and `REAI_ENABLE_UI=1` registers a 157th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
+It sits outside the default surface rather than inside it — every count in this README is the default 163, and `REAI_ENABLE_UI=1` registers a 164th tool. It is the only view here, and the bar it clears is narrow: the user has to make a selection the agent cannot make for them, over items that are painful to name in prose. It follows the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) shape, writes nothing, makes no external request, and declines to compute a difference it cannot establish. Why nothing else in this API clears that bar: [docs/tools.md](docs/tools.md#the-one-ui-surface).
 
 Anything not listed — projects, timesheets, share investments, documents — is reachable through `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 156 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
+If 163 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only** the groups you want:
 
 ```
 REAI_TOOLSETS=bookkeeping          # 19 tools
@@ -451,10 +467,11 @@ REAI_TOOLSETS=agreements           # 12 tools
 REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
 REAI_TOOLSETS=loans                # 20 tools
-(unset)                            # all 156
+REAI_TOOLSETS=investments          # 14 tools
+(unset)                            # all 163
 ```
 
-Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference` and `loans`; listing all twelve is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
+Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference`, `loans` and `investments`; listing all thirteen is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
 
 ## Configuration
 

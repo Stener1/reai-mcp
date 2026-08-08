@@ -553,6 +553,9 @@ const SHAPES_THE_RESPONSE = {
   "reai_list_currencies: query":
     "filters the returned list locally, since GET /api/currencies accepts no parameters; proven by " +
     "the local-filter test in test/reference.test.mjs",
+  "reai_list_share_investments: query":
+    "filters the returned list locally, since GET /api/share-investments accepts no parameters; proven by " +
+    "the local-filter test in test/investments.test.mjs",
   "reai_list_loans: query":
     "filters the returned list locally, since GET /api/loans accepts no parameters at all; proven by " +
     "the local-filter test in test/loans.test.mjs",

@@ -34,6 +34,36 @@ All notable changes to `reai-mcp`. Format loosely follows
   not a leak in the normal case. It is stuck here because that particular position has an event and cannot
   be deleted, and sub-accounts have no `DELETE` endpoint at all. Recorded as known-unrecoverable with the
   reason, which makes the suite green at 158/0 without hiding anything.
+- **Share investments: seven curated tools, built around the constraints that were measured first.** The
+  domain was recorded as module-disabled and was only empty; the previous entry records the four quirks
+  that came out of driving it. 163 tools across thirteen domains.
+  - **The create tool refuses an opening balance unless the caller says a permanent record is intended.**
+    `openingQuantity`, `openingCostAmount` and `openingDate` look like fields on a record and silently
+    produce a `PURCHASE` event; a position with any event can never be deleted, and nothing removes an
+    event. `acceptPermanentPosition: true` is the only argument on this server whose job is to make
+    someone stop and think, and it exists because one position on the write test tenant is unremovable
+    for exactly this reason. The refusal names both ways forward — create it empty and add the purchase
+    as an explicit event, which is also the only way to give it a settlement account and a fee.
+  - **The position and the event are classified apart** because only one of them posts: creating a
+    position left the voucher count at 0, while a `DIVIDEND` booked `SH1-2026` on 1920/8071. The event
+    tool is `destructive` as well as `irreversible`, reports the `voucherId` it booked, and says
+    *unconfirmed* rather than guessing when the response carries none.
+  - Both Norwegian refusals are translated where they surface: the securities account an event needs
+    (`"Velg verdipapirkontoen transaksjonen ble gjort opp mot."`, on a body the document marks as
+    requiring nothing) and the deletion refusal — which is really about a decision taken at creation, so
+    the message says so and points at the event list. Anything else propagates.
+  - `reai_update_share_investment` reads and merges, because the `PUT` replaces *and* requires
+    `instrumentType`, which the document does not list as required.
+  - **The Nordnet bulk import is deliberately not curated.** One call, an unknown number of events, every
+    one a posting, and every position it touches made permanent. `reai_request` reaches it for anyone who
+    means it, and there is a test recording the decision so it reads as a choice rather than an oversight.
+  - The repository's own guards caught two things before review did: `test/spec-bounds.test.mjs` rejected
+    five argument bounds I had guessed at (the spec caps `name` at 150, `ticker` 20, `isin` 12,
+    `organizationNumber` 9, `assetAccountNumber` 10, and requires `amount` ≥ 0.01), and the read-tool
+    sweep required the local `query` filter to be declared with the test that proves it.
+  - Verified live on tenant 2783 without creating a single event: the opening-balance refusal fires, a
+    position created empty reports itself deletable and deletes, the merge keeps `ticker` through a
+    rename, and the known-permanent record refuses deletion with the reason. Nothing new was left behind.
 
 ### Changed
 
@@ -262,7 +292,7 @@ All notable changes to `reai-mcp`. Format loosely follows
     required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
     omission gate, which named all ten omitted fields.
 
-**156 tools**: 149 across twelve accounting domains, plus 7 always-on.
+**163 tools**: 156 across thirteen accounting domains, plus 7 always-on.
 ### Fixed
 
 - **A whole domain was almost unnameable, and one of its commonest words pointed at the wrong thing.**
