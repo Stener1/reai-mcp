@@ -83,6 +83,30 @@ const EMPLOYEE_ACCOUNT_SPLIT_NOTE =
 
 export const QUIRKS: readonly Quirk[] = [
   {
+    id: "skip-registry-lookup-is-not-a-guarantee",
+    paths: ["/api/customers", "/api/suppliers"],
+    methods: ["POST"],
+    kind: "gotcha",
+    note:
+      "skipRegistryLookup=true keeps the name and address you send for an ORDINARY company, and it is " +
+      "the only way to create one whose organisation number is not registered — without it that " +
+      "request fails with 500 {\"detail\":\"404 : [no body]\"}. It is not a guarantee.\n" +
+      "Measured on 29 organisation numbers, each read back: 16 ignore the flag and overwrite BOTH the " +
+      "name and the address, including an address supplied in the same request. They are the standard " +
+      "billing counterparties — Skatteetaten, Brønnøysundregistrene, Statens vegvesen, Kartverket, " +
+      "Husbanken, DNB, Nordea, SpareBank 1, Telia, Telenor Norge, Elvia, Posten Bring, If, Gjensidige, " +
+      "Circle K, Innkrevingsmyndigheten. Ordinary companies, sole proprietorships, sub-units, " +
+      "unregistered numbers and agencies that do not invoice small companies (NAV, Politidirektoratet, " +
+      "Digdir, Lånekassen) all respect it. Telenor is the clean pair: the holding company 982463718 " +
+      "respects the flag, the billing entity 976967631 does not.\n" +
+      "The override is NOT the Brønnøysund registry, and an earlier version of this note said it was. " +
+      "It comes from a ReAI-maintained directory, and that directory is STALE: 971648198 comes back as " +
+      "\"Statens Innkrevingssentral\" (a superseded name), 920058817 as \"First Card (nor)\" (not a " +
+      "registry name at all), and 976967631 with postcode 7900 Rørvik where the registry says 1331 " +
+      "Fornebu. So a record can be created carrying a wrong address with a 201 and no warning, which is " +
+      "why the name or address has to be read back rather than assumed.",
+  },
+  {
     id: "customer-duplicate-org-number-reported-as-name",
     paths: ["/api/customers"],
     methods: ["POST"],
@@ -585,7 +609,9 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "gotcha",
     note:
       "A Norwegian company is looked up in Brønnøysundregistrene from organizationNumber and its " +
-      "name and address are filled in for you. Pass skipRegistryLookup to use exactly what you sent.",
+      "name and address are filled in for you. skipRegistryLookup opts out of that — but only for an " +
+      "ORDINARY company: see skip-registry-lookup-is-not-a-guarantee, which is about this same " +
+      "operation and lists the sixteen counterparties that overwrite you regardless.",
   },
   {
     id: "subscription-read-and-write-shapes-differ",

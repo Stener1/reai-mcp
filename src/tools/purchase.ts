@@ -18,6 +18,7 @@ import {
   mergeForReplacement,
   readableRecord,
   PHONE_RULE,
+  SKIP_REGISTRY_LOOKUP_RULE,
 } from "./registry.js";
 
 /**
@@ -133,7 +134,7 @@ const createSupplier = defineTool({
     skipRegistryLookup: z
       .boolean()
       .optional()
-      .describe("Skip the Brønnøysund lookup and use exactly the details supplied."),
+      .describe(SKIP_REGISTRY_LOOKUP_RULE),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {

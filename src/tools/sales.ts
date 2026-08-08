@@ -16,6 +16,7 @@ import {
   requiredName,
   okText,
   PHONE_RULE,
+  SKIP_REGISTRY_LOOKUP_RULE,
 } from "./registry.js";
 import { ReaiApiError } from "../reai/errors.js";
 
@@ -122,8 +123,9 @@ const createCustomer = defineTool({
     "Create a customer. Two kinds exist: set privateContact=true for a private individual, " +
     "otherwise a company is created and a Norwegian company requires a valid organizationNumber. " +
     "ReAI looks the company up in Brønnøysundregistrene from the organizationNumber and fills in " +
-    "the address — pass skipRegistryLookup to opt out. Two things about that lookup are worth " +
-    "knowing, both measured against the live API rather than inferred:\n" +
+    "the address — pass skipRegistryLookup to opt out, though that flag is not a guarantee (see its " +
+    "own description). Two things about that lookup are worth knowing, both measured against the " +
+    "live API rather than inferred:\n" +
     "  - A name is still REQUIRED. An empty one is refused with \"name is required\" even when a " +
     "valid organizationNumber is supplied, so \"the org number alone is enough\" — which this " +
     "description used to claim — does not work.\n" +
@@ -176,7 +178,7 @@ const createCustomer = defineTool({
     skipRegistryLookup: z
       .boolean()
       .optional()
-      .describe("Skip the Brønnøysund lookup and use exactly the details supplied."),
+      .describe(SKIP_REGISTRY_LOOKUP_RULE),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
