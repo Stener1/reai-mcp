@@ -189,6 +189,29 @@ All notable changes to `reai-mcp`. Format loosely follows
   `.gitignore` now covers the path, and there is a guard on the mode: this repository has no
   submodules, so any gitlink is an accident, and the test also asserts the `.gitignore` rule still
   exists rather than waiting for the next `git add -A` to find out.
+- **A tool description told agents, twice, to use a tool that does not exist.**
+  `reai_get_bank_reconciliation` said that for a `providerType: 'manual'` account this endpoint is
+  not the working view and to *"use `reai_list_bank_transactions` instead"* — once in the
+  description, once in the runtime note it attaches to a suspicious reading. There is no
+  `reai_list_bank_transactions` and there never was. This is a worse failure than an undocumented
+  quirk: an agent that follows the instruction gets "unknown tool" and cannot tell whether the tool
+  was removed, hidden by the operator's toolset selection, or imaginary — so it has no next move,
+  where a missing sentence would at least have left it exploring. Both now point at what actually
+  works for a manual account, `reai_request` on `/api/manual-reconciliations/{bankAccountId}`, which
+  is what `reai_get_bank_reconciliation`'s own description and the
+  `manual-reconciliation-404-means-not-manual-not-missing` quirk already said, and the runtime note
+  names `reai_list_company_banks` as the way to check `providerType` in the first place.
+  - Guarded generally, because a name is exactly the kind of error review does not catch — it reads
+    like an ordinary instruction. `test/tool-names.test.mjs` requires every `reai_`-prefixed token
+    in **all** of `src/` and in README plus `docs/` to be a registered tool. Not a list of surfaces
+    to keep extending: one regex over the source, so descriptions, titles, quirk notes, the
+    connect-time instructions and error strings are covered by construction. A census at the time
+    found this was the only one, across 146 tools, 105 quirk notes and seven documentation pages.
+    Mutation-verified by putting the dead name back, and the file carries a third test that fails if
+    the scan itself stops seeing anything.
+  - Also in `ui.ts`: its module doc reasoned about "another surface to keep in step with 63 tools".
+    That was true when written and is now under half the real number. Rewritten to make the point
+    without a count, since a number in a comment that nothing checks is a fact with an expiry date.
 
 - **The most consequential decision in remote mode had nothing testing it.** A grant is sealed at
   authorization time — unforgeable, but minted then and refreshable for weeks — while the operator's
