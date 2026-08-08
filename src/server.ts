@@ -27,6 +27,7 @@ import { expenseTools } from "./tools/expenses.js";
 import { leadTools } from "./tools/leads.js";
 import { salaryTools } from "./tools/salary.js";
 import { referenceTools } from "./tools/reference.js";
+import { loanTools } from "./tools/loans.js";
 import { subAccountTools } from "./tools/subaccounts.js";
 
 export const SERVER_NAME = "reai-mcp";
@@ -49,6 +50,7 @@ export const TOOL_GROUPS: Record<string, ToolDef[]> = {
   agreements: agreementTools,
   salary: salaryTools,
   reference: referenceTools,
+  loans: loanTools,
 };
 
 export const alwaysOnTools: ToolDef[] = [...metaTools, ...discoveryTools];

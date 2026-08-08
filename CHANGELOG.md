@@ -9,7 +9,54 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ## Unreleased
 
-**145 tools**: 138 across eleven accounting domains, plus 7 always-on.
+### Added
+
+- **Loans: five curated tools, and four constraints the spec does not state.** `/api/loans` had no
+  curated coverage and was listed as blocked on "no data" — both test companies have zero loans. With
+  a write tenant available the domain could be *measured* instead of guessed, which is the only way any
+  of this was findable.
+  - **`perspective` decides which table `counterpartyId` is read from.** The spec types it
+    `integer/int32` and stops. Measured: `borrower` resolves it against **creditors** and answers
+    `404 "Creditor with id=N not found"`, `lender` against **debtors** with `"Debtor with id=N not
+    found"`. So flipping `perspective` silently changes what an unchanged id means — `reai_update_loan`
+    refuses that edit unless a `counterpartyId` comes with it. The response then renames the field
+    again, to `creditorId` or `debtorId`.
+  - **`loanType` and `perspective` are constrained pairs**, and a wrong pair answers
+    `400 "Lånetypen er ikke gyldig for valgt låneperspektiv"` — a Norwegian sentence about an
+    undocumented rule. All twelve combinations measured: `bank_loan` and `owner_loan_to_company` are
+    borrower-only, `company_loan_to_owner` and `company_loan_to_employee` lender-only, `intercompany`
+    and `other` either. `reai_create_loan` refuses locally and says which direction the type means.
+    Worth noting the counterparty is looked up *first*, so a bad id hides the pair error entirely —
+    which is why an earlier probe of the same matrix read as all-valid and had to be redone.
+  - **`reference` is unique per company**, also Norwegian-only:
+    `400 "Lån med referanse X finnes allerede."` Translated, with a pointer at `reai_list_loans`.
+  - **The ledger accounts are derived once and cleared by omission.** Leave them out at creation and
+    the API wires up the standard Norwegian accounts from `loanType` and `perspective` — 2220/8150/2950
+    for a borrower bank loan, 1370/8050/1760 for a company loan to the owner, and the full matrix is in
+    the module doc. But `PUT` treats them like any other field: omitting
+    `interestExpenseAccountNumber` and `accruedInterestAccountNumber` clears them, nothing re-derives
+    them, and the loan is then self-contradictory with no response saying so.
+    `principalAccountNumber` survives omission, so checking one field proves nothing about the others.
+  - That last one was **first written up as a consequence of switching `interestTreatment` to
+    `capitalize`**, because that is when it was first seen. Re-measuring with the treatment held
+    constant corrected it: omission is the cause and the treatment is irrelevant — carrying the
+    accounts through a `capitalize` switch keeps them. The wrong version had already reached the module
+    doc, the README and `docs/tools.md` before the second measurement.
+  - `relatedParty` is never inferred: it stayed `false` on a `company_loan_to_owner` with everything
+    else set. `reai_create_loan` sets it for owner, employee and intercompany loans unless told
+    otherwise, and says that it did.
+  - Classified `irreversible`, matching the existing policy tier for `/api/loans`, even though the
+    measurement points the other way — creating a loan posted **nothing** (voucher count 0 before and
+    after) and `DELETE` answers 204 then 404. Not relaxed: the measurement came from a company with no
+    loan history, says nothing about deleting a loan with repayments against it, and the record is the
+    basis for postings rather than reference data. The two reads are unaffected.
+  - Two new quirks (108 total) so the escape hatch warns as well, and both hazards were verified live
+    through the real tools: the direction rule and duplicate reference are refused before anything is
+    sent, a partial edit keeps all nine untouched fields, and reaching the unwired state at all
+    required `reai_request` with `clearOmittedFields: true` — the ordinary path is refused by the
+    omission gate, which named all ten omitted fields.
+
+**150 tools**: 143 across twelve accounting domains, plus 7 always-on.
 
 ### Added
 

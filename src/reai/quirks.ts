@@ -1518,6 +1518,50 @@ export const QUIRKS: readonly Quirk[] = [
       "a repeated key. This server handles that for you.",
   },
   {
+    id: "loan-type-and-perspective-are-constrained-pairs",
+    paths: ["/api/loans", "/api/loans/{id}"],
+    methods: ["POST", "PUT"],
+    statuses: [400],
+    kind: "validation",
+    note:
+      "loanType and perspective are not independent, and the refusal is a Norwegian sentence about a " +
+      'rule nothing documents: 400 "Lånetypen er ikke gyldig for valgt låneperspektiv". Four of the ' +
+      "six types are direction-locked, because the name already states the direction. Measured, all " +
+      "twelve combinations, on tenant 2783:\n\n" +
+      "  bank_loan                 borrower only\n" +
+      "  owner_loan_to_company     borrower only\n" +
+      "  company_loan_to_owner     lender only\n" +
+      "  company_loan_to_employee  lender only\n" +
+      "  intercompany              either\n" +
+      "  other                     either\n\n" +
+      "The counterparty is looked up BEFORE this check, so a bad counterpartyId hides it: a wrong id " +
+      "answers 404 first and the pair error only appears once the id is real.\n\n" +
+      "`reference` is unique per company as well, and says so in Norwegian too: " +
+      '400 "Lån med referanse X finnes allerede." reai_create_loan checks the pair locally and ' +
+      "translates both.",
+  },
+  {
+    id: "loan-interest-accounts-are-cleared-by-omission",
+    paths: ["/api/loans/{id}"],
+    methods: ["PUT"],
+    kind: "irreversible",
+    note:
+      "This PUT replaces, and the LEDGER ACCOUNTS are part of what it replaces. Omitting " +
+      "interestExpenseAccountNumber and accruedInterestAccountNumber clears them — measured with " +
+      "interestTreatment held constant, so it is the omission and nothing else: 8150 and 2950 both " +
+      "became null. Nothing re-derives them; the API derives the accounts once, at creation, from " +
+      "loanType and perspective. The loan is then self-contradictory (a treatment that posts interest, " +
+      "with no account to post it to) and no response says so.\n\n" +
+      "principalAccountNumber is the EXCEPTION and survives omission, which is what makes this easy to " +
+      "miss: check that one field and the record looks intact.\n\n" +
+      "Worth knowing what this is NOT. It was first recorded here as a consequence of switching " +
+      "interestTreatment to capitalize, because that is when it was first seen. Re-measured: carrying " +
+      "the accounts through a switch to capitalize keeps them, and omitting them clears them with the " +
+      "treatment untouched. The treatment is irrelevant.\n\n" +
+      "reai_update_loan reads the loan and merges, so it cannot cause this. Use it, or send every " +
+      "account number on every PUT.",
+  },
+  {
     id: "expense-voucher-unlink-is-broken-upstream",
     // Both endpoints, because the note is about both: the same 409 comes back from the plain expense
     // delete, which is the operation `reai_reverse_expense` actually sends. Registering only the
