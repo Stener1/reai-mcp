@@ -182,8 +182,8 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
         const tokens = fieldTokens(text);
         let contribution = 0;
         if (rawTerms.length > 1 && text.includes(phrase)) contribution += weight * 3;
-        for (const { term, weight: termWeight } of terms) {
-          const strength = matchStrength(text, tokens, term);
+        for (const { term, weight: termWeight, fromPhrase } of terms) {
+          const strength = matchStrength(text, tokens, term, fromPhrase);
           if (strength === 0) continue;
           contribution += weight * strength * termWeight;
           // A 0.2 bare-substring hit is noise and must not buy the coverage
@@ -960,12 +960,93 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // became "a" + "melding", and `melding` maps to return/returns — so the payroll filing that goes
   // to Skatteetaten ranked the TAX RETURN first. Measured; it is the sharpest instance because the
   // two are different filings to the same authority.
-  // "salary-payments complete" and NOT "amelding": the literal word only matches
-  // GET /amelding/{id}/feedback-raw, which reads a submission's raw feedback rather than filing
-  // one, and it took the top slot away from the operation that does the filing.
-  [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments complete"],
+  // NOT "amelding": the literal word only matches GET /amelding/{id}/feedback-raw, which reads a
+  // submission's raw feedback rather than filing one, and it took the top slot away from the operation
+  // that does the filing.
+  //
+  // "salary-payments-complete complete" -- the hyphenated term names the exact nested operation, and the
+  // bare word stays because it is what discriminates. Once hyphenated terms began matching as tokens,
+  // "salary-payments" scored 1 against the whole family and the COLLECTION overtook the filing, which is
+  // the inversion this entry exists to prevent. Measured, all four candidates:
+  //
+  // Measured three times, and the numbers moved under me twice, so the whole sequence is recorded rather than
+  // just the answer. First round, before hyphenated terms were made all-or-nothing:
+  //
+  //     salary-payments complete            collection 40.40, filing 33.70   inverted
+  //     salary-payments-complete            collection 22.34, filing 13.68   inverted
+  //     salary-payments-complete complete   filing 30.99, collection 22.34   correct, by 8.65
+  //
+  // So "salary-payments-complete complete" was chosen. Then a 15,472-query sweep — the first one to cross the
+  // synonym table's own keys with domain nouns — showed that pair was far too strong: THIRTY-THREE queries
+  // like "amelding lonn", "amelding ansatt" and "apne amelding" moved from GET /api/salary-payments to the
+  // POST that files payroll with Skatteetaten. None of them asks to file anything, and "a question with no
+  // stated intent must not rank a write first" is a property this file is otherwise careful about.
+  //
+  // Re-measured after all-or-nothing, which changed the answer: the collection now scores 0 against
+  // "salary-payments-complete" rather than 0.6, because it has no "complete" segment. It cannot compete at
+  // all, so the single term suffices and the extra bare word — which was what swamped the compounds — is
+  // gone. That is a stronger guarantee than the margin it replaces, and it needs no second word to hold.
+  //
+  // For the record, since the first version of this comment made a point of it: on the OLD scoring the filing
+  // led the collection by 0.28 points, 26.12 to 25.84. A property deciding which document gets filed with a
+  // tax authority was resting on a quarter of a point, whatever else is true.
+  // BEFORE the filing rule below, because matched phrases are consumed in table order and the specific
+  // reading has to win. Codex found on PR #120 that the filing rule fires unconditionally: "a-melding raw
+  // feedback" ranked GET /amelding/{id}/feedback-raw on main and POST /api/salary-payments/{id}/complete on
+  // this branch, and "get a-melding feedback" and "list a-melding feedback" did the same. A query asking to
+  // READ a submission's feedback was answered with the operation that FILES payroll with Skatteetaten. That
+  // is the worst shape of wrong answer this table can produce, and the filing rule's own comment is about
+  // avoiding exactly it in the other direction.
+  //
+  // /amelding/{id}/feedback-raw is the only amelding operation there is, so naming both words is unambiguous.
+  // Both orders, and Norwegian `tilbakemelding` as well as the English.
+  [
+    /\b(a[-\s]?melding\w*\s+(raw\s+)?(feedback|tilbakemelding)\w*|(raw\s+)?(feedback|tilbakemelding)\w*\s+(for\s+|pa\s+|på\s+)?a[-\s]?melding\w*)\b/g,
+    "amelding-feedback-raw",
+  ],
+  // A READ VERB keeps it a read, and this rule sits between the feedback rule and the filing rule because all
+  // three are consumed in order: feedback is most specific, then an explicit read, then the bare noun.
+  //
+  // Two things pushed this in. The 15,533-query sweep showed "apne a-melding" moving from
+  // GET /api/salary-payments to the POST that files payroll, and asking to OPEN something must never file it.
+  // And the same sweep showed that "vis amelding", "list amelding" and "hent amelding" already answered with
+  // that POST on `main` — a pre-existing defect no test had caught, because no sweep had ever crossed a read
+  // verb with this phrase. Both are fixed by the same rule.
+  //
+  // `lever`, `send`, `fullfor` and `submit` are deliberately absent: those state filing intent, and for them
+  // the filing below is the right answer.
+  [/\b(vis|se|list|hent|apne|apn|open|show|get)\s+(a[-\s]?melding\w*)\b/g, "salary-payments"],
+  [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],
   [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
   [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
+  // "bank account" is the English for what Norwegian writes as one word, and the two spellings behaved
+  // completely differently. `bankkonto` reached /api/company-banks through compound decomposition, but the
+  // spaced form tokenised into `bank` + `account`, and `account` pulled the CHART OF ACCOUNTS: "bank
+  // accounts" and "our bank accounts" returned GET /api/chart-of-accounts/accounts and no company-bank
+  // operation at all, on main, before any of this. A ledger account and a bank account are different things.
+  // Consumed, which is the whole point -- annotating would leave `account` in the text to go on scoring the
+  // chart. Narrow enough not to touch "bank transactions" or "bank reconciliations", which name other
+  // resources and must keep reaching them.
+  // ORDER MATTERS in the three rules below, and it is doing the work a lookahead would do badly. Codex found
+  // on PR #120 that "bank account transactions" and "transactions between bank accounts" both ranked
+  // GET /api/bank-transactions/{id} on main and GET /api/company-banks here, because the bank-account rule
+  // matched inside the longer noun phrase and consumed the words the transaction rule needed. Naming the
+  // compound explicitly, in both word orders, is more honest than trying to express "unless another resource
+  // noun is present" as a lookahead.
+  [
+    /\b(bank\s+account\s+transactions?|transactions?\s+(between\s+|on\s+|for\s+|from\s+)?bank\s+accounts?)\b/g,
+    "bank-transactions",
+  ],
+  [/\bbank\s+transactions?\b/g, "bank-transactions"],
+  [/\bbank\s+accounts?\b/g, "company-banks"],
+  // /api/manual-reconciliations is a DIFFERENT resource, so it is claimed FIRST rather than excluded by a
+  // lookbehind. The lookbehind version recognised only exactly one whitespace character while the phrase it
+  // guarded accepted any run of them, so "manual  bank reconciliation" with two spaces, a tab, or
+  // "manual-bank reconciliation" all slipped past it and landed on /api/bank-reconciliations while the
+  // single-space form routed correctly — Codex, PR #120. Consuming the specific phrase first cannot drift
+  // out of step with the general one that way, and it covers the Norwegian `manuell`/`manuelle` too.
+  [/\b(manual|manuell|manuelle)[\s-]+bank\s+reconciliations?\b/g, "manual-reconciliations"],
+  [/\bbank\s+reconciliations?\b/g, "bank-reconciliations"],
 ];
 
 const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
@@ -999,6 +1080,13 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   employees: ["employee"],
   department: ["department"],
   reminder: ["reminders", "dunning"],
+  // Kept as the pair, after measuring the alternative. `bank` is ITSELF a token of /api/company-banks, so
+  // once hyphenated terms began matching properly the two values double-counted and company-banks started
+  // beating resources the query named outright. Dropping "company-banks" fixed that and cost far more than
+  // it bought: every `<verb> bank` query -- "vis bank", "list bank", "get bank", "hent bank", "opprett bank"
+  // -- left /api/company-banks, 18 plausible queries regressed to buy 9. The fix belongs on the other side,
+  // in PHRASE_SYNONYMS, where each of the three bank resources now asserts its own spaced English spelling
+  // at PHRASE_WEIGHT so this generic synonym cannot override a resource the user named.
   bank: ["bank", "company-banks"],
   melding: ["return", "returns"],
   owes: ["ledger", "unpaid", "customer"],
@@ -1535,7 +1623,10 @@ const NORWEGIAN_COMPOUND_STEMS: readonly string[] = [
  * weight. Returns resource terms and verb terms separately so coverage can be
  * measured over the ones that actually identify an endpoint.
  */
-function expandQuery(query: string): { terms: Array<{ term: string; weight: number }>; resourceCount: number } {
+function expandQuery(query: string): {
+  terms: Array<{ term: string; weight: number; fromPhrase: boolean }>;
+  resourceCount: number;
+} {
   const text = query.toLowerCase();
   // A phrase mapping is a deliberate, high-confidence statement that a user's
   // words mean a particular resource ("recurring monthly invoice" -> subscription),
@@ -1562,8 +1653,8 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
     pattern.lastIndex = 0;
   }
 
-  const terms: Array<{ term: string; weight: number }> = [];
-  const byTerm = new Map<string, { term: string; weight: number }>();
+  const terms: Array<{ term: string; weight: number; fromPhrase: boolean }> = [];
+  const byTerm = new Map<string, { term: string; weight: number; fromPhrase: boolean }>();
   /**
    * Record a term, keeping the HIGHEST weight any source gives it.
    *
@@ -1574,19 +1665,22 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
    * "faktura fakturagebyr" stayed first. Fourteen of forty-five two-word Norwegian queries
    * flipped on ordering alone, none of which did before the compound pass existed.
    */
-  const push = (term: string, weight: number) => {
+  const push = (term: string, weight: number, fromPhrase = false) => {
     if (term.length < 2) return;
     const existing = byTerm.get(term);
     if (existing === undefined) {
-      const entry = { term, weight };
+      const entry = { term, weight, fromPhrase };
       byTerm.set(term, entry);
       terms.push(entry);
       return;
     }
     if (weight > existing.weight) existing.weight = weight;
+    // ORed, not overwritten. The same string can arrive from a phrase replacement and from a plain token, and
+    // if a phrase asserted it then it is an exact compound regardless of what else also mentioned it.
+    if (fromPhrase) existing.fromPhrase = true;
   };
 
-  for (const term of phraseTerms) push(term, PHRASE_WEIGHT);
+  for (const term of phraseTerms) push(term, PHRASE_WEIGHT, true);
   for (const token of tokenize(remaining)) {
     const isVerb = VERB_TERMS.has(token);
     const weight = isVerb ? VERB_WEIGHT : 1;
@@ -1623,8 +1717,56 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
  * which is how a receipt-registration endpoint beat `/api/employees`. Ranking a
  * whole-word hit above a fragment is what separates the two.
  */
-export function matchStrength(haystack: string, haystackTokens: ReadonlySet<string>, term: string): number {
+export function matchStrength(
+  haystack: string,
+  haystackTokens: ReadonlySet<string>,
+  term: string,
+  exactCompound = false,
+): number {
   if (haystackTokens.has(term)) return 1;
+  // A HYPHENATED term can never be a token, because FIELD_TOKENS splits on the hyphen. Every such term was
+  // therefore scoring as a fraction of itself, and unevenly — which is what made PHRASE_WEIGHT largely
+  // illusory:
+  //
+  //     vat-returns       0.2   bare substring: "vat" is 3 chars, so the >=4 prefix branch cannot fire
+  //     vat-codes         0.2   same
+  //     opening-balances  0.6   "opening" is >=4, so it caught the prefix branch by luck
+  //     salary-payments   0.6   same
+  //
+  // Measured consequence, and the reason this is a correctness fix rather than tuning: "mva-melding" maps
+  // through PHRASE_SYNONYMS to "vat-returns" at weight 2.6 and scored POST /api/vat-returns at 1.45, while
+  // the single synonym `periodisering -> voucher` scored GET /api/vouchers at 21. So "periodisering av
+  // mva-melding" returned ten voucher operations and NOTHING from the family the query names outright.
+  // Codex found that on PR #118 and proposed weakening the voucher synonym; the named resource being
+  // unable to score was the actual cause.
+  //
+  // All parts present, rather than adjacency: the parts of these terms are path segments, and requiring
+  // every one of them is already specific enough that "vat-returns" does not match /api/vat-codes — where
+  // the old 0.2 substring rule was happy to give it partial credit on any path containing the raw string.
+  // ALL OR NOTHING for a hyphenated term, deliberately: it either names this operation's compound or it does
+  // not. Letting one fall through to the prefix and substring branches below is what leaked a term onto a
+  // SIBLING resource — "bank-transactions" scored 0.6 against /api/company-banks purely because `bank` is a
+  // token there and the term starts with it. With write intent narrowing candidates to one method and
+  // /api/bank-transactions having no DELETE at all, that fraction was enough to make "delete bank
+  // transactions" answer DELETE /api/company-banks/{id}: an offer to delete a bank ACCOUNT, first result, for
+  // a query about transactions. Measured on this branch before this clause existed, so it is a regression
+  // this change would have introduced rather than one it inherited.
+  // OPT-IN, not global, and that distinction is the whole finding of Codex's review of PR #120. Applying this
+  // to every hyphenated term promoted the ordinary TERM_SYNONYMS values too, which were written and tuned
+  // under the old scoring, and it moved three of them onto the wrong operation:
+  //
+  //   krediter faktura   POST /api/invoices/{id}/credit  ->  .../manual-credit-note-applications
+  //                      `krediter -> credit-note` matched the path that APPLIES an existing credit note at
+  //                      1, while the one that CREATES the requested one has no "note" segment and scored 0.
+  //   opprett diett      POST /api/expenses  ->  POST /api/expenses/{id}/approve
+  //                      `diett -> per-diem` promoted approving an existing claim over creating one.
+  //
+  // A PHRASE_SYNONYMS replacement is a deliberate high-confidence statement about the user's words and is
+  // what this rule exists for. An ordinary synonym is a hint, and a hint must not name an exact compound.
+  if (exactCompound && term.includes("-")) {
+    const parts = term.split("-").filter((p) => p.length > 1);
+    if (parts.length > 1) return parts.every((p) => haystackTokens.has(p)) ? 1 : 0;
+  }
   for (const token of haystackTokens) {
     // Plural and inflected forms: "department" in "departments". Restricted to
     // reasonably long terms so short fragments do not sweep up everything.
