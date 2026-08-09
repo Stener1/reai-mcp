@@ -1545,14 +1545,18 @@ const updateOffer = defineTool({
       ),
     );
 
-    // Nulls are carried EXPLICITLY rather than dropped. Behaviourally it makes no difference — every field
-    // here is nullable in OfferReq, so on a full replacement an omitted nullable field and an explicit null
-    // land the same way. It matters for a different reason: `omittedReplacementFields` counts a dropped null
-    // as an omission, and this tool's whole claim to running in the DEFAULT write mode is that its body omits
-    // nothing that gate names. Dropping a null `projectId` was enough to break that, so the body states every
-    // field the record has, null included, and the claim is asserted in test/update-offer.test.mjs.
+    // EVERY carryable field, UNCONDITIONALLY, with an absent one stated as null.
+    //
+    // Two rejected versions, and the reason is the same both times. This tool's whole claim to running in the
+    // DEFAULT write mode is that its body omits nothing `omittedReplacementFields` names — a `reversible` tool
+    // that omitted such a field would be the soft route around the gate the raw PUT is subject to, which is
+    // exactly what reai_update_order was corrected for. Filtering out nulls broke it: a null `projectId` was
+    // dropped and the gate named it. Filtering on `Object.hasOwn` broke it more quietly, because it depends on
+    // the RESPONSE's shape rather than this tool's — measured, a response omitting `email` produced a body
+    // omitting `email`. Every field here is nullable in OfferReq, so null is the correct way to say "the
+    // record has no value", and stating all of them makes completeness independent of what the GET returns.
     const carried = Object.fromEntries(
-      OFFER_CARRIED_FIELDS.filter((f) => Object.hasOwn(offer, f)).map((f) => [f, offer[f]]),
+      OFFER_CARRIED_FIELDS.map((f) => [f, offer[f] === undefined ? null : offer[f]]),
     );
 
     const body: Record<string, unknown> = {

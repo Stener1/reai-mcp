@@ -179,3 +179,31 @@ test("the lost-update window is disclosed", () => {
   assert.match(tool().description, /lost-update|between the read and the write/i);
   assert.match(tool().description, /ETag|If-Match|version field/);
 });
+
+test("the body omits nothing even when the RESPONSE omits keys", async () => {
+  // The tier claim must depend on this tool's shape, not the API's. Filtering the carry on Object.hasOwn made
+  // it depend on the response: measured, a GET omitting `email` produced a body omitting `email`, and the
+  // omission gate names that — which is the soft-route mistake reai_update_order was corrected for. Absent
+  // keys are now stated as null, which every carried field accepts.
+  const op = findOperation("PUT", "/api/offers/{id}");
+  const shapes = [
+    ["all keys present", offer()],
+    ["email absent", (() => { const o = offer(); delete o.email; return o; })()],
+    ["deliveryAddress absent", (() => { const o = offer(); delete o.deliveryAddress; return o; })()],
+    ["every optional absent", (() => {
+      const o = offer();
+      for (const f of ["projectId", "issueDate", "comment", "internalComment", "email", "deliveryAddress"]) delete o[f];
+      return o;
+    })()],
+  ];
+  for (const [label, response] of shapes) {
+    const { calls } = await run({ id: 81, daysUntilDue: 30 }, () => response);
+    const put = calls.find((c) => c.method === "PUT");
+    assert.ok(put, `${label}: no PUT was issued`);
+    assert.deepEqual(
+      omittedReplacementFields(op, put.body).fields,
+      [],
+      `${label}: the body omitted a field the replacement-omission gate names`,
+    );
+  }
+});
