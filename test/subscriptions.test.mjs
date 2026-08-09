@@ -596,3 +596,83 @@ test("the refusals with no coverage: nothing given, and a required field nowhere
   assert.deepEqual(incomplete.calls.map((c) => c.method), ["GET"]);
   assert.match(incomplete.text, /requires/);
 });
+
+/**
+ * The arming report used to be computed from `merged` — what was SENT — and the worst consequence was not a
+ * wrong sentence but a MISSING one: a caller who sent `sendEhf: false` to stop an unattended invoicing
+ * machine, and had it discarded, got no note at all, and the absence of a warning reads as confirmation.
+ *
+ * Not measured against the live API, deliberately: subscriptions are created ACTIVE, so a throwaway one on a
+ * real company could generate an invoice, and the only subscription on the test tenant is a real one. So the
+ * tool does not claim to know whether the API discards a disarming value — it reports the response, warns on
+ * disagreement, and says when the response cannot answer. These tests pin all three.
+ */
+const armed = (over = {}) => ({
+  ...subscription({ outputMode: "create_invoice", automaticBillingGeneration: true, sendEhf: true }),
+  billingTiming: "in_advance",
+  currencyCode: "NOK",
+  startDate: "2026-01-01",
+  lines: [{ itemName: "x", quantity: 1, unitPrice: 5, vatCode: "0" }],
+  ...over,
+});
+
+async function updateArmed(args, before, after) {
+  const calls = [];
+  const queue = [{ data: before, status: 200 }, { data: after, status: 200 }];
+  const result = await tool("reai_update_subscription").handler(
+    { tenantId: 2783, ...args },
+    {
+      client: {
+        request: async (req) => { calls.push(req); return queue.shift(); },
+        deepLink: () => "link",
+      },
+      // allowExternalSend true, so the transmit gate does not pre-empt the reporting under test.
+      config: { writeMode: "full", tenantId: 2783, allowExternalSend: true },
+      session: {},
+    },
+  );
+  return { calls, result, text: result.content.find((c) => c.type === "text").text };
+}
+
+test("a disarming the API discarded is WARNED about, not passed over in silence", async () => {
+  const { text } = await updateArmed({ id: 4, sendEhf: false }, armed(), armed());
+  assert.match(text, /WARNING: you asked to turn off sendEhf/);
+  assert.match(text, /STILL SET/);
+  assert.match(text, /unattended billing this guards is not stopped/);
+  assert.match(text, /reai_deactivate_subscription/, "the way to actually stop it is named");
+  // And the armed list must reflect the RESPONSE, which still says sendEhf. Computing it from what was sent
+  // would drop it here — the original bug — while the warning above happened to still fire.
+  assert.match(text, /Still armed:[^\n]*sendEhf/, "the response says it is armed, so the list must say so");
+});
+
+test("a disarming the API honoured is not warned about, and drops out of the armed list", async () => {
+  const { text } = await updateArmed({ id: 4, sendEhf: false }, armed(), armed({ sendEhf: false }));
+  assert.doesNotMatch(text, /WARNING/);
+  assert.match(text, /Still armed: outputMode="create_invoice", automaticBillingGeneration, confirmed/);
+  assert.doesNotMatch(text, /Still armed:[^\n]*sendEhf/, "sendEhf must not be listed as still armed");
+});
+
+test("arming by this edit is not reported as something carried over", async () => {
+  // The old text said "This edit did not change that — it carries over what was already set" even when the
+  // caller had just armed it.
+  const { text } = await updateArmed({ id: 4, sendEhf: true }, armed({ sendEhf: false }), armed());
+  assert.match(text, /sendEhf was armed BY THIS EDIT, not carried over/);
+  assert.doesNotMatch(text, /This edit did not change that/);
+});
+
+test("a response that omits the arming fields says so rather than implying disarmed", async () => {
+  const { text } = await updateArmed({ id: 4, intervalMonths: 3 }, armed(), { id: 4, active: true, lines: [] });
+  assert.match(text, /did not carry outputMode, automaticBillingGeneration, sendEhf/);
+  assert.match(text, /could not be confirmed/);
+  assert.match(text, /sendEhf=true/, "it must name what was sent");
+  assert.doesNotMatch(text, /Still armed/, "an unconfirmable state is not a confirmed one");
+});
+
+test("the arming flags are read with the coercion-tolerant predicates, not === true", async () => {
+  // The backend coerces "true" and 1. A flag that arms a send is the last place to be strict about spelling,
+  // and this repo has a recorded case of `{"sendEhf": "true"}` arming a send the policy scored as harmless.
+  for (const value of ["true", 1, "yes"]) {
+    const { text } = await updateArmed({ id: 4, intervalMonths: 3 }, armed(), armed({ sendEhf: value }));
+    assert.match(text, /Still armed:[^\n]*sendEhf/, `sendEhf=${JSON.stringify(value)} must count as armed`);
+  }
+});

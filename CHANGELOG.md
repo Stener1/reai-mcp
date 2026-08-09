@@ -80,6 +80,32 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`reai_update_subscription` reported the arming flags from what it SENT, and silence meant disarmed.** The
+  worst of the five request-sourced outcome reports #141's review found, and named there as the one to fix
+  next: `outputMode`, `automaticBillingGeneration` and `sendEhf` were read off `merged`, so a caller who sent
+  `sendEhf: false` to stop an unattended invoicing machine and had it discarded got **no note at all** — and
+  the absence of a warning reads as confirmation that the machine is stopped.
+  - Three defects, not one. It could announce an arming the API had not stored; it said *"This edit did not
+    change that — it carries over what was already set"* even when the caller had just armed it; and the
+    missing-note case above.
+  - Now read from the response. A disarming the response contradicts is **warned** about by name, and points
+    at `reai_deactivate_subscription` for the case where the intent was to stop it billing at all. An arming
+    the caller performed is reported as *"armed BY THIS EDIT, not carried over"*. A response that does not
+    carry the fields says the state could not be confirmed and names what was sent, rather than falling silent.
+  - The flags are read with `bindsToCreateInvoice` and `bindsToTrue` rather than `=== true`, because the
+    backend coerces `"true"` and `1` and this repo has a recorded case of `{"sendEhf": "true"}` arming a send
+    the policy scored as harmless. `bindsToCreateInvoice` is exported for it.
+  - **Deliberately not measured against the live API.** Subscriptions are created ACTIVE, so a throwaway one
+    on a real company could generate an invoice, and the only subscription on the test tenant is a real one.
+    So the tool does not claim to know whether the API discards a disarming value — it is correct under either
+    behaviour. That constraint is stated in the tool text rather than left implicit.
+  - Five mutations fail by name, including the armed list being computed from what was sent. Checked that the
+    disarm test asserts the response's state appears in the armed list too — the first version of it passed
+    under that mutation, which is the gap a review found in the equivalent creditor tests.
+  - Remaining instances of the pattern, unchanged and now the shortlist: `reai_update_share_investment`,
+    `reai_set_customer_address`, `reai_set_supplier_address`, `reai_update_salary_line`.
+
+
 - **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its note read
   *"This creditor now has NO bank account number, so a loan repayment to it has no destination"* off
   `merged.bankAccountNumber`, never checking that the API agreed — while `reai_update_company_bank`, the
