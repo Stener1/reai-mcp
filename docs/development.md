@@ -79,8 +79,10 @@ REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
 # Are the QUIRKS still true? Read-only, so this one is safe against any tenant.
 REAI_USER_API_TOKEN=... npm run audit:quirks -- --tenant 2634
 
-# And the quirks whose claim is that a WRITE is refused. Every probe is built to fail, so nothing is
-# created — but it still sends writes, so it takes the tenant allowlist like the others.
+# And the quirks whose claim is that a WRITE is refused. Every probe is built to BE refused -- but a
+# refusal that stopped being one is exactly what this looks for, and an unexpected 2xx creates a record on
+# the allowlisted tenant. The audit reports that as SAFETY and its count snapshots see it; neither prevents
+# nor undoes it. So it takes the tenant allowlist like the others, and 2783 is the only tenant to point it at.
 REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
   npm run audit:quirks:write -- --tenant 2783
 

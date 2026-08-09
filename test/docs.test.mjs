@@ -141,29 +141,46 @@ test("every live audit has a documented invocation", () => {
   // three of four and silently skipped its six refusal probes. Presence in prose is not an invocation.
   const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
   const audits = readdirSync(join(repo, "scripts")).filter((f) => /^audit-.*\.mjs$/.test(f)).sort();
+  // Only RUNNABLE lines count. Searching the whole corpus would accept a prose mention of the path, and
+  // `docs/audits.md` names every audit in prose by design — the page that documents them is the page most
+  // likely to satisfy a lax check while still showing no command. Commented lines are dropped for the same
+  // reason: a `#`-prefixed line inside a fenced block is documentation of a command, not one.
+  const COMMANDS = DOCS.flatMap(({ text }) => [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)])
+    .flatMap((m) => m[1].split("\n"))
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
   const undocumented = audits.filter((file) => {
-    if (ALL_DOCS.includes(`scripts/${file}`)) return false;
+    if (COMMANDS.includes(`scripts/${file}`)) return false;
     // Or via its npm alias. `audit:quirks` is a prefix of `audit:quirks:write`, so the boundary matters:
     // without it, the write audit's command would satisfy the read-only audit and hide the same gap.
     const aliases = Object.entries(scripts)
       .filter(([, cmd]) => cmd.includes(`scripts/${file}`))
       .map(([name]) => name);
-    return !aliases.some((name) => new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w:-])`).test(ALL_DOCS));
+    return !aliases.some((name) => new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w:-])`).test(COMMANDS));
   });
   assert.deepEqual(undocumented, [], `live audits with no documented command: ${undocumented.join(", ")}`);
 });
 
-test("no curated tool sits outside the toolset groups", () => {
-  // The README described the three rename-safety tools as sitting "outside those groups" because they are
-  // documented together, apart from their domains. They are not: they belong to `bank`, `purchase` and
-  // `loans`, they are inside the 165, and `REAI_TOOLSETS=bank` enables one of them. An operator narrowing
-  // the server by that sentence would have formed a wrong expectation about the surface they configured.
-  const grouped = new Set(Object.values(TOOL_GROUPS).flat().map((t) => (typeof t === "string" ? t : t.name)));
-  const alwaysOn = new Set(alwaysOnTools.map((t) => t.name));
-  const ungrouped = allTools.map((t) => t.name).filter((n) => !grouped.has(n) && !alwaysOn.has(n));
-  assert.deepEqual(ungrouped, [], `a curated tool is in no group, so no REAI_TOOLSETS value enables it: ${ungrouped.join(", ")}`);
+test("the README's group assignment for each rename-safety tool is the real one", () => {
+  // The README described these three as sitting "outside those groups" when in fact each belongs to a
+  // toolset and is enabled by it — an operator narrowing the server by that sentence would have expected a
+  // smaller surface than they configured. The prose now names a group per tool, so the pairing is the thing
+  // that can drift, and the pairing is what this asserts.
+  //
+  // A tempting assertion here is "no curated tool is in zero groups". It is VACUOUS: `allTools` is built as
+  // `[...alwaysOnTools, ...groupArrays]`, so nothing in it can be ungrouped and the check cannot ever fail.
+  // Asserting through `selectTools` instead tests the operator-visible claim rather than set arithmetic.
+  const RENAME_SAFETY = { reai_update_company_bank: "bank", reai_set_supplier_address: "purchase", reai_update_creditor: "loans" };
+  for (const [tool, group] of Object.entries(RENAME_SAFETY)) {
+    const members = TOOL_GROUPS[group].map((t) => (typeof t === "string" ? t : t.name));
+    assert.ok(members.includes(tool), `README puts ${tool} in ${group}; TOOL_GROUPS.${group} does not contain it`);
+    const narrowed = selectTools([group]).map((t) => t.name);
+    assert.ok(narrowed.includes(tool), `REAI_TOOLSETS=${group} does not enable ${tool}, which the README says it does`);
+    assert.match(README, new RegExp(`\`${tool}\`(?: belongs)? to \`${group}\``),
+      `the README must state which group ${tool} is in, so this pairing stays checkable`);
+  }
 
-  // And no page may claim otherwise, which is the form the defect actually took: correct code, wrong prose.
+  // And no page may revert to the old claim, which is the form the defect took: correct code, wrong prose.
   for (const { file, text } of DOCS) {
     assert.doesNotMatch(text, /outside (those|these|the toolset) groups/i,
       `${file} says tools sit outside the toolset groups; every curated tool is in one`);
