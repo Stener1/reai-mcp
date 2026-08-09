@@ -826,7 +826,12 @@ export const QUIRKS: readonly Quirk[] = [
       "organisation number is on every row either way, so it is the handle to use.\n\n" +
       "The envelope is {items, page, hasPrevious, hasNext, latestRegisteredAt} — a page marker and no " +
       "TOTAL, so \"how many companies match\" cannot be answered from one call. And pageSize is " +
-      'capped at 200: 500 answers a bare 400 "Validation failed" that names no field.',
+      'capped at 200: 500 answers 400 "Validation failed", whose top-level detail names nothing but whose ' +
+      "fieldErrors DOES: [{ field: \"pageSize\", message: \"must be less than or equal to 200\" }]. " +
+      "Re-measured 2026-08-09 — an earlier version of this note said that 400 \"names no field\", which " +
+      "sent agents past the one part of the body carrying the fix. Read fieldErrors before concluding a " +
+      "validation failure is opaque: it is populated here and empty on /api/leads/person-role-matches, so " +
+      "the two cannot be treated alike.",
   },
   {
     id: "lead-detail-nests-what-the-search-flattens",
@@ -836,7 +841,8 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "The detail response and a search ROW disagree about where lead state lives, which is easy to " +
       "miss because the two look alike otherwise. LeadRes nests it: " +
-      "`lead: { id, status, notes, email, phone, followUpAt, convertedCustomerId, convertedAt }`, " +
+      "`lead: { id, status, notes, email, phone, followUpAt, convertedCustomerId, convertedAt, " +
+      "createdAt, updatedAt }` — ten fields, not the eight an earlier version of this note listed; " +
       "measured on a live response. A row from GET /api/leads flattens `id` and `status` to the top " +
       "level instead.\n\n" +
       "So code that reads `id` at the top level of a detail response gets undefined and concludes " +
@@ -905,9 +911,14 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "gotcha",
     note:
       "DELETE on a customer or supplier with transactions ARCHIVES it rather than deleting, and an " +
-      "archived record is absent from the plain list. The filter that shows them is `archived=true`; " +
-      "`includeArchived=true` is NOT it and returns nothing — measured, 0 rows against 57 for " +
-      "`archived=true` on the same tenant. So \"the customer is gone\" read off the default list is " +
+      "archived record is absent from the plain list. `archived=true` is what shows them, and it is " +
+      "EXCLUSIVE rather than a superset: it returns the archived records ONLY, so no single call " +
+      "returns both sets. `includeArchived=true` is not a parameter this API has, and — re-measured " +
+      "2026-08-09 — it is silently IGNORED rather than rejected: it returns the plain list, exactly as " +
+      "any unknown parameter does (?totallyBogusParam=true returns the same rows). An earlier version " +
+      "of this note said it \"returns nothing\", which was an artifact of measuring on a tenant with no " +
+      "active records; believing it would leave you reading an unfiltered list while thinking it was " +
+      "filtered. So \"the customer is gone\" read off the default list is " +
       "not evidence that it was deleted, and a name collision on create can come from a record you " +
       "cannot see.",
   },
@@ -1663,7 +1674,8 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["GET"],
     kind: "shape",
     note:
-      "The `include` parameter is the only array query parameter in the API and uses " +
+      "The `include` parameter is the only array query parameter on the surface this server EXPOSES " +
+      "(three internal /account/search* operations also take one, with the opposite serialization) and uses " +
       "style=form, explode=false — i.e. ?include=summary,pending_postings, comma-joined rather than " +
       "a repeated key. This server handles that for you.",
   },
@@ -1891,11 +1903,16 @@ export const QUIRKS: readonly Quirk[] = [
     methods: ["GET"],
     kind: "gotcha",
     note:
-      'A 404 "Bankkonto ikke funnet" here is AMBIGUOUS, and the obvious reading is the less likely ' +
-      "one. It does occur for an id that genuinely does not exist, or belongs to another tenant — " +
-      "but it also occurs for a perfectly good id that simply is not a MANUAL account. Measured on " +
-      'tenant 2634: all three of its company banks are providerType "ztl" — bank-synced — and every ' +
-      "one answers that 404 here while appearing normally in reai_list_company_banks.\n\n" +
+      "`month` is required, and it is validated BEFORE the account is looked up: without it you get 400 " +
+      '"month is required" and learn nothing about the id. Supply month=YYYY-MM first — an earlier version ' +
+      "of this note described the 404 below without mentioning that, so following it bare produced a " +
+      "different error than the one it explains.\n\n" +
+      'With a month supplied, a 404 "Bankkonto ikke funnet." here is AMBIGUOUS, and the obvious reading ' +
+      "is the less likely one. It does occur for an id that genuinely does not exist, or belongs to " +
+      "another tenant — but it also occurs for a perfectly good id that simply is not a MANUAL account. " +
+      'Measured on tenant 2634: all three of its company banks are providerType "ztl" — bank-synced — and ' +
+      "every one answers that 404 here while appearing normally in reai_list_company_banks, and a " +
+      "plainly nonexistent id answers exactly the same thing.\n\n" +
       "So the response cannot tell you which it is, and this quirk is not licence to assume either. " +
       "Settle it with reai_list_company_banks: if the id is in that list, the 404 was about the " +
       'account not being manual, and its reconciliation lives at GET ' +

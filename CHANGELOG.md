@@ -9,6 +9,125 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The read-only quirk audit doubles to 16 cases, and found two more false notes.**
+  - `leads-are-the-company-register-not-your-records` claimed the over-cap 400 *"names no field"*. It names it
+    precisely — `fieldErrors: [{ field: "pageSize", message: "must be less than or equal to 200" }]` — so the
+    note pointed agents away from the only part of the body carrying the fix. Corrected, and the note now
+    draws the contrast that makes "read fieldErrors" actionable: it is populated here and **empty** on
+    `/api/leads/person-role-matches`, whose own quirk claims exactly that.
+  - `manual-reconciliation-404-means-not-manual-not-missing` described the ambiguous 404 without mentioning
+    that `month` is required and validated **first**. Following it bare yields 400 `"month is required"` and
+    nothing about the id at all. Third appearance of the validation-order trap in this audit, so the probe
+    sends the full request and the note states the order. The 404 claim itself reproduces exactly: a `ztl`
+    account and a plainly nonexistent id both answer `"Bankkonto ikke funnet."`, which is the whole warning.
+  - Eight new cases, all measured live first: the leads pageSize cap and its `fieldErrors`; `leadFilter`
+    saved/unsaved/all plus refusal of an unknown value; the row-flattens/detail-nests contrast including
+    `contactEvents: []` and a `lead` object present-but-all-null for an untouched company; `archived=true`
+    versus `includeArchived=true`; the expense status filter refusing `reversed` by name; the
+    manual-reconciliation ordering and ambiguity; and two **spec** claims — that the document itself says
+    supplier invoices are "non-reversed", and that `include` is the only array query parameter on the
+    agent-facing surface.
+  - **`array-query-comma-joined` looked false and is not.** There are four array query parameters in the
+    document, not one — but three are `accountNumberPrefix` on internal `/account/search*` operations, and the
+    claim holds for the 321 non-internal operations an agent can reach. The case checks it scoped that way
+    rather than reporting a defect that isn't one. (Measured aside: the API also tolerates a repeated key,
+    though the spec declares `explode=false`.)
+  - **A fourth coverage category, `unmeasured`**, for an operation that is served but that no GET can reach —
+    `GET /api/expenses/{id}` carries the "booked still reads approved" half of its claim, and both test
+    tenants have zero expenses. Using `exceptions` would have forced the note to assert the claim is false
+    there, which is not known. It needs a reason naming what is missing, may not swallow every GET operation
+    of a case, and is printed on every run.
+  - The reverse-coverage check from #128 immediately earned itself again: it caught `/api/leads/null` being
+    probed under a quirk served only on `/api/leads`, and the null-id claim moved to
+    `lead-detail-nests-what-the-search-flattens`, which is served on `/api/leads/{id}`.
+  - Live: **12 unchanged, 0 drifted, 4 conditional** on 2634. Four rather than two because two cases now decline
+    to report OK for a half they could not read: neither test tenant has a **saved** lead, so "a saved lead does
+    have an id" and the `LeadRes` shape at `/api/leads/{id}` are both unobservable here. That is a smaller
+    number and a more honest one.
+  - Five new ways to defeat the guards, each verified to fail the build: a vague `unmeasured` reason, an
+    `unmeasured` path the quirk is not served on, `unmeasured` swallowing a whole case, a 17th case opened on
+    one line, and the supplier-invoice spec check widened to a catch-all.
+  - **Codex found thirteen defects in these eight cases, all accepted, and one was a P1 that would have cried
+    wolf on most tenants.** `archived-records-need-an-explicit-filter-to-see` compared list SIZES —
+    `n(plain) >= n(archived)` — so 100 active customers and 2 archived would have reported DRIFT against a
+    correctly-behaving API. The claim is that an archived record is ABSENT from the plain list, which is about
+    which rows, not how many, so it now compares identities.
+  - The rest, each a fragment or a false-DRIFT risk: accepting 200 and rejecting 500 does not establish the cap
+    is 200 (probes 201 now, and asserts the field-error message quotes the limit); the empty-`fieldErrors`
+    contrast was computed and used only to decorate a log line, leaving the sentence the corrected note rests
+    on unaudited; the saved-lead rows were reduced to a count, so a saved row with a null id would have passed
+    while the workflow guidance was broken; the lead-detail case checked that the nested keys EXIST but never
+    that they are null, and took the first row of the default page rather than an untouched one; a non-403
+    failure on `/api/leads` fell through to the "no rows" conditional and would have excused the case during an
+    outage; every non-200 for a valid expense status was reported as DRIFT, including 401s and 5xx; the two
+    reconciliation 404s were compared only to each other, so both messages changing would still have read OK;
+    the supplier-invoice check was a bare `non-reversed` substring, which passes on "returns reversed and
+    non-reversed"; the array-query case sent its probe to whichever company bank came first, though that
+    endpoint is the bank-SYNCED view; and it asserted `explode=false` while checking neither `style` nor
+    `explode`, because the compact spec index drops them — it now reads the pinned OpenAPI document, with
+    `node:fs` added to the import allowlist since it cannot reach the network.
+  - **One was a regression from this PR's own work.** Broadening the "a conditional case must have an OK branch"
+    pattern to accept a ternary's else-arm made it read RAW source, so commenting out a case's only
+    `return ["ok", …]` left the literal in a comment and the guard passed — the exact failure this file strips
+    comments for elsewhere. It reads stripped source now, **and the anchor is back**: a second review then
+    satisfied the un-anchored pattern with a bare string containing `["ok"]`, which `stripComments` cannot
+    help with because it preserves string contents.
+  - **A third, narrowly-scoped review broke it again — and its diagnosis is why the check is now an AST walk
+    rather than a pattern.** Two more working bypasses: `const raw = fetch;` placed *above* the guard IIFE
+    captures the still-native function without ever naming `globalThis.fetch` (the IIFE protects its own
+    binding, but nothing stopped re-capturing the same function earlier under another name); and
+    `const N = ["node","http"].join(":"); await import(N)` moves the specifier assembly one statement before the
+    `import()`, where no inspection of the argument text can reach it. Both delivered real writes to a local
+    server with 10/10 green.
+  - The root cause was the same each round: **every check was a regex over the source text of one line**, so any
+    indirection across statements sailed through. Seven bypasses in four rounds, each fixed by a better pattern
+    and each beaten by the next indirection. So the read-only test now **parses the file with the TypeScript
+    compiler** — already a devDependency — and asks structural questions instead: is any binding initialised
+    from the identifier `fetch`, is `globalThis` referenced outside the guard, is every dynamic `import()`
+    argument a string literal or `pathToFileURL(...)`, is there more than one call to `fetch`. Exact rather than
+    heuristic, and the guard is installed as the **first executable statement** so the native function is never
+    nameable. Verified: both bypasses plus five further variants — `globalThis["fetch"]`,
+    `import("node:htt" + "p")`, `const { fetch: alias } = globalThis`, a second `fetch(` call, and
+    `createRequire` — all fail the build.
+  - **Monkey-patching `node:http` was tried as an alternative and does not work**, which is worth recording:
+    patching `.default.request` IS visible to a later `await import("node:http")` (same module object), but is
+    **invisible through the named export** — `const { request } = await import("node:http")` gets the original
+    binding, and that is exactly what the working bypass destructured. `http.get({method:"POST"})` and
+    `new http.ClientRequest({method:"POST"})` both send POSTs without going through the exported `request` at
+    all. So the claim is now narrower and accurate: **no accidental or casual edit can make this file write, and
+    CI proves the committed text has no second network path.** A determined rewrite with raw sockets is out of
+    reach of any in-file check, and the docs say so instead of implying otherwise.
+  - **An earlier second review had found two read-only bypasses, both delivering real writes with all ten guard
+    tests green.** The call-site count was `/fetch\(/g` — a case-sensitive substring
+    — so the module-scope `const nativeFetch = globalThis.fetch` was invisible to it and callable directly. The
+    unguarded function now lives inside an IIFE closure, so it is unreachable by construction: the same exploit
+    produces a `ReferenceError` and **no request at all**, which is stronger than a test catching it. A
+    module-scope alias being re-introduced is caught separately. And the import allowlist matched
+    double-quoted `from` specifiers only, so `import * as evilHttp from 'node:http'` was never collected and a
+    `PUT /api/opening-balances` went out; both quote styles, bare side-effect imports and runtime-assembled
+    dynamic specifiers are all handled now.
+  - **`archived-records-need-an-explicit-filter-to-see` was still false, in the half the previous round did not
+    fix.** The note said `includeArchived=true` *"returns nothing — measured, 0 rows against 57"*. Re-measured:
+    on 2634 `/api/suppliers` gives plain **1**, `includeArchived=true` **1**, and `?totallyBogusParam=true`
+    **1** — it is an unknown parameter, silently **ignored**, returning the unfiltered list. The old figure was
+    an artifact of a tenant with no active records. Believing the note leaves an agent reading an unfiltered
+    list while thinking it is filtered, which is worse than the error it was warning about. The note now says
+    that, and adds that `archived=true` is **exclusive** rather than a superset. `test/archive.test.mjs` had
+    *pinned the false wording*, which is what made it look verified; it now pins the corrected claims and
+    asserts the retraction cannot come back.
+  - Nine more: the case extractor was bound to two-space indentation, so a 17th case indented four was absorbed
+    and the count stayed 16 (it is indentation-agnostic now, and cross-checked against an independent count of
+    `quirk:` keys); `unmeasured` never checked its own premise, so a plainly reachable collection path could be
+    moved into it and silently dropped from the census — an unmeasured path must now take a path parameter, and
+    its reason must survive a padding check; `status=booked` was never probed though the quirk's name has two
+    words and it is one GET; two cases printed OK beside the words "that half is unread", and now report
+    conditional instead; the `manual-reconciliation` ordering claim was probed with a *real* id, where 400
+    "month is required" is equally consistent with lookup-first (it uses an impossible id now, and checks all
+    synced accounts rather than the first); the array-query note said "in the API" unqualified while the case
+    checked a scoped claim, so marker and measurement no longer predicted each other; the `lead` object has
+    **ten** fields and the note listed eight; and the header arithmetic still said 8/113 after the docs were
+    corrected to 17/105 — the same tree stating both.
+
 - **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
   The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
   `reai_api_notes`, and between them those audits named **2 of the 122** —

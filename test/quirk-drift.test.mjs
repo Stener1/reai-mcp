@@ -167,8 +167,12 @@ function auditCases() {
   // as `  { quirk: "…",` — one line instead of two — and it was absorbed into the previous chunk: the count
   // stayed 8, all tests passed, and the audit ran a case with no marker, no drift branch, empty probes and a
   // second `conditional:`. So both the count floor and the conditional cap fell to whitespace.
+  // Any indentation. `split(/\n  \{/)` bound the boundary to exactly two spaces, so review added a 17th case
+  // indented FOUR and it was absorbed into its predecessor: the count stayed 16, all tests passed, and the
+  // audit ran a case with no marker, no drift branch and a path its quirk is not served on. Nothing lints
+  // .mjs here (`npm run lint` is `tsc --noEmit`), so indentation is free and must not be load-bearing.
   return body
-    .split(/\n  \{[ \t]*\n?/)
+    .split(/\n[ \t]*\{[ \t]*\n?/)
     .slice(1)
     .map((chunk) => ({
       quirk: /quirk:\s*"([^"]+)"/.exec(chunk)?.[1],
@@ -186,6 +190,13 @@ function auditCases() {
       // Operations the claim deliberately does NOT hold for, and families represented by one concrete probe.
       exceptions: arrayField(chunk, "exceptions"),
       samples: arrayField(chunk, "samples"),
+      // path -> reason. Served but unanswerable by a GET, which is NOT the same as the claim being false
+      // there; conflating the two would force a note to assert something untrue.
+      unmeasured: Object.fromEntries(
+        [...(/unmeasured:\s*\{([\s\S]*?)\n {4}\}/.exec(chunk)?.[1] ?? "").matchAll(
+          /"([^"]+)":\s*\n?\s*"([^"]+)"/g,
+        )].map(([, k, v]) => [k, v]),
+      ),
       chunk,
     }))
     .filter((c) => c.quirk);
@@ -196,10 +207,19 @@ test("every quirk probe names a real quirk, and binds to text that still PREDICT
   // The count itself is the floor. A "6 of 8" style threshold licenses two cases silently falling out of
   // the population, which is how `storage-drift` was defeated; removing a case on purpose is a
   // one-character edit here.
+  // Cross-checked against an independent count of `quirk:` keys, so a case the boundary split misses still
+  // shows up as a mismatch rather than silently vanishing.
+  const quirkKeys = [...auditSource().slice(auditSource().indexOf("const CASES = [")).matchAll(/^\s*quirk:\s*"/gm)];
   assert.equal(
     cases.length,
-    8,
-    `expected 8 quirk cases, extracted ${cases.length} — either a case was added without updating this ` +
+    quirkKeys.length,
+    `extracted ${cases.length} cases but found ${quirkKeys.length} \`quirk:\` keys — the boundary split is ` +
+      `missing a case, which is how a 17th one hid inside its predecessor`,
+  );
+  assert.equal(
+    cases.length,
+    16,
+    `expected 16 quirk cases, extracted ${cases.length} — either a case was added without updating this ` +
       `number, or the extraction has stopped matching`,
   );
 
@@ -268,77 +288,183 @@ test("every quirk probe can report drift, and its comparisons are not tautologie
   }
 });
 
-test("the quirk audit is read-only, and it is ENFORCED rather than asserted", () => {
-  const src = auditSource();
+/**
+ * The read-only property, checked from the AST rather than from patterns.
+ *
+ * Three review rounds each defeated a text-level version of this test, and the third one named the reason:
+ * every check was a regex over source text, so any indirection across statements sailed through. The bypasses
+ * were not exotic —
+ *
+ *   `...EXTRA` spread over `method: "GET"`            → real POSTs, 9/9 green
+ *   `init.method = "POST"` after the check            → real POSTs, 10/10 green
+ *   `import http from "node:http"`                    → real PUT,  10/10 green
+ *   `import * as x from 'node:http'` (single quotes)   → real PUT,  10/10 green
+ *   `nativeFetch(...)` (case-sensitive /fetch\(/)      → real POST, 10/10 green
+ *   `const raw = fetch;` placed ABOVE the guard IIFE  → real POST, 10/10 green
+ *   `const N = ["node","http"].join(":"); import(N)`  → real PUT,  10/10 green
+ *
+ * The last two are the general form: name the unguarded function without writing `globalThis.fetch`, or build a
+ * forbidden module specifier before the `import()` call. No pattern over one line can see either.
+ *
+ * So this parses the file with the TypeScript compiler (already a devDependency, used by `npm run lint`) and
+ * asks structural questions instead. `const raw = fetch` is a VariableDeclaration whose initializer is the
+ * identifier `fetch`; `import(N)` is a CallExpression whose argument is an Identifier rather than a string.
+ * Both are exact, not heuristic.
+ *
+ * ## What this still does not do, stated because the prose here has overclaimed twice
+ *
+ * It constrains the file **as committed**. It cannot stop a determined rewrite: `node:net` sockets, a
+ * hand-rolled `http.ClientRequest`, `createRequire`. Monkey-patching the http module was tried and does not
+ * close it either — patching `.default.request` is invisible through the NAMED export
+ * (`const { request } = await import("node:http")` gets the original binding), which is exactly what the
+ * working bypass destructured.
+ *
+ * The honest claim is therefore narrower than "read-only is enforced": **no accidental or casual edit can make
+ * this file write, and CI proves the committed text has no second network path.** Defeating it now requires
+ * deliberately writing an HTTP client to defeat a guard, which is no longer a mistake someone makes while
+ * adding a probe. That is the property worth having for a script pointed at a real company's books, and the
+ * runtime wrapper below is what covers the case the AST cannot see.
+ */
+test("the quirk audit is read-only, checked from the AST rather than from patterns", async () => {
+  const { default: ts } = await import("typescript");
+  const text = readFileSync(AUDIT, "utf8");
+  const sf = ts.createSourceFile(AUDIT, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
 
-  // The runtime guard is the primary defence, because every static check here is defeatable by editing the
-  // file the check reads. Review demonstrated exactly that: `method: "GET"` kept, `...EXTRA` added after it,
-  // and the audit issued real POSTs to /api/vouchers and /api/opening-balances with all nine tests green.
-  // The init object is now built and then checked, so a spread that overrides the method throws before the
-  // socket opens.
+  // The guard-installing IIFE is the one place allowed to name the unguarded function. Locate it by position
+  // so everything else can be judged as "outside it".
+  const guard = { start: -1, end: -1 };
+  const findGuard = (n) => {
+    if (
+      ts.isExpressionStatement(n) &&
+      ts.isCallExpression(n.expression) &&
+      (ts.isArrowFunction(n.expression.expression) || ts.isParenthesizedExpression(n.expression.expression)) &&
+      /globalThis\.fetch\s*=/.test(n.getText(sf))
+    ) {
+      guard.start = n.getStart(sf);
+      guard.end = n.getEnd();
+    }
+    ts.forEachChild(n, findGuard);
+  };
+  findGuard(sf);
+  assert.ok(guard.start >= 0, "the guard-installing IIFE was not found");
+
+  // FIRST executable statement. `const raw = fetch` above the IIFE captured the native function and delivered a
+  // POST; ordering closes that by construction, since anything captured afterwards is the wrapper.
+  const firstExecutable = sf.statements.find((st) => !ts.isImportDeclaration(st));
+  assert.equal(
+    firstExecutable?.getStart(sf),
+    guard.start,
+    "the fetch guard must be the first executable statement, or there is a window in which the native " +
+      "function can be captured under another name",
+  );
+
+  const outside = (n) => n.getStart(sf) < guard.start || n.getEnd() > guard.end;
+  const problems = [];
+  const dynamicImports = [];
+  let bareFetchCalls = 0;
+
+  const walk = (n) => {
+    // Any binding that captures fetch, however it is spelled: `= fetch`, `= globalThis.fetch`,
+    // `= globalThis["fetch"]`, `{ fetch: alias } = globalThis`.
+    if (outside(n)) {
+      if (ts.isIdentifier(n) && n.text === "globalThis") {
+        problems.push(`\`globalThis\` is referenced outside the guard at line ${line(n)} — the only legitimate ` +
+          `use is installing the wrapper, and every bypass so far went through a handle on it`);
+      }
+      if (ts.isIdentifier(n) && n.text === "fetch") {
+        const parent = n.parent;
+        const isCallee = ts.isCallExpression(parent) && parent.expression === n;
+        if (!isCallee) {
+          problems.push(`the identifier \`fetch\` appears at line ${line(n)} somewhere other than as a call — ` +
+            `capturing it under another name is how the guard was bypassed`);
+        } else {
+          bareFetchCalls += 1;
+        }
+      }
+      // require / createRequire / process.binding are other ways to a socket.
+      if (ts.isIdentifier(n) && ["require", "createRequire"].includes(n.text)) {
+        problems.push(`\`${n.text}\` at line ${line(n)} can load a network module outside the import checks`);
+      }
+    }
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      dynamicImports.push(n.arguments[0]);
+    }
+    ts.forEachChild(n, walk);
+  };
+  function line(n) {
+    return sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  }
+  walk(sf);
+
+  assert.deepEqual(problems, [], `read-only violations:\n${problems.join("\n")}`);
+  assert.equal(
+    bareFetchCalls,
+    1,
+    `expected exactly one call to \`fetch\` outside the guard, found ${bareFetchCalls}`,
+  );
+
+  // Static imports: an allowlist, from the AST, so quote style and `import x from` vs bare `import "…"` are
+  // irrelevant — a single-quoted namespace import defeated the regex version and issued a real PUT.
+  // node:fs is permitted because it cannot reach the network; it reads the pinned OpenAPI document.
+  const allowed = new Set(["node:url", "node:path", "node:fs"]);
+  const staticSpecs = sf.statements
+    .filter(ts.isImportDeclaration)
+    .map((d) => d.moduleSpecifier.text);
+  assert.deepEqual(
+    staticSpecs.filter((m) => !allowed.has(m)),
+    [],
+    `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
+      `network without passing the fetch wrapper`,
+  );
+
+  // Dynamic imports must be a plain string literal, or pathToFileURL(...) for a dist/ module. An Identifier is
+  // refused outright: `const N = ["node","http"].join(":"); await import(N)` is a working bypass that no
+  // inspection of the argument TEXT can catch.
+  for (const arg of dynamicImports) {
+    if (ts.isStringLiteral(arg)) {
+      assert.doesNotMatch(
+        arg.text,
+        /^node:(http|https|net|dgram|tls)/,
+        `dynamic import of ${arg.text} bypasses the fetch wrapper`,
+      );
+      continue;
+    }
+    // `pathToFileURL(join(process.cwd(), "dist/…")).href` — a property access on the call, which is the form
+    // actually used. The check is on the whole expression being rooted at pathToFileURL, so an identifier or
+    // any assembled string still fails.
+    const rooted = arg.getText(sf).startsWith("pathToFileURL(");
+    const viaPathToFileUrl =
+      rooted && /^pathToFileURL\(join\(process\.cwd\(\), "dist\/[a-z/.-]+"\)\)(\.href)?$/.test(arg.getText(sf));
+    assert.ok(
+      viaPathToFileUrl,
+      `the dynamic import at line ${line(arg)} takes ${ts.SyntaxKind[arg.kind]} \`${arg.getText(sf)}\` — only a ` +
+        `string literal or pathToFileURL(...) is allowed, because a specifier assembled at runtime cannot be ` +
+        `checked at all`,
+    );
+  }
+
+  // The runtime layer, which is what covers the paths the AST cannot see.
+  const src = auditSource();
   assert.match(
     src,
     /if \(init\.method !== "GET"\)[\s\S]{0,200}throw new Error/,
     "the request helper must check the assembled init object at runtime and throw on any non-GET",
   );
-  assert.match(src, /const res = await fetch\(baseUrl \+ path, init\)/, "fetch must receive the checked object");
-  // Frozen, because the check was check-then-USE: `init.method = "POST"` on the following line sent every
-  // request as a POST with all ten tests green.
   assert.match(
     src,
     /Object\.freeze\(init\);\n\s*const res = await fetch/,
     "the init object must be frozen between the check and the fetch, or the check can be undone after it",
   );
-  // And the channel itself, because counting `fetch(` call sites cannot prove no other channel exists —
-  // review reached the network with fourteen lines of node:http and the count still said 1.
-  // Brace-matched, not a windowed regex. The first version used `[\s\S]{0,400}` after the assignment, so
-  // review's neutering — assign a pass-through, then declare an UNUSED function containing the guard — matched
-  // across the boundary and passed. The guard has to be inside the body actually assigned.
-  const assignments = [...src.matchAll(/globalThis\.fetch\s*=/g)];
-  assert.equal(
-    assignments.length,
-    1,
-    `globalThis.fetch must be assigned exactly once, found ${assignments.length} — a later assignment ` +
-      `replaces the guard`,
-  );
-  // From the ARROW, not from the assignment: the first `{` after `globalThis.fetch =` is the `{}` default in
-  // the parameter list `(input, init = {})`, so matching from there returned an empty block.
-  const arrow = src.indexOf("=>", assignments[0].index);
-  assert.ok(arrow > 0, "the fetch wrapper must be a function expression");
-  const wrapperBody = balancedBlockAfter(src, arrow);
-  assert.ok(wrapperBody, "could not find the body assigned to globalThis.fetch");
+  const wrapperBody = balancedBlockAfter(text, text.indexOf("=>", text.indexOf("globalThis.fetch =")));
   assert.match(
-    wrapperBody,
-    /method\.toUpperCase\(\) !== "GET"/,
-    "the function assigned to globalThis.fetch must itself reject any non-GET, not delegate to a helper that " +
-      "may not be called",
+    wrapperBody ?? "",
+    /method\.toUpperCase\(\) !== "GET"[\s\S]{0,200}throw new Error/,
+    "the function assigned to globalThis.fetch must itself reject any non-GET",
   );
-  assert.match(wrapperBody, /throw new Error/, "the wrapper must throw rather than warn");
-  const imports = [...src.matchAll(/^import[^;]*?from\s*"([^"]+)"/gm)].map(([, m]) => m);
-  const allowed = new Set(["node:url", "node:path"]);
-  const forbidden = imports.filter((m) => !allowed.has(m));
-  assert.deepEqual(
-    forbidden,
-    [],
-    `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
-      `network without passing the fetch wrapper, which is how review issued a POST with every test green`,
-  );
-  // Dynamic imports are used for dist/ modules; they must not be a way back to a network module either.
-  const dynamic = [...src.matchAll(/await import\(([^)]*)\)/g)].map(([, a]) => a);
-  for (const arg of dynamic) {
-    assert.doesNotMatch(
-      arg,
-      /node:(http|https|net|dgram|tls)/,
-      `dynamic import of a network module (${arg.trim()}) bypasses the fetch wrapper`,
-    );
-  }
 
-  // Every path it touches, classified. A GET the policy engine thinks is a write would be a bug in one of
-  // the two, and either way this audit must not run against 2634.
-  //
-  // Two sources, unioned: the `probes` arrays (the authoritative endpoint list each case declares, and what
-  // the coverage guard compares against) and any literal path passed to get(). Template-literal calls such
-  // as `get(\`${path}?${DATES}\`)` iterate `this.probes`, so the first source already covers them.
+  // And the stakes, which is the honest use of classifyRequest: `classifyRequest("GET", …)` returns "read" for
+  // every path by an early return in policy.ts, so asserting that could not fail. What it can show is that
+  // these paths are destructive under a write verb, which is why the guard exists.
   const paths = [
     ...new Set([
       ...[...src.matchAll(/probes:\s*\[([\s\S]*?)\]/g)].flatMap(([, body]) =>
@@ -347,75 +473,18 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
       ...[...src.matchAll(/get\(\s*[`"](\/api\/[^`"?]*)/g)].map(([, v]) => v),
     ]),
   ];
-  assert.ok(paths.length >= 15, `only ${paths.length} requests extracted — the extraction has stopped matching`);
-  // NOT `classifyRequest("GET", …)`. Review showed that assertion could not fail: policy.ts returns "read"
-  // for every GET by an early return, so it was a tautology dressed as a policy check, and the PR claimed it
-  // proved read-only. What classifyRequest can honestly establish is the STAKES — that these very paths are
-  // destructive under a write verb, which is why the runtime guard above is the thing that matters.
-  const dangerous = paths.filter((p) => {
-    const concrete = p.replace(/\$\{[^}]*\}/g, "7");
-    return ["POST", "PUT", "PATCH", "DELETE"].some(
-      (m) => classifyRequest(m, concrete) === "irreversible",
-    );
+  assert.ok(paths.length >= 24, `only ${paths.length} requests extracted — the extraction has stopped matching`);
+  const dangerous = paths.filter((pth) => {
+    const concrete = pth.replace(/\$\{[^}]*\}/g, "7");
+    return ["POST", "PUT", "PATCH", "DELETE"].some((m) => classifyRequest(m, concrete) === "irreversible");
   });
   assert.ok(
     dangerous.length >= 5,
-    `expected several audited paths to be irreversible under a write verb (found ${dangerous.length}); if ` +
-      `none are, this audit is harmless and the runtime guard's justification needs restating`,
+    `expected several audited paths to be irreversible under a write verb (found ${dangerous.length})`,
   );
 
-  // And no way to make a non-GET at all. Exactly one fetch call site, and ITS method must be the literal.
-  //
-  // The first version asserted `/method:\s*"GET"/` appears somewhere and that a small blacklist of
-  // non-literal spellings does not. Review defeated it: keep `{ method: "GET" }` as a destructured default
-  // and change the fetch to `method: options.method`, and both assertions still pass while the helper can
-  // issue a POST or DELETE against a real tenant's books. Since path classification also hardcodes "GET",
-  // nothing else would have noticed. So inspect the fetch call itself.
-  const fetches = [...src.matchAll(/fetch\(/g)];
-  assert.equal(fetches.length, 1, `expected exactly one fetch call site, found ${fetches.length}`);
-  // The init object literal, which is what fetch receives. Read from its declaration rather than from the
-  // call site, because the call passes a variable — deliberately, so the runtime guard above can inspect the
-  // fully-assembled object before it is used.
-  const decl = src.indexOf("const init = {");
-  assert.ok(decl > 0, "the request helper must build a named init object so the runtime guard can check it");
-  const open = src.indexOf("{", decl);
-  let depth = 0;
-  let close = -1;
-  for (let i = open; i < src.length; i += 1) {
-    if (src[i] === "{") depth += 1;
-    else if (src[i] === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        close = i;
-        break;
-      }
-    }
-  }
-  assert.ok(close > open, "could not find the end of the init object");
-  const options = src.slice(open, close + 1);
-  const method = /(^|[^a-zA-Z])method\s*:\s*([^,\n]+)/.exec(options)?.[2]?.trim();
-  assert.equal(
-    method,
-    '"GET"',
-    `the init object must set the literal "GET" as its method, not ${JSON.stringify(method)} — anything ` +
-      `resolved at runtime can become a write against a real tenant`,
-  );
-  // And no top-level spread, which is how the literal above was bypassed. A spread inside `headers` is fine
-  // and is used for the tenant header, so only the outer level is checked.
-  const outer = options.replace(/headers:\s*\{[\s\S]*?\n {4}\},?/, "headers: {},");
-  assert.doesNotMatch(
-    outer,
-    /\.\.\./,
-    "the request init must not contain a spread at the top level: `...EXTRA` after `method: \"GET\"` " +
-      "silently overrode it and the audit issued POSTs with every test passing",
-  );
-
-  // Read-only is *why* there is no write guard, so the absence has to be deliberate rather than forgotten.
-  assert.doesNotMatch(
-    src,
-    /REAI_WRITE_TEST_TENANTS/,
-    "a read-only audit must not consult the write guard — if it needs one, it is no longer read-only",
-  );
+  // Read-only is why there is no write guard, so the absence has to be deliberate rather than forgotten.
+  assert.doesNotMatch(src, /REAI_WRITE_TEST_TENANTS/, "a read-only audit must not consult the write guard");
 });
 
 test("probes that depend on validation ORDER send a full request", () => {
@@ -470,9 +539,12 @@ test("the audited quirks are a documented subset, not a claim of coverage", () =
   assert.match(src, /QUIRKS\.length/, "the report must print the total, not only the probed count");
   assert.match(
     src,
-    /covers the subset a GET can answer/,
+    /the subset a GET can answer/,
     "the report must say the probed set is a subset and why",
   );
+  // And the distinct-quirk arithmetic, which has now been wrong three times — including once where the docs
+  // were corrected and this script's header was not, so the same tree stated both 8/113 and 17/105.
+  assert.match(src, /have a live case across all three audits/, "the report must state how many quirks are covered in total");
   assert.ok(QUIRKS.length > 100, `sanity: expected >100 quirks, found ${QUIRKS.length}`);
 });
 
@@ -521,9 +593,16 @@ test("an unverifiable claim fails the run unless it says WHY it cannot be verifi
     "every case is conditional, so a clean run would assert nothing at all",
   );
   for (const c of conditional) {
+    // Against the comment-stripped chunk. Broadening this pattern to accept a ternary's else-arm made it read
+    // RAW source, so commenting out a conditional case's only `return ["ok", …]` left the literal in a comment
+    // and the guard still passed — the exact failure this file strips comments for elsewhere.
+    // Anchored on `return` or a ternary arm. Dropping the anchor to accept an else-arm made a bare STRING
+    // literal satisfy it — review replaced a case's only OK return with
+    // `return ["conditional", 'the literal ["ok"] in this string is all the guard sees']` and it passed.
+    // stripComments does not help, because it preserves string contents.
     assert.match(
-      c.chunk,
-      /return \[\s*\n?\s*"ok"|\?\s*\["ok"/,
+      stripComments(c.chunk),
+      /(?:return|[?:])\s*\[\s*\n?\s*"ok"/,
       `${c.quirk} declares itself conditional but has no branch that can report OK, so it can never verify ` +
         `anything on any tenant`,
     );
@@ -593,6 +672,7 @@ test("every case probes every OPERATION its quirk is served on, or names why not
     const skipped = served.length - gettable.length;
     let probed = 0;
     let sampled = 0;
+    let unmeasured = 0;
     for (const op of gettable) {
       // Exact, or a template the probe instantiates (/api/annual-accounts/{year} needs a concrete year).
       const exact = c.probes.some((probe) => probe === op.path || instantiates(probe, op.path));
@@ -607,11 +687,56 @@ test("every case probes every OPERATION its quirk is served on, or names why not
       }
 
       if (c.exceptions.some((ex) => ex === op.path)) continue;
-      gaps.push(`${c.quirk} is served on GET ${op.path}, which is neither probed, sampled nor excepted`);
+      if (op.path in c.unmeasured) {
+        unmeasured += 1;
+        continue;
+      }
+      gaps.push(
+        `${c.quirk} is served on GET ${op.path}, which is neither probed, sampled, excepted nor declared ` +
+          `unmeasured`,
+      );
     }
     census.push(
       `${c.quirk}: ${served.length} served, ${probed} probed, ${sampled} sampled, ` +
-        `${c.exceptions.length} excepted, ${skipped} non-GET`,
+        `${c.exceptions.length} excepted, ${unmeasured} unmeasured, ${skipped} non-GET`,
+    );
+
+    // `unmeasured` is the third hatch, so it gets the same treatment as the other two: a reason that says
+    // what is missing, and it may not swallow the whole case. `exceptions` earned its note requirement by
+    // asserting the claim is false somewhere; this one asserts only that a GET cannot reach it, which is a
+    // statement about the audit rather than about the API, so the reason lives in the script and not in a
+    // note an agent reads.
+    for (const [path, why] of Object.entries(c.unmeasured)) {
+      assert.ok(
+        gettable.some((op) => op.path === path),
+        `${c.quirk} declares ${path} unmeasured, but the quirk is not served on that GET operation`,
+      );
+      // The premise, not just a sentence. `unmeasured` claims no GET can REACH the claim, and review moved a
+      // plainly reachable collection path (/api/postings) into it with the reason "needs nothing whatsoever;
+      // a plain GET reaches it" — 10/10 green, and the audit silently stopped requesting it. A collection path
+      // is always reachable; only a path needing an identifier this audit cannot obtain is not.
+      assert.match(
+        path,
+        /\{[^}]+\}/,
+        `${c.quirk} declares ${path} unmeasured, but it takes no path parameter — a GET can reach it, so it ` +
+          `must be probed rather than excused`,
+      );
+      assert.ok(
+        why.length >= 20 && /needs|requires|cannot|write/i.test(why),
+        `${c.quirk}'s reason for not measuring ${path} must say what is missing, got ${JSON.stringify(why)}`,
+      );
+      // Padding defeats a keyword-plus-length rule: "needs aaaaaaaaaaaaaaaaaaaaaaaa" satisfied both. Require
+      // real words, the same shape of check the conditional reason needed.
+      const words = why.split(/\s+/).filter((w) => /^[a-z][a-z-]{2,}$/i.test(w));
+      assert.ok(
+        new Set(words).size >= 6,
+        `${c.quirk}'s reason for not measuring ${path} reads as padding (${new Set(words).size} distinct ` +
+          `words): ${JSON.stringify(why)}`,
+      );
+    }
+    assert.ok(
+      Object.keys(c.unmeasured).length < Math.max(gettable.length, 1),
+      `${c.quirk} declares every one of its GET operations unmeasured, so the case verifies nothing`,
     );
   }
   assert.deepEqual(gaps, [], `quirks asserted to agents on operations the audit never checks:\n${gaps.join("\n")}`);

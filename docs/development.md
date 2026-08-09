@@ -197,24 +197,53 @@ places calling the agreement enums undocumented (PR #123).
 
 Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. The checkable figures: **122** total, **2** named before,
-**8** added here, **113** still unnamed — nine *distinct* quirks now have a live case, because
-`tenant-header-ignored-single-tenant` is in both sets. An earlier version said 114, which made 2 + 8 + 114 =
-124 out of 122.
+`audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **122** quirks, of which **17** now have a live
+case — 16 here plus `customer-name-title-cased` in `audit-storage.mjs`, with
+`tenant-header-ignored-single-tenant` in both sets — leaving **105** unnamed.
 
-This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
+The arithmetic here has been wrong twice, in opposite directions: first 2 + 8 + 114 = 124 out of 122
+(double-counting the tenant-header quirk), then the 8-case accounting left in place beside a 16-case
+audit. Count distinct ids and check the total.
+
+This covers the **16 that a GET can answer**, and the report prints `of 122` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
 is no write guard and no `REAI_WRITE_TEST_TENANTS`.
 
-**How that is enforced, after a first version claimed something false.** The original text said the property
-was asserted "against `classifyRequest` rather than by grepping for method names". It was the reverse:
-`classifyRequest("GET", …)` returns `read` for every path by an early return, so the assertion could not
-fail, and the only live checks were greps — which review defeated in one line by keeping `method: "GET"` and
-adding `...EXTRA` after it, making the audit issue real POSTs to `/api/vouchers` and `/api/opening-balances`
-with every test green. Now the request helper builds its `init` object, **checks it at runtime** and throws
-on any non-GET, so a source edit fails before the socket opens; the test additionally requires the literal
-method and forbids a top-level spread, and uses `classifyRequest` for what it can honestly show — that
-these paths are `irreversible` under a write verb, which is why the runtime guard is there at all.
+**How that is enforced — and this took four rounds, because every text-level version was defeated.** The
+first version claimed the property was asserted "against `classifyRequest` rather than by grepping for method
+names", which was backwards: `classifyRequest("GET", …)` returns `read` for every path by an early return, so
+it could not fail. Each subsequent fix was a better pattern, and each was beaten:
+
+| bypass | result |
+|---|---|
+| `...EXTRA` spread over `method: "GET"` | real POSTs, all tests green |
+| `init.method = "POST"` *after* the check | real POSTs, all tests green |
+| `import http from "node:http"` | real PUT, all tests green |
+| `import * as x from 'node:http'` (single quotes) | real PUT, all tests green |
+| `nativeFetch(...)` — the counter used a case-sensitive `/fetch\(/` | real POST, all tests green |
+| `const raw = fetch;` placed **above** the guard IIFE | real POST, all tests green |
+| `const N = ["node","http"].join(":"); await import(N)` | real PUT, all tests green |
+
+The last two are the general form — name the unguarded function without writing `globalThis.fetch`, or build a
+forbidden specifier before the `import()` — and **no pattern over one line can see either**.
+
+So the check now **parses the file** with the TypeScript compiler (already a devDependency) and asks
+structural questions: is any binding initialised from the identifier `fetch`; is `globalThis` referenced
+outside the guard at all; is every dynamic `import()` argument a string literal or `pathToFileURL(...)`; is
+there more than one call to `fetch`. `const raw = fetch` is a VariableDeclaration with an Identifier
+initialiser, and `import(N)` is a CallExpression with an Identifier argument. Both are exact rather than
+heuristic. The guard is also installed as the **first executable statement**, so there is no window in which
+the native function is nameable. Two runtime layers remain: the `globalThis.fetch` wrapper rejects any non-GET
+wherever it is called from, and the `init` object is frozen between its check and the fetch.
+
+**What this does not do, stated because the prose here overclaimed twice.** It constrains the file *as
+committed*. It cannot stop a determined rewrite — `node:net` sockets, a hand-rolled `http.ClientRequest`.
+Monkey-patching the http module was tried and does not close that either: patching `.default.request` is
+invisible through the **named** export, and `const { request } = await import("node:http")` is exactly what
+the working bypass destructured. So the honest claim is narrower than "read-only is enforced": **no accidental
+or casual edit can make this file write, and CI proves the committed text has no second network path.**
+Defeating it now means deliberately writing an HTTP client to defeat a guard, which is not a mistake someone
+makes while adding a probe.
 
 **Probe the request the note describes, not a shorter one.** This is the lesson worth carrying to the next
 audit, because it produced a false DRIFT against a correct quirk while this script was being written.
@@ -270,17 +299,37 @@ something somewhere; and a case that returns `"conditional"` without declaring o
 inconclusive by the runner, so the exemption cannot be reached by a branch that merely failed to get an
 answer.
 
-Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634.
+Currently **12 unchanged, 0 drifted, 4 conditional** against tenant 2634, from **16 cases**. Two of those
+conditionals are cases that could have printed OK: neither test tenant has a *saved* lead, so "a saved lead
+does have an id" and the `LeadRes` shape at `/api/leads/{id}` cannot be observed, and a case that reports OK
+beside the words "that half is unread" is the report contradicting itself.
 
-**Coverage is stated as a census, not a pass mark**, because these eight quirks are served on **56
-operations** — `match: "descendants"` expands them well past their path lists, and `module-gating` alone
-reaches 34. Of those: 16 probed, 16 sampled through a declared family representative, 3 excepted as
-operations where the claim does not hold (named in the note, since an agent describing them still receives
-the quirk), and 21 non-GET and therefore unreachable by a read-only audit. The test fails if any served GET
-is none of those, so adding a path to a quirk breaks the build until it is accounted for.
+**Coverage is stated as a census, not a pass mark**, because these quirks are served on far more operations
+than they have ids — `match: "descendants"` expands them past their path lists, and `module-gating` alone
+reaches 34. Every served GET must be one of four things, and the test fails if it is none of them, so adding
+a path to a quirk breaks the build until it is accounted for:
 
-The 114 unprobed quirks are mostly claims about what a write stores or refuses, which needs the test tenant,
-and that is the next slice.
+| | meaning |
+|---|---|
+| **probed** | called directly |
+| **sampled** | represented by a probe beneath a declared family prefix — the prefix must be one of the quirk's own paths **and** must contain a probe |
+| **excepted** | the claim does **not hold** there, and the note must name that exact path, because an agent describing it still receives the quirk |
+| **unmeasured** | served, but no GET can reach the claim — almost always because it needs a record to exist and creating one is a write. Distinct from an exception, which would force a note to assert something untrue. The reason must name what is missing, and a case may not declare every one of its GET operations unmeasured. |
+
+The report prints the samples, exceptions and unmeasured operations on every run, so a reader is not left
+reconstructing coverage from the case list.
+
+The remaining unprobed quirks are mostly claims about what a write stores or refuses, which needs the test
+tenant — **48 of them are attached to a reversible write**, and that is the next slice. Tenant 2783 is
+reachable, so it is no longer blocked.
+
+**Two more false notes surfaced adding these cases**, both corrected in `src/reai/quirks.ts`:
+`leads-are-the-company-register-not-your-records` said the over-cap 400 *"names no field"*, while its
+`fieldErrors` names `pageSize` and carries the fix — advice that pointed agents away from the one useful part
+of the body. And `manual-reconciliation-404-means-not-manual-not-missing` described a 404 without mentioning
+that `month` is required and validated first, so following it bare produces 400 `"month is required"` and
+nothing about the id. The validation-order lesson for a third time; the probe now sends the full request and
+the note states the order.
 
 
 ## What did a ranking change do to every other query?
