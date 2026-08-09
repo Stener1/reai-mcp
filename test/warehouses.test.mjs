@@ -465,7 +465,7 @@ test("renaming a warehouse states the name the response carries, not the one sen
 test("renaming a warehouse says so plainly when the response carries no name", async () => {
   // The negative branch: a bodyless 200 must not be reported as a confirmed rename.
   const { text } = await run("reai_rename_warehouse", { warehouseId: 4, name: "Nytt navn" }, undefined);
-  assert.match(text, /was sent the name "Nytt navn", but the response does not carry it/);
+  assert.match(text, /was sent the name "Nytt navn", and the response is not a record \(it came back as no body\)/);
   assert.doesNotMatch(text, /read back from the response/);
 });
 
@@ -477,4 +477,17 @@ test("renaming a warehouse to the name it stores reports no discrepancy", async 
   });
   assert.match(text, /is now named "Hovedlager", read back from the response/);
   assert.doesNotMatch(text, /WARNING/);
+});
+
+test("a warehouse response carrying name null is not read as the stored name", async () => {
+  // reai_rename_warehouse: `!== undefined` printed "is now named null, read back from the response".
+  const nulled = await run("reai_rename_warehouse", { warehouseId: 4, name: "Nytt" }, { id: 4, name: null });
+  assert.doesNotMatch(nulled.text, /is now named null/);
+  assert.match(nulled.text, /the response carries name: null — that is what was SENT/);
+  assert.match(nulled.text, /WARNING: name/);
+
+  // And an array response is a different case from a missing field: the note used to deny a name the payload
+  // printed directly below it.
+  const listed = await run("reai_rename_warehouse", { warehouseId: 4, name: "Nytt" }, [{ id: 4, name: "Annet" }]);
+  assert.match(listed.text, /the response is not a record \(it came back as an array of 1\)/);
 });

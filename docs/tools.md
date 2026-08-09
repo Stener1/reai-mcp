@@ -387,14 +387,23 @@ Two populations, both derived rather than listed by hand, and both enforced by
 | population | how it is found | state |
 |---|---|---|
 | read-merge-write | declares a `GET` **and** a `PUT`/`PATCH` | 13 tools, 11 certified against the response, 2 recorded as unverified with the reason |
-| no `GET` at all | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts | 39 tools, 4 proven, 35 **not examined** |
+| not a merge tool | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts, at ANY depth | 47 tools, 7 proven, 40 **not examined** |
 
-The second row is the blind spot that let three tools echo their arguments through five rediscoveries: the first
-tripwire was gated on declaring a `GET`, and none of them does. Deriving the population from the spec instead
-means a new tool joins it automatically. Identity fields (`id`, `orgNumber`) are excluded — they go out in the
-path and come back unchanged whatever the API did with the payload, so they confirm nothing.
+The second row is the blind spot that let tools echo their arguments through five rediscoveries. Three refinements
+were each forced by a tool that escaped:
 
-The 35 is a **ratchet**: it may fall and must never rise. Being on that list is a statement that nobody has
+- **not gated on declaring a `GET`.** The first version was, because that is what a merge tool looks like — and it
+  then excluded anything with a GET, while the merge census only owns GET-*plus*-PUT/PATCH. Tools with a POST and
+  an ancillary GET fell between the two.
+- **every `2xx`, not just 200/201.** A POST documented as `202` fell out entirely.
+- **fields at ANY depth.** `reai_add_salary_line` echoed its figures while the response carried the stored line
+  at `employees[].wageSpecs[]`; comparing top-level names only found nothing. `reai_log_lead_contact` escaped the
+  same way, through `contactEvents[]`. `allOf` members are followed for the same reason.
+
+Identity fields (`id`, `orgNumber`) are excluded — they go out in the path and come back unchanged whatever the
+API did with the payload, so they confirm nothing.
+
+The 40 is a **ratchet**: it may fall and must never rise. Being on that list is a statement that nobody has
 checked whether the tool quotes the request or the record — not that it is fine. Most are `create` tools, where
 the question is softer, because a caller who supplied every field has more reason to re-read anyway than one
 whose carried field was destroyed without mention.

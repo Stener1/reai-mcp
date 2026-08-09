@@ -681,7 +681,7 @@ test("renaming a sub-account states the name the response carries, not the one s
 
 test("renaming a sub-account says so plainly when the response carries no name", async () => {
   const { text } = await run("reai_rename_sub_account", { id: 12, name: "Nytt" }, () => undefined);
-  assert.match(text, /was sent the name "Nytt", but the response does not carry it/);
+  assert.match(text, /was sent the name "Nytt", and the response is not a record \(it came back as no body\)/);
   assert.doesNotMatch(text, /read back from the response/);
 });
 

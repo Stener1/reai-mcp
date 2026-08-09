@@ -420,6 +420,14 @@ const READS_BACK_FROM_RESPONSE = {
     "test/subaccounts.test.mjs",
     "creating a sub-account states the name the response stored, not the one sent",
   ],
+  reai_add_salary_line: [
+    "test/salary.test.mjs",
+    "reai_add_salary_line reports the added line from the response, not from args",
+  ],
+  reai_log_lead_contact: [
+    "test/leads.test.mjs",
+    "reai_log_lead_contact reports the event from the response, not from args",
+  ],
 };
 
 /**
@@ -490,13 +498,48 @@ test("a write tool whose response could answer for it is classified, GET or no G
    * tool — so it fell out of the census entirely and neither list had to account for it. A guard that skips
    * the tools it cannot categorise is not a guard.
    */
+  /**
+   * Property names reachable in a schema, following `allOf` and descending through nested objects and arrays.
+   *
+   * Both refinements came from review finding a real tool escaping:
+   *
+   *   NESTED — `reai_add_salary_line` echoed `args.quantity`, `args.rate` and `args.specificationCode` while
+   *   the POST answers with `SalaryPaymentDetailRes`, which carries the stored line at
+   *   `employees[].wageSpecs[]`. Comparing only TOP-LEVEL names found none of them, so the tool was in neither
+   *   list and the tripwire was green — while its own sibling `reai_update_salary_line` is certified by the
+   *   older census for walking exactly that path, ten lines away in the same file.
+   *
+   *   allOf — `BankReconciliationOverviewRes` declares its 30-odd fields inside an `allOf` member, so reading
+   *   `schemas[name].properties` returned nothing. Latent rather than live (no registered tool declares those
+   *   two paths today), but a census that returns zero fields drops the tool silently, which is the failure
+   *   mode this whole file exists to stop.
+   */
+  const fieldsOf = (schema, depth = 0, seen = new Set()) => {
+    if (!schema || depth > 4) return [];
+    if (schema.$ref) {
+      const name = schema.$ref.split("/").pop();
+      if (seen.has(name)) return [];
+      return fieldsOf(schemas[name], depth, new Set([...seen, name]));
+    }
+    const names = [];
+    for (const member of schema.allOf ?? []) names.push(...fieldsOf(member, depth, seen));
+    if (schema.items) names.push(...fieldsOf(schema.items, depth + 1, seen));
+    for (const [key, prop] of Object.entries(schema.properties ?? {})) {
+      names.push(key);
+      names.push(...fieldsOf(prop, depth + 1, seen));
+    }
+    return names;
+  };
+
+  /** The fields any SUCCESSFUL response of this write endpoint can carry, at any depth. */
   const responseFields = (method, path) => {
     const op = spec.paths?.[path]?.[method.toLowerCase()];
-    const success = Object.entries(op?.responses ?? {}).filter(([code]) => /^2\d\d$/.test(code));
     const names = new Set();
-    for (const [, body] of success) {
-      const ref = /schemas\/([A-Za-z0-9_]+)/.exec(JSON.stringify(body ?? {}));
-      if (ref) for (const k of Object.keys(schemas[ref[1]]?.properties ?? {})) names.add(k);
+    for (const [code, body] of Object.entries(op?.responses ?? {})) {
+      if (!/^2\d\d$/.test(code)) continue;
+      for (const media of Object.values(body?.content ?? {})) {
+        for (const k of fieldsOf(media?.schema)) names.add(k);
+      }
     }
     return [...names];
   };
@@ -535,6 +578,17 @@ test("a write tool whose response could answer for it is classified, GET or no G
   const stale = [...classified].filter((n) => !candidates.includes(n));
   assert.deepEqual(stale, [], `no longer in this population (renamed, or gained a GET): ${stale.join(", ")}`);
 
+  // The numbers in docs/tools.md are ENFORCED here, because the last commit moved this population and left
+  // three of them stale in the doc and self-contradictory in the CHANGELOG (39/4/35 against an actual 45/5/40).
+  // A count in prose that nothing checks is a count that rots.
+  const doc = readFileSync(join(repo, "docs", "tools.md"), "utf8");
+  const proven = Object.keys(READS_BACK_FROM_RESPONSE).length;
+  assert.ok(
+    doc.includes(`${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} **not examined**`),
+    `docs/tools.md must say "${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} ` +
+      `**not examined**" for this census; update it when the population moves`,
+  );
+
   // The ratchet. It may fall and must never rise for a FIXED population: a new tool that quotes its request
   // instead of the record cannot be parked here without the number moving, which is the visible act the first
   // version lacked.
@@ -550,9 +604,31 @@ test("a write tool whose response could answer for it is classified, GET or no G
       `this file exists to stop; fix it, or widen the ceiling only alongside a stated reason like the one above.`,
   );
 
-  // Same anchoring as the merge-tool list, for the same reasons: a title in a comment, two entries sharing a
-  // title, or a test that never mentions its tool all passed the first version of that check.
+  // What this can and cannot check, stated honestly, because the version of this comment on the merge-tool
+  // list overclaimed and review demonstrated it: a test reading `assert.ok(true)` with the tool's name in a
+  // COMMENT, placed in an unrelated file, satisfied every condition — and moving a tool out of NOT_ESTABLISHED
+  // on that basis LOWERS the ratchet, so the fake proof reads as progress.
+  //
+  // No static check can establish that a test proves something. These raise the cost of a fake to the point
+  // where writing the real test is easier:
+  //
+  //   - the file must actually exercise the tool's module (it must import the module the tool is defined in),
+  //     which stops a proof living in a file that has nothing to do with it;
+  //   - the tool name must appear OUTSIDE comments in the test's body, so a naming comment is not enough;
+  //   - the body must assert on something, and must mention at least one of the words this class of proof
+  //     turns on — a disagreement has to be visible for the test to be about one.
+  // tool name -> the src/tools module that defines it, read off the source rather than from a property on the
+  // tool (there is none) or a hand-kept table.
+  const { readdirSync } = await import("node:fs");
+  const toolModules = new Map();
+  for (const entry of readdirSync(join(repo, "src", "tools"))) {
+    if (!entry.endsWith(".ts")) continue;
+    const src = readFileSync(join(repo, "src", "tools", entry), "utf8");
+    for (const m of src.matchAll(/name:\s*"(reai_[a-z0-9_]+)"/g)) toolModules.set(m[1], entry.replace(/\.ts$/, ""));
+  }
+
   const seen = new Set();
+  const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   for (const [name, [file, title]] of Object.entries(READS_BACK_FROM_RESPONSE)) {
     assert.ok(existsSync(join(repo, file)), `${name} names ${file}, which does not exist`);
     const body = readFileSync(join(repo, file), "utf8");
@@ -560,12 +636,35 @@ test("a write tool whose response could answer for it is classified, GET or no G
     assert.ok(body.includes(opener), `${name} claims a test titled "${title}" in ${file}; none OPENS with it`);
     assert.ok(!seen.has(`${file}::${title}`), `two entries name the same test: ${file}::${title}`);
     seen.add(`${file}::${title}`);
+
+    // The file has to be about the module this tool lives in, so a proof cannot be parked in whichever test
+    // file happens to be convenient. The module is found by looking for the tool's `name:` in src/tools —
+    // the FIRST version of this read `t.sourceModule`, a property no tool has, so it was a silent skip that
+    // asserted nothing. Hence the assertion that the module was found at all.
+    const module = toolModules.get(name);
+    assert.ok(module !== undefined, `could not find where ${name} is defined under src/tools`);
+    assert.ok(
+      body.includes(`dist/tools/${module}.js`),
+      `${name} is defined in src/tools/${module}.ts, but ${file} does not import that module — a proof for ` +
+        `it cannot live there`,
+    );
+
     const from = body.indexOf(opener);
     const next = body.indexOf("\ntest(", from + 1);
     const testBody = body.slice(from, next === -1 ? body.length : next);
+    const code = stripComments(testBody);
     assert.ok(
-      testBody.includes(name) || testBody.includes(name.replace(/^reai_/, "")),
-      `the test "${title}" never mentions ${name}, so it cannot be what proves it`,
+      code.includes(name) || code.includes(name.replace(/^reai_/, "")),
+      `the test "${title}" mentions ${name} only in a comment, so it cannot be what proves it`,
+    );
+    assert.ok(
+      /assert\.(match|equal|deepEqual|ok|doesNotMatch|notEqual)\(/.test(code),
+      `the test "${title}" asserts nothing`,
+    );
+    assert.ok(
+      /read back|WARNING|stored|SENT|carried|DESTROYED/.test(code),
+      `the test "${title}" never asserts on what the response said versus what was sent, which is the only ` +
+        `thing that would make it a proof for ${name}`,
     );
   }
 });

@@ -777,6 +777,24 @@ export function mergeForReplacement(opts: {
  * counts in the order, offer and subscription tools are checked separately for that reason. (That was
  * false for order and offer when written — review caught it, and `lineCountNote` in sales.ts now makes it true.)
  */
+/**
+ * Is this a record a field could be read out of?
+ *
+ * Separate from "does the field exist", because review found the two conflated: a response that came back as an
+ * ARRAY produced "the response does not carry it" printed directly above a payload that showed the value. An
+ * unreadable shape and a missing field call for different sentences.
+ */
+export const isRecord = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === "object" && !Array.isArray(v);
+
+/** What a response came back as, for a note that has to say why nothing could be read from it. */
+export function describeShape(v: unknown): string {
+  if (v === undefined) return "no body";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return `an array of ${v.length}`;
+  return `a ${typeof v}`;
+}
+
 /** Shared by `confirmAgainstResponse` and by callers that need to explain a difference it found. */
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);

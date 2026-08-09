@@ -563,3 +563,68 @@ test("changing a line on a run that is no longer a draft is refused before the P
     assert.match(text, /reai_request PUT/);
   }
 });
+
+test("reai_add_salary_line reports the added line from the response, not from args", async () => {
+  // reai_add_salary_line stated "Added 8 × 500 as HOURLY_SALARY" from `args` while already reading
+  // payableAmount out of the same object — and its sibling reai_update_salary_line is certified in this repo
+  // for walking exactly this nested path. Found by review; the census now finds it too, because it descends
+  // into nested schemas instead of matching top-level names only.
+  //
+  // The codes here are real members of the tool's enum. The first version of this test used HOURLY_WAGE and
+  // OVERTIME_50, which are not, and the harness rejected them at the schema — which is precisely why it
+  // validates rather than calling `handler` directly.
+  const stored = (specs) => ({
+    id: 9,
+    status: "under_process",
+    payableAmount: 4000,
+    employees: [{ employeeId: 3, payableAmount: 4000, taxDeducted: 1000, taxDeductionRate: 20, wageSpecs: specs }],
+  });
+
+  // The response shows something other than what was sent: no matching line.
+  const wrong = await run(
+    "reai_add_salary_line",
+    { id: 9, employeeId: 3, specificationCode: "HOURLY_SALARY", quantity: 8, rate: 500 },
+    stored([{ id: 77, specificationCode: "COMMISSION", quantity: 1, rate: 250 }]),
+  );
+  assert.match(wrong.text, /WARNING: no line on that employee in the response matches those figures/);
+  assert.match(wrong.text, /COMMISSION 1 × 250/, "what the response DOES list is named");
+  assert.match(wrong.text, /figures SENT, not what is stored/);
+  assert.doesNotMatch(wrong.text, /read back from the response/);
+
+  // And the ordinary case. The response's figures are the same NUMBERS spelled differently — "8.0" and "500"
+  // as a string — which is what makes this able to tell a read-back from an echo at all: if the stored values
+  // were identical to the sent ones, both implementations print the same sentence and the assertion proves
+  // nothing. That is the trap review caught in the sibling assets test, and the first version of THIS test
+  // walked into it: reverting the handler to `args` left it green, because only the line id differed.
+  const right = await run(
+    "reai_add_salary_line",
+    { id: 9, employeeId: 3, specificationCode: "HOURLY_SALARY", quantity: 8, rate: 500 },
+    stored([{ id: 81, specificationCode: "HOURLY_SALARY", quantity: "8.0", rate: "500" }]),
+  );
+  assert.match(right.text, /Added 8\.0 × 500 as HOURLY_SALARY \(line 81\), read back from the response/);
+  assert.doesNotMatch(right.text, /WARNING/);
+});
+
+test("reai_add_salary_line says when the figures match more than one line", async () => {
+  // A new line carries an id the request cannot know, so it is identified by MATCHING. Two identical lines
+  // means the amounts are confirmed but the row is not — which is worth saying rather than picking one.
+  const { text } = await run(
+    "reai_add_salary_line",
+    { id: 9, employeeId: 3, specificationCode: "HOURLY_SALARY", quantity: 8, rate: 500 },
+    {
+      id: 9,
+      status: "under_process",
+      employees: [
+        {
+          employeeId: 3,
+          wageSpecs: [
+            { id: 80, specificationCode: "HOURLY_SALARY", quantity: 8, rate: 500 },
+            { id: 81, specificationCode: "HOURLY_SALARY", quantity: 8, rate: 500 },
+          ],
+        },
+      ],
+    },
+  );
+  assert.match(text, /2 lines on that employee now match those figures/);
+  assert.match(text, /which row is the new one is not/);
+});

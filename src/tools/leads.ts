@@ -488,8 +488,16 @@ const updateLead = defineTool({
     // acting on it anyway would create a lead in order to empty it — state produced by a request to
     // remove state. Reported as the answer it is rather than as an error, since the caller's
     // intended end state is already the actual one.
-    const asksToClear = (key: "notes" | "email" | "phone" | "followUpAt") =>
-      args[key] === null || (key === "notes" && args[key] === "");
+    // ONE emptiness predicate for the whole handler. Review found the two still disagreeing on whitespace after
+    // the commit that claimed to unify them: `email: "   "` was routed as a SET (so the body carried it and the
+    // calls line said "email set") while the verification below treated it as a CLEAR, and the two cancelled
+    // out to no report at all.
+    //
+    // `notes` is not special-cased any more either. It was the only key where `""` counted as clearing, which
+    // was a statement about the endpoint, not about the argument — and the endpoint that clears on `""` is the
+    // one the check already treats that way.
+    const blank = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+    const asksToClear = (key: "notes" | "email" | "phone" | "followUpAt") => blank(args[key]);
     const clearsOnly = (["notes", "email", "phone", "followUpAt"] as const).every(
       (key) => !given(key) || asksToClear(key),
     );
@@ -582,7 +590,10 @@ const updateLead = defineTool({
         `PUT .../contact with ${(["email", "phone"] as const)
           .map((k) =>
             given(k)
-              ? `${k} ${args[k] === null ? "cleared" : "set"}`
+              // `blank`, not `=== null`: this was a THIRD emptiness rule in the same handler, so a
+              // whitespace-only value was announced as "set" while every other part of the tool treated it
+              // as a clear.
+              ? `${k} ${blank(args[k]) ? "cleared" : "set"}`
               // "sent to preserve", not "carried over unchanged": the value printed here is the one from the
               // REQUEST, and whether the API kept it is a separate question the re-read below now answers.
               // The old wording asserted the answer.
@@ -609,14 +620,14 @@ const updateLead = defineTool({
     // phone needs no special case any more — the general rule already covers it.
     const failures: string[] = [];
     const rewritten: string[] = [];
+    const substituted: string[] = [];
     const show = (v: unknown) => JSON.stringify(v ?? null);
-    // ONE emptiness class, the same one `confirmAgainstResponse` uses. `UpdateLeadContactReq` permits a
-    // zero-length email and phone, so `""` and `null` both reach here and keying on `=== null` got two cases
+    // The emptiness class is `blank` above, shared with asksToClear. `UpdateLeadContactReq` permits a
+    // zero-length email and phone, so `""` and `null` both reach here, and keying on `=== null` got two cases
     // backwards: a carried `""` normalised to null read as DESTROYED (a failure over nothing), while a
     // non-empty email erased to `""` fell through to "stored, but not exactly as sent" — real data loss filed
     // as a formatting note. Clearing had the mirror bug: a field asked to be cleared that reads `""` was
     // reported as still holding a value.
-    const blank = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
     const check = (key: "status" | "notes" | "email" | "phone" | "followUpAt") => {
       if (!given(key)) return;
       const want = key !== "status" && asksToClear(key) ? null : (args[key] ?? null);
@@ -651,7 +662,16 @@ const updateLead = defineTool({
             `${show(after.state[key] ?? null)} now, so this write DESTROYED it`,
         );
       } else if (String(carried) !== String(after.state[key])) {
-        rewritten.push(`${key}: carried ${show(carried)}, stored ${show(after.state[key])}`);
+        // NOT the "this API rewrites values" bucket. That sentence blames normalisation, and normalisation is
+        // not a plausible reading here: the value sent was the one just read back from this same API, so it was
+        // already in whatever form the API stores. A carried email that comes back as a DIFFERENT address is
+        // strictly worse than one blanked — the lead now points at the wrong person — and review found it
+        // filed as a formatting note by the very commit that claimed to stop doing that.
+        //
+        // Not an isError, because a substitution cannot be told apart from a write-side normalisation the read
+        // side does not apply, and failing every phone edit on that suspicion would be its own defect. Both
+        // readings are named instead.
+        substituted.push(`${key}: carried ${show(carried)}, stored ${show(after.state[key])}`);
       }
     }
     // The row itself, which is the failure the whole save-first exists to prevent: without this the
@@ -690,6 +710,14 @@ const updateLead = defineTool({
         (rewritten.length > 0
           ? `\n\nStored, but not exactly as sent — this API rewrites values (a phone becomes E.164, ` +
             `a name comes back title-cased):\n` + rewritten.map((m) => `  - ${m}`).join("\n")
+          : ``) +
+        (substituted.length > 0
+          ? `\n\nCARRIED, and the record came back with something else:\n` +
+            substituted.map((m) => `  - ${m}`).join("\n") +
+            `\n\nYou did not mention ${substituted.length === 1 ? "that field" : "those fields"}; this tool ` +
+            `sent the value it had just read, so the API storing a different one is either a write-side ` +
+            `rewrite that the read side does not apply, or something else changed it. Not counted as a ` +
+            `failure for that reason — but a contact value pointing somewhere unintended is worth checking.`
           : ``),
     });
     if (failures.length > 0) result.isError = true;
@@ -727,7 +755,10 @@ const logLeadContact = defineTool({
   handler: async (args, ctx) => {
     const tenantId = requireTenantId(args.tenantId, ctx);
     const before = await readLeadState(ctx, tenantId, args.orgNumber);
-    const res = await ctx.client.request<{ id?: number }>({
+    // `LeadRes`, whose contact events are nested — the old `{ id?: number }` was a guess that made the
+    // `res.data.id` clause below dead code against the documented response.
+    type ContactEvent = { id?: number; contactedOn?: unknown; source?: unknown; note?: unknown };
+    const res = await ctx.client.request<{ contactEvents?: ContactEvent[] }>({
       method: "POST",
       path: `/api/leads/org/${encodeURIComponent(args.orgNumber)}/contact-events`,
       tenantId,
@@ -737,11 +768,35 @@ const logLeadContact = defineTool({
         ...(args.note === undefined ? {} : { note: args.note }),
       },
     });
+    // From the RESPONSE. Both echoed values are the exact rewrite classes this repo documents: `contactedOn`
+    // is a date the API may echo as a timestamp, and `source` is an enum whose casing it may normalise. The
+    // event is nested at `contactEvents[]`, which is why the census could not see it until it learned to
+    // descend — review found this one by hand.
+    //
+    // Identified by matching, not by "the newest is last": a unique match on the sent date and channel is a
+    // confirmation, and anything else is reported as sent.
+    const events = Array.isArray(res.data?.contactEvents) ? res.data.contactEvents : [];
+    const sameDay = (v: unknown) => typeof v === "string" && v.slice(0, 10) === args.contactedOn;
+    const logged = events.filter(
+      (e): e is NonNullable<typeof e> =>
+        !!e && sameDay(e.contactedOn) && String(e.source).toUpperCase() === args.source.toUpperCase(),
+    );
+    const stored = logged.length === 1 ? logged[0] : undefined;
+    // `LeadRes` has no top-level `id` — the lead's is at `lead.id` — so the old ` as event ${res.data.id}`
+    // clause was dead against the documented response. The event's own id is on the event.
     return ok(res.data ?? {}, {
       note:
-        `Logged ${args.source} contact with ${before.record.companyName ?? args.orgNumber} on ` +
-        `${args.contactedOn}` +
-        (res.data?.id ? ` as event ${res.data.id}` : ``) +
+        (stored !== undefined
+          ? `Logged ${String(stored.source)} contact with ` +
+            `${before.record.companyName ?? args.orgNumber} on ${String(stored.contactedOn)}, read back ` +
+            `from the response` + (stored.id === undefined ? `` : ` as event ${stored.id}`)
+          : `Sent a ${args.source} contact for ${before.record.companyName ?? args.orgNumber} on ` +
+            `${args.contactedOn}` +
+            (logged.length > 1
+              ? ` — ${logged.length} events in the response match that date and channel, so it was stored but ` +
+                `which one this call created is not identifiable`
+              : ` — no event in the response matches that date and channel, so those are the values SENT. ` +
+                `Read the lead back with reai_get_lead`)) +
         `.` +
         (isSaved(before.state) ? `` : ` This also created the lead, which did not exist before.`) +
         `\n\nIt cannot be removed on its own — see the tool description.`,
