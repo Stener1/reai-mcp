@@ -293,3 +293,167 @@ test("the reconciliation-rule quirk does not mention companyBankId", () => {
       .includes("some-accounts-demand-a-dimension"),
   );
 });
+
+/**
+ * The OTHER conditionally-mandatory dimension, pre-checked the same way.
+ *
+ * `reai_create_voucher` already refused a posting missing a `subAccountId` and named the choices. It did
+ * not do the same for `companyBankId`, and the reason given in the argument's own description was that
+ * "nothing in the company-bank response says which ledger account each bank belongs to". That premise is
+ * true — measured, `/api/company-banks` returns id, name, bban, iban, currency, providerType and no
+ * account number — but the conclusion was wrong, which the review of PR #132 pointed out.
+ *
+ * `GET /api/chart-of-accounts/accounts` pairs them. Measured on tenant 2634, which has three company
+ * banks (1337, 1338, 1339):
+ *
+ *   accountNumberPrefix=1920 -> 1920/1337 {type:"bank", id:1337, name:"mva"}
+ *                               1920/1338 {type:"bank", id:1338, name:"drift"}
+ *                               1920/1339 {type:"bank", id:1339, name:"Skatt tilsidesatt - NOK"}
+ *
+ * and `subsidiaryLedger.id` is the companyBankId exactly. So the 400 the API would answer —
+ * "Linje 1: Konto 1920 må posteres med bankkonto." naming the line and nothing else — is replaceable with
+ * the actual ids, before anything is sent.
+ */
+const BANK_ROWS = [
+  { number: "1920/1337", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1337, name: "mva" } },
+  { number: "1920/1338", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1338, name: "drift" } },
+  { number: "1920/1339", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1339, name: "Skatt tilsidesatt - NOK" } },
+];
+
+/** The chart search is a PREFIX search, so the stub must behave like one — see the exact-match test. */
+const chartResponder = (rows) => (req) => {
+  if (req.path === "/api/general-sub-accounts") return [];
+  if (req.path.startsWith("/api/chart-of-accounts/accounts")) {
+    const want = decodeURIComponent(new URL(`http://x/${req.path}`).searchParams.get("accountNumberPrefix") ?? "");
+    return rows.filter((r) => r.accountNumber.startsWith(want));
+  }
+  return { id: 1, number: "MV1-2026" };
+};
+
+const bankPostings = (extra = {}) => [
+  { accountNumber: "1920", amount: 100, description: "d", ...extra },
+  { accountNumber: "3000", amount: -100, description: "d" },
+];
+
+test("a posting to a bank account is refused locally, with the company bank ids", async () => {
+  const { calls, result, text } = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: bankPostings() },
+    chartResponder(BANK_ROWS),
+  );
+  assert.deepEqual([...new Set(calls.map((c) => c.method))], ["GET"], "no voucher may be sent");
+  assert.equal(result.isError, true);
+  assert.match(text, /Nothing was sent/);
+  assert.match(text, /line 1, account 1920 → companyBankId/);
+  // The ids themselves, which is the whole point — a refusal naming only the line is what the API
+  // already does.
+  for (const id of [1337, 1338, 1339]) assert.match(text, new RegExp(String(id)));
+  assert.match(text, /mva/, "and the bank names, so a caller can pick the right one");
+  assert.match(text, /reai_list_company_banks/, "with the tool for the full records");
+});
+
+test("supplying a companyBankId, or posting to an account without one, goes through", async () => {
+  const supplied = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: bankPostings({ companyBankId: 1338 }) },
+    chartResponder(BANK_ROWS),
+  );
+  assert.notEqual(supplied.result.isError, true);
+  assert.ok(supplied.calls.some((c) => c.method === "POST"), "the voucher must be sent");
+
+  // An account with no bank dimension must not be blocked. On a tenant with no company banks the prefix
+  // search returns nothing at all — measured on 2783 — so absence is the normal case, not a signal.
+  const noBanks = await run(
+    "reai_create_voucher",
+    {
+      date: "2026-08-08",
+      description: "Zz",
+      postings: [
+        { accountNumber: "3000", amount: 100, description: "d" },
+        { accountNumber: "4000", amount: -100, description: "d" },
+      ],
+    },
+    chartResponder([]),
+  );
+  assert.notEqual(noBanks.result.isError, true);
+  assert.ok(noBanks.calls.some((c) => c.method === "POST"));
+});
+
+test("a failed dimension lookup does not block a voucher the API would accept", async () => {
+  // Same discipline as the sub-account lookup: this spec has under-stated requirements before, and
+  // refusing a write because a helper read failed would be the check doing harm. The API stays the
+  // authority, and the catch after the POST still translates its Norwegian refusal.
+  const calls = [];
+  const validated = z.object(tool("reai_create_voucher").inputSchema).parse({
+    tenantId: 2783,
+    date: "2026-08-08",
+    description: "Zz",
+    postings: bankPostings(),
+  });
+  const result = await tool("reai_create_voucher").handler(validated, {
+    client: {
+      request: async (req) => {
+        calls.push(req);
+        if (req.path === "/api/general-sub-accounts") return { data: [], status: 200 };
+        if (req.path.startsWith("/api/chart-of-accounts")) throw new Error("network down");
+        return { data: { id: 1, number: "MV1-2026" }, status: 200 };
+      },
+      deepLink: () => "link",
+    },
+    config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+    session: {},
+  });
+  assert.notEqual(result.isError, true, "a failed lookup must not refuse the write");
+  assert.ok(calls.some((c) => c.method === "POST"), "the voucher must still be sent");
+});
+
+test("the bank lookup matches the account EXACTLY, because the search is a prefix search", async () => {
+  // accountNumberPrefix=1920 also returns 19205 if such an account exists, and `query` is worse — it
+  // matches names too, so query=bank returns 1920 AND 7770 (measured). A posting to 1921 must not inherit
+  // 1920's banks.
+  const neighbour = [
+    ...BANK_ROWS,
+    { number: "19205/1400", accountNumber: "19205", subsidiaryLedger: { type: "bank", id: 1400, name: "other" } },
+  ];
+  const { result, text } = await run(
+    "reai_create_voucher",
+    {
+      date: "2026-08-08",
+      description: "Zz",
+      postings: [
+        { accountNumber: "1920", amount: 100, description: "d" },
+        { accountNumber: "3000", amount: -100, description: "d" },
+      ],
+    },
+    chartResponder(neighbour),
+  );
+  assert.equal(result.isError, true);
+  assert.doesNotMatch(text, /1400/, "a neighbouring account's bank must not be offered for 1920");
+});
+
+test("the lookup is bounded, so a wide voucher does not burst a read per line", async () => {
+  // One read per DISTINCT account lacking a companyBankId. Beyond a small budget the check steps aside
+  // rather than spending a burst of reads before the API has even been asked.
+  const many = [];
+  for (let i = 0; i < 12; i += 1) many.push({ accountNumber: `40${10 + i}`, amount: i % 2 ? -10 : 10, description: "d" });
+  const { calls, result } = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: many },
+    chartResponder(BANK_ROWS),
+  );
+  const lookups = calls.filter((c) => String(c.path).startsWith("/api/chart-of-accounts")).length;
+  assert.equal(lookups, 0, "past the budget the check must step aside, not issue 12 reads");
+  assert.notEqual(result.isError, true, "and must not block the voucher");
+});
+
+test("the companyBankId description no longer says the pre-check is missing", () => {
+  const posting = tool("reai_create_voucher").inputSchema.postings._def.type._def.shape();
+  const desc = posting.companyBankId._def.description;
+  assert.match(desc, /PRE-CHECKS/, "the argument must say the check now happens");
+  assert.doesNotMatch(
+    desc,
+    /has\s+not\s+made\s+yet/,
+    "the deferral note must go now that the check exists",
+  );
+  assert.match(desc, /subsidiaryLedger/, "and name where the pairing comes from");
+});

@@ -256,14 +256,14 @@ const postingInput = z.object({
       "Company bank account id, from reai_list_company_banks. Conditionally REQUIRED in the same way " +
         "subAccountId is: a posting to a bank account in the chart answers " +
         '400 "Linje 1: Konto 1920 må posteres med bankkonto." without it — measured. This tool does ' +
-        "not pre-check that one. The reason used to be given as \"nothing in the company-bank response " +
-        "says which ledger account each bank belongs to\", which is true — measured, that response " +
-        "carries id, name, bban, iban, currency, providerType and no account number — but the " +
-        "conclusion drawn from it was wrong: reai_list_accounts DOES pair them, returning " +
-        '"1920/1337" with accountNumber 1920 and subsidiaryLedger {type: "bank", id: 1337}. So the ' +
-        "pairing is available, from that endpoint rather than this one, and pre-checking bank " +
-        "dimensions the way sub-accounts are already pre-checked is a real improvement this tool has " +
-        "not made yet.",
+        "PRE-CHECKS this the way it pre-checks subAccountId: if a posting is on an account that has bank " +
+        "dimensions and carries no companyBankId, nothing is sent and the refusal names the actual ids to " +
+        "choose from. The pairing comes from reai_list_accounts, which returns \"1920/1337\" with " +
+        'accountNumber 1920 and subsidiaryLedger {type: "bank", id: 1337} — that id IS the companyBankId. ' +
+        "(An earlier version declined to pre-check it, reasoning that nothing in the company-bank response " +
+        "says which ledger account each bank belongs to. True of that response, wrong as a conclusion.) " +
+        "The check only fires on a positive finding, so an account it cannot resolve is still left to the " +
+        "API.",
     ),
   assetId: z.number().int().optional().describe("Link the posting to an asset."),
   subAccountId: z
@@ -545,6 +545,68 @@ const createVoucher = defineTool({
           `\n\nAn account that has ANY sub-account requires one on every posting, even when the only ` +
           `one is called "Default" — the API answers 400 "må posteres med underkonto" and names just ` +
           `the line. Pick from the ids above, or list them with reai_sub_accounts_for_account.`,
+      );
+    }
+
+    // The same courtesy for the OTHER conditionally-mandatory dimension. A posting to a bank account
+    // answers 400 "Linje 1: Konto 1920 må posteres med bankkonto." without a companyBankId, naming the
+    // line and nothing actionable — and this tool used to decline to pre-check it, on the grounds that
+    // "nothing in the company-bank response says which ledger account each bank belongs to". That premise
+    // is true; the conclusion was not. reai_list_accounts pairs them: GET /api/chart-of-accounts/accounts
+    // returns one row per account-plus-dimension, so account 1920 comes back as "1920/1337" carrying
+    // subsidiaryLedger {type: "bank", id: 1337} — and that id IS the companyBankId.
+    //
+    // Only fires on a POSITIVE finding. `accountNumberPrefix` returns nothing both for an account with no
+    // bank dimension and for an account that does not exist (measured: 2783 has 1920 in its chart, zero
+    // company banks, and the prefix search returns 0 rows), so absence proves nothing and must not block.
+    // Exact-match on accountNumber because the search is a prefix search — 1920 would also return 19205 —
+    // and `query` is worse still, matching names too: `query=bank` returns 1920 AND 7770.
+    const needBank: Array<{ line: number; accountNumber: string; choices: string }> = [];
+    const distinct = [...new Set(args.postings.filter((p) => p.companyBankId === undefined).map((p) => p.accountNumber))];
+    // Bounded: one read per distinct account, and vouchers are a handful of lines. A voucher touching
+    // more accounts than this is not a case worth spending a burst of reads on before even trying.
+    const LOOKUP_BUDGET = 8;
+    if (distinct.length > 0 && distinct.length <= LOOKUP_BUDGET) {
+      const bankDimensions = new Map<string, Array<{ id?: number; name?: string }>>();
+      try {
+        for (const accountNumber of distinct) {
+          const rows = await ctx.client.request<
+            Array<{ accountNumber?: string; subsidiaryLedger?: { type?: string; id?: number; name?: string } | null }>
+          >({
+            method: "GET",
+            path: `/api/chart-of-accounts/accounts?accountNumberPrefix=${encodeURIComponent(accountNumber)}`,
+            tenantId,
+          });
+          if (!Array.isArray(rows.data)) continue;
+          const banks = rows.data
+            .filter((r) => r.accountNumber === accountNumber && r.subsidiaryLedger?.type === "bank")
+            .map((r) => ({ id: r.subsidiaryLedger?.id, name: r.subsidiaryLedger?.name }));
+          if (banks.length > 0) bankDimensions.set(accountNumber, banks);
+        }
+      } catch {
+        // Left to the API, deliberately — same reasoning as the sub-account lookup above. A helper read
+        // that fails must not refuse a voucher the API would have accepted.
+      }
+      args.postings.forEach((posting, index) => {
+        if (posting.companyBankId !== undefined) return;
+        const choices = bankDimensions.get(posting.accountNumber);
+        if (choices === undefined) return;
+        needBank.push({
+          line: index + 1,
+          accountNumber: posting.accountNumber,
+          choices: choices.map((c) => `${c.id} (${c.name ?? "?"})`).join(", "),
+        });
+      });
+    }
+    if (needBank.length > 0) {
+      return fail(
+        `Nothing was sent. ${needBank.length} posting(s) are on a bank account, which must say WHICH ` +
+          `company bank, and none was given:\n\n` +
+          needBank
+            .map((n) => `  line ${n.line}, account ${n.accountNumber} → companyBankId ${n.choices}`)
+            .join("\n") +
+          `\n\nThe API answers 400 "må posteres med bankkonto" and names only the line. Pick from the ids ` +
+          `above — they are the company bank ids — or list the full records with reai_list_company_banks.`,
       );
     }
 

@@ -9,6 +9,39 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_create_voucher` now pre-checks `companyBankId`, the way it already pre-checked `subAccountId`.**
+  The deferred half of #132, and the reviewer there was right that it is the smaller, better fix: it closes
+  the gap rather than describing it.
+  - A posting to a bank account without a `companyBankId` answers 400 `"Linje 1: Konto 1920 må posteres med
+    bankkonto."` — naming the line and nothing a caller can act on. The tool now refuses before sending and
+    names the actual ids. Verified live against 2634's real chart, with a client that throws on any non-GET
+    so a failed check could not become a write:
+
+    ```
+    Nothing was sent. 1 posting(s) are on a bank account, which must say WHICH company bank:
+      line 1, account 1920 → companyBankId 1338 (drift), 1337 (mva), 1339 (Skatt tilsidesatt - NOK)
+    ```
+
+    Those are 2634's three company banks exactly, resolved from the API rather than from a fixture.
+  - The pairing comes from `GET /api/chart-of-accounts/accounts`, which returns one row per
+    account-plus-dimension: `1920/1337` carrying `subsidiaryLedger {type: "bank", id: 1337}`, and that id IS
+    the `companyBankId`. The argument's own description previously justified skipping the check with
+    *"nothing in the company-bank response says which ledger account each bank belongs to"* — true of that
+    response, wrong as a conclusion.
+  - **It only fires on a positive finding.** The prefix search returns nothing both for an account with no
+    bank dimension and for an account that does not exist (measured: 2783 has 1920 in its chart, zero
+    company banks, and the search returns 0 rows), so absence proves nothing and must not block. Matched on
+    `accountNumber` EXACTLY, because the search is a prefix search — 1920 would also return 19205 — and
+    `query` is worse still, matching names too: `query=bank` returns 1920 **and** 7770.
+  - **A failed lookup does not block the write**, the same discipline the sub-account check already has:
+    this spec has under-stated requirements before, and refusing a voucher because a helper read failed
+    would be the check doing harm. The API stays the authority, and the existing catch still translates its
+    Norwegian refusal.
+  - Bounded to one read per distinct account lacking the field, and it steps aside past eight rather than
+    issuing a burst before the API has been asked at all.
+  - Four mutations verified failing: the refusal removed, the exact-match dropped so a neighbouring
+    account's bank bleeds in, a failed lookup made to block, and the budget removed.
+
 - **`reai_list_accounts` is a search that read like a listing, and told agents to conclude the opposite.**
   - Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on a 399-account chart: **no
     parameters returns 20 rows**, `limit=5` returns 5, `limit=500` returns **100** (silently capped — the
