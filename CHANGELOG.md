@@ -7,6 +7,62 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **Two invariants that hold the curated tools to what the document says the API accepts.** Both properties
+  already held — this locks them in rather than fixing anything, which is worth saying plainly. They came out of
+  looking for a validation gap that turned out not to exist, and the looking is what belongs in the repository.
+  - **Every enum a tool declares is compared against the members the document declares** — 26 arguments across
+    **14** write tools, all in step today. This catches drift in the direction that hurts: a spec refresh that
+    ADDS a member leaves a tool's `z.enum` rejecting a value the API now accepts, and the agent is told the
+    value is invalid by the side that is wrong about it. Nothing else in the suite would notice, because each
+    tool's own tests use values from that tool's own list.
+  - **No write tool omits a body property the document marks required** — **51** operations carry one and none
+    is missing. That failure mode arrives as a 400 after a round-trip rather than locally.
+  - **Most of the first version's escape valves were unexercised slack, and the review took them out.** Each
+    was a hole rather than a nicety: twelve pairs were dropped *before* they could be recorded, because a spec
+    enum field with no matching argument hit a `continue` — all twelve belong to `reai_update_agreement`, which
+    checks a free-form `changes` record against `findOperation(...).body.fields` at runtime and so cannot drift,
+    but a thirteenth on a tool without that check would have vanished too. `notEnum.length <= 2` licensed two
+    future holes while the actual was zero, and the comment justifying the slack described a case that cannot
+    occur. The unwrapper did not follow `ZodArray`, so a correctly written `z.array(z.enum([...]))` would have
+    been counted as "not an enum" and swallowed by that same slack. And the free-form escape whitelisted eight
+    argument names on speculation that no tool used; it is a structural `z.record` check now.
+  - `ENUM_LIMIT = 24` in the index builder renders overflow as `enum(a|b|+21 more)`, and two live fields hit it,
+    so comparing against a literal member `+21 more` would be a spurious failure indistinguishable from real
+    drift. Those two are detected and skipped by name, and a third test pins the count at two so a spec refresh
+    cannot quietly add one.
+  - Mutation-tested: removing a member from `INSTRUMENT_TYPES` fails the first, renaming `accountNumber` out of
+    `reai_create_sub_account` fails the second, and **weakening a `z.enum` to `z.string()`** — which the old
+    slack permitted — now fails as well.
+
+### Verified, nothing to change
+
+- **Both live drift audits were run against tenant 2783 and passed.** `scripts/audit-messages.mjs` — 9 refusal
+  strings the code matches on, all unchanged. `scripts/audit-storage.mjs` — 17 storage claims, all unchanged,
+  including the phone canonicalisation, the title-casing, the stale-directory override and the wrong postcode.
+  The sweep confirms the tenant is back to the 0 customers and 0 suppliers it started with, and the customer
+  created to refuse against returns 404 afterwards. **26 claims checked, 0 drifted** — as of this run. These
+  audits write to a live tenant, so they are hand-run and not in CI; that is an observation on a date, not a
+  standing property, and the entry says so rather than implying otherwise.
+- **The param-less action hole named in #122 and #123 promotes nothing wrongly — but a measured wrong answer
+  does exist, pointing the other way.** `POST /api/subscriptions/generate-due` transmits and ranks first for
+  "generate due" and for its own summary; in both the query NAMES it, which is correct. Across eleven phrasings
+  that do not name it ("abonnement", "opprett abonnement", "forfalte abonnementer", "fakturer abonnementene" and
+  so on) it ranks first for none. So there is nothing to demote.
+  - What a first draft of this entry then claimed — "there is no measured case to fix" — is **false**, and the
+    counter-example is in this repository's own corpus. `test/discovery-heldout.test.mjs:381` declares
+    `/api/subscriptions/generate-due` the correct answer for "lag faktura for abonnementene", and it is **not in
+    the top 20**: the query returns `GET /api/invoices` first. The corpus is scored against floors, so it does
+    not fail. That is a discovery MISS rather than a wrongly promoted write, which is why the demotion work in
+    #122 could not have found it and why it is recorded here instead of fixed in passing. Found by the
+    independent review.
+- **Two of my own audit harnesses were wrong before they were right, which is why the checks above are
+  committed rather than run by hand.** A grep for `enum(` reported `reai_update_agreement` as unvalidated,
+  because the source carries the regex escape `enum\(`. And inferring requiredness from a type string not
+  ending in `?` reported nine tools missing required fields — every one a false positive, since the index
+  carries the document's own `required` list and those tools are verified working live.
+
 ### Fixed
 
 - **Four places told agents the agreement enums are undocumented. The spec declares all fourteen.** The source
