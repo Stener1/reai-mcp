@@ -39,45 +39,30 @@ const listAccounts = defineTool({
   name: "reai_list_accounts",
   title: "List chart of accounts",
   description:
-    "SEARCH the tenant's chart of accounts (kontoplan) — a search, not a listing. Returns account " +
-    "numbers, names and types. Use it to find the right account number before booking a voucher.\n\n" +
-    "**Called with no arguments it returns 20 accounts, and the chart has hundreds.** Measured " +
-    "2026-08-09: 20 rows from a 399-account chart, and `limit` is capped at 100. There is no paging " +
-    "either — the endpoint declares only query, limit, accountNumberPrefix and filterRestricted, and " +
-    "`offset` and `page` are accepted-and-ignored, still answering 100 — so this endpoint cannot reach " +
-    "the rest of the chart at all.\n\n" +
-    "The COMPLETE chart is a different endpoint: `GET /api/chart-of-accounts` returns all 399 in one " +
-    "response, with a `generalSubAccounts` array this search does not carry. No curated tool exposes it " +
-    "yet, so reach it with reai_request if you genuinely need every account — but prefer narrowing here " +
-    "first, because the full response is several hundred rows each carrying a paragraph of Norwegian " +
-    "guidance.\n\n" +
-    "An account being ABSENT from a result is therefore not evidence that it " +
-    "is absent from the chart — narrow with `query` or `accountNumberPrefix` and ask again before " +
-    "concluding an account does not exist. An earlier version of this text said \"every posting must " +
-    "reference an account that exists in this list\", which invited exactly that wrong inference.\n\n" +
-    "The chart is also per TENANT in membership as well as size: measured, 349 accounts on one tenant " +
-    "and 399 on another, with account 1320 present on the second and absent from the first. An account " +
-    "number that worked for one company is not evidence about another.\n\n" +
-    "**Each row is an account-plus-dimension, and it carries the id a posting needs.** This is the part " +
-    "worth knowing, and an earlier version of this description got it backwards by claiming the " +
-    "dimensions were invisible here. They are not — they are the whole shape of the response:\n\n" +
-    "  1900        subsidiaryLedger: null                                  -> post to \"1900\"\n" +
-    '  1920/1337   {type: "bank",    id: 1337, name: "mva"}                -> companyBankId 1337\n' +
-    '  1320/6230   {type: "general", id: 6230, name: "Default"}            -> subAccountId 6230\n\n' +
-    "Measured 2026-08-09. An account that demands a dimension does NOT appear bare: `1920` came back " +
-    "three times, once per company bank, with `number` already composed as \"1920/1337\" in the subledger " +
-    "syntax vouchers accept, and `subsidiaryLedger.id` equal to the companyBankId. An account that needs " +
-    "nothing appears once with `subsidiaryLedger: null`. So this search answers the dimension question " +
-    "directly, and `reai_sub_accounts_for_account` / `reai_list_company_banks` are for when you need the " +
-    "full sub-account or bank record rather than just the id to post with — and note that " +
-    "reai_list_company_banks lives in the `bank` toolset, so a server started with " +
-    "REAI_TOOLSETS=bookkeeping will not have it; the always-on reai_request reaches " +
-    "GET /api/company-banks directly. `subsidiaryLedger.type` is one of asset, bank, supplier, customer, " +
-    "employee, general.\n\n" +
-    "It also means the row COUNT is not an account count: a chart of 399 base accounts yields more rows " +
-    "than that once each dimension is enumerated, which is another reason the 100 cap bites sooner than " +
-    "it looks. See reai_api_notes for some-accounts-demand-a-dimension, which documents the 400s you get " +
-    "when the dimension is omitted anyway.",
+    "SEARCH the tenant's chart of accounts (kontoplan) — a search, not a listing — to find the account " +
+    "number to book to. Each row is an ACCOUNT PLUS ITS DIMENSION, and carries the id a posting needs:\n\n" +
+    "  1900        subsidiaryLedger: null                        -> post to \"1900\"\n" +
+    '  1920/1337   {type: "bank",    id: 1337, name: "mva"}      -> companyBankId 1337\n' +
+    '  1320/6230   {type: "general", id: 6230, name: "Default"}  -> subAccountId 6230\n\n' +
+    "Measured 2026-08-09. `number` is already composed in the subledger syntax vouchers accept, and " +
+    "`subsidiaryLedger.id` IS the companyBankId or subAccountId — so this one call usually answers the " +
+    "dimension question, and reai_sub_accounts_for_account / reai_list_company_banks are for the full " +
+    "record rather than the id. (reai_list_company_banks is in the `bank` toolset, so a server started " +
+    "with REAI_TOOLSETS=bookkeeping will not have it; always-on reai_request reaches " +
+    "GET /api/company-banks.) `subsidiaryLedger.type` is asset, bank, supplier, customer, employee or " +
+    "general.\n\n" +
+    "**Absence from a result is not evidence of absence from the chart**, for three separate reasons:\n\n" +
+    "  - No arguments returns 20 rows; `limit` caps at 100; there is no paging at all (`offset` and " +
+    "`page` are accepted and ignored).\n" +
+    "  - An account that takes a dimension never appears bare, so one with NO dimensions yet has no rows " +
+    "at all. Measured: tenant 2783 has 1920 in its chart and zero company banks, and " +
+    "`accountNumberPrefix=19` returns only 1900. `accountNumberPrefix=13` returns 1300/6229 and " +
+    "1300/6312, never a plain 1300.\n" +
+    "  - The chart differs per tenant in membership as well as size — 349 accounts on one, 399 on " +
+    "another, with 1320 present on the second and absent from the first.\n\n" +
+    "So to settle whether an account exists, read `GET /api/chart-of-accounts` through reai_request: it " +
+    "returns every base account in one response. See reai_api_notes for " +
+    "some-accounts-demand-a-dimension, which documents the 400s a missing dimension produces.",
   risk: "read",
   apiPaths: [["GET", "/api/chart-of-accounts/accounts"]],
   inputSchema: {
@@ -271,8 +256,14 @@ const postingInput = z.object({
       "Company bank account id, from reai_list_company_banks. Conditionally REQUIRED in the same way " +
         "subAccountId is: a posting to a bank account in the chart answers " +
         '400 "Linje 1: Konto 1920 må posteres med bankkonto." without it — measured. This tool does ' +
-        "not pre-check that one, because nothing in the company-bank response says which ledger " +
-        "account each bank belongs to, so which accounts demand it cannot be established here.",
+        "not pre-check that one. The reason used to be given as \"nothing in the company-bank response " +
+        "says which ledger account each bank belongs to\", which is true — measured, that response " +
+        "carries id, name, bban, iban, currency, providerType and no account number — but the " +
+        "conclusion drawn from it was wrong: reai_list_accounts DOES pair them, returning " +
+        '"1920/1337" with accountNumber 1920 and subsidiaryLedger {type: "bank", id: 1337}. So the ' +
+        "pairing is available, from that endpoint rather than this one, and pre-checking bank " +
+        "dimensions the way sub-accounts are already pre-checked is a real improvement this tool has " +
+        "not made yet.",
     ),
   assetId: z.number().int().optional().describe("Link the posting to an asset."),
   subAccountId: z

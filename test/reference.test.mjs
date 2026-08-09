@@ -412,40 +412,42 @@ test("the accounts search says it is a search, and that absence is not evidence"
   const t = registeredTools.find((x) => x.name === "reai_list_accounts");
   assert.ok(t, "reai_list_accounts must exist — five places in src/ tell agents to call it");
 
-  // The default is the part nothing documented. 20 of 399 is the number that matters.
-  assert.match(t.description, /returns 20 accounts/, "the default page size must be stated");
-  assert.match(t.description, /capped at 100/, "and the cap, so no call can return the whole chart");
+  // The wrong inference the old text invited, closed off explicitly.
   assert.match(
     t.description,
-    /ABSENT from a result is therefore not evidence/,
-    "the wrong inference must be closed off explicitly",
+    /Absence from a result is not evidence of absence from the chart/,
+    "the wrong inference must be closed off in so many words",
   );
-  // Specific to the CLAIM, not the quotation. The description quotes what it retracted — which is
-  // useful for anyone diffing it — so a bare substring check fires on the retraction itself. The old
-  // text was the closing sentence "…before booking a voucher — every posting must reference an account
-  // that exists in this list", so the sentence shape is what must not return. Same trick as the
-  // `returns nothing —` pin in test/archive.test.mjs.
+  // The retraction itself no longer lives in the description — a tool description is not the place for
+  // this repository's edit history, and an agent's tool list should not have to carry it. The pin that
+  // guarded it was near-vacuous anyway: review appended the old closing sentence in a slightly different
+  // form and the assertion passed, because it matched one em-dash phrasing rather than the claim. What is
+  // pinned instead is the substance — the three independent reasons absence is not evidence — because
+  // those are what the description exists to say, and a rewrite that loses one of them is the regression.
   assert.doesNotMatch(
     t.description,
-    /voucher\s*—\s*every posting must reference/,
-    "the retracted framing must not come back as a claim",
+    /earlier version of this text/,
+    "keep the edit history in CHANGELOG, not in every agent's tool list",
   );
-  assert.match(
+  // The bad CLAIM shape, rather than one phrasing of one sentence. The old text invited membership
+  // checking — "an account that exists in this list" — and that inference is wrong however it is worded,
+  // because the list is 20 rows of a chart of hundreds and an account can be missing from it entirely.
+  assert.doesNotMatch(
     t.description,
-    /An earlier version of this text said/,
-    "and the retraction itself should stay, so the change is legible",
+    /in this list/i,
+    "this result is not a list to check membership against; do not invite that reading in any wording",
   );
-
-  // The endpoint cannot page, and the complete chart lives elsewhere. Saying "no single call can return
-  // the whole thing" without that would read as "the whole chart is unobtainable", which is false —
-  // GET /api/chart-of-accounts returns all 399, and no curated tool exposes it.
-  assert.match(t.description, /no paging/, "the absence of paging must be stated, not implied");
-  assert.match(
-    t.description,
-    /COMPLETE chart is a different endpoint/,
-    "and the route that does return everything must be named",
-  );
-  assert.match(t.description, /reai_request/, "with the honest fallback for reaching it");
+  for (const [claim, pattern] of [
+    ["the 20-row default", /returns 20 rows/],
+    ["the 100 cap", /caps at 100/],
+    ["no paging at all", /no paging at all/],
+    ["an account can be invisible", /never appears bare/],
+    ["the measured invisible case", /zero company banks/],
+    ["per-tenant membership", /349 accounts on one, 399 on another/],
+    ["the exhaustive route", /GET \/api\/chart-of-accounts` through reai_request/],
+  ]) {
+    assert.match(t.description, pattern, `${claim} must stay stated — it is why this description exists`);
+  }
 
   // The dimensions ARE here, and an earlier version of this description claimed the opposite. Measured:
   // `accountNumberPrefix=19` on a tenant with three company banks returns 1900 with
@@ -543,19 +545,47 @@ test("a description that points across toolsets is recorded, not accidental", as
   assert.deepEqual(gone, [], "these recorded references no longer exist; drop them from the list");
 });
 
-test("every tool named in another tool's description is actually registered", async () => {
-  // The check that would have caught this class earlier. Descriptions point agents at other tools by
-  // name, and a name that does not resolve is a dead end an agent cannot recover from — it reads as a
-  // capability the server has and then does not.
+test("every reai_ tool named anywhere in src/ actually exists", async () => {
+  // Sweeping the registered OBJECTS misses most of the places a tool name appears. Review added a
+  // plausible non-existent `reai_get_account_dimensions` to a tool's `title`, to a note the handler
+  // RETURNS, and to a quirk note surfaced by reai_api_notes — and the object sweep saw none of them,
+  // because it reads `description` and `inputSchema` only.
+  //
+  // So sweep the source. A name that does not resolve is a dead end an agent cannot recover from: it
+  // reads as a capability the server has, and then does not.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
   const { registeredTools } = await import("../dist/server.js");
   const names = new Set(registeredTools.map((t) => t.name));
-  const dangling = [];
-  for (const t of registeredTools) {
-    const text = `${t.description ?? ""} ${JSON.stringify(t.inputSchema ?? {})}`;
-    for (const [, referenced] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
-      if (referenced === t.name) continue;
-      if (!names.has(referenced)) dangling.push(`${t.name} -> ${referenced}`);
+
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = `${dir}/${entry}`;
+      if (statSync(full).isDirectory()) walk(full);
+      else if (entry.endsWith(".ts")) files.push(full);
+    }
+  };
+  walk(new URL("../src", import.meta.url).pathname);
+
+  const dangling = new Map();
+  let referencesSeen = 0;
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    for (const [, ref] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
+      referencesSeen += 1;
+      if (!names.has(ref)) dangling.set(ref, file.replace(/.*\/src\//, "src/"));
     }
   }
-  assert.deepEqual(dangling, [], "these descriptions name tools that do not exist");
+
+  // A floor, because a sweep that examines nothing passes. Every comparable sweep in this repo has one.
+  assert.ok(
+    referencesSeen >= 300,
+    `only ${referencesSeen} tool references found across ${files.length} source files — the sweep has ` +
+      `stopped matching`,
+  );
+  assert.deepEqual(
+    [...dangling].map(([ref, file]) => `${file}: ${ref}`),
+    [],
+    "these names look like tools and are not registered",
+  );
 });
