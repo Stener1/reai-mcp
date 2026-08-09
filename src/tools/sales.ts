@@ -1296,12 +1296,16 @@ const updateOrder = defineTool({
         // A failed read here must not undo a write that already succeeded.
         theirTerms = undefined;
       }
+      // From the response where it carries the field, for the same reason reai_update_creditor now does: a
+      // note about money should state what the record says, not what the request said. daysUntilDue is
+      // required and has always come back as sent, so this is consistency rather than a known discrepancy.
+      const storedTerms = res.data?.daysUntilDue ?? body.daysUntilDue;
       notes.push(
-        `The order moved to customer ${changes.customerId} but KEPT payment terms of ${body.daysUntilDue} ` +
+        `The order moved to customer ${changes.customerId} but KEPT payment terms of ${storedTerms} ` +
           `days, which came from the order as it was. ` +
           (theirTerms === undefined
             ? `The new customer's own terms could not be read.`
-            : theirTerms === body.daysUntilDue
+            : theirTerms === storedTerms
               ? `That happens to match the new customer's own terms.`
               : `The new customer's own terms are ${theirTerms} days — pass daysUntilDue if you want those.`),
       );
@@ -1695,12 +1699,16 @@ const updateOffer = defineTool({
       } catch {
         theirTerms = undefined;
       }
+      // From the response where it carries the field, for the same reason reai_update_creditor now does: a
+      // note about money should state what the record says, not what the request said. daysUntilDue is
+      // required and has always come back as sent, so this is consistency rather than a known discrepancy.
+      const storedTerms = res.data?.daysUntilDue ?? body.daysUntilDue;
       notes.push(
-        `The offer moved to customer ${changes.customerId} but KEPT payment terms of ${body.daysUntilDue} ` +
+        `The offer moved to customer ${changes.customerId} but KEPT payment terms of ${storedTerms} ` +
           `days, which came from the offer as it was. ` +
           (theirTerms === undefined
             ? `The new customer's own terms could not be read.`
-            : theirTerms === body.daysUntilDue
+            : theirTerms === storedTerms
               ? `That happens to match the new customer's own terms.`
               : `The new customer's own terms are ${theirTerms} days — pass daysUntilDue if you want those.`),
       );

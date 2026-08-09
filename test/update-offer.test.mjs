@@ -367,3 +367,14 @@ test("a null against an already-empty field is reported as applied, not refused"
   assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
   assert.doesNotMatch(text, /IGNORED by the API/, "the outcome is what was asked for");
 });
+
+test("the kept-terms note states what the record says, not what was sent", async () => {
+  // Same principle as reai_update_creditor: a note about money reads from the response. If the API ever
+  // stored a different daysUntilDue than was sent, this note would have quoted the request.
+  const { text } = await run({ id: 81, customerId: 6000 }, (req, n) => {
+    if (n === 1) return offer();
+    if (req.method === "PUT") return offer({ customerId: 6000, daysUntilDue: 21 });
+    return { daysUntilDue: 45 };
+  });
+  assert.match(text, /KEPT payment terms of 21 days/, "21 is what the record came back with; 14 was sent");
+});
