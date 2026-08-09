@@ -77,6 +77,21 @@ another one would reintroduce it; if a protected tenant ever genuinely needs wri
 in a diff someone reads. `2634` is not a fact about ReAI — it is this repository's operator's own company, and
 anyone self-hosting should put their own production tenants in that list.
 
+**Two layers, because the number is not the destination.** A token scoped to a single tenant IGNORES
+`X-Tenant-Id`, so both the allowlist and the denylist check a number that may not be where the write lands.
+`requireTokenReachesTenant()` reads the structured `tenants` list from `/api/me` and refuses if the token does
+not reach the declared tenant — or if it reaches exactly one tenant and that one is protected.
+
+It must be the structured list. The version this replaces harvested four-digit numbers out of `reai_whoami`'s
+prose, and `src/tools/meta.ts` emits *"Active tenant is set to 2783, but that id is NOT in this token's tenant
+list"* — so the warning that a tenant was unreachable contained the number that made it look reachable, and
+`--tenant 2783` on a token scoped to 2634 passed. Parse the list, never the sentence.
+
+**`smoke.mjs` forces `REAI_WRITE_MODE=read-only`** rather than forwarding it. It POSTs to `/api/vat-returns`,
+`/api/manual-reconciliations/{id}/close`, `/api/bank-reconciliations/{id}/vouchers` and `/api/subscriptions`
+expecting refusals; with an ambient `full` those became real writes, and that file has no tenant guard. Forcing
+the mode is also what makes its assertions mean anything, since all of them are written for read-only.
+
 **The guard used to be four divergent copies**, one per script. It is one module now, so it cannot drift, and
 `test/write-guard.test.mjs` checks it two ways: the behavioural tests **call** `assertWritableTenant` rather
 than grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and

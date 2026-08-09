@@ -33,6 +33,30 @@ All notable changes to `reai-mcp`. Format loosely follows
     adding a brand-new writing script — each fails the build.
   - Four divergent copies collapsed into one module, so the check can no longer drift between scripts. A
     pre-existing test had pinned the old inline message string; it now asserts the guard is called.
+  - **Codex then found four defects in the fix, two of them P1, and both were real.**
+    - **`smoke.mjs` was exempt from the guard while able to write.** It spawned the server with
+      `REAI_WRITE_MODE: process.env.REAI_WRITE_MODE ?? "read-only"` — forwarding an ambient `full` — and it POSTs
+      to `/api/vat-returns`, `/api/manual-reconciliations/{id}/close`, `/api/bank-reconciliations/{id}/vouchers`
+      and `/api/subscriptions` *expecting refusals*. In full mode three of those are irreversible with no
+      transmission gate, so they became real writes against whatever `--tenant` said, in a file with no tenant
+      guard. It forces `read-only` now, which is also what makes its own assertions mean anything — every one of
+      them is written for that mode. (Codex's named example, `generate-due`, stays blocked by the separate
+      external-send gate; the finding is valid and worse than stated for the other three.)
+    - **The token-reachability check was defeated by the warning that a tenant is unreachable.** Both smoke
+      scripts harvested every four-digit number out of `reai_whoami`'s prose, and `src/tools/meta.ts` emits
+      *"Active tenant is set to 2783, but that id is NOT in this token's tenant list"* — so `--tenant 2783` on a
+      token scoped to 2634 found "2783" in that sentence, passed, and would have written to 2634, because a
+      single-tenant token ignores `X-Tenant-Id`. This matters because it is the one hazard the number-based
+      guards cannot see, and an hour earlier I had cited this check as the layer that covered it. It now reads
+      the structured `tenants` list from `/api/me`, refuses an unrecognised shape rather than assuming success,
+      and separately refuses when the token reaches exactly one tenant and that tenant is protected.
+    - The coverage test only recognised literal HTTP verbs, so a script writing solely through curated tools
+      (`callTool({ name: "reai_create_customer" })`) was invisible to it. It now derives the writing-tool set
+      from each tool's **declared risk** — 95 of 173 — rather than from names.
+    - And its "top level, exactly once" requirement applied only to the four scripts named by hand, so a *new*
+      script could put the guard behind an `if` and pass. That requirement now applies to every detected writer.
+    - Each verified by mutation: re-forwarding the ambient write mode, a new script writing only through a
+      curated tool, a new writer with the guard behind a condition, and reintroducing the prose harvest.
   - Re-verified after the change: all four scripts refuse 2634 with the protected message, 2783 still works,
     and `audit-storage.mjs` against 2783 reports 17 unchanged / 0 drifted with its sweep returning the tenant
     to 0 suppliers.

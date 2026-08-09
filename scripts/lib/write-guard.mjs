@@ -104,3 +104,73 @@ export function requireWritableTenant(tenantId, opts) {
     process.exit(2);
   }
 }
+
+/**
+ * The tenant the token ACTUALLY reaches, read from the structured `/api/me` list.
+ *
+ * A token scoped to a single tenant IGNORES `X-Tenant-Id` and answers for its own tenant whatever value is
+ * sent. So the allowlist and the denylist both check a number on the command line, and neither can tell you
+ * where a write will land. This can.
+ *
+ * The version this replaces read `reai_whoami`'s PROSE and harvested every four-digit number from it:
+ *
+ *     const reachable = [...textOf(whoami).matchAll(/\b(\d{4,})\b/g)].map(Number);
+ *
+ * `src/tools/meta.ts` emits "Active tenant is set to 2783, but that id is NOT in this token's tenant list"
+ * when the id is absent — so the warning that the tenant is unreachable contained the number that made it look
+ * reachable, and `--tenant 2783` on a token scoped to 2634 passed the check and wrote to 2634. Found by review
+ * on PR #130. Parse the list, never the sentence.
+ */
+export async function reachableTenants({ token, baseUrl = "https://app.reai.no", timeoutMs = 30_000 } = {}) {
+  const res = await fetch(`${baseUrl}/api/me`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.status !== 200) {
+    throw new Error(`Could not read /api/me to confirm which tenants this token reaches (HTTP ${res.status}).`);
+  }
+  const body = await res.json();
+  const list = body?.tenants;
+  if (!Array.isArray(list)) {
+    // Not "assume it is fine": an unrecognised shape means the check did not happen.
+    throw new Error(
+      `/api/me returned no \`tenants\` array (keys: ${Object.keys(body ?? {}).join(", ") || "none"}), so which ` +
+        `tenants this token reaches could not be established. Refusing to write.`,
+    );
+  }
+  return list.map((t) => Number(t.id)).filter(Number.isInteger);
+}
+
+/**
+ * Refuses unless the token reaches `tenantId` AND reaches no protected tenant that a single-tenant token
+ * would silently redirect to. Call this before any write, in addition to `requireWritableTenant`.
+ */
+export async function requireTokenReachesTenant(tenantId, opts) {
+  let reachable;
+  try {
+    reachable = await reachableTenants(opts);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(2);
+  }
+  const id = Number(tenantId);
+  if (!reachable.includes(id)) {
+    console.error(
+      `Refusing to write: the token does not reach tenant ${id}.\n` +
+        `/api/me reports ${reachable.join(", ") || "(none)"}.\n\n` +
+        `A token scoped to a single tenant IGNORES X-Tenant-Id, so this run would have written to ` +
+        `${reachable[0] ?? "another company"} while --tenant said ${id}.`,
+    );
+    process.exit(2);
+  }
+  // The case the number-based guards cannot see: one reachable tenant, and it is protected. Then every write
+  // lands there regardless of --tenant.
+  if (reachable.length === 1 && PROTECTED_TENANTS.has(reachable[0])) {
+    console.error(
+      `Refusing to write: this token reaches only tenant ${reachable[0]}, which is PROTECTED. A single-tenant ` +
+        `token ignores X-Tenant-Id, so every write would land there whatever --tenant says.`,
+    );
+    process.exit(2);
+  }
+}

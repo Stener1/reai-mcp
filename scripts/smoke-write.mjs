@@ -20,7 +20,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { requireWritableTenant } from "./lib/write-guard.mjs";
+import { requireTokenReachesTenant, requireWritableTenant } from "./lib/write-guard.mjs";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function arg(name) {
@@ -29,6 +29,9 @@ function arg(name) {
 }
 
 const token = process.env.REAI_USER_API_TOKEN ?? process.env.REAI_TOKEN;
+// The audit talks to the MCP server over stdio, but the tenant-reachability check reads /api/me
+// directly — the structured list, not whoami's prose. Same default the server uses.
+const baseUrl = process.env.REAI_BASE_URL ?? "https://app.reai.no";
 const tenantId = arg("tenant") ? Number(arg("tenant")) : undefined;
 if (!token) {
   console.error("REAI_USER_API_TOKEN is not set.");
@@ -134,17 +137,12 @@ async function main() {
   // to another company posts to that company while every guard here passes. Codex found this on
   // PR #114, on a script that only refuses writes; it applies with far more force to this one, which
   // posts to the general ledger. Nothing in this repository checked it.
-  const whoami = await client.callTool({ name: "reai_whoami", arguments: {} });
-  const reachable = [...textOf(whoami).matchAll(/\b(\d{4,})\b/g)].map((m) => Number(m[1]));
-  if (!reachable.includes(tenantId)) {
-    console.error(
-      `Refusing to write: the token does not reach tenant ${tenantId}.\n` +
-        `reai_whoami reports ${reachable.join(", ") || "(none)"}.\n\n` +
-        `A token scoped to a single tenant IGNORES X-Tenant-Id, so this run would have written to\n` +
-        `${reachable[0] ?? "another company"} while --tenant said ${tenantId}.`,
-    );
-    process.exit(2);
-  }
+  // Structured, from /api/me. This read `reai_whoami`'s PROSE and harvested every four-digit
+  // number from it — and src/tools/meta.ts emits "Active tenant is set to 2783, but that id is NOT
+  // in this token's tenant list" when the id is absent, so the warning that the tenant was
+  // unreachable contained the number that made it look reachable. `--tenant 2783` on a token scoped
+  // to 2634 passed this check and would have written to 2634. Found by review on PR #130.
+  await requireTokenReachesTenant(tenantId, { token, baseUrl });
 
   try {
     // 0. Warehouse round-trip. Nothing else depends on it, and it is the cheapest

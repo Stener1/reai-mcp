@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   assertWritableTenant,
   declaredTestTenants,
@@ -132,10 +132,44 @@ test("the protected list names the tenant this repository must never write to", 
 test("every script that writes calls the guard, checked from the AST", async () => {
   const { default: ts } = await import("typescript");
   const WRITE_VERBS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+  // Curated tools too, not only literal HTTP verbs. These scripts write mostly through
+  // `client.callTool({ name: "reai_create_customer", … })`, which carries no `method` property at all — so a
+  // new script using only curated tools would have left `writes` null and passed with no guard. The existing
+  // ones were detected only incidentally, because they also make raw `reai_request` calls.
+  //
+  // Derived from each tool's DECLARED risk rather than from its name, so a tool called something unexpected is
+  // still classified correctly, and a new write tool is covered the day it is added.
+  const WRITING_TOOLS = new Set();
+  const { readdirSync: rd } = await import("node:fs");
+  for (const file of rd(path.join(HERE, "..", "dist", "tools")).filter((f) => f.endsWith(".js"))) {
+    let mod;
+    try {
+      mod = await import(pathToFileURL(path.join(HERE, "..", "dist", "tools", file)).href);
+    } catch {
+      continue;
+    }
+    for (const value of Object.values(mod)) {
+      if (!Array.isArray(value)) continue;
+      for (const tool of value) {
+        if (tool?.name?.startsWith?.("reai_") && tool.risk && tool.risk !== "read") WRITING_TOOLS.add(tool.name);
+      }
+    }
+  }
+  assert.ok(
+    WRITING_TOOLS.size > 50,
+    `expected many writing tools, found ${WRITING_TOOLS.size} — the registry scan has stopped matching`,
+  );
+  // reai_request takes the verb as an argument, so it is a write whenever that verb is one.
+  WRITING_TOOLS.delete("reai_request");
   // Read-only or non-API scripts. Each is listed with the reason, so adding to this list is a visible choice.
   const EXEMPT = new Map([
     ["audit-quirks.mjs", "read-only by construction: an AST test forbids it issuing anything but GET"],
-    ["smoke.mjs", "read-only smoke; asserts refusals rather than performing writes"],
+    // Earned by forcing the mode, not by intent. It POSTs to /api/vat-returns,
+    // /api/manual-reconciliations/{id}/close, /api/bank-reconciliations/{id}/vouchers and /api/subscriptions
+    // expecting refusals; forwarding an ambient REAI_WRITE_MODE=full turned three irreversible ones into real
+    // writes with no tenant guard in the file. A separate test below pins the forcing.
+    ["smoke.mjs", "spawns the server with REAI_WRITE_MODE forced to read-only, pinned by its own test"],
     ["smoke-http.mjs", "exercises the deployed server's OAuth flow, not the ReAI API directly"],
     ["build-spec-index.mjs", "generates spec/index.json from the pinned document"],
     ["check-deployed.mjs", "compares git and Cloud Run metadata"],
@@ -151,6 +185,7 @@ test("every script that writes calls the guard, checked from the AST", async () 
 
     let writes = null;
     let callsGuard = false;
+    const guardCalls = [];
     const walk = (n) => {
       // `{ method: "POST" }` on a request, and `call("POST", …)` — the helper these scripts actually use.
       if (ts.isPropertyAssignment(n) && n.name.getText(sf) === "method" && ts.isStringLiteral(n.initializer)) {
@@ -158,11 +193,18 @@ test("every script that writes calls the guard, checked from the AST", async () 
       }
       if (ts.isCallExpression(n)) {
         const callee = n.expression.getText(sf);
-        if (callee === "requireWritableTenant" || callee === "assertWritableTenant") callsGuard = true;
+        if (callee === "requireWritableTenant" || callee === "assertWritableTenant") {
+          callsGuard = true;
+          guardCalls.push(n);
+        }
         const first = n.arguments[0];
         if (first && ts.isStringLiteral(first) && WRITE_VERBS.has(first.text.toUpperCase())) {
           writes ??= `${callee}("${first.text}", …)`;
         }
+      }
+      // `{ name: "reai_create_customer" }` anywhere — the callTool argument shape.
+      if (ts.isPropertyAssignment(n) && n.name.getText(sf) === "name" && ts.isStringLiteral(n.initializer)) {
+        if (WRITING_TOOLS.has(n.initializer.text)) writes ??= `callTool ${n.initializer.text}`;
       }
       ts.forEachChild(n, walk);
     };
@@ -178,7 +220,33 @@ test("every script that writes calls the guard, checked from the AST", async () 
       );
       continue;
     }
-    if (!callsGuard) findings.push(`${file} can issue a write (${writes}) but never calls the tenant guard`);
+    if (!callsGuard) {
+      findings.push(`${file} can issue a write (${writes}) but never calls the tenant guard`);
+      continue;
+    }
+
+    // Reachable, not merely present. A call inside `if (cond)` or in an unused function satisfies
+    // "callsGuard" while being skipped at runtime, and the stricter check below used to apply only to the four
+    // scripts named by hand — so a NEW script could put the guard behind a condition and pass.
+    const topLevel = sf.statements.filter(
+      (st) =>
+        ts.isExpressionStatement(st) &&
+        ts.isCallExpression(st.expression) &&
+        ["requireWritableTenant", "assertWritableTenant"].includes(st.expression.expression.getText(sf)),
+    );
+    if (topLevel.length === 0) {
+      findings.push(
+        `${file} writes (${writes}) and mentions the guard, but never calls it at the TOP LEVEL — a call ` +
+          `inside a branch or an unused function is not a guard`,
+      );
+      continue;
+    }
+    // And nothing write-shaped may appear before it.
+    const guardPos = topLevel[0].getStart(sf);
+    const before = [...text.slice(0, guardPos).matchAll(/method:\s*"(POST|PUT|PATCH|DELETE)"/g)];
+    if (before.length > 0) {
+      findings.push(`${file} has a write-shaped request before the guard runs (${before[0][0]})`);
+    }
   }
 
   assert.deepEqual(findings, [], findings.join("\n"));
@@ -210,4 +278,29 @@ test("the four known writing scripts each call the guard exactly once, at the to
       `${file} has a write-shaped request before the guard runs`,
     );
   }
+});
+
+test("the read-only smoke forces read-only mode rather than forwarding it", () => {
+  // Its exemption from the tenant guard rests entirely on this line. With
+  // `REAI_WRITE_MODE: process.env.REAI_WRITE_MODE ?? "read-only"`, an ambient `full` in the shell reached the
+  // spawned server, and these four became real requests against whatever --tenant said:
+  //
+  //   POST /api/vat-returns                        irreversible, no transmission gate
+  //   POST /api/manual-reconciliations/{id}/close  irreversible, no transmission gate
+  //   POST /api/bank-reconciliations/{id}/vouchers irreversible, no transmission gate
+  //   POST /api/subscriptions                      reversible
+  //
+  // (The generate-due paths stay blocked by the external-send gate, which is a separate axis.) Every
+  // assertion in that file is written for read-only mode, so forcing it is also what makes them mean anything.
+  const src = readFileSync(path.join(SCRIPTS, "smoke.mjs"), "utf8");
+  assert.match(
+    src,
+    /REAI_WRITE_MODE:\s*"read-only"/,
+    "smoke.mjs must FORCE read-only for the server it spawns",
+  );
+  assert.doesNotMatch(
+    src,
+    /REAI_WRITE_MODE:\s*process\.env\.REAI_WRITE_MODE/,
+    "smoke.mjs must not forward an ambient write mode: it has no tenant guard, so full mode reached real books",
+  );
 });
