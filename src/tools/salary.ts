@@ -5,6 +5,8 @@ import {
   isoDate,
   ok,
   okList,
+  confirmAgainstResponse,
+  describeConfirmation,
   readableRecord,
   requireTenantId,
   tenantIdArg,
@@ -485,17 +487,51 @@ const updateSalaryLine = defineTool({
       body,
       tenantId: resolvedTenant,
     });
-    return ok(res.data, {
-      note:
-        `Line ${wageSpecId} in run ${id} is now ${args.quantity} × ${args.rate} as ` +
-        `${args.specificationCode}. Run total: ${res.data?.payableAmount ?? "?"} payable, ` +
-        `${res.data?.totalTaxDeducted ?? "?"} withheld.` +
-        (kept.length > 0
-          ? `\n\nWritten back unchanged because you did not mention them: ${kept.join(", ")}. ` +
-            `This PUT replaces the line, so omitting a field would otherwise have cleared it — ` +
-            `pass null explicitly when clearing is what you want.`
-          : ``),
-    });
+    // The amounts come from the RESPONSE's own line, not from `args`. This is payroll: quoting the request
+    // back as "Line N is now Q × R" states a figure nobody checked, and the response nests the stored line at
+    // employees[].wageSpecs[] where it can be found by id. Of the five tools that reported an outcome from the
+    // request, this was the one whose numbers matter most.
+    // `SalaryWageSpecRes.id` is assumed to BE the wageSpecId the path takes — both are int32 and the parameter
+    // carries no description, so that is read off the schema rather than measured. If the assumption is wrong
+    // the lookup finds nothing and the note falls back to reporting what was sent, which is safe; the two
+    // fallback messages are worded differently so a wrong assumption shows up as "no line matched" instead of
+    // hiding behind "the response did not carry the line".
+    const returnedLines = (Array.isArray(res.data?.employees) ? res.data.employees : []).flatMap(
+      (e: { wageSpecs?: unknown }) => (Array.isArray(e?.wageSpecs) ? e.wageSpecs : []),
+    );
+    const storedLine = returnedLines.find((l: { id?: unknown }) => l?.id === wageSpecId) as
+      | Record<string, unknown>
+      | undefined;
+    // wholeRecord, because `storedLine` IS the whole line — SalaryWageSpecRes carries all five fields this
+    // sends. Without it a carried comment the replacing PUT dropped read as "the response did not answer",
+    // while the headline said the line was read back FROM the response. That is the same contradiction the
+    // address tools were fixed for, at the one site I did not check, and payroll is where I argued it matters
+    // most.
+    const confirmation = confirmAgainstResponse(body, storedLine, { wholeRecord: true });
+    const notes = [
+      (storedLine
+        ? `Line ${wageSpecId} in run ${id} is now ${storedLine.quantity} × ${storedLine.rate} as ` +
+          `${storedLine.specificationCode}, read back from the response.`
+        : `Line ${wageSpecId} in run ${id} was sent as ${args.quantity} × ${args.rate} as ` +
+          `${args.specificationCode}. ` +
+          (returnedLines.length === 0
+            ? `The response carried no lines, so that is what was SENT, not what is stored`
+            : `The response carried ${returnedLines.length} line(s) but none with id ${wageSpecId}, so that ` +
+              `is what was SENT, not what is stored`) +
+          ` — read it back with reai_get_salary_run.`) +
+        ` Run total: ${res.data?.payableAmount ?? "?"} payable, ${res.data?.totalTaxDeducted ?? "?"} withheld.`,
+      // Only when there was a line to compare against; otherwise the fallback sentence above already says the
+      // figures are what was sent, and this would repeat it field by field.
+      ...(storedLine ? describeConfirmation(confirmation, `line ${wageSpecId}`) : []),
+    ];
+    if (kept.length > 0) {
+      notes.push(
+        `Written back unchanged because you did not mention them: ${kept.join(", ")}. ` +
+          `This PUT replaces the line, so omitting a field would otherwise have cleared it — ` +
+          `pass null explicitly when clearing is what you want.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
   },
 });
 

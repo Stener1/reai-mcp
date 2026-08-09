@@ -1047,11 +1047,25 @@ const updateLoan = defineTool({
       );
     }
     if (inferredOnUpdate) {
+      // From the response. This said relatedParty "was set to true" on the strength of `merged`, while the
+      // CREATE sibling 230 lines up warns off the stored value because the API is measured not to infer this
+      // and to store false. Related-party status drives note disclosure, so asserting it from the request is
+      // the same class of claim as announcing where a payment goes without looking.
+      const after = res.data && typeof res.data === "object" ? (res.data as Record<string, unknown>) : {};
+      const storedRelated = Object.hasOwn(after, "relatedParty") ? after.relatedParty : undefined;
       notes.push(
-        `relatedParty was set to true because the loan is now a ${mergedType}, which is a related ` +
-          `party by construction. The stored value was ${JSON.stringify(existing.relatedParty ?? null)} ` +
-          `and the API does not infer this. Pass relatedParty: false explicitly if this really is at ` +
-          `arm's length.`,
+        `relatedParty was sent as true because the loan is now a ${mergedType}, which is a related party by ` +
+          `construction — the API does not infer it, and the stored value was ` +
+          `${JSON.stringify(existing.relatedParty ?? null)} before this write. ` +
+          (storedRelated === undefined
+            ? `The response did not carry relatedParty, so read the loan back before relying on the ` +
+              `disclosure that follows from it.`
+            : storedRelated === true
+              ? `The response confirms it is now true.`
+              : `WARNING: the response came back with relatedParty ` +
+                `${JSON.stringify(storedRelated)} — it did NOT take, and the note disclosure will follow the ` +
+                `stored value rather than the intent.`) +
+          ` Pass relatedParty: false explicitly if this really is at arm's length.`,
       );
     }
     if (unknown.length > 0) {

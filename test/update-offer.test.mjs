@@ -166,7 +166,7 @@ test("a value the API ignored is not reported as a change", async () => {
     const { calls, result, text } = await run({ id: 81, [field]: null }, () => populated);
     assert.notEqual(result.isError, true, "the write is harmless, so it is not refused");
     assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
-    assert.match(text, /Changed NOTHING/, "the headline must not claim a change the API discarded");
+    assert.match(text, /Changed NOTHING you asked for/, "the headline must not claim a change the API discarded");
     assert.match(text, /IGNORED by the API/);
     assert.match(text, /EMPTY STRING/, "and must name what actually works");
   }
@@ -280,6 +280,7 @@ test("moving an offer to another customer says whose payment terms it kept", asy
 });
 
 test("a value stored differently from what was sent is flagged", async () => {
+  // reai_update_offer: named in test/confirm-against-response.test.mjs as the proof for this tool.
   const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : offer({ daysUntilDue: 14 })));
   assert.match(text, /IGNORED by the API/);
   assert.match(text, /daysUntilDue \(sent 30, still 14\)/);
@@ -377,4 +378,177 @@ test("the kept-terms note states what the record says, not what was sent", async
     return { daysUntilDue: 45 };
   });
   assert.match(text, /KEPT payment terms of 21 days/, "21 is what the record came back with; 14 was sent");
+});
+
+/**
+ * The fields the headline claims were carried over.
+ *
+ * Parsed rather than matched with /comment carried over/, which is what the first version of these tests did:
+ * the offer note names five fields, so `comment` appears mid-list and that regex matched NEITHER the passing
+ * nor the failing case. The negative assertion built on it was therefore vacuous.
+ */
+const carriedOver = (text) => {
+  const m = /, and ([^—]+?) carried over/.exec(text);
+  return m ? m[1].split(", ").map((s) => s.trim()) : [];
+};
+
+test("a CARRIED field the offer PUT emptied is warned about, not listed as carried over", async () => {
+  // reai_update_offer: same carried half as the order tool. Both routed through `appliedChanges`, which
+  // answered only for the fields the caller ASKED to change, so a dropped carry was invisible.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30, comment: null }),
+  );
+  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", offer TB-81 came back empty\)/);
+  assert.match(text, /LOST unless you set it again/);
+  const named = carriedOver(text);
+  assert.ok(!named.includes("comment"), `comment must not be listed as carried over: ${JSON.stringify(named)}`);
+  assert.ok(named.includes("internalComment"), "the fields that DID survive are still named");
+});
+
+test("an offer's carried field returned CHANGED is reported, and not called lost", async () => {
+  // reai_update_offer: the review's mutation, which counted only a null echo as a loss and passed every test.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30, comment: "someone else's text" }),
+  );
+  assert.match(text, /different value for comment \(carried "ZZ customer-visible", stored "someone else's text"\)/);
+  assert.ok(!carriedOver(text).includes("comment"));
+  assert.doesNotMatch(text, /LOST unless/);
+});
+
+test("an offer's carried fields are not claimed when the response does not mention them", async () => {
+  // reai_update_offer: a bodyless PUT listed all five carried fields as preserved, on no evidence at all.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : undefined));
+  assert.deepEqual(carriedOver(text), []);
+  assert.match(text, /Sent back unchanged but NOT confirmed: .*comment/);
+});
+
+test("an offer's lines dropped by the API are reported", async () => {
+  // reai_update_offer: the count check the source comments claimed existed and did not.
+  const dropped = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30, lines: [] }),
+  );
+  assert.match(dropped.text, /WARNING: 1 line\(s\) were sent and offer TB-81 came back with 0/);
+  const intact = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : offer({ daysUntilDue: 30 })));
+  assert.doesNotMatch(intact.text, /line\(s\) were sent and/);
+});
+
+test("an offer's carried field the API DID keep is still named as carried over", async () => {
+  // reai_update_offer: the positive control, so a warning that always fires, or a headline that stopped
+  // naming survivors at all, cannot pass the tests above.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30 }),
+  );
+  const named = carriedOver(text);
+  assert.ok(named.includes("comment"), `comment should be carried: ${JSON.stringify(named)}`);
+  assert.ok(named.includes("internalComment"), `internalComment should be carried: ${JSON.stringify(named)}`);
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /NOT confirmed/);
+});
+
+test("a nested carried record that differs names the differing key, not both objects whole", async () => {
+  // reai_update_offer: this is where the ALTERED note fires most — a `deliveryAddress` echoed with a fresh
+  // `id` — and dumping both 7-key objects into one sentence left the agent to diff them by eye.
+  const withAddress = (o = {}) =>
+    offer({ deliveryAddress: { id: 9, addressLine1: "Gata 1", postalCode: "0150", city: "Oslo" }, ...o });
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1
+      ? withAddress()
+      : withAddress({
+          daysUntilDue: 30,
+          deliveryAddress: { id: 12, addressLine1: "Gata 1", postalCode: "0150", city: "Oslo" },
+        }),
+  );
+  // Scoped to the SENTENCE, not the whole text: every response appends the record as JSON, so a bare
+  // /addressLine1/ assertion matched that dump and failed a correct note. Third too-broad regex in these
+  // tests, hence the narrowing.
+  const sentence = /The record came back with a different value for [^\n]*/.exec(text)?.[0] ?? "";
+  assert.match(sentence, /deliveryAddress \(differs in id: carried 9, stored 12\)/);
+  assert.doesNotMatch(sentence, /addressLine1/, "the keys that match are not repeated back");
+  assert.doesNotMatch(text, /LOST unless/, "a renumbered nested record is not a destroyed one");
+});
+
+test("a required field carried from the offer record is checked too", async () => {
+  // reai_update_offer: currencyCode, customerId and daysUntilDue are carried because the PUT requires them.
+  // This is the ONE site the previous round left unguarded — reverting the offer fix to the optional-carry
+  // list passed all 54 tests, which is the same one-site-unchecked pattern as the commit before it.
+  const { text } = await run({ id: 81, comment: "new" }, (req, n) =>
+    n === 1 ? offer() : offer({ comment: "new", customerId: 999999, currencyCode: "EUR" }),
+  );
+  assert.match(text, /different value for .*customerId \(carried 5941, stored 999999\)/);
+  assert.match(text, /currencyCode \(carried "NOK", stored "EUR"\)/);
+});
+
+test("a carried NULL the offer PUT answered with a value is a contradiction, not silence", async () => {
+  // reai_update_offer: the first version filtered nulls out of the comparison, claiming they could "only ever
+  // confirm null against null". A carried null against a RETURNED value contradicts, so the filter hid the
+  // one case that matters: the write joining a project the caller never mentioned.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer({ projectId: null }) : offer({ daysUntilDue: 30, projectId: 4242 }),
+  );
+  assert.match(text, /different value for projectId \(carried null, stored 4242\)/);
+});
+
+test("a carried null the response ignores is not reported at all", async () => {
+  // reai_update_offer: the counterweight to the test above. Six carryable fields are null on a bare offer, so
+  // listing each as unconfirmed would bury the notes that matter. Nothing was at stake for them.
+  // The response must OMIT them, not echo them as null: the first version of this test echoed them, so they
+  // came back CONFIRMED and the test never reached the unanswered branch it exists to pin. It survived the
+  // mutation that reintroduced the noise.
+  const sparse = (o) => {
+    const rec = offer(o);
+    for (const k of ["projectId", "email", "deliveryAddress"]) delete rec[k];
+    return rec;
+  };
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer({ projectId: null, email: null, deliveryAddress: null }) : sparse({ daysUntilDue: 30 }),
+  );
+  assert.doesNotMatch(text, /NOT confirmed: .*projectId/);
+  assert.doesNotMatch(text, /NOT confirmed: .*email/);
+  assert.doesNotMatch(text, /WARNING/);
+});
+
+test("a nested carried record that differs only by blank normalisation is NOT a difference", async () => {
+  // reai_update_offer: `same()` applied its blank class at the top level only, so an address echoed with
+  // `province: ""` where the record held null fell through to exact comparison and contradicted. ReAI
+  // normalises whitespace to null on address parts, so that would have warned on a great many ordinary
+  // updates — a warning on every call is worse than the silence it replaced.
+  const addr = (province) => ({ id: 9, addressLine1: "Gata 1", postalCode: "0150", city: "Oslo", province });
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer({ deliveryAddress: addr(null) }) : offer({ daysUntilDue: 30, deliveryAddress: addr("") }),
+  );
+  assert.doesNotMatch(text, /different value for/);
+  // Stronger than a bare /province/ assertion, which matched the record every response appends as JSON and
+  // failed a correct note. Fourth time in this branch, so: assert what the NOTE says, never the whole text.
+  assert.ok(carriedOver(text).includes("deliveryAddress"), "the address counts as preserved, not altered");
+});
+
+test("every differing key of a nested record is named, not just the first", async () => {
+  // reai_update_offer: the previous version's test used a single differing key, so it could not tell
+  // "names the differing keys" from "names the first one".
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1
+      ? offer({ deliveryAddress: { id: 9, addressLine1: "Gata 1", city: "Oslo" } })
+      : offer({ daysUntilDue: 30, deliveryAddress: { id: 12, addressLine1: "Vegen 2", city: "Bergen" } }),
+  );
+  const sentence = /The record came back with a different value for [^\n]*/.exec(text)?.[0] ?? "";
+  for (const key of ["id", "addressLine1", "city"]) {
+    assert.match(sentence, new RegExp(`${key}: carried`), `${key} must be named: ${sentence}`);
+  }
+});
+
+test("an offer response that omits lines is not treated as a drop", async () => {
+  // reai_update_offer: the order file asserts this and the offer file did not.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : undefined));
+  assert.doesNotMatch(text, /line\(s\) were sent and/);
+});
+
+test("a bodyless PUT is not reported as the API IGNORING the change", async () => {
+  // reai_update_offer: `ignored` folded `unanswered` into itself, so the note said "the response does not
+  // mention them, so this tool cannot say" and then asserted "IGNORED by the API, with a 200 and no error:
+  // comment (sent ..., still undefined)" with clearing advice — off the same zero evidence.
+  const { text } = await run({ id: 81, comment: "new text" }, (req, n) => (n === 1 ? offer() : undefined));
+  assert.doesNotMatch(text, /IGNORED by the API/);
+  assert.doesNotMatch(text, /still undefined/);
+  assert.match(text, /NOT CONFIRMED: the response does not mention comment/);
+  assert.match(text, /Changed NOTHING you asked for/);
 });

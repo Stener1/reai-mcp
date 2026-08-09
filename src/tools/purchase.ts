@@ -8,6 +8,8 @@ import {
   isoDate,
   ok,
   okList,
+  confirmAgainstResponse,
+  describeConfirmation,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -929,13 +931,35 @@ const setSupplierAddress = defineTool({
       body: merged,
       tenantId: resolved,
     });
+    // Nested, and `merged` rather than the caller's subset — see the note in reai_set_customer_address. The
+    // documented response is SupplierRes with the address at `.address`, so comparing the top level marked
+    // every field unanswered always.
+    // See the note in reai_set_customer_address: `{ record: {} }` covers both "no address" and "address: null",
+    // and the second means every part is gone.
+    const written = readableRecord(res.data, "address");
+    const wiped =
+      !!res.data &&
+      typeof res.data === "object" &&
+      !Array.isArray(res.data) &&
+      (res.data as Record<string, unknown>).address === null;
+    const confirmation = confirmAgainstResponse(merged, wiped ? {} : written.record, { wholeRecord: true });
+    const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? "Supplier address updated.", {
       note:
         `Changed ${given.join(", ")} on supplier ${id}'s address` +
         (kept.length
           ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
             `unchanged, because this endpoint replaces rather than patches.`
-          : `. Nothing else was set on it beforehand.`),
+          : `. Nothing else was set on it beforehand.`) +
+        (wiped
+          ? `\n\nWARNING: the response came back with no address at all — every part is gone, not just the ` +
+            `ones you changed. Read the supplier back before relying on it.`
+          : ``) +
+        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``) +
+        (!wiped && written.problem !== undefined
+          ? `\n\nThe response could not be read as an address (${written.problem}), so nothing above about ` +
+            `what is stored is confirmed.`
+          : ``),
     });
   },
 });

@@ -80,6 +80,167 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The remaining four tools that reported an outcome from what they SENT, fixed together rather than one at a
+  time.** `reai_update_salary_line`, `reai_update_share_investment`, `reai_set_customer_address` and
+  `reai_set_supplier_address`. Doing them separately is what produced the previous two PRs, in each of which the
+  fix repeated a mistake an earlier fix had already corrected. The semantics now live in one place,
+  `confirmAgainstResponse` in `src/tools/registry.ts`, with the measured rules written down:
+  - a field the response OMITS is UNANSWERED; a field it returns as `null` is a CONTRADICTION when the response
+    carries the whole record, because there a null means the API discarded the value. Collapsing those two made
+    the shared helper strictly weaker than the `reai_update_creditor` site it generalises, which distinguishes
+    them by name;
+  - `""` sent and `null` stored is CONFIRMED — the API normalising, not refusing;
+  - comparison is key-order stable, recursively, or an object-valued field would warn on every write purely
+    because the API orders its keys differently;
+  - a number and its PLAIN-DECIMAL spelling are equal, and nothing else is. The first version accepted far too
+    much: `"0150"` matched `150` — a postal code losing its leading zero, which is the exact harm #140 measured
+    on the address endpoint — `"0x10"` matched `16`, and two different eighteen-digit ids matched each other
+    through float64.
+- **`reai_update_salary_line` was the one whose numbers matter.** It said *"Line N in run M is now
+  `${args.quantity}` × `${args.rate}`"* — payroll quoted from the request. It reports the stored line now, found
+  at `employees[].wageSpecs[]`, and warns when that differs from what was sent.
+- **Both address tools were comparing the parts to the wrong LEVEL of the response, so the check could never
+  fire.** `PUT /api/customers/{id}/address` answers with `CustomerRes`, where the parts are nested at
+  `.address`. Comparing the top level marked every field unanswered ALWAYS: the contradiction branch was
+  unreachable and a false *"could not be confirmed"* was printed under a response that visibly confirmed the
+  write. **And the tests passed only because they fed a bare address object — a shape the document does not
+  describe and nothing here measures.** An earlier version of this entry justified the behaviour by claiming
+  *"both address tools answer with a bare string sometimes"*. There is no measurement of that anywhere in this
+  repository; I invented it to explain what the bug produced. Retracted, here and in the code comments and the
+  test that repeated it.
+- **Three of the four re-introduced the `given` gate** — one of the two mistakes this entry names as the reason
+  for consolidating. They passed only the caller's own fields, so the CARRIED fields, which are the entire
+  reason these tools read first, were never checked. On the address tools that excluded exactly the field #140
+  measured being wiped. All four now pass `merged`. Worth stating plainly: a shared helper does not prevent
+  this, because the gate lives at the call site.
+- **And a live defect the review found while checking my classification of it**: `reai_update_loan` stated
+  *"relatedParty was set to true"* from `merged`, while its own create sibling has always warned off the STORED
+  value because the API is measured not to infer it and to store `false`. Related-party status drives note
+  disclosure. It reports the stored value now, and warns when the flag did not take.
+
+- **The tripwire, and it was prose rather than tests when first written.** Thirteen tools GET then PUT/PATCH,
+  and each must be classified — either in `VERIFIES_AGAINST_RESPONSE`, naming the file and test title that
+  drive a DISAGREEING response, or in `UNVERIFIED` with why nobody has checked it. The first version read only
+  the keys, so a review proved that repointing an entry at `test/no-such-file.test.mjs` and promoting a tool
+  with an invented test name both passed. The named file must now exist and contain that title; both
+  fabrications fail. Eleven are proven, two are named as unproven.
+  - One of those classifications was itself wrong, which is the error class the list exists to prevent
+    occurring inside the list: `reai_set_employee_bank_account` was listed as unverified with a reason wrong on
+    both clauses. It is proven twice in `test/employees.test.mjs` and is the strongest example in the repo.
+  - Still not enforced: the population comes from author-written `apiPaths`, so a tool that reads then replaces
+    without declaring the GET escapes both this and `test/merge-tools.test.mjs`, which derives its population
+    the same way. The two are circular.
+  - A re-review of the branch then found the same class at the one site I had not checked, plus two more:
+    `reai_update_salary_line` omitted the `wholeRecord` flag, so a carried comment the PUT dropped read as
+    *"the response did not answer"* while the headline said the line was read back FROM the response — payroll,
+    and the site I had argued matters most. `readableRecord` answers `{ record: {} }` for a nested field that is
+    missing OR null, so an address the write had WIPED ENTIRELY got the same soft "could not be confirmed" as an
+    unreadable response; the two are distinguished now, with the discarded `problem` string used. And the
+    numeric round trip the comment claimed was never performed — a 400-digit decimal confirmed against `0`
+    because the code re-parsed the string instead of canonicalising it.
+  - **`reai_update_order` and `reai_update_offer` were certified as verifying while using a near-duplicate
+    helper with the OPPOSITE semantics**, 560 lines from a migrated site in the same file. Measured: a PUT
+    answering with no body produced a bare "Changed comment" — the costliest class by this helper's own
+    docstring — and `projectId` sent as `7` against a stored `"7"` produced both a false "Changed NOTHING" and a
+    false "IGNORED by the API". `appliedChanges` now delegates to the shared helper, which makes six of the
+    eleven certified tools route through it. Five still hand-roll their wording, which is worth saying rather
+    than claiming the consolidation is complete.
+  - **The tripwire was still defeatable three ways** after the first hardening, all reproduced by the review: a
+    title that appears only in a comment or an assertion message; two entries naming the SAME title, so
+    deleting one test left the other satisfying both; and a named test whose body proves nothing about the tool.
+    It now anchors on the `test("` that opens the title, requires each entry's test to be distinct, and requires
+    that test to mention the tool it certifies — which caught four certifying tests that drove their tool
+    through a local helper without naming it.
+  - **The `given` gate a third time, one layer down, found by probing my own fix rather than by a review.**
+    Delegating `appliedChanges` fixed the fields the caller ASKED to change. It is handed `asked`, so the
+    *carried* fields — the other half of a read-merge-write, and the half the headline names out loud — were
+    still never compared. Measured against the built handler: an order whose `comment` came back **null** after
+    the merge had carried it printed *"…and comment carried over"* with no warning anywhere in the note. Same
+    class as the `given` gate at the four call sites; `asked` is only what it is called here. It is the worse
+    half, too, because the caller never mentioned the field and so has no reason to check it.
+    - Both tools now name the carried fields from what came **back** — meaning the `confirmed` bucket only.
+    - **My first fix for this was itself the same overstatement, and the review caught it.** `survived` was
+      *sent minus contradicted*, so an `unanswered` field counted as preserved: a PUT answering with **no body**
+      listed every carried field as carried over, on zero evidence, in the same note that correctly demoted the
+      caller's own field to unconfirmed. The changelog sentence above was false as first written.
+    - **Three outcomes now, not two**, because collapsing them is what made it dishonest in both directions:
+      `EMPTIED` (came back null or blank — the write destroyed it, warned as LOST), `ALTERED` (came back with a
+      *different* value — reported, but **not** called a loss) and `UNANSWERED` (named as *"sent back unchanged
+      but NOT confirmed"*). The middle one matters: ReAI renormalises what it stores, and `src/tools/leads.ts`
+      already documents that a date echoed as a timestamp would read as a failed write. The first version would
+      have warned `LOST` about `issueDate` and about a nested `deliveryAddress` echoed with a fresh `id`.
+    - **The required-from-record fields escaped every check**, which the review found and which was the largest
+      hole: `currencyCode`, `customerId`, `daysUntilDue` and `issueDate` are carried from the record because the
+      PUT requires them, so they were in neither `asked` nor the optional-carry list. A response that moved the
+      order to another customer, changed its currency and changed its payment terms produced a note that said
+      **nothing at all**. The check is now read off `body` rather than a hardcoded list, and the headline still
+      names only the optional carries so a required echo does not read as a change the caller made.
+    - **The lines were excluded on a false premise.** Two comments — `src/tools/sales.ts` and
+      `src/tools/registry.ts` — licensed skipping them because "each tool checks separately by count"; only the
+      subscription tool did. `lineCountNote` now checks the count in both, so the largest payload these PUTs
+      carry can no longer be dropped silently **when the response carries the lines**. A response that omits
+      `lines` is not evidence either way and produces no note, so that case is still silent — which the first
+      version of this sentence claimed it was not, in the same breath as saying an absent `lines` is not
+      treated as evidence.
+    - **`Changed NOTHING` → `Changed NOTHING you asked for`.** The review constructed the case where a caller's
+      field was ignored *and* a carried comment destroyed in the same call: the headline said the write changed
+      nothing while the warning below said a customer-visible comment was gone. The record did change.
+    - **Nineteen tests** across the two files (42 before this work, 61 after), one per outcome class plus
+      positive controls, each **pinned by a named mutation**: naming attempts instead of survivors; counting
+      `unanswered` as preserved; treating only a null echo as a loss (the review's own defeat of the first
+      version); calling every contradiction LOST; restoring the optional-only carry list at either site;
+      restoring the offer null filter; folding `unanswered` back into `ignored`; stopping the blank class from
+      recursing; naming only the first differing key; removing the line count; and reporting a blank carry as
+      unconfirmed. Twelve mutations, twelve named failures.
+      - An earlier version of this bullet counted *how many* tests each mutation failed. Two of those counts
+        went stale within one commit, because adding a test changes them — so what is recorded now is that each
+        mutation is caught and by which behaviour, which does not rot.
+    - **A third round of review on the same change found six more, five of them introduced by the fixes.** Worth
+      recording as a pattern: each round's fix was correct about the defect it named and wrong about something
+      adjacent.
+      - **The offer site's copy of the required-field fix had no test at all** — reverting it passed all 54
+        tests, silently reproducing the exact failure the fix was for. That is the same one-site-unchecked
+        pattern as the salary omission one commit earlier, twice in a row, so the mutation battery now runs
+        every mutation against **both** sites rather than assuming a shared helper makes them equivalent.
+      - **The offer null filter hid the case it claimed was impossible.** Its comment said comparing carried
+        nulls "would only ever confirm null against null"; a carried null against a *returned* value is a
+        contradiction. An offer whose stored `projectId` was null and whose response came back `4242` — the
+        write joining a project the caller never mentioned — produced no note at all. Nulls are compared now,
+        and dropped only from the *naming*, which is the job that filter was conflating with comparison.
+      - **`ignored` folded `unanswered` into itself**, so a bodyless PUT printed *"the response does not mention
+        them, so this tool cannot say"* and then, one paragraph later, *"IGNORED by the API, with a 200 and no
+        error: comment (sent "new text", still undefined)"* with clearing advice — asserting the API's behaviour
+        off the same zero evidence the paragraph above had just refused to read anything into. Split.
+      - **The blank class applied at the top level only.** An offer's nested `deliveryAddress` echoed with
+        `province: ""` where the record held `null` fell through to exact comparison and contradicted — and this
+        API is documented, in this file, as normalising whitespace to null on address parts. That would have
+        printed a warning on a great many ordinary updates, which is worse than the silence it replaced. The
+        comparison recurses now, and is exported as `valuesAgree` so the code that *explains* a difference uses
+        the same rule as the code that *finds* one; comparing spellings there had named keys as differing purely
+        on key order.
+      - A carried `null` the response never mentions is no longer named as unconfirmed: six such fields on an
+        offer would bury the notes that matter, and nothing was at stake for them.
+      - **One of these tests was vacuous when written, and the mutation battery is what caught it.** It echoed
+        the null fields in the response, so they came back CONFIRMED and it never reached the unanswered branch
+        it existed to pin — it survived the mutation that reintroduced the noise. Fixed to omit them.
+    - **The whole-text regex trap, four times on this branch.** Every response appends the record as JSON, so
+      `/province/`, `/addressLine1/` and `/comment carried over/` all matched the payload rather than the note —
+      twice failing a correct note, twice passing vacuously. Assertions are scoped to the sentence now.
+    - **The first version of these tests asserted `/comment carried over/`**, which matched a one-item list by
+      luck for orders and matched *neither* case for offers, where the note names five fields and `comment`
+      falls mid-list — so the offer negative assertion was vacuous. They parse the list now.
+  - **A fourth instance, recorded not fixed: `reai_update_lead`** (`src/tools/leads.ts:582`) reports
+    `email`/`phone` as *"carried over unchanged"* with the value from the **request**. It re-reads the record
+    afterwards, so the data is in hand, but that verification covers only the fields the caller asked for, by
+    design. A different mechanism from this PR's claim, so it goes with the three below.
+  - **Three instances outside the thirteen, found by the review and NOT fixed here**, all invisible for that
+    reason: `reai_set_asset_depreciation` (`src/tools/assets.ts:201`, declared irreversible, echoes
+    `args.depreciationMethod` and `args.usefulLifeInMonths` while `AssetRes` carries both),
+    `reai_rename_warehouse` (`src/tools/warehouses.ts:215`) and `reai_rename_sub_account`
+    (`src/tools/subaccounts.ts:233`) — both echo `args.name` while the response carries `name`.
+    `reai_update_debtor` already shows the correct shape for a rename.
+
+
 - **`reai_update_subscription` reported the arming flags from what it SENT, and silence meant disarmed.** The
   worst of the five request-sourced outcome reports #141's review found, and named there as the one to fix
   next: `outputMode`, `automaticBillingGeneration` and `sendEhf` were read off `merged`, so a caller who sent

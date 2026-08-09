@@ -7,6 +7,9 @@ import {
   ok,
   okList,
   readableRecord,
+  confirmAgainstResponse,
+  valuesAgree,
+  describeConfirmation,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -374,13 +377,45 @@ const setCustomerAddress = defineTool({
       tenantId: resolved,
     });
     const kept = Object.keys(base).filter((k) => !(k in given));
+    // The parts are NESTED in the response. `PUT /api/customers/{id}/address` answers with CustomerRes, where
+    // the address sits at `.address` — so comparing against the top level marked every field "unanswered"
+    // ALWAYS, made the contradiction branch unreachable, and printed a false caveat under a response that
+    // visibly confirmed the write. The GET path in this same handler already reads it nested; the write path
+    // did not. An earlier version of this comment claimed the API "may answer with a plain string" — nothing
+    // in this repository measures that, and it was invented to explain the behaviour the bug produced.
+    //
+    // And `merged`, not `given`: the carried parts are the whole reason this reads first, and #140's measured
+    // harm on this endpoint was a CARRIED postalCode being wiped. Checking only the caller's own fields would
+    // have excluded exactly the field that was lost — the `given` gate this repo has now been bitten by twice.
+    // `readableRecord` answers `{ record: {} }` for a nested field that is missing OR null, which is right for
+    // the pre-write GET (no address yet is a legitimate base) and wrong here: a write response carrying
+    // `address: null` means the whole address is GONE, and an empty base made that read as "could not be
+    // confirmed" — the same soft sentence a bare string would get. Distinguished, and the problem string is
+    // used rather than discarded.
+    const written = readableRecord(res.data, kind === "delivery" ? "deliveryAddress" : "address");
+    const wiped =
+      !!res.data &&
+      typeof res.data === "object" &&
+      !Array.isArray(res.data) &&
+      (res.data as Record<string, unknown>)[kind === "delivery" ? "deliveryAddress" : "address"] === null;
+    const confirmation = confirmAgainstResponse(merged, wiped ? {} : written.record, { wholeRecord: true });
+    const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? `${kind ?? "postal"} address updated.`, {
       note:
         `Changed ${Object.keys(given).join(", ")} on customer ${id}'s ${kind ?? "postal"} address` +
         (kept.length
           ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
             `unchanged, because this endpoint replaces rather than patches.`
-          : `. Nothing else was set on it beforehand.`),
+          : `. Nothing else was set on it beforehand.`) +
+        (wiped
+          ? `\n\nWARNING: the response came back with no ${kind ?? "postal"} address at all — every part is ` +
+            `gone, not just the ones you changed. Read the customer back before relying on it.`
+          : ``) +
+        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``) +
+        (!wiped && written.problem !== undefined
+          ? `\n\nThe response could not be read as an address (${written.problem}), so nothing above about ` +
+            `what is stored is confirmed.`
+          : ``),
     });
   },
 });
@@ -935,25 +970,174 @@ function appliedChanges(
   asked: ReadonlyArray<readonly [string, unknown]>,
   after: Record<string, unknown> | undefined,
   skip: readonly string[],
-): { took: string[]; ignored: string[] } {
-  const took: string[] = [];
-  const ignored: string[] = [];
-  for (const [key, sent] of asked) {
-    if (skip.includes(key)) {
-      took.push(key);
-      continue;
+): { took: string[]; ignored: string[]; unconfirmed: string[] } {
+  // A thin adapter over confirmAgainstResponse, which is the point: this was a near-duplicate with the
+  // OPPOSITE semantics sitting in the same file as the migrated sites, while the order and offer tools were
+  // certified as verifying against the response. Measured before this change: a PUT answering with NO BODY
+  // produced a bare "Changed comment", the very class the shared docstring calls costliest; and `projectId`
+  // sent 7 against a stored "7" produced both a false "Changed NOTHING" and a false "IGNORED by the API".
+  //
+  // wholeRecord, because both endpoints answer with the record. `skip` carries the line fields, whose shapes
+  // differ between request and response. `lineCountNote` checks their COUNT instead, which is what the two
+  // comments licensing this exclusion already claimed happened and, until review looked, did not.
+  const sent = Object.fromEntries(asked);
+  const { confirmed, contradicted, unanswered } = confirmAgainstResponse(sent, after, { skip, wholeRecord: true });
+  return {
+    took: [...confirmed, ...skip.filter((k) => Object.hasOwn(sent, k))],
+    // Unanswered is not applied — a response that cannot confirm a change is not grounds for claiming it, and
+    // the previous version counted it as applied. But it is not IGNORED either, and merging the two buckets
+    // made the note contradict itself: on a bodyless PUT it said "the response does not mention them, so this
+    // tool cannot say" and then, one paragraph later, "IGNORED by the API, with a 200 and no error: comment
+    // (sent "new text", still undefined)" — asserting the API's behaviour on the same zero evidence, and
+    // offering clearing advice off it. Kept apart so each sentence says only what is known.
+    ignored: contradicted.map((c) => c.field),
+    unconfirmed: unanswered,
+  };
+}
+
+/**
+ * Did the fields this tool CARRIED to avoid erasing them actually survive the replacement?
+ *
+ * `appliedChanges` answers only for what the caller asked to change. The carried fields are the other half,
+ * and the headline claims them out loud — "…and comment carried over" — while nothing checked the claim.
+ * Measured against the built handler before this: an order whose `comment` came back **null** after the merge
+ * had carried it printed exactly that sentence, with no warning anywhere in the note.
+ *
+ * That is the same class as the `given` gate this PR exists to stop repeating; `asked` is only what it is
+ * called here. It is the worse half, too: the caller never mentioned the field, so a silent loss is the one
+ * outcome they have no reason to go looking for.
+ *
+ * Three outcomes, not two, because collapsing them is what made the first version of this dishonest.
+ *
+ *   EMPTIED    sent a value, the record came back null or blank. Unambiguous: the write destroyed it.
+ *   ALTERED    sent a value, the record came back with a DIFFERENT value. Ambiguous, and it must not be
+ *              called "lost" — ReAI renormalises what it stores (a date echoed as a timestamp, a nested
+ *              address echoed with a fresh `id`, a title-cased name), so this is as likely to be the API
+ *              tidying up as an overwrite. `src/tools/leads.ts` documents that hazard; the first version of
+ *              this helper walked straight into it and would have warned "LOST" about a stored value.
+ *   UNANSWERED the response does not mention the field. NOT evidence of preservation.
+ *
+ * `confirmed` is the only bucket the headline may name, which is the difference between "named from what came
+ * back" and "named from what was sent, minus the losses we happened to detect". The first version did the
+ * latter while its changelog claimed the former: a PUT answering with NO BODY listed every carried field as
+ * carried over, on zero evidence.
+ */
+type CarryOutcome = {
+  confirmed: string[];
+  emptied: Array<{ field: string; sent: unknown }>;
+  altered: Array<{ field: string; sent: unknown; stored: unknown }>;
+  unanswered: string[];
+};
+
+function carriedSurvival(carried: Readonly<Record<string, unknown>>, after: unknown): CarryOutcome {
+  const { confirmed, contradicted, unanswered } = confirmAgainstResponse(carried, after, {
+    wholeRecord: true,
+  });
+  // The same emptiness class `confirmAgainstResponse` uses, so "" and " " and null are one outcome here too.
+  const isBlank = (v: unknown) => v === null || (typeof v === "string" && v.trim() === "");
+  return {
+    confirmed,
+    emptied: contradicted.filter((x) => isBlank(x.stored)).map((x) => ({ field: x.field, sent: x.sent })),
+    altered: contradicted.filter((x) => !isBlank(x.stored)),
+    // A carried field that was ALREADY blank and that the response does not mention had nothing at stake, so
+    // naming it as unconfirmed is pure noise — and there are six such fields on an offer. It stays in the
+    // comparison, because a blank carried against a RETURNED value is a real contradiction and the version
+    // that filtered nulls out of the comparison hid exactly that.
+    unanswered: unanswered.filter((k) => !isBlank(carried[k])),
+  };
+}
+
+/**
+ * Did the lines come back in the number they were sent?
+ *
+ * The lines are excluded from the field comparison because request and response disagree on both the key
+ * (`orderLines` vs `lines`) and the per-line shape, and two comments in this repo claimed each tool "checks
+ * them separately by count" to license that. Review found the claim false: only the subscription tool did.
+ * The lines are the largest thing these PUTs carry, so a silent drop is the most expensive loss available.
+ *
+ * Only a present array counts. A response that omits `lines` is not evidence either way, and saying so would
+ * fire on every bodyless PUT.
+ */
+function lineCountNote(sent: number, after: unknown, subject: string): string[] {
+  const stored = (after as { lines?: unknown } | undefined)?.lines;
+  if (!Array.isArray(stored) || stored.length === sent) return [];
+  return [
+    `WARNING: ${sent} line(s) were sent and ${subject} came back with ${stored.length}. ` +
+      `This PUT replaces the lines, so a count that does not match means lines were dropped or added — ` +
+      `read them back with the get tool before relying on the totals.`,
+  ];
+}
+
+/**
+ * How a carried value and the stored one differ, in a form an agent can act on.
+ *
+ * Dumping both sides whole is what review called out, and it is worst exactly where this fires most: a nested
+ * `deliveryAddress` echoed with a fresh `id` puts two near-identical objects in one sentence and leaves the
+ * reader to diff seven keys by eye. Naming the keys that actually differ lets the agent see at a glance that
+ * only `id` moved.
+ *
+ * Deliberately NOT special-cased to ignore `id`: that ReAI renumbers a nested record on write is the review's
+ * hypothesis and mine, and nothing has measured it. Suppressing the note on that guess would hide a real
+ * address swap. Naming the difference is honest either way.
+ */
+function describeDifference(sent: unknown, stored: unknown): string {
+  const isPlain = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  if (isPlain(sent) && isPlain(stored)) {
+    // `valuesAgree`, not JSON.stringify: comparing spellings here disagreed with the classifier that decided
+    // this was a difference at all, so a nested key was named as differing purely on key order or on a blank
+    // normalisation the classifier calls equal. Review caught both. Using the same predicate means this can
+    // only ever name keys that genuinely differ by the rule the warning is based on.
+    const keys = [...new Set([...Object.keys(sent), ...Object.keys(stored)])].filter(
+      (k) => !valuesAgree(sent[k], stored[k]),
+    );
+    if (keys.length > 0) {
+      return `differs in ${keys
+        .map(
+          (k) =>
+            // "absent" rather than `undefined`, which is not JSON and reads as a value. A key one side omits
+            // is only reachable here when the other side holds something non-blank.
+            `${k}: carried ${k in sent ? JSON.stringify(sent[k]) : "absent"}, stored ${
+              k in stored ? JSON.stringify(stored[k]) : "absent"
+            }`,
+        )
+        .join(", ")}`;
     }
-    const stored = after?.[key];
-    // The response does not carry it, so nothing can be concluded — reported as taken rather than doubted.
-    if (after === undefined || !Object.hasOwn(after, key)) {
-      took.push(key);
-      continue;
-    }
-    const same = JSON.stringify(stored) === JSON.stringify(sent);
-    const emptiedToNull = sent === "" && stored === null;
-    (same || emptiedToNull ? took : ignored).push(key);
   }
-  return { took, ignored };
+  return `carried ${JSON.stringify(sent)}, stored ${JSON.stringify(stored)}`;
+}
+
+/** The notes for a carry outcome. Separate from the classification so both tools word it identically. */
+function describeCarry(o: CarryOutcome, subject: string): string[] {
+  const notes: string[] = [];
+  if (o.emptied.length > 0) {
+    const one = o.emptied.length === 1;
+    notes.push(
+      `WARNING: ${o.emptied
+        .map((x) => `${x.field} (carried ${JSON.stringify(x.sent)}, ${subject} came back empty)`)
+        .join("; ")}. This tool sent ${one ? "that" : "those"} to preserve ${one ? "it" : "them"} and the ` +
+        `record came back without ${one ? "it" : "them"}, so ${one ? "it is" : "they are"} LOST unless you ` +
+        `set ${one ? "it" : "them"} again. You did not mention ${one ? "it" : "them"}, so nothing else here ` +
+        `would have told you.`,
+    );
+  }
+  if (o.altered.length > 0) {
+    notes.push(
+      `The record came back with a different value for ${o.altered
+        .map((x) => `${x.field} (${describeDifference(x.sent, x.stored)})`)
+        .join("; ")}. This tool sent the stored value back to preserve it, so either the API rewrote it — ` +
+        `which it does, for dates, names and nested records — or something else changed it. Not treated as a ` +
+        `loss, because a value is there; read it back if it matters.`,
+    );
+  }
+  if (o.unanswered.length > 0) {
+    notes.push(
+      `Sent back unchanged but NOT confirmed: ${o.unanswered.join(", ")} — the response does not mention ` +
+        `${o.unanswered.length === 1 ? "it" : "them"}, so this tool cannot say ` +
+        `${o.unanswered.length === 1 ? "it" : "they"} survived the replacement.`,
+    );
+  }
+  return notes;
 }
 
 /**
@@ -1256,16 +1440,36 @@ const updateOrder = defineTool({
       tenantId: resolved,
     });
 
+    const after = res.data;
     const changedKeys = asked.map(([k]) => k);
-    // Only the fields carried that the caller did NOT also change — otherwise a comment-only edit read
-    // "Changed comment … and comment carried over", which is both wrong and confusing.
-    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
+    // EVERYTHING the body carried and the caller did not ask for — read off `body` rather than from the
+    // optional-carry list, because `currencyCode`, `customerId`, `daysUntilDue` and `issueDate` are carried
+    // from the record too. They are required by the PUT, which is why they are easy to forget: review found
+    // them escaping every check here, so a response moving the order to another customer or changing its
+    // payment terms produced a note that said nothing at all. Those are the most expensive fields in the
+    // record. `orderLines` is excluded because request and response shapes differ; see the count note below.
+    const carriedAll = Object.fromEntries(
+      Object.entries(body).filter(([k]) => k !== "orderLines" && !changedKeys.includes(k)),
+    );
+    const carryOutcome = carriedSurvival(carriedAll, after);
+    // The headline names only the OPTIONAL carries, and only the ones the response confirmed. Naming the
+    // required four would read as a change the caller made, and naming an unanswered field would claim
+    // preservation the response does not support — which is what the first version of this did.
+    const carriedNamed = carryOutcome.confirmed.filter((k) => Object.hasOwn(carried, k));
     const notes = [
       `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
         `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
-        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `${carriedNamed.length > 0 ? `, and ${carriedNamed.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    notes.push(...describeCarry(carryOutcome, `order ${order.number ?? id}`));
+    notes.push(
+      ...lineCountNote(
+        (changes.orderLines ?? mappedLines ?? []).length,
+        after,
+        `order ${order.number ?? id}`,
+      ),
+    );
     // EVERY update, not only the ones that passed it. The claim "every successful update says so" was in
     // the source comment and false: the word appeared only when the caller supplied the field, which also
     // made the test asserting it pass vacuously.
@@ -1311,14 +1515,18 @@ const updateOrder = defineTool({
       );
     }
 
-    const after = res.data;
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
-    const { took, ignored } = appliedChanges(asked, after, ["orderLines"]);
-    if (ignored.length > 0) {
+    const { took, ignored, unconfirmed } = appliedChanges(asked, after, ["orderLines"]);
+    if (ignored.length > 0 || unconfirmed.length > 0) {
       notes[0] = (notes[0] ?? "").replace(
         `Changed ${changedKeys.join(", ")}`,
-        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+        // "NOTHING you asked for", not "NOTHING": review constructed the case where a caller's field was
+        // ignored AND a carried field was destroyed in the same call, and the headline said the write changed
+        // nothing while the warning below said a customer-visible comment was gone. The record DID change.
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING you asked for`,
       );
+    }
+    if (ignored.length > 0) {
       const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
         `IGNORED by the API, with a 200 and no error: ${ignored
@@ -1327,6 +1535,13 @@ const updateOrder = defineTool({
           (clearable.length > 0
             ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
             : ` Check the value is one the API accepts for that field.`),
+      );
+    }
+    if (unconfirmed.length > 0) {
+      notes.push(
+        `NOT CONFIRMED: the response does not mention ${unconfirmed.join(", ")}, so this tool cannot say ` +
+          `whether the change took. It is not reported as ignored, because nothing here shows that either — ` +
+          `read the record back with the get tool.`,
       );
     }
     return ok(res.data, {
@@ -1671,19 +1886,42 @@ const updateOffer = defineTool({
       tenantId: resolved,
     });
 
+    const after = res.data;
     const changedKeys = asked.map(([k]) => k);
-    // What was PRESERVED, which is not the same as what the body states. Every carryable field is sent — nulls
-    // included, to satisfy the replacement-omission gate — so naming all of them told a caller that six
-    // fields were carried over when all six were null and stayed null. Only fields with a value are named.
-    const carriedOnly = Object.keys(carried).filter(
-      (k) => !changedKeys.includes(k) && carried[k] !== null && carried[k] !== undefined,
+    // Everything the body carried, including the fields the PUT requires — same reasoning as the order tool.
+    //
+    // Nulls included. The first version filtered them out, on the stated grounds that "comparing them would
+    // only ever confirm null against null" — which review measured false: a carried null against a RETURNED
+    // value is a contradiction, and the filter suppressed the only report of it. An offer whose stored
+    // `projectId` was null and whose response came back `4242` said nothing at all, meaning the write joined a
+    // project the caller never mentioned, silently. That is the same path the merge docstring above calls the
+    // least-tested one on live data, so it is the last one to hide.
+    const carriedAll = Object.fromEntries(
+      Object.entries(body).filter(([k]) => k !== "offerLines" && !changedKeys.includes(k)),
+    );
+    const carryOutcome = carriedSurvival(carriedAll, after);
+    // What was PRESERVED, which is not the same as what the body states, and not the same as what was sent:
+    // naming every carryable field told a caller that six fields were carried over when all six were null and
+    // stayed null, and naming the unconfirmed ones claims preservation the response does not support. The
+    // already-null ones are dropped HERE, from the naming, rather than from the comparison above — that split
+    // is the fix for a filter that had been doing both jobs with one condition.
+    const carriedNamed = carryOutcome.confirmed.filter(
+      (k) => Object.hasOwn(carried, k) && carried[k] !== null && carried[k] !== undefined,
     );
     const notes = [
       `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
         `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
-        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `${carriedNamed.length > 0 ? `, and ${carriedNamed.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    notes.push(...describeCarry(carryOutcome, `offer ${offer.number ?? id}`));
+    notes.push(
+      ...lineCountNote(
+        (changes.offerLines ?? mappedLines ?? []).length,
+        after,
+        `offer ${offer.number ?? id}`,
+      ),
+    );
     // Moving an offer does NOT move the payment terms: daysUntilDue is required, so the replacement carries
     // the number the offer already had — which belonged to the previous customer. Same reasoning as the order
     // tool: changing it silently is a money decision the caller did not ask for, so it is named instead.
@@ -1714,14 +1952,18 @@ const updateOffer = defineTool({
       );
     }
 
-    const after = res.data;
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
-    const { took, ignored } = appliedChanges(asked, after, ["offerLines"]);
-    if (ignored.length > 0) {
+    const { took, ignored, unconfirmed } = appliedChanges(asked, after, ["offerLines"]);
+    if (ignored.length > 0 || unconfirmed.length > 0) {
       notes[0] = (notes[0] ?? "").replace(
         `Changed ${changedKeys.join(", ")}`,
-        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+        // "NOTHING you asked for", not "NOTHING": review constructed the case where a caller's field was
+        // ignored AND a carried field was destroyed in the same call, and the headline said the write changed
+        // nothing while the warning below said a customer-visible comment was gone. The record DID change.
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING you asked for`,
       );
+    }
+    if (ignored.length > 0) {
       const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
         `IGNORED by the API, with a 200 and no error: ${ignored
@@ -1730,6 +1972,13 @@ const updateOffer = defineTool({
           (clearable.length > 0
             ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
             : ` Check the value is one the API accepts for that field.`),
+      );
+    }
+    if (unconfirmed.length > 0) {
+      notes.push(
+        `NOT CONFIRMED: the response does not mention ${unconfirmed.join(", ")}, so this tool cannot say ` +
+          `whether the change took. It is not reported as ignored, because nothing here shows that either — ` +
+          `read the record back with the get tool.`,
       );
     }
     return ok(res.data, {

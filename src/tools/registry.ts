@@ -752,6 +752,190 @@ export function mergeForReplacement(opts: {
  * base, and the write then sent the caller's fields alone. That is the destruction the merge
  * exists to prevent, with the caller believing they made a small edit.
  */
+/**
+ * Which of a write's requested changes the RESPONSE actually confirms.
+ *
+ * Every read-merge-write tool here reports an outcome, and five of them reported it from what they SENT. That
+ * produced, in order of how much it cost: a subscription whose discarded disarming was met with silence, a
+ * creditor announcing that repayments had no destination without checking, an order claiming a comment was
+ * changed that the API had thrown away, and payroll amounts quoted from the request. Each was found and fixed
+ * separately, and twice the fix repeated a mistake an earlier fix had already corrected — which is the
+ * argument for one helper rather than five careful sites.
+ *
+ * The semantics are the ones that were measured, not the ones that seem obvious:
+ *
+ *   - A field the response OMITS, or returns as `null`, is UNANSWERED — not confirmed-absent. A non-answer
+ *     read as "cleared" is how `sendEhf: null` silently dropped an arming flag out of a sentence containing
+ *     the word "confirmed".
+ *   - `""` sent and `null` stored is CONFIRMED, not a disagreement. The API normalises an empty string to
+ *     null, and comparing them naively flagged every successful clear with "check the value is one the API
+ *     accepts" — on the very path the tool recommends.
+ *   - Strings are compared trimmed, because a sibling tool shipped once testing only `=== ""`.
+ *
+ * `skip` is for fields whose shape differs between request and response and so cannot be compared here —
+ * `orderLines` against `lines`, for instance. Skipping is a claim that something else checks them; the line
+ * counts in the order, offer and subscription tools are checked separately for that reason. (That was
+ * false for order and offer when written — review caught it, and `lineCountNote` in sales.ts now makes it true.)
+ */
+/** Shared by `confirmAgainstResponse` and by callers that need to explain a difference it found. */
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === "object" && !Array.isArray(v);
+
+// Key order must not be a disagreement. `JSON.stringify` alone reported `{x:1,y:2}` against `{y:2,x:1}` as a
+// contradiction — measured — and an object-valued field like an offer's deliveryAddress would then warn on
+// every write purely because the API serialises its keys in a different order.
+const stable = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v as Record<string, unknown>)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+};
+// 3 and "3" are the same value differently spelled, and this backend coerces freely. But the first version of
+// this accepted far too much: measured, `"0150"` matched `150` (a postal code losing its leading zero — the
+// exact field #140 recorded being wiped on this very endpoint), `"0x10"` matched 16, and two different
+// eighteen-digit ids matched each other through float64. So a string only counts as numeric when it is the
+// CANONICAL spelling of that number and the number survives the round trip.
+const numeric = (v: unknown): number | undefined => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v !== "string") return undefined;
+  const t = v.trim();
+  if (t === "") return undefined;
+  // A PLAIN DECIMAL only. This rejects the three classes that made the first version report false
+  // confirmations, while still accepting the spellings that genuinely mean the same number:
+  //
+  //   "0150" vs 150   leading zero — an identifier, not a quantity. #140 recorded a postalCode
+  //                   being wiped on this very endpoint, so calling those equal is the worst case.
+  //   "1e3", "0x10"   alternative notations
+  //   18-digit ids    two different ones compare equal through float64
+  //
+  // "3.0" against 3 does pass, which it should: same number, and no information is lost either way.
+  if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(t)) return undefined;
+  const n = Number(t);
+  if (!Number.isFinite(n) || Math.abs(n) > Number.MAX_SAFE_INTEGER) return undefined;
+  // A real round trip. The first attempt re-parsed the string, which of course produced the same float and so
+  // rejected nothing: a 400-digit decimal confirmed against 0, and "1.00000000000000002" against 1. Those
+  // did not SURVIVE parsing — they only landed on the same float — so they are not the same number.
+  // Canonicalising the sent spelling instead keeps the one exception worth keeping, a trailing-zero
+  // difference like "3.0" against 3, where nothing is lost either way.
+  const canonical = t.includes(".") ? t.replace(/0+$/, "").replace(/\.$/, "") : t;
+  if (String(n) !== canonical) return undefined;
+  return n;
+};
+export function valuesAgree(a: unknown, b: unknown): boolean {
+  // Trimmed FIRST, or the two documented rules do not compose: `" "` vs `""` confirmed and `""` vs null
+  // confirmed, but `" "` vs null contradicted. Reachable on any address part, which accepts any string while
+  // the API normalises whitespace to null.
+  // `undefined` is in the class only because recursion can reach a key one side omits; a top-level
+  // undefined is skipped as "not mentioned" or recorded as unanswered before this runs.
+  const blank = (v: unknown) =>
+    v === null || v === undefined || v === "" || (typeof v === "string" && v.trim() === "");
+  if (blank(a) && blank(b)) return true;
+  // Before the both-strings comparison, or "3.0" against "3" contradicted while 3 against "3" did not.
+  const [na, nb] = [numeric(a), numeric(b)];
+  if (na !== undefined && nb !== undefined) return na === nb;
+  if (typeof a === "string" && typeof b === "string") return a.trim() === b.trim();
+  // RECURSE, so the three rules above hold at every depth instead of only at the top level. Review measured
+  // the gap: an offer's nested `deliveryAddress` echoed with `province: ""` where the record held null was a
+  // contradiction, because the object case fell through to exact comparison. That would have printed the
+  // "either the API rewrote it" paragraph on every offer update whose address had one blank part — a warning
+  // on every call is worse than the silence it replaced. `registry.ts` already documents that this API
+  // normalises whitespace to null on address parts, so the nested case is the documented one, not a corner.
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => valuesAgree(v, b[i]));
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((k) => valuesAgree(a[k], b[k]));
+  }
+  return stable(a) === stable(b);
+}
+
+export type ResponseConfirmation = {
+  /** Sent and the response agrees. */
+  confirmed: string[];
+  /** Sent and the response disagrees — the case worth a warning. */
+  contradicted: Array<{ field: string; sent: unknown; stored: unknown }>;
+  /** The response neither carries the field nor returns a value for it. */
+  unanswered: string[];
+};
+
+export function confirmAgainstResponse(
+  sent: Readonly<Record<string, unknown>>,
+  response: unknown,
+  opts: { readonly skip?: readonly string[]; readonly wholeRecord?: boolean } = {},
+): ResponseConfirmation {
+  const skip = opts.skip ?? [];
+  const after =
+    response && typeof response === "object" && !Array.isArray(response)
+      ? (response as Record<string, unknown>)
+      : undefined;
+  const result: ResponseConfirmation = { confirmed: [], contradicted: [], unanswered: [] };
+  for (const [field, value] of Object.entries(sent)) {
+    if (skip.includes(field) || value === undefined) continue;
+    if (after === undefined || !Object.hasOwn(after, field)) {
+      result.unanswered.push(field);
+      continue;
+    }
+    if (after[field] === null) {
+      // The same blank class same() uses. Keying this on `=== ""` meant `" "` against a stored null reported
+      // "unanswered" while `""` against it confirmed — the null branch runs first, so same() never saw it.
+      if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) {
+        // Both mean absent, so the outcome is what was asked for.
+        result.confirmed.push(field);
+      } else if (opts.wholeRecord) {
+        // On a response that carries the RECORD, a null is an answer: the API discarded the value. Without
+        // this the shared helper was strictly weaker than reai_update_creditor, which distinguishes "could not
+        // be confirmed" from "this write CARRIED a value and the API did not keep it" — and the softer wording
+        // is the one that would be chosen for the order-comment and creditor cases this exists for.
+        result.contradicted.push({ field, sent: value, stored: null });
+      } else {
+        result.unanswered.push(field);
+      }
+      continue;
+    }
+    if (valuesAgree(value, after[field])) {
+      result.confirmed.push(field);
+    } else {
+      result.contradicted.push({ field, sent: value, stored: after[field] });
+    }
+  }
+  return result;
+}
+
+/**
+ * The standard paragraphs for a confirmation, so tools cannot phrase the same finding several ways. Six of
+ * the eleven certified merge tools use it; five still hand-roll their wording, which is worth saying rather
+ * than claiming the consolidation is complete.
+ *
+ * `subject` names the record ("order OR-4105"). Returns nothing when there is nothing to report, so a caller
+ * can spread it into a notes array unconditionally.
+ */
+export function describeConfirmation(c: ResponseConfirmation, subject: string): string[] {
+  const notes: string[] = [];
+  if (c.contradicted.length > 0) {
+    notes.push(
+      `WARNING: ${c.contradicted
+        .map((x) => `${x.field} (sent ${JSON.stringify(x.sent)}, ${subject} came back with ${JSON.stringify(x.stored)})`)
+        .join("; ")}. This API does not always store what it accepts, so read the record back before relying ` +
+        `on ${c.contradicted.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (c.unanswered.length > 0) {
+    notes.push(
+      `The response did not answer for ${c.unanswered.join(", ")}, so ${
+        c.unanswered.length === 1 ? "that change" : "those changes"
+      } could not be confirmed from it. Read the record back before relying on ${
+        c.unanswered.length === 1 ? "it" : "them"
+      }.`,
+    );
+  }
+  return notes;
+}
+
 export function readableRecord(
   data: unknown,
   field?: string,

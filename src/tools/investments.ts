@@ -7,6 +7,8 @@ import {
   mergeForReplacement,
   ok,
   okList,
+  confirmAgainstResponse,
+  describeConfirmation,
   readableRecord,
   requiredName,
   requireTenantId,
@@ -596,6 +598,16 @@ const updateInvestment = defineTool({
             `unchanged, because this endpoint replaces rather than patches.`
           : `.`),
     ];
+    // Against the response, not against what was sent. The description conceded that a surviving
+    // assetAccountNumber was "an OBSERVATION rather than a rule" — the response carries it, so it is checked
+    // now, and that sentence was updated rather than left contradicting this.
+    notes.push(
+      ...describeConfirmation(
+        // `merged`, not the caller's subset: the carried fields are what the merge exists to protect.
+        confirmAgainstResponse(merged, res.data, { wholeRecord: true }),
+        `share investment ${id}`,
+      ),
+    );
     if (unknown.length > 0) notes.push(`The stored record had no ${unknown.join(", ")} before this write.`);
     notes.push(
       `Nothing here changes what the position holds, and nothing posted to the ledger — quantity and ` +

@@ -255,7 +255,7 @@ test("reclassifying into a related-party type sets relatedParty, as create does"
   );
   assert.notEqual(res.isError, true, textOf(res));
   assert.equal(sent[1].body.relatedParty, true, "the API does not infer this — measured");
-  assert.match(textOf(res), /relatedParty was set to true/);
+  assert.match(textOf(res), /relatedParty was sent as true/);
 
   // And an explicit false still wins: the inference must not overrule the caller.
   const explicit = ctxFor([
@@ -921,6 +921,7 @@ test('clearing with "" is not reported as the API discarding the value', async (
 });
 
 test("a rename whose replacement drops the carried account is the case this tool exists for, and warns", async () => {
+  // reai_update_creditor: this is the case named in test/confirm-against-response.test.mjs as its proof.
   // Gated on `given` before, so the hazard the tool was written to catch produced no warning at all — while
   // the first paragraph still said the account was "written back unchanged".
   const { text } = await updateCreditor({ id: 7, name: "New" }, creditor("15031234567"), creditor(null));
@@ -1001,4 +1002,31 @@ test("reai_update_company_bank still warns when the response really shows an emp
   const res = await tool("reai_update_company_bank").handler({ id: 3, name: "ZZ Renamed", tenantId: 2783 }, ctx);
   assert.match(textOf(res), /the account number is now EMPTY/);
   assert.match(textOf(res), /Confirmed from the response/);
+});
+
+test("a relatedParty the API did not store is flagged, not asserted", async () => {
+  // The update tool said relatedParty "was set to true" from what it SENT, while the CREATE sibling has always
+  // warned off the STORED value because the API is measured not to infer this and to store false. Related-party
+  // status drives note disclosure, so the request is the wrong half to trust.
+  const loan = (over = {}) => ({
+    id: 4, reference: "ZZ-1", loanType: "other", perspective: "lender", relatedParty: false,
+    currency: "NOK", principalAmount: 1000, interestRateAnnual: 5, disbursementDate: "2026-01-01",
+    repaymentType: "annuity", debtorId: 7,
+    loanAccountNumber: "1560", interestIncomeAccountNumber: "8050", ...over,
+  });
+  const { ctx } = ctxFor([
+    { status: 200, data: loan() },
+    { status: 200, data: loan({ loanType: "company_loan_to_owner", relatedParty: false }) },
+    { status: 200, data: loan({ loanType: "company_loan_to_owner", relatedParty: false }) },
+  ]);
+  const res = await tool("reai_update_loan").handler(
+    // The accounts must be stated explicitly on a reclassification — the API derives them once at creation and
+    // never re-derives, which this tool refuses to paper over.
+    { id: 4, loanType: "company_loan_to_owner", loanAccountNumber: "1560", interestIncomeAccountNumber: "8050", tenantId: 2783 },
+    ctx,
+  );
+  const text = textOf(res);
+  assert.match(text, /relatedParty was sent as true/);
+  assert.match(text, /WARNING: the response came back with relatedParty false/);
+  assert.match(text, /did NOT take/);
 });
