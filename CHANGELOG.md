@@ -9,37 +9,51 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **Round two of the Norwegian vocabulary work: nine terms mapped, fifteen deliberately refused.** The
-  review of PR #118 listed ~30 terms that returned nothing; that PR's own lesson was that four of nine
-  justifications had been overstated, so each candidate here was checked against what the spec actually
-  contains before anything was added, and **the refusals are recorded in the source beside the additions**
-  so the next reader does not re-derive the same wrong answers.
-  - **Two of the nine fix a confident wrong answer rather than an empty one**, which is the worse failure.
-    `aga` reached `POST /api/bank-reconciliations/{bankAccountId}/vouchers` while the unabbreviated
-    `arbeidsgiveravgift` correctly reached `/api/salary-payments`. And `inngaende` — as in "inngående
-    faktura", a **supplier** invoice — reached `/api/invoices`, the customer side of the ledger.
-  - Also mapped: `fordring`/`fordringer` → the customer ledger, `anskaffelseskost` → the asset register,
-    `driftskostnader` → expenses, `termin` → VAT returns, `kontonummer` → account lookup, and `dimensjon` →
-    departments (labelled a judgement: there is no `/api/dimensions`, and a department is what a posting is
-    analysed by here).
-  - **`kredit` is refused, and it is the one worth naming.** Its closest match is `/api/creditors` — loan
-    counterparties, not the credit side of a posting. Mapping it would have repeated the `avslutt` mistake
-    exactly: a word pointed at an endpoint that shares its letters and not its meaning. A test asserts it
-    never reaches `/api/creditors`.
-  - Fourteen more refused with reasons in the source: `debet`, `egenkapital`, `omsetning`, `utbytte`,
-    `varekostnad`, `permisjon`, `fravaer`, `sykepenger`, `trekk`, `kid`/`kidnummer`, `valutakurs` (its only
-    match is an INTERNAL operation), `saldobalanse`, `arsberetning`, `generalforsamling`, `styre`.
-  - **`betalingsbetingelser` was mapped and then removed**, which is worth recording. The target exists and
-    is public — `POST /invoice/setting/daysUntilDue`, and querying `daysuntildue` directly reaches it — but
-    the synonym is outvoted by compound decomposition: the word splits into `betaling` + `betingelser`,
-    `betaling` maps to payment, and the payment endpoints win. Measured rather than assumed, and removed
-    rather than left looking effective. The English "payment terms" fails the same way.
-  - Two refinements caught by measuring rather than by reading: mapping `fordring` to `["receivable",
-    "ledger"]` put the **asset** ledger first, because "receivable" matches nothing in this spec — a
-    receivable is the customer ledger, so the entity had to be named. And `anskaffelseskost → ["asset"]`
-    ranked the asset LEDGER above the register that actually carries the figure.
-  - Regression checked at rank level across **388 queries** drawn from every committed ranking corpus: two
-    lists changed, and both are the `inngående faktura` correction.
+- **Round two of the Norwegian vocabulary work: two terms mapped, seven withdrawn, fifteen refused.** This
+  entry began as "nine terms mapped" and is a retraction. Seven of the nine additions were withdrawn after
+  the independent review measured them, and the headline claim was false in both halves.
+  - **`fordring` → the customer ledger.** A receivable *is* the kundereskontro. Mapped to one token, not
+    two: `["ledger", "customer"]` outscored single named resources, so any compound containing the word
+    ranked the customer ledger above the endpoint the *other* word names — `/api/invoices` for "faktura
+    fordringer", `/api/vouchers` for "bilag fordring", `/api/postings` for "postering fordringer".
+    `["customer"]` alone keeps rank 1 for the bare term, both plurals, "kundefordringer" and "utestående
+    fordringer" while leaving those three compounds alone. Still imperfect: "leverandør fordring" and
+    "ansatt fordring" rank the customer ledger above the supplier and employee ledgers, which sit at rank 3.
+  - **`aga` → `/api/salary-payments`**, which the unabbreviated `arbeidsgiveravgift` already reached.
+  - **The claim this PR opened with was wrong twice over.** "Two of the nine fix a confident wrong answer
+    rather than an empty one" — `aga` had returned seven operations **all tied at the bare-substring floor
+    of 0.16**, so the top hit was index order rather than a confident answer, and `inngaende` had returned
+    **nothing at all**, so it was the empty case it was cited as being better than. Noise is not confidence.
+  - **Withdrawn, each with the measurement in the source:** `kontonummer` (two different things are called
+    kontonummer here, and mapping it to `account` promoted `PUT /api/general-sub-accounts/{id}` — a write on
+    the wrong resource — to first place for "endre kontonummer på bankkonto", where `PUT /api/company-banks/{id}`
+    had been correct); `dimensjon` (the premise was false — `departmentId` appears on two employee writes,
+    `projectId` is the posting dimension — and it demoted `/api/projects`); `driftskostnader` (`/api/expenses`
+    is employee expense *claims*, as this repository's own tool description says, not operating costs);
+    `inngaende` (right for one sense of a standard pair, and it evicted all three vat-return operations from
+    "inngående mva" and three of four `/api/opening-balances` from "inngående balanse"); `termin` (a loan
+    instalment as well as a VAT period, and "betale termin" pointed at VAT filing); `anskaffelseskost`
+    (evicted `/api/share-investments` from "anskaffelseskost aksjer", where PURCHASE events carry a
+    `pricePerUnit`); and `fordringer`, dead code the `-er` rule already derives.
+  - **Four refusal reasons were fabricated and are corrected in place.** The first version said `kredit`'s
+    "closest match is `/api/creditors`", and that `trekk`, `styre` and `valutakurs` reached named endpoints.
+    All four return **zero hits**. The refusals stand; the measurements never existed. Also corrected:
+    `utbytte` was refused as "no endpoint reports it" when DIVIDEND is an eventType on
+    `/api/share-investments/{id}/events`, and `valutakurs`'s note contradicted the correct note twelve lines
+    above it.
+  - Fifteen terms stay refused with reasons in the source: `debet`, `kredit`, `egenkapital`, `omsetning`,
+    `utbytte`, `varekostnad`, `permisjon`, `fravaer`, `sykepenger`, `trekk`, `kid`/`kidnummer`, `valutakurs`,
+    `saldobalanse`, `arsberetning`, `generalforsamling`, `styre`.
+  - **`betalingsbetingelser` was mapped and then removed.** The target exists and is public — `POST
+    /invoice/setting/daysUntilDue`, and querying `daysuntildue` reaches it — but the synonym is outvoted by
+    compound decomposition: the word splits into `betaling` + `betingelser`, and the payment endpoints win.
+    The English "payment terms" fails the same way.
+  - **The regression harness was the root cause and was replaced.** The first version compared rank lists
+    across 388 queries and reported two changes; it drew every query from strings already committed to test
+    files, which contain almost no multi-word Norwegian, so it could not see any of the ten regressions
+    above. The replacement generates **1170 queries** — each candidate term crossed with 25 domain nouns and
+    10 Norwegian verbs, plus every path segment in the spec — and it is what found the `fordring` compound
+    displacement, after the review had already found the rest.
 
 
 - **Nine core Norwegian bookkeeping terms reached the wrong endpoint, or nothing at all.** The escape hatch

@@ -607,43 +607,56 @@ test("the domain probe still measures what the change reported", async () => {
 });
 
 /**
- * Round two of the vocabulary work, from the ~30 still-empty terms the review of PR #118 listed.
+ * Round two of the vocabulary work — nine terms added, SEVEN withdrawn after review.
  *
- * Nine mapped, fifteen deliberately not — and the ratio is the point. The previous round's lesson was that
- * four of nine justifications were overstated, so each candidate here was checked against what the spec
- * actually contains before anything was added, and the refusals are recorded in `src/reai/spec.ts` beside
- * the additions so the next reader does not re-derive the same wrong answers.
+ * The retraction is the honest summary. Of nine additions: `kontonummer` promoted a PUT on the wrong
+ * resource to first place for "endre kontonummer pa bankkonto"; `dimensjon` rested on a premise the spec
+ * refutes (`departmentId` is an employee attribute, `projectId` is the posting dimension); `driftskostnader`
+ * pointed operating costs at employee expense CLAIMS, which this repository documents in its own words;
+ * `inngaende` was right for one sense of a standard pair and evicted the correct answers for the other two;
+ * `termin` and `anskaffelseskost` were weak or mis-sensed; and `fordringer` was dead code the `-er` rule
+ * already derived. Two survive.
  *
- * `kredit` is the one worth naming: the closest match is `/api/creditors`, which is loan counterparties,
- * not the credit side of a posting. Mapping it would have repeated the `avslutt` mistake — a word pointed
- * at an endpoint that shares its letters and not its meaning — which is why that entry is a refusal.
+ * The headline claim was also wrong. "Two of the nine fix a confident wrong answer" — `aga` had returned
+ * seven operations ALL TIED at the bare-substring floor, so the top hit was index order, and `inngaende`
+ * had returned nothing at all. Noise is not confidence, and neither "before" value was real.
  *
- * Two of the nine fix a CONFIDENT WRONG ANSWER rather than an empty one, which is the worse failure:
- * `aga` reached a bank-reconciliation voucher POST while the unabbreviated `arbeidsgiveravgift` reached
- * salary-payments, and `inngaende` — as in "inngående faktura", a supplier invoice — reached `/api/invoices`,
- * the customer side of the ledger.
+ * What is left is small and checked: a receivable is the customer ledger, and an abbreviation reaches what
+ * the unabbreviated word already reached.
+ *
+ * Then `fordring` was narrowed from ["ledger", "customer"] to ["customer"], which is a third finding the
+ * review's method produced and the author's did not. Comparing rank lists over 1170 queries — every
+ * verb+term and noun+term pair a Norwegian speaker would plausibly type, not just strings already quoted in
+ * these files — showed the two-token expansion outscoring single named resources, so the customer ledger
+ * displaced /api/invoices, /api/vouchers and /api/postings in compounds containing those words. The lesson
+ * about the harness is the durable part: a corpus assembled from committed test strings cannot find a
+ * regression in a phrase nobody committed yet.
  */
 const ROUND_TWO = [
   ["fordring", "GET /api/ledger/customer", "nothing"],
-  ["fordringer", "GET /api/ledger/customer", "nothing"],
-  ["inngaende", "GET /api/supplier-invoices", "/api/invoices — the OPPOSITE side of the ledger"],
-  ["aga", "GET /api/salary-payments", "POST /api/bank-reconciliations/{bankAccountId}/vouchers"],
-  ["anskaffelseskost", "GET /api/assets", "nothing"],
-  ["driftskostnader", "GET /api/expenses", "nothing"],
-  ["dimensjon", "GET /api/departments", "nothing"],
+  ["aga", "GET /api/salary-payments", "seven operations tied at the substring floor, ordered by index"],
 ];
 
-test("round-two vocabulary reaches the exact operation it names", async () => {
+test("round-two vocabulary reaches the exact operation it names, at rank 1", async () => {
   const { searchOperations } = await import("../dist/reai/spec.js");
   const failures = [];
   for (const [term, wanted, was] of ROUND_TWO) {
     const hits = searchOperations({ query: term, limit: 5 }).map((h) => `${h.method} ${h.path}`);
-    const at = hits.indexOf(wanted);
-    if (at < 0 || at > 1) {
-      failures.push(`${term} -> wanted ${wanted} first or second, got ${hits.slice(0, 3).join(", ") || "(nothing)"} (before: ${was})`);
+    // Rank 1, not "first or second". Both terms rank 0 today, so the slack bought nothing except room for
+    // a demotion to pass unnoticed — which is how the plural in `postering` got through the round before.
+    if (hits[0] !== wanted) {
+      failures.push(`${term} -> wanted ${wanted} FIRST, got ${hits.slice(0, 3).join(", ") || "(nothing)"} (before: ${was})`);
     }
   }
   assert.deepEqual(failures, [], failures.join("\n  "));
+});
+
+test("the derived plural still resolves, so no entry is needed for it", async () => {
+  // `fordringer` was shipped as a separate entry and was dead: lookupForms' `-er` rule already reaches
+  // `fordring`. Asserted rather than trusted, because that is the third dead-plural in this table's history.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const hits = searchOperations({ query: "fordringer", limit: 3 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(hits[0], "GET /api/ledger/customer", `got ${hits.join(", ")}`);
 });
 
 test("round-two operations all exist", async () => {
@@ -654,14 +667,44 @@ test("round-two operations all exist", async () => {
   }
 });
 
-test("the refused terms stay refused, and `kredit` above all", async () => {
-  // A regression here would be someone mapping one of these on the same reasoning that was rejected. The
-  // assertion is specifically that `kredit` does NOT reach /api/creditors: that is the false friend, and a
-  // future mapping of it would be a confident wrong answer about the credit side of a posting.
+test("a synonym does not displace the resource the other word in the query names", async () => {
+  // The defect the 1170-query sweep found in this PR's own surviving mapping: with `fordring` expanded to
+  // ["ledger", "customer"], two tokens outscored one, and any compound containing the word ranked the
+  // customer ledger first — over the very endpoint the other word names. Each left-hand result below was
+  // measured under the wide form; each right-hand one is what ["customer"] gives.
   const { searchOperations } = await import("../dist/reai/spec.js");
-  const creditHits = searchOperations({ query: "kredit", limit: 5 }).map((h) => h.path);
-  assert.ok(
-    !creditHits.some((p) => p.startsWith("/api/creditors")),
-    `kredit must not reach /api/creditors — that is loan counterparties, not the credit side. Got ${creditHits.join(", ")}`,
+  const first = (q) => searchOperations({ query: q, limit: 3 }).map((h) => `${h.method} ${h.path}`)[0];
+  for (const [query, wanted] of [
+    ["faktura fordringer", "GET /api/invoices"],
+    ["bilag fordring", "GET /api/vouchers"],
+    ["postering fordringer", "GET /api/postings"],
+  ]) {
+    assert.equal(first(query), wanted, `"${query}" should reach the resource it names, not the synonym's`);
+  }
+  // And the mapping still has to earn its place: the bare term and the phrasings an accountant actually uses
+  // must reach the ledger. Narrowing a synonym until it stops breaking things can also make it useless.
+  for (const query of ["fordring", "fordringer", "kundefordringer", "utestaende fordringer", "sum fordringer"]) {
+    assert.equal(first(query), "GET /api/ledger/customer", `"${query}" should reach the customer ledger`);
+  }
+});
+
+test("the withdrawn mappings stay withdrawn, because each broke a correct answer", async () => {
+  // This is the test the previous version should have been. The old one asserted `kredit` does not reach
+  // /api/creditors — which cannot fail, because `kredit` returns NOTHING, so `![].some(...)` is trivially
+  // true. It also stated the false premise it was built on. These four assertions can fail: each is a query
+  // that a withdrawn mapping demonstrably broke.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const first = (q) => searchOperations({ query: q, limit: 3 }).map((h) => `${h.method} ${h.path}`)[0];
+  assert.equal(
+    first("endre kontonummer pa bankkonto"),
+    "PUT /api/company-banks/{id}",
+    "kontonummer -> account promoted a write on the chart of accounts over the bank account",
+  );
+  assert.equal(first("dimensjon prosjekt"), "GET /api/projects", "dimensjon -> department demoted projects");
+  assert.equal(first("inngaende mva"), "GET /api/vat-codes", "inngaende -> supplier-invoice evicted the VAT answers");
+  assert.equal(
+    first("anskaffelseskost aksjer"),
+    "GET /api/share-investments",
+    "anskaffelseskost -> assets evicted share investments",
   );
 });
