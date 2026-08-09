@@ -8,7 +8,7 @@
  * rejected on a supplier phone, and that foreign numbers are stored as sent), and PR #123 corrected four
  * places claiming the agreement enums are undocumented when the document declares all fourteen.
  *
- * Two live audits already existed, and between them they named **2 of the 122 quirks**:
+ * Two live audits already existed, and between them they named **2 of the 124 quirks**:
  * `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. That 2, and the 122, are exact.
  *
  * How many of the remaining 120 assert something an API call could check is NOT exact, and the number is

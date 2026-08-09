@@ -914,6 +914,49 @@ const createOrder = defineTool({
 });
 
 /**
+ * Which of the caller's changes the record actually came back with.
+ *
+ * This exists because the API silently discards some values. Measured on 2783, and it is TWO families rather
+ * than one rule:
+ *
+ *   comment, internalComment          omitted KEPT   null KEPT   "" CLEARS
+ *   buyerReference, externalReference  omitted EMPTIED  null CLEARS
+ *   projectId                          omitted EMPTIED
+ *
+ * So `comment: null` is a no-op that answers 200, and a tool that reported "Changed comment" would be
+ * confidently wrong. Driven off the RESPONSE rather than a hardcoded field list: that covers every field the
+ * API ignores, including ones nobody has measured yet, and it cannot refuse a call that would have worked.
+ *
+ * An empty string counts as applied when the record comes back null — that is the API normalising it, not a
+ * value being rejected. Without this, the very path this server recommends for clearing a comment carried a
+ * warning telling the agent to doubt it.
+ */
+function appliedChanges(
+  asked: ReadonlyArray<readonly [string, unknown]>,
+  after: Record<string, unknown> | undefined,
+  skip: readonly string[],
+): { took: string[]; ignored: string[] } {
+  const took: string[] = [];
+  const ignored: string[] = [];
+  for (const [key, sent] of asked) {
+    if (skip.includes(key)) {
+      took.push(key);
+      continue;
+    }
+    const stored = after?.[key];
+    // The response does not carry it, so nothing can be concluded — reported as taken rather than doubted.
+    if (after === undefined || !Object.hasOwn(after, key)) {
+      took.push(key);
+      continue;
+    }
+    const same = JSON.stringify(stored) === JSON.stringify(sent);
+    const emptiedToNull = sent === "" && stored === null;
+    (same || emptiedToNull ? took : ignored).push(key);
+  }
+  return { took, ignored };
+}
+
+/**
  * Fields the order PUT accepts on a line, and the ones a GET adds that it does not.
  *
  * The response and the request disagree, which is the whole reason this tool exists. `GET /api/orders/{id}`
@@ -998,8 +1041,9 @@ const updateOrder = defineTool({
     "wants — so a read-modify-write done by hand goes wrong in three separate ways. The lines come back " +
     "under `lines` and must be sent as `orderLines`. Each line the GET returns carries `id`, `vatTitle`, " +
     "`vatRate` and `amounts`, none of which the PUT declares. And `comment`, `internalComment`, " +
-    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional, so a PUT that " +
-    "omits them keeps the order but empties those fields.\n\n" +
+    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional — and what a PUT " +
+    "that omits them does is NOT uniform. Measured: omitting `buyerReference`, `externalReference` or " +
+    "`projectId` EMPTIES them, while omitting `comment` or `internalComment` KEEPS them.\n\n" +
     "The API does protect the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and " +
     "`issueDate` are REQUIRED, so a partial PUT is refused with a 400 rather than quietly dropping the " +
     "lines. That is the one thing you cannot break here by accident — everything else in the list above " +
@@ -1054,26 +1098,26 @@ const updateOrder = defineTool({
     currencyCode: CURRENCY.optional(),
     daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
     issueDate: isoDate.optional().describe("Order date."),
-    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
-    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass null to clear it."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
+    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
       .nullable()
       .optional()
-      .describe("The customer's own reference (deres ref). Pass null to clear it."),
+      .describe("The customer's own reference (deres ref). Pass null to clear it — measured, this field does honour a null."),
     externalReference: z
       .string()
       .max(100, "The API caps externalReference at 100 characters.")
       .nullable()
       .optional()
-      .describe("Your reference from an external system. Pass null to clear it."),
+      .describe("Your reference from an external system. Pass null to clear it — measured, this field does honour a null."),
     projectId: z
       .number()
       .int()
       .nullable()
       .optional()
-      .describe("Link the order to a project, or null to unlink it — `UpdateOrderReq.projectId` is nullable."),
+      .describe("Link the order to a project. `UpdateOrderReq.projectId` is declared nullable, so null is accepted, but whether it actually UNLINKS was not established — /api/projects answers 403 on the test tenant, so no order could be linked to one to unlink. Nulls are ignored on several other fields here, so do not assume."),
     invoiceEmail: z
       .string()
       .nullable()
@@ -1264,14 +1308,21 @@ const updateOrder = defineTool({
     }
 
     const after = res.data;
-    const notApplied = changedKeys.filter(
-      (k) => k !== "orderLines" && after?.[k] !== undefined && JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
-    );
-    if (notApplied.length > 0) {
+    // What the record actually came back with, so the headline cannot claim a change the API discarded.
+    const { took, ignored } = appliedChanges(asked, after, ["orderLines"]);
+    if (ignored.length > 0) {
+      notes[0] = (notes[0] ?? "").replace(
+        `Changed ${changedKeys.join(", ")}`,
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+      );
+      const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
-        `WARNING: ${notApplied
-          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
-          .join("; ")}. Check the value is one the API accepts.`,
+        `IGNORED by the API, with a 200 and no error: ${ignored
+          .map((k) => `${k} (sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, still ${JSON.stringify(after?.[k])})`)
+          .join("; ")}.` +
+          (clearable.length > 0
+            ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
+            : ` Check the value is one the API accepts for that field.`),
       );
     }
     return ok(res.data, {
@@ -1443,8 +1494,9 @@ const updateOffer = defineTool({
     "`offerLines` is required, so a body that echoes `lines` back is a body with no lines at all. Each line " +
     "the GET returns carries seven fields the PUT does not declare: `id`, `rowNumber`, `vatRate`, " +
     "`lineTotal`, `lineTotalExclVat`, `lineVat` and `lineDiscount`, five of them computed. And `projectId`, " +
-    "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a PUT that " +
-    "omits them keeps the offer and empties those fields.\n\n" +
+    "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional — and what a PUT " +
+    "that omits them does is NOT uniform: omitting `projectId` empties it, while omitting `comment` or " +
+    "`internalComment` KEEPS them. Measured on the order side; carried here regardless.\n\n" +
     "Offer lines are stricter than order lines in exactly ONE field, not two: `vatCode` is required here " +
     "and genuinely optional on an order line — but `itemName` is required on BOTH, and an order line " +
     "without it is refused with 400 \"Produkt er obligatorisk for alle ordrelinjer.\" So a line carrying " +
@@ -1479,19 +1531,19 @@ const updateOffer = defineTool({
     customerId: z.number().int().positive().optional().describe("Move the offer to a different customer."),
     currencyCode: CURRENCY.optional(),
     daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
-    issueDate: isoDate.nullable().optional().describe("Offer date. Not required by this endpoint, unlike an order."),
-    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
+    issueDate: isoDate.nullable().optional().describe("Offer date. Not required by this endpoint, unlike an order — and a null is accepted and then ignored, the API keeping the existing date."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     internalComment: z
       .string()
       .nullable()
       .optional()
-      .describe("Internal note, not shown to the customer. Pass null to clear it."),
+      .describe("Internal note, not shown to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     email: z
       .string()
       .nullable()
       .optional()
-      .describe("Offer-specific email address. Returned by the API, so it is carried unless you change it."),
-    projectId: z.number().int().nullable().optional().describe("Link the offer to a project, or null to unlink it."),
+      .describe("Offer-specific email address. Returned by the API, so it is carried unless you change it. A null is accepted and then ignored — measured — so it cannot be emptied this way."),
+    projectId: z.number().int().nullable().optional().describe("Link the offer to a project. Null is accepted but whether it UNLINKS was not established — see reai_update_order's note; /api/projects is 403 on the test tenant."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -1655,17 +1707,21 @@ const updateOffer = defineTool({
     }
 
     const after = res.data;
-    const notApplied = changedKeys.filter(
-      (k) =>
-        k !== "offerLines" &&
-        after?.[k] !== undefined &&
-        JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
-    );
-    if (notApplied.length > 0) {
+    // What the record actually came back with, so the headline cannot claim a change the API discarded.
+    const { took, ignored } = appliedChanges(asked, after, ["offerLines"]);
+    if (ignored.length > 0) {
+      notes[0] = (notes[0] ?? "").replace(
+        `Changed ${changedKeys.join(", ")}`,
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+      );
+      const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
-        `WARNING: ${notApplied
-          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
-          .join("; ")}. Check the value is one the API accepts.`,
+        `IGNORED by the API, with a 200 and no error: ${ignored
+          .map((k) => `${k} (sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, still ${JSON.stringify(after?.[k])})`)
+          .join("; ")}.` +
+          (clearable.length > 0
+            ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
+            : ` Check the value is one the API accepts for that field.`),
       );
     }
     return ok(res.data, {

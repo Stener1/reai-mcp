@@ -630,6 +630,41 @@ async function main() {
           body: { daysUntilDue: 45 },
         },
       });
+      // The null/empty-string table the quirk states, re-measured here rather than left in prose. This is the
+      // only place it can live: audit-quirks-write.mjs is refusal-only by construction and audit-storage.mjs
+      // is customers-only. Two families, and the split is the whole point.
+      const clearedByEmpty = await client.callTool({
+        name: "reai_update_order",
+        arguments: { id: created.orderId, comment: "" },
+      });
+      report(
+        'an EMPTY STRING clears a comment, and is not reported as ignored',
+        !clearedByEmpty.isError &&
+          jsonOf(clearedByEmpty)?.comment === null &&
+          !/IGNORED by the API/.test(textOf(clearedByEmpty)),
+        `comment=${JSON.stringify(jsonOf(clearedByEmpty)?.comment)}`,
+      );
+      const nullIgnored = await client.callTool({
+        name: "reai_update_order",
+        arguments: { id: created.orderId, internalComment: null },
+      });
+      report(
+        "a NULL on internalComment is ignored by the API, and the tool says so instead of claiming a change",
+        !nullIgnored.isError &&
+          jsonOf(nullIgnored)?.internalComment === `${STAMP} internal` &&
+          /IGNORED by the API/.test(textOf(nullIgnored)),
+        `internalComment=${JSON.stringify(jsonOf(nullIgnored)?.internalComment)}`,
+      );
+      const refCleared = await client.callTool({
+        name: "reai_update_order",
+        arguments: { id: created.orderId, buyerReference: null },
+      });
+      report(
+        "a NULL on buyerReference DOES clear it — the other family",
+        !refCleared.isError && jsonOf(refCleared)?.buyerReference === null,
+        `buyerReference=${JSON.stringify(jsonOf(refCleared)?.buyerReference)}`,
+      );
+
       // NOT isError: the replacement-omission gate answers through okText, so a correct refusal leaves
       // isError unset — asserting on it recorded a failure on the expected safe path and would have made
       // the whole live run exit 1. The gate's own words are what to check.

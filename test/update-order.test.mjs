@@ -157,10 +157,11 @@ test("an order with no readable lines is refused rather than having its contents
   assert.match(text, /no readable lines/);
 });
 
-test("a value the API did not store is reported against what was sent", async () => {
+test("a value stored differently from what was sent is flagged", async () => {
   const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) => (n === 1 ? order() : order({ daysUntilDue: 14 })));
-  assert.match(text, /WARNING/);
-  assert.match(text, /daysUntilDue: sent 30, stored 14/);
+  assert.match(text, /IGNORED by the API/);
+  assert.match(text, /daysUntilDue \(sent 30, still 14\)/);
+  assert.match(text, /Check the value is one the API accepts/, "a non-clearable field gets the generic hint");
 });
 
 test("updating an order sits at the tier the omission gate already imposes, and transmits nothing", async () => {
@@ -218,23 +219,49 @@ test("invoiceEmail is an argument because it can never be read back", async () =
   assert.match(text, /invoiceEmail/, "every update must say it cannot be preserved");
 });
 
-test("a nullable field can actually be cleared", async () => {
-  // TWO halves, because the first version only exercised the handler. `run()` calls tool().handler directly,
-  // so zod never runs there — the test passed with `.nullable()` removed, which is precisely the bug it was
-  // written to pin. The schema is asserted separately, the way test/reference.test.mjs does it.
+test("a value the API ignored is not reported as a change", async () => {
+  // Measured on 2783, and it is two families rather than one rule:
+  //   comment, internalComment          omitted KEPT   null KEPT   "" CLEARS
+  //   buyerReference, externalReference  omitted EMPTIED  null CLEARS
+  // An earlier version REFUSED a null on the first family. A review argued the better fix is to stop
+  // claiming a change the API discarded — that covers every ignored field rather than two hardcoded ones,
+  // and cannot refuse a call whose intent was already satisfied (a null against an already-empty comment).
   const schema = z.object(tool().inputSchema);
-  for (const field of ["comment", "internalComment", "buyerReference", "externalReference", "projectId", "invoiceEmail"]) {
-    const parsed = schema.safeParse({ id: 4105, [field]: null });
-    assert.equal(parsed.success, true, `${field} must accept null, or there is no way to clear it`);
-    assert.equal(parsed.data[field], null, `${field}: null must survive parsing, not be stripped`);
+  for (const field of ["comment", "internalComment"]) {
+    assert.equal(schema.safeParse({ id: 4105, [field]: null }).success, true, `${field} must still parse`);
+    // The field must HAVE a value, or a null genuinely matches what is stored and reporting it as applied is
+    // correct — that "already empty" case is exactly what the removed refusal got wrong.
+    const populated = order({ [field]: "ZZ has a value" });
+    const { calls, result, text } = await run({ id: 4105, [field]: null }, () => populated);
+    assert.notEqual(result.isError, true, "the write is harmless, so it is not refused");
+    assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+    assert.match(text, /Changed NOTHING/, "the headline must not claim a change the API discarded");
+    assert.match(text, /IGNORED by the API/);
+    assert.match(text, /EMPTY STRING/, "and must name what actually works");
   }
-  // And null must reach the body rather than being filtered out with undefined.
-  const { calls } = await run(
-    { id: 4105, projectId: null, buyerReference: null },
-    (req, n) => (n === 1 ? order({ projectId: 77, buyerReference: "ZZ-REF" }) : order()),
+
+  // A legitimate change alongside an ignored one is still reported as having happened.
+  const mixed = await run({ id: 4105, daysUntilDue: 30, comment: null }, (req, n) =>
+    n === 1 ? order() : order({ daysUntilDue: 30 }),
   );
-  assert.equal(calls[1].body.projectId, null, "null must reach the body to unlink");
-  assert.equal(calls[1].body.buyerReference, null);
+  assert.match(mixed.text, /Changed daysUntilDue on/);
+  assert.doesNotMatch(mixed.text, /Changed daysUntilDue, comment/);
+
+  // buyerReference and externalReference DO honour a null — measured — so it must reach the body.
+  const cleared = await run(
+    { id: 4105, buyerReference: null, externalReference: null },
+    (req, n) => (n === 1 ? order({ buyerReference: "ZZ-REF", externalReference: "ZZ-EXT" }) : order()),
+  );
+  assert.equal(cleared.calls[1].body.buyerReference, null);
+  assert.equal(cleared.calls[1].body.externalReference, null);
+
+  // And the empty string, which is what clears, must NOT carry a doubt-yourself warning: the API stores it
+  // back as null, and comparing "" against null naively flagged every successful clear.
+  const emptied = await run({ id: 4105, comment: "" }, (req, n) => (n === 1 ? order() : order({ comment: null })));
+  assert.notEqual(emptied.result.isError, true);
+  assert.equal(emptied.calls[1].body.comment, "");
+  assert.doesNotMatch(emptied.text, /IGNORED by the API/, "clearing with \"\" must not be reported as ignored");
+  assert.match(emptied.text, /Changed comment on/);
 });
 
 test("replacement lines can carry accrual settings", async () => {
@@ -312,4 +339,13 @@ test("an unreadable existing line does not block the replacement that is meant t
   assert.notEqual(result.isError, true, "supplying replacements must work even when the old lines are unreadable");
   assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
   assert.deepEqual(calls[1].body.orderLines, lines);
+});
+
+test("a null against an already-empty field is reported as applied, not refused", async () => {
+  // The removed refusal fired on this: an idempotent caller that always sends the desired state (nulls for
+  // empty fields) was told to send "" to clear a field that was already clear, and could never succeed.
+  const { calls, result, text } = await run({ id: 4105, internalComment: null }, () => order({ internalComment: null }));
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+  assert.doesNotMatch(text, /IGNORED by the API/, "the outcome is what was asked for");
 });

@@ -354,6 +354,31 @@ Like every read-merge-write here it leaves a **lost-update window**: an edit mad
 
 `PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `vatCode` is (`itemName` is required on both), seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
 
+## Null, the empty string, and omission
+
+This repo has measured these three separately on several endpoints and they **disagree per field**, so it has one home rather than four. Measured on 2783 on 2026-08-09, after both update tools shipped telling agents "pass null to clear it" — which is false for most fields.
+
+On `PUT /api/orders/{id}` and `PUT /api/offers/{id}` there are **two families**, and omission follows the same split as null:
+
+| field | omitted | `null` | `""` |
+|---|---|---|---|
+| `comment` | **kept** | **kept** | **clears**, stored back as `null` |
+| `internalComment` | **kept** | **kept** | **clears** |
+| `buyerReference` (order) | **emptied** | **clears** | — |
+| `externalReference` (order) | **emptied** | **clears** | — |
+| `projectId` | **emptied** | — | — |
+| `email` — **offers only** | — | **kept** | not measured |
+| `issueDate` — **offers only** | — | **kept**, existing date preserved | on an *order* `issueDate` is **required**, so a null there is a different question and was not measured |
+| `deliveryAddress` — **offers only** | — | **kept**, existing object preserved | `UpdateOrderReq` does not declare this field at all |
+
+The first two behave like `if (value != null) set(value)`; the rest like a plain replacement. An earlier version of this page said a partial PUT "empties those fields" for all six — true for three of them, false for the two comments.
+
+Both tools therefore report from the **response** rather than from what was sent: a value the API discarded is named as `IGNORED by the API`, the headline drops it (down to `Changed NOTHING` if that is all there was), and for the two clearable fields the note says to send an empty string. An earlier version *refused* a null on those two, which covered two of the five ignored fields and refused legitimate calls — including a null against an already-empty field, whose outcome is what the caller asked for.
+
+Counter-examples elsewhere, all measured previously and none of them contradicted: `PUT /api/leads/{…}/notes` does clear on null, and so does an employee's `endDateOfEmployment`. **Do not generalise between endpoints.**
+
+**Scope, stated because the fix is much narrower than the hazard.** Fourteen curated tools take a nullable argument on a `PUT` or `PATCH` — twelve besides these two — and the phrase "null clears it" appears in **eight** source files. All of that is unverified against the behaviour above. The one to check first is **`reai_update_creditor`**: it promises a null clears `bankAccountNumber`, a *payment destination*, and its success note is computed from what was **sent** rather than from the response — so if nulls are ignored there it announces that loan repayments have no destination when they still do. No creditor exists on the test tenant to measure it. `reai_update_subscription` was deliberately not probed: subscriptions are created **active**, so a throwaway one on a real company could generate an invoice.
+
 ## Payroll
 | Tool | Purpose | Risk |
 |---|---|---|

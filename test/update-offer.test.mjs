@@ -150,15 +150,41 @@ test("a field the PUT requires but the record lacks is named, not sent as undefi
   assert.match(text, /daysUntilDue/);
 });
 
-test("nullable fields can be cleared, and null reaches the body", async () => {
+test("a value the API ignored is not reported as a change", async () => {
+  // Measured on 2783, and it is two families rather than one rule:
+  //   comment, internalComment          omitted KEPT   null KEPT   "" CLEARS
+  //   buyerReference, externalReference  omitted EMPTIED  null CLEARS
+  // An earlier version REFUSED a null on the first family. A review argued the better fix is to stop
+  // claiming a change the API discarded — that covers every ignored field rather than two hardcoded ones,
+  // and cannot refuse a call whose intent was already satisfied (a null against an already-empty comment).
   const schema = z.object(tool().inputSchema);
-  for (const field of ["comment", "internalComment", "email", "projectId", "issueDate"]) {
-    const parsed = schema.safeParse({ id: 81, [field]: null });
-    assert.equal(parsed.success, true, `${field} must accept null`);
-    assert.equal(parsed.data[field], null, `${field}: null must survive parsing`);
+  for (const field of ["comment", "internalComment"]) {
+    assert.equal(schema.safeParse({ id: 81, [field]: null }).success, true, `${field} must still parse`);
+    // The field must HAVE a value, or a null genuinely matches what is stored and reporting it as applied is
+    // correct — that "already empty" case is exactly what the removed refusal got wrong.
+    const populated = offer({ [field]: "ZZ has a value" });
+    const { calls, result, text } = await run({ id: 81, [field]: null }, () => populated);
+    assert.notEqual(result.isError, true, "the write is harmless, so it is not refused");
+    assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+    assert.match(text, /Changed NOTHING/, "the headline must not claim a change the API discarded");
+    assert.match(text, /IGNORED by the API/);
+    assert.match(text, /EMPTY STRING/, "and must name what actually works");
   }
-  const { calls } = await run({ id: 81, comment: null }, (req, n) => (n === 1 ? offer() : offer()));
-  assert.equal(calls[1].body.comment, null);
+
+  // A legitimate change alongside an ignored one is still reported as having happened.
+  const mixed = await run({ id: 81, daysUntilDue: 30, comment: null }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30 }),
+  );
+  assert.match(mixed.text, /Changed daysUntilDue on/);
+  assert.doesNotMatch(mixed.text, /Changed daysUntilDue, comment/);
+
+  // And the empty string, which is what clears, must NOT carry a doubt-yourself warning: the API stores it
+  // back as null, and comparing "" against null naively flagged every successful clear.
+  const emptied = await run({ id: 81, comment: "" }, (req, n) => (n === 1 ? offer() : offer({ comment: null })));
+  assert.notEqual(emptied.result.isError, true);
+  assert.equal(emptied.calls[1].body.comment, "");
+  assert.doesNotMatch(emptied.text, /IGNORED by the API/, "clearing with \"\" must not be reported as ignored");
+  assert.match(emptied.text, /Changed comment on/);
 });
 
 test("an offer line needs vatCode where an order line does not — and itemName on both", async () => {
@@ -253,10 +279,11 @@ test("moving an offer to another customer says whose payment terms it kept", asy
   assert.match(text, /new customer's own terms are 45 days/);
 });
 
-test("a value the API did not store is reported against what was sent", async () => {
-  const { text } = await run({ id: 81, comment: "ZZ new" }, (req, n) => (n === 1 ? offer() : offer({ comment: "ZZ old" })));
-  assert.match(text, /WARNING/);
-  assert.match(text, /comment: sent "ZZ new", stored "ZZ old"/);
+test("a value stored differently from what was sent is flagged", async () => {
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : offer({ daysUntilDue: 14 })));
+  assert.match(text, /IGNORED by the API/);
+  assert.match(text, /daysUntilDue \(sent 30, still 14\)/);
+  assert.match(text, /Check the value is one the API accepts/, "a non-clearable field gets the generic hint");
 });
 
 test("an offer with no readable lines is refused rather than having its contents invented", async () => {
@@ -330,4 +357,13 @@ test("an array line element is not mistaken for a readable line", async () => {
   const { calls, result } = await run({ id: 81, comment: "ZZ" }, () => offer({ lines: [[]] }));
   assert.equal(result.isError, true);
   assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+});
+
+test("a null against an already-empty field is reported as applied, not refused", async () => {
+  // The removed refusal fired on this: an idempotent caller that always sends the desired state (nulls for
+  // empty fields) was told to send "" to clear a field that was already clear, and could never succeed.
+  const { calls, result, text } = await run({ id: 81, internalComment: null }, () => offer({ internalComment: null }));
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+  assert.doesNotMatch(text, /IGNORED by the API/, "the outcome is what was asked for");
 });
