@@ -890,55 +890,115 @@ test("a 409 on creating a counterparty is reported, not diagnosed", async () => 
 });
 
 /**
- * `reai_update_creditor` announces where loan repayments no longer go. It used to do that from what it
- * SENT — `merged.bankAccountNumber` — never checking that the API agreed, while `reai_update_company_bank`,
- * the sibling tool for the same hazard, has always compared the response against the request. On a payment
- * destination that is the wrong half to trust, because this API silently discards some values.
+ * `reai_update_creditor` announces where loan repayments no longer go.
  *
- * For creditors it does not: measured on 2783, `bankAccountNumber` is cleared by a null, by omitting the
- * field, and by an empty string alike. So the claim was true; it was just unverified.
+ * It used to do that from what it SENT — `merged.bankAccountNumber` — never checking that the API agreed,
+ * while `reai_update_company_bank`, the sibling for the same hazard, has always compared the response against
+ * the request. Measured on 2783: `bankAccountNumber` is cleared by a null, by omitting the field, and by an
+ * empty string alike, so the claim was true but unverified.
+ *
+ * The first fix copied bankvat's strict `!==` and NOT the guard that makes it sound — bankvat refuses null and
+ * "" up front, so it can never see two spellings of empty. Here both are legal and "" is documented as a way
+ * to clear, so `sent "" / stored null` fired a discard warning AND the confirmation, saying opposite things.
+ * Every branch below is pinned because a review found two of them surviving mutation.
  */
-test("clearing a creditor's account is reported from the response, not from what was sent", async () => {
-  const { ctx, sent } = ctxFor([
-    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
-    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: null } },
-  ]);
-  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
-  assert.notEqual(res.isError, true);
-  assert.deepEqual(sent.map((s) => s.method), ["GET", "PUT"]);
-  const text = textOf(res);
+const creditor = (bankAccountNumber) => ({ id: 7, name: "ZZ Kreditor", bankAccountNumber });
+
+async function updateCreditor(args, before, after) {
+  const { ctx, sent } = ctxFor([{ status: 200, data: before }, { status: 200, data: after }]);
+  const res = await tool("reai_update_creditor").handler({ tenantId: 2783, ...args }, ctx);
+  return { res, sent, text: textOf(res) };
+}
+
+test('clearing with "" is not reported as the API discarding the value', async () => {
+  // The blocking case: "" and null are one emptiness class, and the measurement says the API stores "" back
+  // as null. A strict comparison called that a disagreement while the next paragraph confirmed success.
+  const { text } = await updateCreditor({ id: 7, bankAccountNumber: "" }, creditor("15031234567"), creditor(null));
+  assert.doesNotMatch(text, /WARNING/, '"" stored as null is the API doing what was asked');
   assert.match(text, /has NO bank account number/);
-  assert.match(text, /Confirmed from the response/, "the claim must be sourced from the response");
+  assert.match(text, /Confirmed from the response/);
+  assert.match(text, /You cleared it — it held "15031234567" before/, "provenance, so a caller knows what changed");
 });
 
-test("a creditor account the API did not store as sent is flagged as a payment-destination risk", async () => {
-  // The case the old code could not see: the PUT succeeds, the response disagrees, and the tool used to
-  // report the request as though it were the outcome.
-  const { ctx } = ctxFor([
-    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
-    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
-  ]);
-  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
-  const text = textOf(res);
-  assert.match(text, /WARNING: bankAccountNumber came back as "15031234567"/);
-  assert.match(text, /read the creditor back/);
-  assert.doesNotMatch(text, /has NO bank account number/, "it must not claim an emptying the response denies");
+test("a rename whose replacement drops the carried account is the case this tool exists for, and warns", async () => {
+  // Gated on `given` before, so the hazard the tool was written to catch produced no warning at all — while
+  // the first paragraph still said the account was "written back unchanged".
+  const { text } = await updateCreditor({ id: 7, name: "New" }, creditor("15031234567"), creditor(null));
+  assert.match(text, /WARNING: bankAccountNumber came back as null/);
+  assert.match(text, /this write CARRIED "15031234567" and the API did not keep it/);
+  assert.match(text, /the failure this tool exists to prevent/);
 });
 
-test("a response that omits the account says the emptying is inferred, not confirmed", async () => {
-  const { ctx } = ctxFor([
-    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
-    { status: 200, data: { id: 7, name: "ZZ Kreditor" } },
-  ]);
-  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
-  const text = textOf(res);
+test("a rename that preserves the account claims nothing about it", async () => {
+  const { text } = await updateCreditor({ id: 7, name: "New" }, creditor("15031234567"), creditor("15031234567"));
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /has NO bank account number/, "it must not announce an emptying that did not happen");
+});
+
+test("repointing to a new account is confirmed, not left silent", async () => {
+  // Verification was asymmetric in the dangerous direction: an emptying got a caveat, a REPOINT got nothing —
+  // and money going to the wrong destination is at least as consequential as money going nowhere.
+  const { text } = await updateCreditor(
+    { id: 7, bankAccountNumber: "15201353103" },
+    creditor("15031234567"),
+    creditor("15201353103"),
+  );
+  assert.match(text, /repayments to this creditor now go to "15201353103", not "15031234567"/);
+  assert.match(text, /Confirmed from the response/);
+});
+
+test("a response that omits the account says so for a repoint too, not only for a clear", async () => {
+  const { text } = await updateCreditor(
+    { id: 7, bankAccountNumber: "15201353103" },
+    creditor("15031234567"),
+    { id: 7, name: "ZZ Kreditor" },
+  );
+  assert.match(text, /did not carry bankAccountNumber/);
+  assert.match(text, /sent "15201353103"/);
+  assert.match(text, /Read the creditor back/);
+  assert.doesNotMatch(text, /Confirmed from the response/);
+});
+
+test("a whitespace-only account counts as no destination", async () => {
+  // The sibling records shipping without trim() once: "The first version tested only === \"\"".
+  const { text } = await updateCreditor({ id: 7, name: "New" }, creditor("15031234567"), creditor("   "));
   assert.match(text, /has NO bank account number/);
-  assert.match(text, /Inferred from the request/);
-  assert.match(text, /read the .*creditor back/);
+});
+
+test("an account that was already empty is not reported as something this write did", async () => {
+  const { text } = await updateCreditor({ id: 7, name: "New" }, creditor(null), creditor(null));
+  assert.match(text, /already empty before this write/);
+  assert.doesNotMatch(text, /You cleared it/);
+  assert.doesNotMatch(text, /WARNING/);
 });
 
 test("the measured null behaviour is stated in the tool text, since it differs by endpoint", () => {
   // orders and offers ignore a null on their comment fields; creditors honour one. The repo's own quirk says
-  // not to generalise, so each tool that depends on the answer has to carry it.
+  // not to generalise, so each tool that depends on the answer carries the answer.
   assert.match(tool("reai_update_creditor").description, /cleared by a null, by OMITTING it, and by an empty string/);
+});
+
+test("reai_update_company_bank does not call a bodyless response an empty account", async () => {
+  // The inverse of the creditor bug, found by a review of the creditor fix: `res.data ?? {}` makes an absent
+  // body look like `bban: undefined`, so a 204 announced "the account number is now EMPTY" about a payment
+  // destination. Same distinction as the creditor tool now makes.
+  const { ctx } = ctxFor([
+    { status: 200, data: { id: 3, name: "ZZ Konto", bban: "15031234567", currency: "NOK", countryCode: "NO" } },
+    { status: 204, data: undefined },
+  ]);
+  const res = await tool("reai_update_company_bank").handler({ id: 3, name: "ZZ Renamed", tenantId: 2783 }, ctx);
+  const text = textOf(res);
+  assert.doesNotMatch(text, /the account number is now EMPTY/, "an absent body is not evidence of an emptying");
+  assert.match(text, /did not carry bban/);
+  assert.match(text, /Read the account back/);
+});
+
+test("reai_update_company_bank still warns when the response really shows an empty account", async () => {
+  const { ctx } = ctxFor([
+    { status: 200, data: { id: 3, name: "ZZ Konto", bban: "15031234567", currency: "NOK", countryCode: "NO" } },
+    { status: 200, data: { id: 3, name: "ZZ Renamed", bban: null, currency: "NOK", countryCode: "NO" } },
+  ]);
+  const res = await tool("reai_update_company_bank").handler({ id: 3, name: "ZZ Renamed", tenantId: 2783 }, ctx);
+  assert.match(textOf(res), /the account number is now EMPTY/);
+  assert.match(textOf(res), /Confirmed from the response/);
 });

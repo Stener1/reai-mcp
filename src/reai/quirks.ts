@@ -568,11 +568,18 @@ export const QUIRKS: readonly Quirk[] = [
       "not have them null in the first place — which is why this went unnoticed.\n\n" +
       "SCOPE: measured on these two endpoints only, and it does NOT generalise. 14 curated tools take a " +
       "nullable argument on a PUT or PATCH — 12 besides these two — and the phrase \"null clears it\" appears " +
-      "in eight source files. Those are unverified against this behaviour, with one exception now settled: " +
-      "PUT /api/creditors/{id} DOES honour a null on bankAccountNumber — cleared by a null, by omitting the " +
-      "field and by an empty string alike, measured on three throwaway creditors. So creditors behave like " +
-      "buyerReference, not like a comment, which is the third endpoint to disagree with the other two and the " +
-      "reason not to generalise. reai_update_subscription remains unprobed on purpose: subscriptions are " +
+      "in eight source files. Those remain unverified against this behaviour, with one exception now measured: " +
+      "PUT /api/creditors/{id} honours a null on bankAccountNumber — cleared by a null, by omitting the field " +
+      "and by an empty string alike, on three throwaway creditors. So creditors fall in the PLAIN REPLACEMENT " +
+      "family, alongside buyerReference and externalReference above, rather than in the comment family. Worth " +
+      "stating precisely because the earlier wording called it \"the third endpoint to disagree\", which was " +
+      "wrong twice: the split here is per-FIELD rather than per-endpoint, and other endpoints that clear on " +
+      "null were already recorded (PUT /api/leads/{orgNumber}/notes, an employee endDateOfEmployment). The " +
+      "rule is that each field on each endpoint has to be measured, not that endpoints disagree.\n\n" +
+      "reai_update_subscription remains unprobed on purpose, and is the one to fix next for a different " +
+      "reason: it reports \"Still armed\" for outputMode, automaticBillingGeneration and sendEhf from what it " +
+      "SENT, so a caller who sends sendEhf: false to stop an unattended invoicing machine and has it " +
+      "discarded is told nothing at all — silence reads as confirmation. Not probed because subscriptions are " +
       "created ACTIVE, so a throwaway one on a real company could generate an invoice.",
   },
   {
