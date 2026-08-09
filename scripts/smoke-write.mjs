@@ -42,17 +42,20 @@ if (!tenantId) {
   process.exit(2);
 }
 
-// --- Write-tenant allowlist -------------------------------------------------
-// A tenant id alone is not consent. This script must never be able to write to a
-// real business just because someone passed its id, so the tenant has to be
-// declared a test tenant OUT OF BAND, in the environment, before any write.
+// --- Write-tenant guard -----------------------------------------------------
+// A tenant id alone is not consent. This script must never be able to write to a real business just because
+// someone passed its id, so the tenant has to be declared a test tenant OUT OF BAND, in the environment,
+// before any write — and must not be on the protected list whatever the environment says.
 //
-// Added after a full-write run went against a live company: the intended test
-// tenant was unreachable, and "--tenant <the other one>" was all it took.
+// The allowlist was added after a full-write run went against a live company: the intended test tenant was
+// unreachable, and "--tenant <the other one>" was all it took. The denylist was added after measuring that the
+// allowlist alone did not stop that at all.
+//
 // The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
 // divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
 // consistency check between two operator-supplied values: set both to the same wrong number and every
-// one of them proceeded. Measured — all three runnable ones attempted POST /api/customers against
+// one of them proceeded. Measured — all FOUR did, and between them attempted POST /api/vouchers,
+// POST /api/salary-payments, POST /api/loans, POST /api/employees and DELETE /api/vouchers against
 // tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
 requireWritableTenant(tenantId, { scriptName: "scripts/smoke-write.mjs" });
 

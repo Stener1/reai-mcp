@@ -6,7 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   assertWritableTenant,
   declaredTestTenants,
-  PROTECTED_TENANTS,
+  isProtectedTenant,
+  protectedTenants,
 } from "../scripts/lib/write-guard.mjs";
 
 /**
@@ -94,14 +95,11 @@ test("no environment variable can override the denylist", () => {
       `refused regardless of ${Object.keys(env).join(", ")}`,
     );
   }
-  // And the module must not read any such variable in the first place.
-  const src = readFileSync(path.join(SCRIPTS, "lib/write-guard.mjs"), "utf8");
-  const envReads = [...src.matchAll(/env\.([A-Z_]+)/g)].map(([, n]) => n);
-  assert.deepEqual(
-    [...new Set(envReads)],
-    ["REAI_WRITE_TEST_TENANTS"],
-    "the guard may read only the allowlist variable; anything else is an override waiting to be used",
-  );
+  // The old version of this assertion required the module to read NO environment variable except the
+  // allowlist. Review pointed out that forbids the one safe extension — letting a self-hoster ADD their own
+  // production tenants — while doing nothing about the hazard, which is removal. The invariant now lives in
+  // "env-ADDABLE but never env-REMOVABLE" below, and an argv flag has its own test, because that is the form
+  // review actually used to get through.
 });
 
 test("the allowlist still does its job for an unprotected tenant", () => {
@@ -116,10 +114,87 @@ test("the allowlist still does its job for an unprotected tenant", () => {
   assert.deepEqual(declaredTestTenants({ REAI_WRITE_TEST_TENANTS: "2783, 1581 ," }), ["2783", "1581"]);
 });
 
-test("the protected list names the tenant this repository must never write to", () => {
-  assert.ok(
-    PROTECTED_TENANTS.has(2634),
-    "2634 is the operator's real company; it is the whole reason this list exists",
+test("the protected list names the tenant this repository must never write to, and cannot be edited", () => {
+  assert.ok(isProtectedTenant(2634), "2634 is the operator's real company; it is why this list exists");
+
+  // It used to be an exported Set, and review defeated the entire guard with one line —
+  // `PROTECTED_TENANTS.delete(2634)` in a caller, then 41 non-GET requests to 2634 with every test passing.
+  // `export const` blocks rebinding, not mutation. The Set is module-private now and this is the only handle.
+  const copy = protectedTenants();
+  copy.length = 0;
+  copy.push(999);
+  assert.ok(isProtectedTenant(2634), "mutating the returned array must not change the list");
+});
+
+test("the protected list is env-ADDABLE but never env-REMOVABLE", async () => {
+  // Review's point, and the right invariant. The previous test asserted the module reads NO environment
+  // variable except the allowlist, which forbade the safe extension: a self-hoster inherits a list protecting
+  // this repository's operator's company and none of their own. Additions are fine; removals are the hazard.
+  const { isProtectedTenant: isProtected } = await import(
+    `../scripts/lib/write-guard.mjs?added=${encodeURIComponent("1")}`
+  );
+  assert.ok(isProtected(2634), "the built-in entry survives a fresh import");
+
+  const src = readFileSync(path.join(SCRIPTS, "lib/write-guard.mjs"), "utf8");
+  // Additive only: the env value is fed to `.add`, and nothing in the module deletes or clears.
+  assert.match(src, /PROTECTED\.add\(/, "the env list must be additive");
+  assert.doesNotMatch(
+    src,
+    /PROTECTED\.(delete|clear)\(/,
+    "nothing in the guard may remove a protected tenant",
+  );
+});
+
+test("the decision cannot be changed by a command-line flag", () => {
+  // "No override flag, deliberately" was asserted in prose and tested only by a source regex over `env.X` —
+  // the very pattern this PR argues against. Review added `!process.argv.includes("--force-protected")` to the
+  // condition and wrote to 2634 with every test passing. So: the module must not read argv at all, and the
+  // decision must not change when argv is full of plausible hatches.
+  const src = readFileSync(path.join(SCRIPTS, "lib/write-guard.mjs"), "utf8");
+  assert.doesNotMatch(
+    src,
+    /process\.argv/,
+    "the guard must not consult argv: a flag is the override this PR promises not to add",
+  );
+
+  const saved = process.argv;
+  try {
+    process.argv = [...saved, "--force-protected", "--force", "--yes", "--i-know-what-i-am-doing"];
+    assert.throws(
+      () => assertWritableTenant(2634, { env: { REAI_WRITE_TEST_TENANTS: "2634" } }),
+      /PROTECTED list/,
+      "no combination of flags may make a protected tenant writable",
+    );
+  } finally {
+    process.argv = saved;
+  }
+});
+
+test("a non-GET to a protected tenant is refused at the request itself", async () => {
+  // The layer that does not depend on reading the caller's source. PR #129 established that source-level checks
+  // lose to ordinary indirection — `const VERB = "POST"`, a template literal, a file one directory down — so
+  // this fires when the request is actually made.
+  const { installProtectedTenantFetchGuard } = await import("../scripts/lib/write-guard.mjs");
+  installProtectedTenantFetchGuard();
+  // Synchronously, before any promise exists — the refusal should be as early as it can be.
+  for (const headers of [{ "X-Tenant-Id": "2634" }, { "x-tenant-id": 2634 }]) {
+    assert.throws(
+      () => globalThis.fetch("http://127.0.0.1:9/api/customers", { method: "POST", headers }),
+      /PROTECTED/,
+      `a POST carrying ${JSON.stringify(headers)} must be refused before it is sent`,
+    );
+  }
+  // A GET to the same tenant is the whole point of the read-only audits, and must still reach the socket.
+  await assert.rejects(
+    () => globalThis.fetch("http://127.0.0.1:9/api/customers", { headers: { "X-Tenant-Id": "2634" } }),
+    /ECONNREFUSED|fetch failed|other side closed/,
+    "a GET must reach the socket rather than being refused by the guard",
+  );
+  // And a non-GET to an UNPROTECTED tenant must not be refused by this layer.
+  await assert.rejects(
+    () => globalThis.fetch("http://127.0.0.1:9/api/customers", { method: "POST", headers: { "X-Tenant-Id": "2783" } }),
+    /ECONNREFUSED|fetch failed|other side closed/,
+    "the guard must only block protected tenants, or the write audits stop working",
   );
 });
 
@@ -178,7 +253,20 @@ test("every script that writes calls the guard, checked from the AST", async () 
   ]);
 
   const findings = [];
-  for (const file of readdirSync(SCRIPTS).filter((f) => f.endsWith(".mjs"))) {
+  // Recursive. The flat readdir never looked in scripts/lib, and review put a writer there — plain
+  // `method: "POST"`, never scanned, all tests green.
+  const scriptFiles = [];
+  const collect = (dir, prefix = "") => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) collect(path.join(dir, entry.name), `${prefix}${entry.name}/`);
+      else if (entry.name.endsWith(".mjs")) scriptFiles.push(`${prefix}${entry.name}`);
+    }
+  };
+  collect(SCRIPTS);
+  assert.ok(scriptFiles.length >= 12, `only ${scriptFiles.length} scripts found — the scan has stopped working`);
+  assert.ok(scriptFiles.includes("lib/write-guard.mjs"), "the scan must reach scripts/lib, where review put a writer");
+
+  for (const file of scriptFiles) {
     const full = path.join(SCRIPTS, file);
     const text = readFileSync(full, "utf8");
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
@@ -188,8 +276,26 @@ test("every script that writes calls the guard, checked from the AST", async () 
     const guardCalls = [];
     const walk = (n) => {
       // `{ method: "POST" }` on a request, and `call("POST", …)` — the helper these scripts actually use.
-      if (ts.isPropertyAssignment(n) && n.name.getText(sf) === "method" && ts.isStringLiteral(n.initializer)) {
-        if (WRITE_VERBS.has(n.initializer.text.toUpperCase())) writes ??= `method: "${n.initializer.text}"`;
+      // Anything not PROVABLY GET. Enumerating write verbs missed `const VERB = "POST"` and a template
+      // literal, both of which review used to write to 2634 with every test green. Inverting it means an
+      // unrecognised spelling counts as a possible write, which is the safe direction to be wrong in.
+      if (ts.isPropertyAssignment(n) && n.name.getText(sf) === "method") {
+        const init = n.initializer;
+        const provablyGet = ts.isStringLiteral(init) && init.text.toUpperCase() === "GET";
+        if (!provablyGet) {
+          writes ??= ts.isStringLiteral(init)
+            ? `method: "${init.text}"`
+            : `method: ${init.getText(sf)} (not a literal, so it could be any verb)`;
+        }
+      }
+      // `opts.method = …` — assignment rather than a property in a literal.
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        /\.method$/.test(n.left.getText(sf))
+      ) {
+        const provablyGet = ts.isStringLiteral(n.right) && n.right.text.toUpperCase() === "GET";
+        if (!provablyGet) writes ??= `${n.left.getText(sf)} = ${n.right.getText(sf)}`;
       }
       if (ts.isCallExpression(n)) {
         const callee = n.expression.getText(sf);

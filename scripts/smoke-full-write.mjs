@@ -55,6 +55,18 @@ if (!tenantId) {
   console.error("--tenant <id> is required, so this cannot post to the wrong company.");
   process.exit(2);
 }
+// BEFORE the acknowledgement flag. With the flag checked first, `--tenant 2634` without it exited with
+// "Refusing to run without --i-understand-this-posts-to-real-books" and never mentioned that the tenant is
+// protected — so the operator learns to add the flag and meets the real refusal one step later. Report the
+// blocking reason, not the first missing formality.
+// The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
+// divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
+// consistency check between two operator-supplied values: set both to the same wrong number and every
+// one of them proceeded. Measured — all FOUR did, and between them attempted POST /api/vouchers,
+// POST /api/salary-payments, POST /api/loans, POST /api/employees and DELETE /api/vouchers against
+// tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
+requireWritableTenant(tenantId, { scriptName: "scripts/smoke-full-write.mjs" });
+
 if (!acknowledged) {
   console.error(
     "Refusing to run without --i-understand-this-posts-to-real-books.\n" +
@@ -70,12 +82,6 @@ if (!acknowledged) {
 //
 // Added after a full-write run went against a live company: the intended test
 // tenant was unreachable, and "--tenant <the other one>" was all it took.
-// The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
-// divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
-// consistency check between two operator-supplied values: set both to the same wrong number and every
-// one of them proceeded. Measured — all three runnable ones attempted POST /api/customers against
-// tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
-requireWritableTenant(tenantId, { scriptName: "scripts/smoke-full-write.mjs" });
 
 let passed = 0;
 let failed = 0;

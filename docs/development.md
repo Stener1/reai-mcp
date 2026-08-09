@@ -55,7 +55,16 @@ level, before it can issue anything. There are two layers and they do different 
 
 - **an allowlist** — `REAI_WRITE_TEST_TENANTS` must name the `--tenant` being written to. Catches the ordinary
   typo.
-- **a denylist** — `PROTECTED_TENANTS` in that module, which **no environment variable can override**.
+- **a denylist** — module-private in that module, reachable only through `isProtectedTenant()`. It is
+  **env-addable and never env-removable**: `REAI_PROTECTED_TENANTS` can add your own production tenants, and
+  nothing can take one off the list. It was briefly an exported `Set`, and review defeated the whole guard with
+  one line — `PROTECTED_TENANTS.delete(2634)` in a caller, then 41 non-GET requests to 2634 with every test
+  passing, because `export const` blocks rebinding rather than mutation.
+- **a runtime refusal at the socket** — `installProtectedTenantFetchGuard()` throws on any non-GET whose
+  `X-Tenant-Id` names a protected tenant. The two number-based layers read values the caller supplied and the
+  coverage test reads the caller's *source*; this one fires when the request is actually made. It covers the two
+  audits, which call `fetch` in-process. It does **not** cover the two smoke scripts, which spawn the MCP server
+  — for those the control point is the tenant handed to the child, checked before it starts.
 
 The second layer exists because the first one is not a protection. It compares two values the *operator*
 supplies, so setting both to the same wrong number makes it agree with the mistake — and that is precisely the
@@ -64,13 +73,19 @@ because the intended test tenant was unreachable and the run was pointed elsewhe
 (37 vouchers, 84 postings, no MV-number gap), but the guard that should have stopped it had approved it.
 
 Measured 2026-08-09, before the denylist existed. With `REAI_WRITE_TEST_TENANTS=2634 --tenant 2634` against a
-local server mimicking `/api/me`, all three runnable write scripts proceeded and attempted:
+local server mimicking `/api/me`, **all four** write scripts proceeded. The first version of this paragraph said
+"three" and listed only master data; review reproduced all four and the real reach is the ledger and payroll:
 
 ```
-POST /api/customers      PATCH /api/customers/{id}     DELETE /api/customers/{id}
-POST /api/suppliers      PATCH /api/suppliers/{id}     POST /api/subscriptions
-POST /api/warehouses     PUT   /api/warehouses/{id}    POST /api/agreements/rent-agreement
+POST /api/vouchers ×3       DELETE /api/vouchers        POST /api/loans
+POST /api/salary-payments   POST /api/employees         POST /api/company-banks
+POST /api/expenses/{id}/voucher                         POST /api/creditors, /api/debtors
+POST /api/customers         POST /api/suppliers         POST /api/warehouses
+POST /api/subscriptions     POST /api/agreements/rent-agreement
+plus PATCH and DELETE follow-ups on customers, suppliers, warehouses and leads
 ```
+
+`POST /api/vouchers` is the shape of the original incident.
 
 There is deliberately **no override flag**. The thing that failed was an environment variable, so adding
 another one would reintroduce it; if a protected tenant ever genuinely needs writing to, that is a code change
@@ -95,9 +110,9 @@ the mode is also what makes its assertions mean anything, since all of them are 
 **The guard used to be four divergent copies**, one per script. It is one module now, so it cannot drift, and
 `test/write-guard.test.mjs` checks it two ways: the behavioural tests **call** `assertWritableTenant` rather
 than grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and
-fails if one can issue a non-GET without calling the guard. That shape is deliberate — PR #129 spent four
-review rounds watching seven regex-based guards get worded around, and a new write script that forgets the
-guard is the realistic way this protection would be lost. Verified by removing the guard, hiding it behind an
+fails if one can issue a non-GET without calling the guard. That shape is deliberate — PR #129 spent three
+review rounds watching **one** guard get worded around **seven** different ways, and a new write script that
+forgets the guard is the realistic way this protection would be lost. Verified by removing the guard, hiding it behind an
 `if`, and adding a fresh writing script: each fails the build.
 
 
