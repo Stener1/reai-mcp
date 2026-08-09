@@ -89,3 +89,29 @@ target that is irreversible or transmitting is now named whatever the previous m
 
 Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
 as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
+
+## More than half the API documents nothing, and that is not fixable from this end
+
+Measured 2026-08-09: **178 of the 321 public operations carry neither a summary nor a description.** Not "thin prose" — nothing at all. `POST /api/agreements/rent-agreement` and its four sibling templates are among them.
+
+That matters because the scorer's haystacks include the summary (weight 4) and the description (2) on top of the path (6). A documented operation is scored on strictly more evidence than an undocumented one, so **ranking is biased toward whatever ReAI happened to write prose about, independent of which endpoint is right.** The clearest case: every one of "create agreement", "opprett avtale" and "create lease agreement" answers with
+
+```
+19  POST /api/agreements/{id}/sign-request            irreversible / external
+18  POST /api/agreements/{id}/sign-requests           irreversible / external
+16  POST /api/agreements/{id}/sign-requests/{id}/send irreversible / external
+16  POST /api/agreements/accounting-services          reversible / none
+16  … and the other four creation templates, tied
+```
+
+The signing call wins because its summary says "Send agreement signing **requests**" and its description opens "**Creates** one signing request…" — so it matches both query terms, while the endpoints that actually create an agreement match only `agreement`, from the path. An agent asking to create a contract is offered three ways to email a counterparty first.
+
+### Two fixes were tried and neither is the answer
+
+**Deriving a phrase from method and path** for the 178 bare operations, so ranking could see the verb a path cannot carry (`create agreements rent agreement`). The naive form double-counts: the derived text restates resource words the path already scores at 6, and it displaced five known-good answers — `finn kunde amelding` moved to `/api/customers` from `/api/ledger/customer`, `gjeld til leverandør` lost first place, a salary run fell to rank 7. Constraining it to contribute **only terms the path lacks**, with no phrase bonus, brought regressions to zero. Then the benefit was measured across all 178 bare operations, querying each by its own natural phrasing: **one improvement, one regression.** The verb is already supplied by write intent and implied methods, and the resource by the path, so the derived field earned nothing and was dropped rather than kept as plausible-looking machinery.
+
+**Demoting the nested action.** There is already a rule for "an irreversible or transmitting action hanging off a resource, where the query does not name the action" — which is this case exactly. It does not fire, for two independent reasons, both recorded at the demotion site in `src/reai/spec.ts`. `sign-request` is hyphenated and the rule is deliberately scoped to single-word segments (PR #122's reviews rejected the general form; a test pins it). And even with that scope widened the cut is only ×0.9, because `familyOffersNonNested` compares `familyOf` values and `familyOf` truncates at the first `{param}` — so `/api/agreements/{id}/sign-request` sits in family `/api/agreements` while `/api/agreements/rent-agreement` is its own family. **The check that asks "is there a better alternative?" cannot see the five alternatives.**
+
+That last sentence is the real defect, and it is not in the demotion rule. Fixing it means widening the family notion to the resource root — which is the "register ancestors" change PR #122 rejected on separate evidence, so it needs its own measurement rather than being smuggled in.
+
+What made the live case safe in the meantime was not ranking at all: `reai_create_agreement` now exists, so an agent has a curated tool and does not depend on the search result. The ranking bias remains for the 60 bare operations no curated tool covers.

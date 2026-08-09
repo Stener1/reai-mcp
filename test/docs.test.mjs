@@ -325,6 +325,27 @@ test("every stated uncovered-operation count matches the registry", async () => 
   );
 });
 
+test("the undocumented-operation counts docs/discovery.md states are real", () => {
+  // docs/discovery.md argues that ranking is biased toward whatever ReAI wrote prose about, and the argument
+  // rests entirely on how MANY operations have none. An unenforced number in a page that reasons from it is
+  // the kind that rots quietly and takes the reasoning with it — a spec refresh adding summaries is exactly
+  // the change that should make the page wrong, and should say so.
+  const ops = getSpecIndex().operations.filter((o) => !o.internal);
+  const bare = ops.filter((o) => !o.summary && !(o.description ?? "").trim());
+  const covered = new Set(allTools.flatMap((t) => (t.apiPaths ?? []).map(([m, p]) => `${m} ${p}`)));
+  const bareUncovered = bare.filter((o) => !covered.has(`${o.method} ${o.path}`));
+
+  const DISCOVERY = readFileSync(join(repo, "docs", "discovery.md"), "utf8");
+  const stated = /\*\*(\d+) of the (\d+) public operations carry neither a summary nor a description/.exec(DISCOVERY);
+  assert.ok(stated, "docs/discovery.md no longer states the count its argument depends on");
+  assert.equal(Number(stated[1]), bare.length, "the stated bare-operation count is wrong");
+  assert.equal(Number(stated[2]), ops.length, "the stated public-operation count is wrong");
+
+  const remaining = /(\d+) bare operations no curated tool covers/.exec(DISCOVERY);
+  assert.ok(remaining, "docs/discovery.md no longer states how many are left without a tool");
+  assert.equal(Number(remaining[1]), bareUncovered.length, "the stated uncovered-and-undocumented count is wrong");
+});
+
 test("every documented toolset group exists", () => {
   for (const group of TOOLSETS) {
     assert.ok(group in TOOL_GROUPS, `${group} is documented but has no tool group`);

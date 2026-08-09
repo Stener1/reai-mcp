@@ -380,6 +380,35 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // untouched, and that includes POST /api/peppol/messages/sendsbdh and POST /api/invoices/reminders/bulk,
       // which both transmit outside the tenant -- the review is right that those are the dangerous class and
       // this does not cover them. Covering them needs its own change and its own measurement.
+      // RE-TESTED 2026-08-09 against a live defect, and the scope above held. Recording both halves, because
+      // the case looks like exactly what this block is for and is blocked twice over.
+      //
+      // The defect: "create agreement", "opprett avtale" and "create lease agreement" all answer with
+      // POST /api/agreements/{id}/sign-request first — irreversible AND transmitting — with the five endpoints
+      // that actually create an agreement tied for fourth through eighth. Nothing else in the top three either;
+      // they are `sign-requests` and `sign-requests/{id}/send`.
+      //
+      // 1. `sign-request` carries a hyphen, so `single` is undefined and no demotion is considered at all.
+      //    Removing the hyphen condition alone was measured: it fails the test below THIS one on its own terms
+      //    (an English query lost rank) as well as the credit-note inversion it was written for. The scope is
+      //    right; the exclusion is not the thing to change.
+      //
+      // 2. Even with the condition removed, the cut is 0.9 rather than 0.45 — so sign-request goes 19.0 -> 17.1
+      //    and still wins. `familyOffersNonNested` compares `familyOf` values, and `familyOf` truncates at the
+      //    first `{param}`: `/api/agreements/{id}/sign-request` is in family `/api/agreements`, while
+      //    `/api/agreements/rent-agreement` has no parameter and so is its OWN family. The five alternatives are
+      //    invisible to the check that asks whether an alternative exists. THAT is the blocker, and it is not
+      //    this block — a nested action is correctly told "nothing better exists" by a family notion that cannot
+      //    see its siblings. Fixing it means widening `familyOffersNonNested` to the resource root, which is the
+      //    "register ancestors" change PR #122's reviews rejected on other evidence, so it needs its own
+      //    measurement rather than being folded into a fix for this.
+      //
+      // Also tried and rejected, same day: giving the 178 public operations with NO summary and NO description a
+      // derived phrase from method plus path, so ranking could see the verb a path cannot carry. Constrained to
+      // contribute only terms the path lacks (the naive version double-counted the resource and displaced five
+      // known-good answers), it reached zero regressions — and then measured, across all 178, ONE improvement
+      // and ONE regression. The verb signal is already carried by write intent and implied methods; the path
+      // already carries the resource. Not worth an index field. See docs/discovery.md.
       const actions = nestedActionSegments(op.path);
       const only = actions.length === 1 ? actions[0] : undefined;
       const single = only !== undefined && !only.includes("-") ? only : undefined;
