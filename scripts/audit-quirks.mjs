@@ -15,9 +15,11 @@
  * deliberately not quoted here. A keyword sweep over `note` prose returns 86 or 95 depending on the word
  * list, which makes it a lower bound dressed as a measurement — the false precision `storage-drift` was
  * corrected for, and which its census script prints rather than asserts for the same reason. The exact,
- * checkable statement is the one that matters: 2 were named before, this file adds 8, and **113** remain
- * unnamed — not 114, because `tenant-header-ignored-single-tenant` is in both sets. Nine distinct quirks now
- * have a live case, and 122 - 9 = 113. Review caught the arithmetic making 124 out of 122.
+ * checkable statement is the one that matters: of **122** quirks, **17** now have a live case — the 16 here plus
+ * `customer-name-title-cased` in audit-storage.mjs, with `tenant-header-ignored-single-tenant` in both sets —
+ * leaving **105** unnamed. This arithmetic has been wrong three times: 124-out-of-122 from double-counting,
+ * then an 8-case accounting left standing beside a 16-case audit, then this header still saying 8/113 after the
+ * docs were corrected. Count distinct ids and check the total against 122.
  *
  * This closes the read-only part of that gap. Every request below is a GET, so it runs against any tenant
  * the token reaches, which is why there is no write guard and no `REAI_WRITE_TEST_TENANTS`: nothing here
@@ -148,17 +150,23 @@ if (!Number.isInteger(tenantId)) {
  * because a determined edit to this file can always add one. What this makes impossible is doing it by
  * ACCIDENT, which is the realistic failure mode for an audit pointed at a real company's books.
  */
-const nativeFetch = globalThis.fetch;
-globalThis.fetch = (input, init = {}) => {
-  const method = String(init?.method ?? (typeof input === "object" && input ? input.method : "GET") ?? "GET");
-  if (method.toUpperCase() !== "GET") {
-    throw new Error(
-      `audit-quirks may only issue GET; a ${method.toUpperCase()} was attempted. This audit runs against ` +
-        `real books and nothing here is permitted to write.`,
-    );
-  }
-  return nativeFetch(input, init);
-};
+// Installed inside an IIFE so the UNGUARDED function is closure-scoped and unreachable from the rest of the
+// file. A first version kept `const nativeFetch = globalThis.fetch` at module scope; review then called
+// `nativeFetch(...)` directly and delivered a POST /api/vouchers and a DELETE, with all ten guard tests green
+// — the call-site count used a case-sensitive /fetch\(/ and never saw the capital F.
+(() => {
+  const unguarded = globalThis.fetch;
+  globalThis.fetch = (input, init = {}) => {
+    const method = String(init?.method ?? (typeof input === "object" && input ? input.method : "GET") ?? "GET");
+    if (method.toUpperCase() !== "GET") {
+      throw new Error(
+        `audit-quirks may only issue GET; a ${method.toUpperCase()} was attempted. This audit runs against ` +
+          `real books and nothing here is permitted to write.`,
+      );
+    }
+    return unguarded(input, init);
+  };
+})();
 
 const request = async (path, { omitTenant = false, tenantOverride } = {}) => {
   const init = {
@@ -653,7 +661,9 @@ const CASES = [
     claim: "leadFilter selects saved/unsaved/all, and an unsaved row's id is null",
     marker: "A row's `id` is null only while the lead is UNSAVED",
     probes: ["/api/leads"],
-    conditional: "needs the Leads module ENABLED; where it is off there are no rows to inspect",
+    conditional:
+      "needs the Leads module ENABLED, and needs at least one SAVED lead — without one the claim that a saved " +
+      "lead carries an id cannot be read at all",
     async check() {
       const accepted = {};
       for (const f of ["all", "saved", "unsaved"]) {
@@ -689,13 +699,19 @@ const CASES = [
             `handle the note says it is`,
         ];
       }
-      const savedNote = savedRows.length
-        ? `all ${savedRows.length} saved rows carry an id`
-        : "no saved rows here, so that half is unread";
+      // OK requires BOTH halves. A first version printed "no saved rows here, so that half is unread" next to
+      // the word OK, which is the report saying it verified something it just said it had not.
+      if (savedRows.length === 0) {
+        return [
+          "conditional",
+          `all ${rows.length} unsaved rows have id null, but there are no SAVED leads on this tenant, so the ` +
+            `other half of the claim — that a saved lead does have an id — could not be read`,
+        ];
+      }
       return [
         "ok",
         `leadFilter all/saved/unsaved = ${accepted.all}/${accepted.saved}/${accepted.unsaved}; all ${rows.length} ` +
-          `unsaved rows have id null; ${savedNote}`,
+          `unsaved rows have id null; all ${savedRows.length} saved rows carry an id`,
       ];
     },
   },
@@ -704,7 +720,9 @@ const CASES = [
     claim: "the detail nests lead state under `lead`; a search row flattens id and status to the top",
     marker: "code that reads `id` at the top level of a detail response gets undefined",
     probes: ["/api/leads/org/{orgNumber}", "/api/leads/null"],
-    conditional: "needs the Leads module ENABLED; where it is off there is no row to look one up from",
+    conditional:
+      "needs the Leads module ENABLED, an UNTOUCHED company to read the all-null claim from, and a SAVED lead " +
+      "to observe the shape at /api/leads/{id}",
     async check() {
       const list = await get("/api/leads?leadFilter=unsaved&pageSize=5");
       if (list.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
@@ -753,17 +771,36 @@ const CASES = [
       // And the path that cannot address an untouched company at all.
       const nullId = await get("/api/leads/null");
       if (nullId.status !== 400) return ["drift", `GET /api/leads/null answered ${nullId.status}, not the documented 400`];
+
+      // The note's central claim is the SHAPE of a LeadRes, and /api/leads/{id} is one of the two paths it is
+      // served on — but reaching it needs a saved lead's id, and an error-path probe (null -> 400) shows only
+      // that the path is unusable without one. Counting that as coverage of the shape would be the
+      // fragment-verification this audit keeps rediscovering, so say so instead.
+      const saved = (await get("/api/leads?leadFilter=saved&pageSize=1")).body?.items ?? [];
+      if (saved.length === 0) {
+        return [
+          "conditional",
+          `the org-number path checks out — row flattens {id, status}; detail nests lead ` +
+            `{ ${leadKeys.slice(0, 4).join(", ")}… } all null, contactEvents [] — and /api/leads/null still 400. ` +
+            `But there is no SAVED lead on this tenant, so the LeadRes shape at /api/leads/{id} was never observed`,
+        ];
+      }
+      const byId = await get(`/api/leads/${saved[0].id}`);
+      if (byId.status !== 200) return ["inconclusive", `/api/leads/${saved[0].id} answered ${byId.status}`];
+      if (typeof byId.body?.lead !== "object" || byId.body.lead === null) {
+        return ["drift", `/api/leads/{id} does not nest a lead object: ${Object.keys(byId.body ?? {}).slice(0, 8).join(", ")}`];
+      }
       return [
         "ok",
-        `row flattens {id, status}; detail nests lead { ${leadKeys.slice(0, 5).join(", ")}… } with contactEvents ` +
-          `[${detail.body.contactEvents.length}]; /api/leads/null still 400`,
+        `row flattens {id, status}; both detail paths nest lead { ${leadKeys.slice(0, 4).join(", ")}… }; ` +
+          `untouched company all null with contactEvents []; /api/leads/null still 400`,
       ];
     },
   },
   {
     quirk: "archived-records-need-an-explicit-filter-to-see",
-    claim: "archived=true reveals archived records and includeArchived=true does NOT",
-    marker: "`includeArchived=true` is NOT it and returns nothing",
+    claim: "archived=true is exclusive, and includeArchived=true is silently ignored rather than empty",
+    marker: "it is silently IGNORED rather than rejected: it returns the plain list",
     probes: ["/api/customers", "/api/suppliers"],
     conditional: "needs at least one ARCHIVED customer or supplier on the tenant; 2634 has none",
     async check() {
@@ -784,16 +821,29 @@ const CASES = [
           continue;
         }
         observed += 1;
-        // The wrong parameter is silently empty rather than an error, which is why "the customer is gone"
-        // gets believed.
-        if (n(include) !== 0) {
-          return ["drift", `${path}?includeArchived=true now returns ${n(include)} rows, so it IS a filter after all`];
+        const plainIds = ids(plain);
+        // `includeArchived=true` is IGNORED, not empty. Two versions of this probe asserted it returns zero
+        // rows, which was an artifact of measuring on tenants with no active records: on 2634 /api/suppliers
+        // gives plain 1, includeArchived=true 1, and ?totallyBogusParam=true 1 — an unknown parameter is
+        // dropped. So the check is that it matches the PLAIN list, which is what makes it dangerous: an agent
+        // gets an unfiltered list and believes it is filtered.
+        const bogus = await get(`${path}?totallyBogusParam=true`);
+        if (bogus.status !== 200) return ["inconclusive", `${path} with an unknown parameter answered ${bogus.status}`];
+        if (n(include) !== n(plain) || n(bogus) !== n(plain)) {
+          return [
+            "drift",
+            `${path}: plain ${n(plain)}, includeArchived=true ${n(include)}, unknown-parameter ${n(bogus)} — ` +
+              `includeArchived is no longer simply ignored, so the note's explanation is stale`,
+          ];
+        }
+        // And archived=true must be EXCLUSIVE, not a superset: no single call returns both sets.
+        if ([...ids(archived)].some((id) => plainIds.has(id))) {
+          return ["drift", `${path}?archived=true now includes active records too, so it is not exclusive`];
         }
         // IDENTITIES, not sizes. `n(plain) >= n(archived)` was the comparison, and it reports DRIFT on any
         // tenant with more active records than archived ones — 100 active and 2 archived would have failed a
         // correctly-behaving API. The claim is that an archived record is ABSENT from the plain list, which is
         // a statement about which rows, not how many.
-        const plainIds = ids(plain);
         const leaked = [...ids(archived)].filter((id) => plainIds.has(id));
         if (leaked.length > 0) {
           return [
@@ -802,7 +852,10 @@ const CASES = [
               `no longer hides them`,
           ];
         }
-        seen.push(`${path}: plain ${n(plain)}, archived=true ${n(archived)} (none of them in the plain list), includeArchived=true ${n(include)}`);
+        seen.push(
+          `${path}: plain ${n(plain)}, archived=true ${n(archived)} (exclusive, none in the plain list), ` +
+            `includeArchived=true ${n(include)} (= plain, ignored)`,
+        );
       }
       return observed === 0
         ? ["conditional", `no archived records on this tenant: ${seen.join("; ")}`]
@@ -818,7 +871,9 @@ const CASES = [
     // "approved" and only voucherId distinguishes it, and that a reversed one is still returned by id. Both
     // need an expense to exist, and creating one is a write. Declared rather than quietly skipped.
     unmeasured: {
-      "/api/expenses/{id}": "needs an expense to exist; both test tenants have none and creating one is a write",
+      "/api/expenses/{id}":
+        "requires an expense id, which cannot be obtained without creating one — a write, and out of scope " +
+        "for this audit whatever the current row count happens to be",
     },
     async check() {
       // The documented values must be accepted...
@@ -834,6 +889,18 @@ const CASES = [
         return ["inconclusive", `status=${v} answered ${r.status}, which says nothing about the value's validity`];
       }
       // ...and the one the note says cannot be used must still be refused, by name.
+      // BOTH words in the quirk's name. `booked` is refused the same way and costs one GET; checking only
+      // `reversed` left half the title unverified.
+      for (const absent of ["booked", "reversed"]) {
+        const r = await get(`/api/expenses?status=${absent}`);
+        if (r.status === 200) {
+          return ["drift", `status=${absent} is accepted now, so it IS a status and the note is stale`];
+        }
+        if (r.status !== 400) return ["inconclusive", `status=${absent} answered ${r.status}`];
+        if (!new RegExp(`failed to convert 'status' with value: '${absent}'`, "i").test(detailOf(r))) {
+          return ["drift", `status=${absent} is refused, but with "${detailOf(r).slice(0, 70)}"`];
+        }
+      }
       const reversed = await get("/api/expenses?status=reversed");
       if (reversed.status === 200) {
         return ["drift", "status=reversed is accepted now, so reversed expenses CAN be listed and the note is stale"];
@@ -859,7 +926,11 @@ const CASES = [
 
       // The ordering half, which the note used to omit: bare, the endpoint complains about month and says
       // nothing about the id at all.
-      const bare = await get(`/api/manual-reconciliations/${rows[0].id}`);
+      // An IMPOSSIBLE id, bare. Asking with a REAL id cannot discriminate: 400 "month is required" is equally
+      // consistent with the account being looked up first and found. Only an id that could not resolve shows
+      // that validation runs before the lookup. Third round in a row an ordering claim was probed with a
+      // request that could not establish it.
+      const bare = await get("/api/manual-reconciliations/999999999");
       if (bare.status !== 400 || !/month is required/i.test(detailOf(bare))) {
         return [
           "drift",
@@ -874,11 +945,19 @@ const CASES = [
       if (synced.length === 0) {
         return ["conditional", "every company bank here is manual, so the not-manual 404 cannot be produced"];
       }
-      const real = await get(`/api/manual-reconciliations/${synced[0].id}?month=2026-07`);
-      const fake = await get("/api/manual-reconciliations/999999999?month=2026-07");
-      if (real.status !== 404) {
-        return ["drift", `a ${synced[0].providerType} account answered ${real.status}, not the documented 404`];
+      // Every synced account, not just the first: the note says all of 2634's three banks answer this.
+      const reals = [];
+      for (const b of synced) reals.push([b, await get(`/api/manual-reconciliations/${b.id}?month=2026-07`)]);
+      const notFourOhFour = reals.filter(([, r]) => r.status !== 404);
+      if (notFourOhFour.length > 0) {
+        return [
+          "drift",
+          `${notFourOhFour.length} of ${reals.length} non-manual accounts answered something other than 404, ` +
+            `e.g. id ${notFourOhFour[0][0].id} -> ${notFourOhFour[0][1].status}`,
+        ];
       }
+      const real = reals[0][1];
+      const fake = await get("/api/manual-reconciliations/999999999?month=2026-07");
       if (fake.status !== 404) {
         return ["drift", `a nonexistent id answered ${fake.status}, so the two cases ARE distinguishable now`];
       }
@@ -890,7 +969,7 @@ const CASES = [
         }
       }
       return detailOf(real) === detailOf(fake)
-        ? ["ok", `bare -> 400 "month is required"; ${synced[0].providerType} id and a nonexistent id both 404 "${detailOf(real)}"`]
+        ? ["ok", `an impossible id bare -> 400 "month is required"; all ${reals.length} ${synced[0].providerType} accounts and a nonexistent id 404 "${detailOf(real)}"`]
         : ["drift", `the two 404s now differ: "${detailOf(real)}" vs "${detailOf(fake)}" — they are distinguishable`];
     },
   },
@@ -934,7 +1013,7 @@ const CASES = [
   {
     quirk: "array-query-comma-joined",
     claim: "`include` is the only array query parameter on the agent-facing surface, declared explode=false",
-    marker: "is the only array query parameter in the API and uses style=form, explode=false",
+    marker: "is the only array query parameter on the surface this server EXPOSES",
     probes: ["/api/bank-reconciliations/{bankAccountId}"],
     conditional: "needs a company bank id to call the reconciliation endpoint with",
     async check() {
@@ -1014,7 +1093,10 @@ async function main() {
   }
 
   console.log(`Checking ${CASES.length} read-only quirk claims against tenant ${tenantId}.`);
-  console.log(`(${QUIRKS.length} quirks exist; this covers the subset a GET can answer.)`);
+  console.log(
+    `(${QUIRKS.length} quirks exist; this covers ${CASES.length} of them — the subset a GET can answer.)`,
+  );
+  console.log(`(17 of the ${QUIRKS.length} have a live case across all three audits; ${QUIRKS.length - 17} do not.)`);
   // No silent caps. These quirks are served on more operations than are probed, and the two reasons — a
   // family represented by one endpoint, and an operation where the claim does not hold — are stated here
   // rather than left for someone to reconstruct from the case list. test/quirk-drift.test.mjs fails if any

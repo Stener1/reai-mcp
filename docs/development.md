@@ -273,7 +273,10 @@ something somewhere; and a case that returns `"conditional"` without declaring o
 inconclusive by the runner, so the exemption cannot be reached by a branch that merely failed to get an
 answer.
 
-Currently **14 unchanged, 0 drifted, 2 conditional** against tenant 2634, from **16 cases**.
+Currently **12 unchanged, 0 drifted, 4 conditional** against tenant 2634, from **16 cases**. Two of those
+conditionals are cases that could have printed OK: neither test tenant has a *saved* lead, so "a saved lead
+does have an id" and the `LeadRes` shape at `/api/leads/{id}` cannot be observed, and a case that reports OK
+beside the words "that half is unread" is the report contradicting itself.
 
 **Coverage is stated as a census, not a pass mark**, because these quirks are served on far more operations
 than they have ids — `match: "descendants"` expands them past their path lists, and `module-gating` alone

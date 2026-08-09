@@ -149,7 +149,21 @@ test("the archive-visibility quirk names the filter that works and the one that 
     (q) => q.id === "archived-records-need-an-explicit-filter-to-see",
   );
   assert.match(quirk.note, /`archived=true`/);
-  assert.match(quirk.note, /includeArchived=true` is NOT it/);
+  // This used to pin `includeArchived=true` is NOT it`, which enshrined a FALSE explanation: the note said
+  // that parameter "returns nothing", when re-measurement showed it is silently IGNORED and returns the plain
+  // list — identical to ?totallyBogusParam=true. The old wording was an artifact of measuring on a tenant with
+  // no active records, and this assertion was what made it look verified.
+  //
+  // So the pins are now on the two things that are true and that an agent acts on: the wrong parameter is
+  // ignored rather than empty, and the right one is exclusive rather than a superset.
+  assert.match(quirk.note, /silently IGNORED/);
+  assert.match(quirk.note, /returns the plain list/);
+  assert.match(quirk.note, /EXCLUSIVE rather than a superset/);
+  assert.doesNotMatch(
+    quirk.note,
+    /returns nothing —/,
+    "the retracted explanation must not come back: includeArchived is ignored, not empty",
+  );
   // The list tools already expose it, which is what makes the quirk actionable.
   for (const name of ["reai_list_customers", "reai_list_suppliers"]) {
     assert.ok(tool(name).inputSchema.archived, `${name} should take an archived filter`);

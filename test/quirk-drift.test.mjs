@@ -167,8 +167,12 @@ function auditCases() {
   // as `  { quirk: "…",` — one line instead of two — and it was absorbed into the previous chunk: the count
   // stayed 8, all tests passed, and the audit ran a case with no marker, no drift branch, empty probes and a
   // second `conditional:`. So both the count floor and the conditional cap fell to whitespace.
+  // Any indentation. `split(/\n  \{/)` bound the boundary to exactly two spaces, so review added a 17th case
+  // indented FOUR and it was absorbed into its predecessor: the count stayed 16, all tests passed, and the
+  // audit ran a case with no marker, no drift branch and a path its quirk is not served on. Nothing lints
+  // .mjs here (`npm run lint` is `tsc --noEmit`), so indentation is free and must not be load-bearing.
   return body
-    .split(/\n  \{[ \t]*\n?/)
+    .split(/\n[ \t]*\{[ \t]*\n?/)
     .slice(1)
     .map((chunk) => ({
       quirk: /quirk:\s*"([^"]+)"/.exec(chunk)?.[1],
@@ -203,6 +207,15 @@ test("every quirk probe names a real quirk, and binds to text that still PREDICT
   // The count itself is the floor. A "6 of 8" style threshold licenses two cases silently falling out of
   // the population, which is how `storage-drift` was defeated; removing a case on purpose is a
   // one-character edit here.
+  // Cross-checked against an independent count of `quirk:` keys, so a case the boundary split misses still
+  // shows up as a mismatch rather than silently vanishing.
+  const quirkKeys = [...auditSource().slice(auditSource().indexOf("const CASES = [")).matchAll(/^\s*quirk:\s*"/gm)];
+  assert.equal(
+    cases.length,
+    quirkKeys.length,
+    `extracted ${cases.length} cases but found ${quirkKeys.length} \`quirk:\` keys — the boundary split is ` +
+      `missing a case, which is how a 17th one hid inside its predecessor`,
+  );
   assert.equal(
     cases.length,
     16,
@@ -321,7 +334,13 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
       "may not be called",
   );
   assert.match(wrapperBody, /throw new Error/, "the wrapper must throw rather than warn");
-  const imports = [...src.matchAll(/^import[^;]*?from\s*"([^"]+)"/gm)].map(([, m]) => m);
+  // Both quote styles, and side-effect imports with no `from`. The first version matched double quotes after a
+  // `from` only, so `import * as evilHttp from 'node:http';` was never collected, `forbidden` came back empty,
+  // and review issued a PUT /api/opening-balances through node:http with all ten tests green.
+  const imports = [
+    ...[...src.matchAll(/^\s*import\s+[^;'"]*?from\s*['"]([^'"]+)['"]/gm)].map(([, m]) => m),
+    ...[...src.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)].map(([, m]) => m),
+  ];
   // node:fs is permitted: the allowlist exists to keep the audit off any channel that can reach the network,
   // and reading the pinned OpenAPI document is not one. node:http/https/net remain forbidden.
   const allowed = new Set(["node:url", "node:path", "node:fs"]);
@@ -332,13 +351,21 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
     `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
       `network without passing the fetch wrapper, which is how review issued a POST with every test green`,
   );
-  // Dynamic imports are used for dist/ modules; they must not be a way back to a network module either.
-  const dynamic = [...src.matchAll(/await import\(([^)]*)\)/g)].map(([, a]) => a);
+  // Dynamic imports are used for dist/ modules; they must not be a way back to a network module either. Text
+  // matching alone is not enough — `import("node:" + "http")` reads as neither — so a concatenated or
+  // otherwise computed specifier is refused outright.
+  const dynamic = [...src.matchAll(/import\(([^)]*)\)/g)].map(([, a]) => a.trim());
   for (const arg of dynamic) {
     assert.doesNotMatch(
       arg,
       /node:(http|https|net|dgram|tls)/,
-      `dynamic import of a network module (${arg.trim()}) bypasses the fetch wrapper`,
+      `dynamic import of a network module (${arg}) bypasses the fetch wrapper`,
+    );
+    // Allowed: a bare string, or pathToFileURL(join(...)) for a dist/ module. Not allowed: string arithmetic.
+    const computed = /\+/.test(arg) && !/pathToFileURL/.test(arg);
+    assert.ok(
+      !computed,
+      `dynamic import specifier ${arg} is assembled at runtime, so no static check can tell what it loads`,
     );
   }
 
@@ -380,8 +407,22 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
   // and change the fetch to `method: options.method`, and both assertions still pass while the helper can
   // issue a POST or DELETE against a real tenant's books. Since path classification also hardcodes "GET",
   // nothing else would have noticed. So inspect the fetch call itself.
-  const fetches = [...src.matchAll(/fetch\(/g)];
+  // A word boundary, and case-sensitively distinguishing `fetch(` from `nativeFetch(`. The first version used
+  // /fetch\(/g, which is a SUBSTRING match: review aliased the unguarded function and called `nativeFetch(...)`,
+  // which the count never saw (capital F), and delivered a POST /api/vouchers with all ten tests green.
+  const fetches = [...src.matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)];
   assert.equal(fetches.length, 1, `expected exactly one fetch call site, found ${fetches.length}`);
+  // And no reachable handle on the unguarded function. It must live inside the wrapper's closure, so that
+  // installing the guard is the only way to reach the network from this file.
+  // Column 0 only. The wrapper's own `const unguarded = globalThis.fetch` lives INDENTED inside an IIFE, which
+  // is exactly the fix — closure-scoped and unreachable. What must not exist is a binding at module scope.
+  const aliases = [...src.matchAll(/^(?:const|let|var)\s+(\w+)\s*=\s*globalThis\.fetch/gm)].map(([, n]) => n);
+  assert.deepEqual(
+    aliases,
+    [],
+    `the unguarded fetch must not be bound at module scope (found ${aliases.join(", ")}) — anything in this ` +
+      `file could then call it and bypass the guard entirely`,
+  );
   // The init object literal, which is what fetch receives. Read from its declaration rather than from the
   // call site, because the call passes a variable — deliberately, so the runtime guard above can inspect the
   // fully-assembled object before it is used.
@@ -479,9 +520,12 @@ test("the audited quirks are a documented subset, not a claim of coverage", () =
   assert.match(src, /QUIRKS\.length/, "the report must print the total, not only the probed count");
   assert.match(
     src,
-    /covers the subset a GET can answer/,
+    /the subset a GET can answer/,
     "the report must say the probed set is a subset and why",
   );
+  // And the distinct-quirk arithmetic, which has now been wrong three times — including once where the docs
+  // were corrected and this script's header was not, so the same tree stated both 8/113 and 17/105.
+  assert.match(src, /have a live case across all three audits/, "the report must state how many quirks are covered in total");
   assert.ok(QUIRKS.length > 100, `sanity: expected >100 quirks, found ${QUIRKS.length}`);
 });
 
@@ -533,9 +577,13 @@ test("an unverifiable claim fails the run unless it says WHY it cannot be verifi
     // Against the comment-stripped chunk. Broadening this pattern to accept a ternary's else-arm made it read
     // RAW source, so commenting out a conditional case's only `return ["ok", …]` left the literal in a comment
     // and the guard still passed — the exact failure this file strips comments for elsewhere.
+    // Anchored on `return` or a ternary arm. Dropping the anchor to accept an else-arm made a bare STRING
+    // literal satisfy it — review replaced a case's only OK return with
+    // `return ["conditional", 'the literal ["ok"] in this string is all the guard sees']` and it passed.
+    // stripComments does not help, because it preserves string contents.
     assert.match(
       stripComments(c.chunk),
-      /\[\s*\n?\s*"ok"/,
+      /(?:return|[?:])\s*\[\s*\n?\s*"ok"/,
       `${c.quirk} declares itself conditional but has no branch that can report OK, so it can never verify ` +
         `anything on any tenant`,
     );
@@ -644,9 +692,27 @@ test("every case probes every OPERATION its quirk is served on, or names why not
         gettable.some((op) => op.path === path),
         `${c.quirk} declares ${path} unmeasured, but the quirk is not served on that GET operation`,
       );
+      // The premise, not just a sentence. `unmeasured` claims no GET can REACH the claim, and review moved a
+      // plainly reachable collection path (/api/postings) into it with the reason "needs nothing whatsoever;
+      // a plain GET reaches it" — 10/10 green, and the audit silently stopped requesting it. A collection path
+      // is always reachable; only a path needing an identifier this audit cannot obtain is not.
+      assert.match(
+        path,
+        /\{[^}]+\}/,
+        `${c.quirk} declares ${path} unmeasured, but it takes no path parameter — a GET can reach it, so it ` +
+          `must be probed rather than excused`,
+      );
       assert.ok(
         why.length >= 20 && /needs|requires|cannot|write/i.test(why),
         `${c.quirk}'s reason for not measuring ${path} must say what is missing, got ${JSON.stringify(why)}`,
+      );
+      // Padding defeats a keyword-plus-length rule: "needs aaaaaaaaaaaaaaaaaaaaaaaa" satisfied both. Require
+      // real words, the same shape of check the conditional reason needed.
+      const words = why.split(/\s+/).filter((w) => /^[a-z][a-z-]{2,}$/i.test(w));
+      assert.ok(
+        new Set(words).size >= 6,
+        `${c.quirk}'s reason for not measuring ${path} reads as padding (${new Set(words).size} distinct ` +
+          `words): ${JSON.stringify(why)}`,
       );
     }
     assert.ok(

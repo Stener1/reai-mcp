@@ -40,9 +40,10 @@ All notable changes to `reai-mcp`. Format loosely follows
   - The reverse-coverage check from #128 immediately earned itself again: it caught `/api/leads/null` being
     probed under a quirk served only on `/api/leads`, and the null-id claim moved to
     `lead-detail-nests-what-the-search-flattens`, which is served on `/api/leads/{id}`.
-  - Live: **14 unchanged, 0 drifted, 2 conditional** on 2634; the archived-records case is conditional there
-    (no archived records) and **verifies on 2783** — customers 0/2/0 and suppliers 0/69/0 for
-    plain/`archived=true`/`includeArchived=true` — which is what shows it is not vacuous.
+  - Live: **12 unchanged, 0 drifted, 4 conditional** on 2634. Four rather than two because two cases now decline
+    to report OK for a half they could not read: neither test tenant has a **saved** lead, so "a saved lead does
+    have an id" and the `LeadRes` shape at `/api/leads/{id}` are both unobservable here. That is a smaller
+    number and a more honest one.
   - Five new ways to defeat the guards, each verified to fail the build: a vague `unmeasured` reason, an
     `unmeasured` path the quirk is not served on, `unmeasured` swallowing a whole case, a 17th case opened on
     one line, and the supplier-invoice spec check widened to a catch-all.
@@ -68,7 +69,39 @@ All notable changes to `reai-mcp`. Format loosely follows
   - **One was a regression from this PR's own work.** Broadening the "a conditional case must have an OK branch"
     pattern to accept a ternary's else-arm made it read RAW source, so commenting out a case's only
     `return ["ok", …]` left the literal in a comment and the guard passed — the exact failure this file strips
-    comments for elsewhere. It reads stripped source now.
+    comments for elsewhere. It reads stripped source now, **and the anchor is back**: a second review then
+    satisfied the un-anchored pattern with a bare string containing `["ok"]`, which `stripComments` cannot
+    help with because it preserves string contents.
+  - **A second independent review found two more read-only bypasses, both delivered real writes to a local
+    server with all ten guard tests green.** The call-site count was `/fetch\(/g` — a case-sensitive substring
+    — so the module-scope `const nativeFetch = globalThis.fetch` was invisible to it and callable directly. The
+    unguarded function now lives inside an IIFE closure, so it is unreachable by construction: the same exploit
+    produces a `ReferenceError` and **no request at all**, which is stronger than a test catching it. A
+    module-scope alias being re-introduced is caught separately. And the import allowlist matched
+    double-quoted `from` specifiers only, so `import * as evilHttp from 'node:http'` was never collected and a
+    `PUT /api/opening-balances` went out; both quote styles, bare side-effect imports and runtime-assembled
+    dynamic specifiers are all handled now.
+  - **`archived-records-need-an-explicit-filter-to-see` was still false, in the half the previous round did not
+    fix.** The note said `includeArchived=true` *"returns nothing — measured, 0 rows against 57"*. Re-measured:
+    on 2634 `/api/suppliers` gives plain **1**, `includeArchived=true` **1**, and `?totallyBogusParam=true`
+    **1** — it is an unknown parameter, silently **ignored**, returning the unfiltered list. The old figure was
+    an artifact of a tenant with no active records. Believing the note leaves an agent reading an unfiltered
+    list while thinking it is filtered, which is worse than the error it was warning about. The note now says
+    that, and adds that `archived=true` is **exclusive** rather than a superset. `test/archive.test.mjs` had
+    *pinned the false wording*, which is what made it look verified; it now pins the corrected claims and
+    asserts the retraction cannot come back.
+  - Nine more: the case extractor was bound to two-space indentation, so a 17th case indented four was absorbed
+    and the count stayed 16 (it is indentation-agnostic now, and cross-checked against an independent count of
+    `quirk:` keys); `unmeasured` never checked its own premise, so a plainly reachable collection path could be
+    moved into it and silently dropped from the census — an unmeasured path must now take a path parameter, and
+    its reason must survive a padding check; `status=booked` was never probed though the quirk's name has two
+    words and it is one GET; two cases printed OK beside the words "that half is unread", and now report
+    conditional instead; the `manual-reconciliation` ordering claim was probed with a *real* id, where 400
+    "month is required" is equally consistent with lookup-first (it uses an impossible id now, and checks all
+    synced accounts rather than the first); the array-query note said "in the API" unqualified while the case
+    checked a scoped claim, so marker and measurement no longer predicted each other; the `lead` object has
+    **ten** fields and the note listed eight; and the header arithmetic still said 8/113 after the docs were
+    corrected to 17/105 — the same tree stating both.
 
 - **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
   The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
