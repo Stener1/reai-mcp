@@ -546,7 +546,11 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "daysUntilDue is required and non-nullable, so the API can never fall back to the customer's " +
       "own payment terms — whatever you send OVERRIDES them. Read the customer's daysUntilDue " +
-      "first if you want their terms respected.",
+      "first if you want their terms respected.\n\n" +
+      'Omitting it does NOT produce a field error: it answers a bare 400 "Failed to read request", with no ' +
+      "fieldErrors and nothing naming the field, because a non-nullable field that fails to deserialise never " +
+      "reaches validation. Measured 2026-08-09 on orders, both omitted and explicitly null. On that message, " +
+      "re-check your required fields rather than hunting for a field name that will not come.",
   },
   {
     id: "order-send-ehf",

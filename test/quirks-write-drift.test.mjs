@@ -182,3 +182,80 @@ test("a probe is valid except for the field under test, and the required set com
     "the field is offerLines/orderLines; `lines` is silently ignored and the probe measures nothing",
   );
 });
+
+test("the token's actual tenant is verified, not just the number on the command line", async () => {
+  // The single-tenant-token hazard: ReAI ignores X-Tenant-Id when a token reaches exactly one tenant, so
+  // `--tenant 2783` on a token scoped to 2634 satisfies both number-based guards while every write lands in
+  // 2634. This file imported `requireTokenReachesTenant` and never called it — the hazard PR #130 existed to
+  // fix, reintroduced one file later by forgetting a line. The coverage test in write-guard.test.mjs only
+  // required the top-level allowlist call, so nothing caught it.
+  const { default: ts } = await import("typescript");
+  const text = auditSource();
+  const sf = ts.createSourceFile(AUDIT, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
+  let called = false;
+  let pos = -1;
+  const walk = (n) => {
+    if (ts.isCallExpression(n) && n.expression.getText(sf) === "requireTokenReachesTenant") {
+      called = true;
+      pos = n.getStart(sf);
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  assert.ok(called, "requireTokenReachesTenant must be CALLED, not merely imported");
+  // And before any write, or it protects nothing.
+  const before = [...text.slice(0, pos).matchAll(/call\(\s*"(POST|PUT|PATCH|DELETE)"/g)];
+  assert.deepEqual(
+    before.map(([m]) => m),
+    [],
+    "the reachability check must run before the first write",
+  );
+});
+
+test("an accepted write is classified SAFETY in every case that can create something", () => {
+  // A "drift" outcome tells the operator to correct a note. When a probe is ACCEPTED, a record now exists — a
+  // different kind of problem, and the run's `0 SAFETY` line would otherwise be false. Three cases POST an
+  // otherwise-valid order, so each must say safety rather than drift on success.
+  for (const c of auditCases()) {
+    const successBranches = [...c.chunk.matchAll(/status < 300[\s\S]{0,400}?return \[\s*\n?\s*"(\w+)"/g)].map(
+      ([, outcome]) => outcome,
+    );
+    assert.ok(successBranches.length > 0, `${c.quirk} has no success branch`);
+    assert.deepEqual(
+      [...new Set(successBranches)].filter((o) => o !== "safety"),
+      [],
+      `${c.quirk} reports ${successBranches.join(", ")} when a probe is ACCEPTED; it must be "safety", because ` +
+        `the run's SAFETY count is what tells the operator a record was created`,
+    );
+  }
+});
+
+test("the order snapshot cannot be masked by a default date window", () => {
+  // /api/orders takes startDate/endDate. With a pinned probe date and a default window, a stray order would
+  // fall outside the list once the year rolled over — and the count check that exists to catch exactly that
+  // would see nothing.
+  const src = auditSource();
+  assert.match(
+    src,
+    /"\/api\/orders\?startDate=\d{4}-\d{2}-\d{2}&endDate=\d{4}-\d{2}-\d{2}"/,
+    "the order snapshot must ask for an explicit wide date range",
+  );
+  assert.doesNotMatch(
+    src,
+    /return "20\d\d-\d\d-\d\d";/,
+    "the probe date must be derived, not pinned to a literal year",
+  );
+  assert.match(src, /new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
+});
+
+test("a claim that needs a successful write is declared unverified, not quietly dropped", () => {
+  // `offer-lines-stricter` also says vatCode is OPTIONAL on an order line. Showing that requires a line that
+  // SUCCEEDS, which would create an order — so this file does not probe it, and says so in the result rather
+  // than reporting OK for the whole claim.
+  const c = auditCases().find((x) => x.quirk === "offer-lines-stricter");
+  assert.match(
+    c.chunk,
+    /NOT verified here/,
+    "the unprobed half of the claim must be named in the case's own output",
+  );
+});

@@ -71,6 +71,11 @@ if (!Number.isInteger(tenantId)) {
 // designed to fail, but "designed to" is not a guarantee, and this is the file that would find out.
 requireWritableTenant(tenantId, { scriptName: "scripts/audit-quirks-write.mjs" });
 installProtectedTenantFetchGuard();
+// And where the token ACTUALLY points. The two guards above check a number on the command line; a token scoped
+// to a single tenant IGNORES X-Tenant-Id, so `--tenant 2783` on a token reaching only 2634 satisfies both while
+// every write lands in 2634. This was imported and then never called — the exact hazard PR #130 existed to fix,
+// reintroduced one file later by forgetting a line.
+await requireTokenReachesTenant(tenantId, { token, baseUrl });
 
 const call = async (method, path, body) => {
   const res = await fetch(baseUrl + path, {
@@ -111,7 +116,9 @@ const rowsOf = (r) => (Array.isArray(r.body) ? r.body : (r.body?.items ?? []));
 const WATCHED = [
   "/api/products",
   "/api/offers",
-  "/api/orders",
+  // An explicit range, because the order list takes startDate/endDate and a default window would hide a stray
+  // record the moment its date fell outside it — which is the one thing this snapshot exists to notice.
+  "/api/orders?startDate=2000-01-01&endDate=2099-12-31",
   "/api/customers",
   "/api/employees",
   "/api/leads?leadFilter=saved&pageSize=1",
@@ -168,6 +175,19 @@ const CASES = [
 
       const offerBase = { customerId, currencyCode: "NOK", daysUntilDue: 14 };
       const missing = { quantity: 1, unitPrice: 100 };
+      // Against the spec, not a remembered list. If a refreshed spec adds a required offer field this probe does
+      // not supply, the request fails on THAT field and the case would report drift in the line validation —
+      // a false positive pointing at the wrong thing. Better to say so.
+      const unsupplied = requiredFor("/api/offers").filter(
+        (f) => !(f in offerBase) && f !== "offerLines",
+      );
+      if (unsupplied.length > 0) {
+        return [
+          "inconclusive",
+          `the spec now requires ${unsupplied.join(", ")} on an offer, which this probe does not supply — it ` +
+            `would fail on that instead of on the line fields this case is about`,
+        ];
+      }
 
       const noItem = await call("POST", "/api/offers", { ...offerBase, offerLines: [{ ...missing, vatCode: "0" }] });
       if (noItem.status < 300) return ["safety", `an offer line with no itemName was ACCEPTED (id ${noItem.body?.id})`];
@@ -185,19 +205,28 @@ const CASES = [
       const orderBase = { customerId, currencyCode: "NOK", daysUntilDue: 14, issueDate: today() };
       const orderNoItem = await call("POST", "/api/orders", { ...orderBase, orderLines: [missing] });
       if (orderNoItem.status < 300) {
+        // SAFETY, not drift. A drift outcome tells the operator to correct a note; this outcome means an order
+        // now exists in the tenant. The count check will also fire, but the classification has to say which
+        // kind of problem it is.
         return [
-          "drift",
-          `an order line with no itemName was accepted (id ${orderNoItem.body?.id}) — the note's "optional on ` +
-            `an order line" would be true again, and this probe has created an order that needs deleting`,
+          "safety",
+          `an order line with no itemName was ACCEPTED (order id ${orderNoItem.body?.id}) — the note's "optional ` +
+            `on an order line" is true again AND this probe created an order that must be deleted`,
         ];
       }
       if (!/produkt er obligatorisk/i.test(errorTextOf(orderNoItem))) {
         return ["drift", `an order line without itemName is refused differently now: ${errorTextOf(orderNoItem)}`];
       }
+      // The remaining half — that vatCode is OPTIONAL on an order line — cannot be shown by a refusal, because
+      // demonstrating it means sending a line that SUCCEEDS and creating an order. Measured by hand while
+      // scoping this (itemName only -> 201, order deleted afterwards), and deliberately not probed here: this
+      // file's guarantee is that nothing is created, and one case is not worth trading it for.
       return [
         "ok",
         `offer line refused for itemName and for vatCode; order line without itemName refused with ` +
-          `"${detailOf(orderNoItem)}" — so itemName is required on BOTH, as the corrected note says`,
+          `"${detailOf(orderNoItem)}" — so itemName is required on BOTH. The claim that vatCode is optional on ` +
+          `an ORDER line is NOT verified here: showing it requires a line that succeeds, which would create an ` +
+          `order`,
       ];
     },
   },
@@ -236,7 +265,7 @@ const CASES = [
   {
     quirk: "days-until-due-mandatory",
     claim: "daysUntilDue is declared required on both offers and orders, and omitting it is refused",
-    marker: "daysUntilDue is required and non-nullable",
+    marker: 'it answers a bare 400 "Failed to read request", with no fieldErrors',
     async check() {
       // The schema half first, from the pinned spec — the claim is about the CONTRACT, and a runtime 400 alone
       // cannot distinguish "required" from "rejected for another reason".
@@ -254,21 +283,39 @@ const CASES = [
         issueDate: today(),
         orderLines: [{ quantity: 1, unitPrice: 100, itemName: "audit-refusal-probe" }],
       };
+      let refusal;
       for (const [label, body] of [["omitted", base], ["null", { ...base, daysUntilDue: null }]]) {
         const r = await call("POST", "/api/orders", body);
+        refusal ??= r;
         if (r.status < 300) {
           return [
-            "drift",
-            `an order with daysUntilDue ${label} was accepted (id ${r.body?.id}) — it is no longer mandatory, ` +
-              `and this probe created an order that needs deleting`,
+            "safety",
+            `an order with daysUntilDue ${label} was ACCEPTED (order id ${r.body?.id}) — it is no longer ` +
+              `mandatory AND this probe created an order that must be deleted`,
           ];
         }
         if (r.status !== 400) return ["inconclusive", `daysUntilDue ${label} answered ${r.status}`];
       }
+      // The response the loop ALREADY saw. A first version re-issued the request purely to quote its detail,
+      // which meant one more chance to create an order and no check on the result — it would have printed the
+      // new text as though it had been verified.
+      //
       // Worth stating: the refusal is a deserialization failure, not a field error, so an agent gets no clue
-      // which field it was. That is the practical consequence of "non-nullable" and the note now says it.
-      const r = await call("POST", "/api/orders", base);
-      return ["ok", `declared required on offers and orders; omitting it gives 400 "${detailOf(r)}" with no field named`];
+      // which field was missing. That is the practical consequence of "non-nullable", and the note says it.
+      if (fieldErrorsOf(refusal)) {
+        return [
+          "drift",
+          `omitting daysUntilDue now returns field errors (${fieldErrorsOf(refusal)}) rather than the bare ` +
+            `deserialization failure the note describes — the note should be updated to the better behaviour`,
+        ];
+      }
+      if (!/failed to read request/i.test(detailOf(refusal))) {
+        return ["drift", `the refusal now reads "${detailOf(refusal).slice(0, 80)}", not the documented bare failure`];
+      }
+      return [
+        "ok",
+        `declared required on offers and orders; omitting it gives 400 "${detailOf(refusal)}" with no field named`,
+      ];
     },
   },
   {
@@ -288,16 +335,40 @@ const CASES = [
       });
       if (r.status < 300) {
         return [
-          "drift",
-          `vatCode 999 was accepted (order id ${r.body?.id}) — the subset is no longer enforced, and this ` +
-            `probe created an order that needs deleting`,
+          "safety",
+          `vatCode 999 was ACCEPTED (order id ${r.body?.id}) — the subset is no longer enforced AND this probe ` +
+            `created an order that must be deleted`,
         ];
       }
       if (r.status !== 400) return ["inconclusive", `answered ${r.status}`];
       const text = errorTextOf(r);
-      return /ikke tillatt/i.test(text) && /tillatte koder/i.test(text)
-        ? ["ok", `400 "${detailOf(r)}" — the refusal lists the tenant's own codes`]
-        : ["drift", `refused, but without listing the allowed codes: ${text.slice(0, 90)}`];
+      if (!/ikke tillatt/i.test(text) || !/tillatte koder/i.test(text)) {
+        return ["drift", `refused, but without listing the allowed codes: ${text.slice(0, 90)}`];
+      }
+      // The claim is that it lists the TENANT'S OWN codes, so compare them. Accepting any text containing the
+      // two Norwegian phrases would pass on a hard-coded or stale list.
+      const codesRes = await call("GET", "/api/vat-codes?usage=customer-invoice");
+      if (codesRes.status !== 200) {
+        return ["inconclusive", `the refusal lists codes, but /api/vat-codes answered ${codesRes.status} so they ` +
+          `could not be compared with the tenant's own`];
+      }
+      const own = rowsOf(codesRes)
+        .map((c) => String(c.code ?? c.vatCode ?? c.id))
+        .filter(Boolean)
+        .sort();
+      const listed = (/tillatte koder:\s*([^."]+)/i.exec(text)?.[1] ?? "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .sort();
+      if (own.length === 0) return ["inconclusive", "the tenant reports no customer-invoice VAT codes to compare"];
+      return listed.join(",") === own.join(",")
+        ? ["ok", `400 "${detailOf(r)}" — and the listed codes match the tenant's own [${own.join(", ")}]`]
+        : [
+            "drift",
+            `the refusal lists [${listed.join(", ")}] but the tenant's customer-invoice codes are ` +
+              `[${own.join(", ")}] — the message is not reporting this tenant's set`,
+          ];
     },
   },
 ];
@@ -316,9 +387,10 @@ async function anyCustomerId() {
 }
 
 function today() {
-  // The spec wants YYYY-MM-DD; derived from the API's own clock would be better, but issueDate is not the
-  // claim under test in any case and a fixed valid date keeps the probe deterministic.
-  return "2026-01-02";
+  // Derived, not pinned. A fixed 2026-01-02 would drift out of `/api/orders`' default window once the year
+  // rolled over, and then a probe order created by accident would be invisible to the count check that is
+  // supposed to catch exactly that. The snapshot also asks for an explicit wide range for the same reason.
+  return new Date().toISOString().slice(0, 10);
 }
 
 async function main() {

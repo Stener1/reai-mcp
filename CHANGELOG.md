@@ -37,6 +37,29 @@ All notable changes to `reai-mcp`. Format loosely follows
     then finally the claim. Required-field sets now come from the pinned spec and a test asserts it.
   - Goes through the same tenant guard as every other writing script — verified refusing 2634 — plus the runtime
     protected-tenant refusal, since sending writes is this file's whole method.
+  - **Codex found eight defects, two P1, and the first was the same hazard PR #130 existed to fix, reintroduced
+    one file later by forgetting a line.** `requireTokenReachesTenant` was imported and never called. A token
+    scoped to a single tenant ignores `X-Tenant-Id`, so `--tenant 2783` on a token reaching only 2634 satisfies
+    both number-based guards while every write lands in 2634. `write-guard.test.mjs`'s coverage check only
+    required the top-level *allowlist* call, so nothing caught it; this file's own test now requires the
+    reachability call, and requires it before the first write.
+  - The other P1: three cases returned **drift** when a probe was ACCEPTED. Drift tells the operator to correct a
+    note; an accepted probe means a record now exists, and the run's `0 SAFETY` line would have been false. All
+    three say `safety` now, and a test walks each case's success branch to require it.
+  - Six more, each real: the `daysUntilDue` case re-issued its request purely to quote the detail, giving one
+    more chance to create an order and no check on the result — it now validates the response the loop already
+    saw, and reports drift if field errors appear or the wording changes. The probe date was pinned to
+    `2026-01-02`, which would fall outside `/api/orders`' default window once the year rolled over and hide a
+    stray record from the very count check meant to catch it — derived now, and the order snapshot asks for an
+    explicit wide range. The offer probe hard-coded its required-field set while the docs claimed the spec
+    supplied it — it now compares against `requiredFor("/api/offers")` and reports inconclusive if the spec gains
+    a field it does not send, rather than false drift in the line validation. The VAT case accepted any text
+    containing two Norwegian phrases, so a hard-coded list would have passed — it now fetches
+    `/api/vat-codes?usage=customer-invoice` and compares (`listed codes match the tenant's own [0]`). The
+    remaining half of `offer-lines-stricter` — that `vatCode` is optional on an order line — cannot be shown
+    without a write that SUCCEEDS, so it is declared unverified in the case's own output rather than folded into
+    an OK, and a test requires that. And the CHANGELOG credited the `days-until-due-mandatory` note with
+    documenting the bare `"Failed to read request"` when the note never mentioned it; the note now does.
 
 - **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
   guard instead of trusting it, before starting work that writes.
