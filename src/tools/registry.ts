@@ -788,7 +788,7 @@ export type ResponseConfirmation = {
 export function confirmAgainstResponse(
   sent: Readonly<Record<string, unknown>>,
   response: unknown,
-  opts: { readonly skip?: readonly string[] } = {},
+  opts: { readonly skip?: readonly string[]; readonly wholeRecord?: boolean } = {},
 ): ResponseConfirmation {
   const skip = opts.skip ?? [];
   const after =
@@ -809,25 +809,56 @@ export function confirmAgainstResponse(
     }
     return JSON.stringify(v) ?? "null";
   };
+  // 3 and "3" are the same value differently spelled, and this backend coerces freely. But the first version of
+  // this accepted far too much: measured, `"0150"` matched `150` (a postal code losing its leading zero — the
+  // exact field #140 recorded being wiped on this very endpoint), `"0x10"` matched 16, and two different
+  // eighteen-digit ids matched each other through float64. So a string only counts as numeric when it is the
+  // CANONICAL spelling of that number and the number survives the round trip.
+  const numeric = (v: unknown): number | undefined => {
+    if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+    if (typeof v !== "string") return undefined;
+    const t = v.trim();
+    if (t === "") return undefined;
+    // A PLAIN DECIMAL only. This rejects the three classes that made the first version report false
+    // confirmations, while still accepting the spellings that genuinely mean the same number:
+    //
+    //   "0150" vs 150   leading zero — an identifier, not a quantity. #140 recorded a postalCode
+    //                   being wiped on this very endpoint, so calling those equal is the worst case.
+    //   "1e3", "0x10"   alternative notations
+    //   18-digit ids    two different ones compare equal through float64
+    //
+    // "3.0" against 3 does pass, which it should: same number, and no information is lost either way.
+    if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(t)) return undefined;
+    const n = Number(t);
+    if (!Number.isFinite(n) || Math.abs(n) > Number.MAX_SAFE_INTEGER) return undefined;
+    return n;
+  };
   const same = (a: unknown, b: unknown): boolean => {
-    if (typeof a === "string" && typeof b === "string") return a.trim() === b.trim();
     // The API stores an empty string back as null. That is it doing what was asked, not refusing it.
     if (a === "" && b === null) return true;
     if (b === "" && a === null) return true;
-    // 3 and "3" are the same value differently spelled, and this backend coerces freely. Warning about the
-    // spelling of a payroll quantity would be noise on the one report where noise is most expensive.
-    const numeric = (v: unknown) =>
-      typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined;
+    // Before the both-strings comparison, or "3.0" against "3" contradicted while 3 against "3" did not.
     const [na, nb] = [numeric(a), numeric(b)];
     if (na !== undefined && nb !== undefined) return na === nb;
+    if (typeof a === "string" && typeof b === "string") return a.trim() === b.trim();
     return stable(a) === stable(b);
   };
   for (const [field, value] of Object.entries(sent)) {
     if (skip.includes(field) || value === undefined) continue;
-    if (after === undefined || !Object.hasOwn(after, field) || after[field] === null) {
-      // A null stored against a null sent IS an answer: both mean absent, and the outcome is what was asked.
-      if (after !== undefined && Object.hasOwn(after, field) && after[field] === null && (value === null || value === "")) {
+    if (after === undefined || !Object.hasOwn(after, field)) {
+      result.unanswered.push(field);
+      continue;
+    }
+    if (after[field] === null) {
+      if (value === null || value === "") {
+        // Both mean absent, so the outcome is what was asked for.
         result.confirmed.push(field);
+      } else if (opts.wholeRecord) {
+        // On a response that carries the RECORD, a null is an answer: the API discarded the value. Without
+        // this the shared helper was strictly weaker than reai_update_creditor, which distinguishes "could not
+        // be confirmed" from "this write CARRIED a value and the API did not keep it" — and the softer wording
+        // is the one that would be chosen for the order-comment and creditor cases this exists for.
+        result.contradicted.push({ field, sent: value, stored: null });
       } else {
         result.unanswered.push(field);
       }

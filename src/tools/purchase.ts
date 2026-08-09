@@ -931,9 +931,12 @@ const setSupplierAddress = defineTool({
       body: merged,
       tenantId: resolved,
     });
-    // Against the response. `res.data` may be a plain string here, which the helper reports as unanswered —
-    // honest, and better than a sentence asserting the parts were stored when nothing checked.
-    const confirmation = confirmAgainstResponse(Object.fromEntries(given.map((f) => [f, merged[f]])), res.data);
+    // Nested, and `merged` rather than the caller's subset — see the note in reai_set_customer_address. The
+    // documented response is SupplierRes with the address at `.address`, so comparing the top level marked
+    // every field unanswered always.
+    const confirmation = confirmAgainstResponse(merged, readableRecord(res.data, "address").record, {
+      wholeRecord: true,
+    });
     const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? "Supplier address updated.", {
       note:

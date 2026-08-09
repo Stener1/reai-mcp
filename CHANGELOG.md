@@ -82,29 +82,60 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **The remaining four tools that reported an outcome from what they SENT, fixed together rather than one at a
   time.** `reai_update_salary_line`, `reai_update_share_investment`, `reai_set_customer_address` and
-  `reai_set_supplier_address`. Doing them separately is what produced the last two PRs, in each of which the
-  fix repeated a mistake an earlier fix had already corrected — the `given` gate that blinds the check to a
-  carried value, and the `""`/`null` comparison that flags a successful clear. So the semantics now live in one
-  place, `confirmAgainstResponse` in `src/tools/registry.ts`, with the measured rules written down where they
-  cannot be re-derived differently per tool:
-  - a field the response OMITS or returns as `null` is UNANSWERED, not confirmed-absent;
+  `reai_set_supplier_address`. Doing them separately is what produced the previous two PRs, in each of which the
+  fix repeated a mistake an earlier fix had already corrected. The semantics now live in one place,
+  `confirmAgainstResponse` in `src/tools/registry.ts`, with the measured rules written down:
+  - a field the response OMITS is UNANSWERED; a field it returns as `null` is a CONTRADICTION when the response
+    carries the whole record, because there a null means the API discarded the value. Collapsing those two made
+    the shared helper strictly weaker than the `reai_update_creditor` site it generalises, which distinguishes
+    them by name;
   - `""` sent and `null` stored is CONFIRMED — the API normalising, not refusing;
-  - strings compare trimmed, because a sibling shipped once testing only `=== ""`.
+  - comparison is key-order stable, recursively, or an object-valued field would warn on every write purely
+    because the API orders its keys differently;
+  - a number and its PLAIN-DECIMAL spelling are equal, and nothing else is. The first version accepted far too
+    much: `"0150"` matched `150` — a postal code losing its leading zero, which is the exact harm #140 measured
+    on the address endpoint — `"0x10"` matched `16`, and two different eighteen-digit ids matched each other
+    through float64.
 - **`reai_update_salary_line` was the one whose numbers matter.** It said *"Line N in run M is now
-  `${args.quantity}` × `${args.rate}`"* — payroll figures quoted from the request. The stored line is nested at
-  `employees[].wageSpecs[]` and findable by id, so it now reports what the record says, warns when that differs
-  from what was sent, and says plainly *"that is what was SENT, not what is stored"* when the response does not
-  carry the line.
-- **Both address tools answer with a bare string sometimes**, which the helper reports as unanswered rather
-  than letting a sentence assert the parts were stored. That is the honest outcome for a response that cannot
-  confirm anything.
-- **And a tripwire, because the real failure was serial rediscovery.** Thirteen tools GET then PUT/PATCH.
-  `test/confirm-against-response.test.mjs` requires every one to be classified — either in
-  `VERIFIES_AGAINST_RESPONSE`, naming the test that drives a DISAGREEING response and proves it says so, or in
-  `UNVERIFIED` with why nobody has checked it. Ten are proven; three are named as unproven rather than assumed
-  fine (`reai_update_loan`, `reai_set_employee_bank_account`, `reai_add_employment_line`). A fourteenth merge
-  tool fails the suite until someone decides which side it belongs on, and a stale entry after a rename fails
-  too. Mutation-tested both ways.
+  `${args.quantity}` × `${args.rate}`"* — payroll quoted from the request. It reports the stored line now, found
+  at `employees[].wageSpecs[]`, and warns when that differs from what was sent.
+- **Both address tools were comparing the parts to the wrong LEVEL of the response, so the check could never
+  fire.** `PUT /api/customers/{id}/address` answers with `CustomerRes`, where the parts are nested at
+  `.address`. Comparing the top level marked every field unanswered ALWAYS: the contradiction branch was
+  unreachable and a false *"could not be confirmed"* was printed under a response that visibly confirmed the
+  write. **And the tests passed only because they fed a bare address object — a shape the document does not
+  describe and nothing here measures.** An earlier version of this entry justified the behaviour by claiming
+  *"both address tools answer with a bare string sometimes"*. There is no measurement of that anywhere in this
+  repository; I invented it to explain what the bug produced. Retracted, here and in the code comments and the
+  test that repeated it.
+- **Three of the four re-introduced the `given` gate** — one of the two mistakes this entry names as the reason
+  for consolidating. They passed only the caller's own fields, so the CARRIED fields, which are the entire
+  reason these tools read first, were never checked. On the address tools that excluded exactly the field #140
+  measured being wiped. All four now pass `merged`. Worth stating plainly: a shared helper does not prevent
+  this, because the gate lives at the call site.
+- **And a live defect the review found while checking my classification of it**: `reai_update_loan` stated
+  *"relatedParty was set to true"* from `merged`, while its own create sibling has always warned off the STORED
+  value because the API is measured not to infer it and to store `false`. Related-party status drives note
+  disclosure. It reports the stored value now, and warns when the flag did not take.
+
+- **The tripwire, and it was prose rather than tests when first written.** Thirteen tools GET then PUT/PATCH,
+  and each must be classified — either in `VERIFIES_AGAINST_RESPONSE`, naming the file and test title that
+  drive a DISAGREEING response, or in `UNVERIFIED` with why nobody has checked it. The first version read only
+  the keys, so a review proved that repointing an entry at `test/no-such-file.test.mjs` and promoting a tool
+  with an invented test name both passed. The named file must now exist and contain that title; both
+  fabrications fail. Eleven are proven, two are named as unproven.
+  - One of those classifications was itself wrong, which is the error class the list exists to prevent
+    occurring inside the list: `reai_set_employee_bank_account` was listed as unverified with a reason wrong on
+    both clauses. It is proven twice in `test/employees.test.mjs` and is the strongest example in the repo.
+  - Still not enforced: the population comes from author-written `apiPaths`, so a tool that reads then replaces
+    without declaring the GET escapes both this and `test/merge-tools.test.mjs`, which derives its population
+    the same way. The two are circular.
+  - **Three instances outside the thirteen, found by the review and NOT fixed here**, all invisible for that
+    reason: `reai_set_asset_depreciation` (`src/tools/assets.ts:201`, declared irreversible, echoes
+    `args.depreciationMethod` and `args.usefulLifeInMonths` while `AssetRes` carries both),
+    `reai_rename_warehouse` (`src/tools/warehouses.ts:215`) and `reai_rename_sub_account`
+    (`src/tools/subaccounts.ts:233`) — both echo `args.name` while the response carries `name`.
+    `reai_update_debtor` already shows the correct shape for a rename.
 
 
 - **`reai_update_subscription` reported the arming flags from what it SENT, and silence meant disarmed.** The

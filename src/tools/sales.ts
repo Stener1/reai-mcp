@@ -376,9 +376,21 @@ const setCustomerAddress = defineTool({
       tenantId: resolved,
     });
     const kept = Object.keys(base).filter((k) => !(k in given));
-    // Against the response. `res.data` may be a plain string here, which the helper reports as unanswered —
-    // honest, and better than a sentence asserting the parts were stored when nothing checked.
-    const confirmation = confirmAgainstResponse(given, res.data);
+    // The parts are NESTED in the response. `PUT /api/customers/{id}/address` answers with CustomerRes, where
+    // the address sits at `.address` — so comparing against the top level marked every field "unanswered"
+    // ALWAYS, made the contradiction branch unreachable, and printed a false caveat under a response that
+    // visibly confirmed the write. The GET path in this same handler already reads it nested; the write path
+    // did not. An earlier version of this comment claimed the API "may answer with a plain string" — nothing
+    // in this repository measures that, and it was invented to explain the behaviour the bug produced.
+    //
+    // And `merged`, not `given`: the carried parts are the whole reason this reads first, and #140's measured
+    // harm on this endpoint was a CARRIED postalCode being wiped. Checking only the caller's own fields would
+    // have excluded exactly the field that was lost — the `given` gate this repo has now been bitten by twice.
+    const confirmation = confirmAgainstResponse(
+      merged,
+      readableRecord(res.data, kind === "delivery" ? "deliveryAddress" : "address").record,
+      { wholeRecord: true },
+    );
     const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? `${kind ?? "postal"} address updated.`, {
       note:

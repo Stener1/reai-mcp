@@ -603,7 +603,8 @@ const updateInvestment = defineTool({
     // checked instead of caveated.
     notes.push(
       ...describeConfirmation(
-        confirmAgainstResponse(Object.fromEntries(given.map((f) => [f, merged[f]])), res.data),
+        // `merged`, not the caller's subset: the carried fields are what the merge exists to protect.
+        confirmAgainstResponse(merged, res.data, { wholeRecord: true }),
         `share investment ${id}`,
       ),
     );

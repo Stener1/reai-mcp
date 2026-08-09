@@ -77,12 +77,22 @@ test("key order is not a disagreement, and neither is the spelling of a number",
   assert.deepEqual(confirmAgainstResponse({ a: { x: 1, y: 2 } }, { a: { y: 2, x: 1 } }).confirmed, ["a"]);
   assert.deepEqual(confirmAgainstResponse({ a: { p: { m: 1, n: 2 } } }, { a: { p: { n: 2, m: 1 } } }).confirmed, ["a"]);
   assert.deepEqual(confirmAgainstResponse({ a: 5 }, { a: "5" }).confirmed, ["a"]);
-  assert.deepEqual(confirmAgainstResponse({ a: "3.0" }, { a: 3 }).confirmed, ["a"]);
+  assert.deepEqual(confirmAgainstResponse({ a: "3.0" }, { a: 3 }).confirmed, ["a"], "same number, no information lost");
   // And a real difference still is one, in both shapes.
   assert.equal(confirmAgainstResponse({ a: 5 }, { a: 6 }).contradicted.length, 1);
   assert.equal(confirmAgainstResponse({ a: { x: 1 } }, { a: { x: 2 } }).contradicted.length, 1);
   // A non-numeric string must not be coerced into agreeing with a number.
   assert.equal(confirmAgainstResponse({ a: "abc" }, { a: 0 }).contradicted.length, 1);
+  // The three classes the first version got wrong. A leading zero is an identifier, not a quantity — and a
+  // postalCode losing one is the exact harm #140 measured on the address endpoint.
+  assert.equal(confirmAgainstResponse({ postalCode: "0150" }, { postalCode: 150 }).contradicted.length, 1);
+  assert.equal(confirmAgainstResponse({ a: "1e3" }, { a: 1000 }).contradicted.length, 1);
+  assert.equal(confirmAgainstResponse({ a: "0x10" }, { a: 16 }).contradicted.length, 1);
+  // Two different eighteen-digit ids compared equal through float64.
+  assert.equal(
+    confirmAgainstResponse({ a: "123456789012345678" }, { a: 123456789012345679 }).contradicted.length,
+    1,
+  );
 });
 
 test("skip is for fields whose shape differs between request and response", () => {
@@ -132,25 +142,63 @@ test("reai_update_share_investment checks its fields against the response", asyn
   assert.doesNotMatch(ok.text, /WARNING/);
 });
 
-test("reai_set_customer_address checks the parts against the response", async () => {
-  const addr = (over = {}) => ({ addressPart1: "Gata 1", city: "Oslo", postalCode: "0150", countryCode: "NO", ...over });
-  // The address is NESTED under `address` on the customer record; the PUT answers with the address itself.
-  const { text } = await run("reai_set_customer_address", { id: 5, city: "Bergen" }, { id: 5, address: addr() }, addr({ city: "Oslo" }));
+/**
+ * The address responses are DOCUMENTED as CustomerRes / SupplierRes with the parts nested at `.address` (or
+ * `.deliveryAddress`), and the first version of these tests fed a bare address object instead — a shape the
+ * document does not describe and nothing in this repo measures. They passed against that fiction while the
+ * tool compared the parts to the top level of a customer record, so the contradiction branch was unreachable
+ * and every successful write printed "could not be confirmed". Derived from the schema now.
+ */
+const addressParts = (over = {}) => ({
+  addressPart1: "Gata 1",
+  city: "Oslo",
+  postalCode: "0150",
+  countryCode: "NO",
+  ...over,
+});
+const customerRecord = (over = {}) => ({ id: 5, name: "ZZ Kunde", address: addressParts(over) });
+const supplierRecord = (over = {}) => ({ id: 5, name: "ZZ Leverandør", address: addressParts(over) });
+
+test("reai_set_customer_address checks the parts against the nested response", async () => {
+  const { text } = await run(
+    "reai_set_customer_address",
+    { id: 5, city: "Bergen" },
+    customerRecord(),
+    customerRecord({ city: "Oslo" }),
+  );
   assert.match(text, /WARNING: city \(sent "Bergen", the address came back with "Oslo"\)/);
 });
 
-test("reai_set_customer_address reports a string response as unconfirmed rather than asserting success", async () => {
-  // The API answers some of these with a bare string, and asserting the parts were stored would be a claim
-  // nothing checked.
-  const addr = { addressPart1: "Gata 1", city: "Oslo", postalCode: "0150", countryCode: "NO" };
-  const { text } = await run("reai_set_customer_address", { id: 5, city: "Bergen" }, { id: 5, address: addr }, "Address updated.");
-  assert.match(text, /did not answer for city/);
-  assert.match(text, /could not be confirmed/);
+test("reai_set_customer_address confirms silently when the nested response agrees", async () => {
+  const { text } = await run(
+    "reai_set_customer_address",
+    { id: 5, city: "Bergen" },
+    customerRecord(),
+    customerRecord({ city: "Bergen" }),
+  );
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /could not be confirmed/, "the response confirms it — saying otherwise was the bug");
 });
 
-test("reai_set_supplier_address checks the parts against the response", async () => {
-  const addr = (over = {}) => ({ addressPart1: "Gata 1", city: "Oslo", postalCode: "0150", countryCode: "NO", ...over });
-  const { text } = await run("reai_set_supplier_address", { id: 5, city: "Bergen" }, { id: 5, address: addr() }, addr({ city: "Oslo" }));
+test("reai_set_customer_address checks the CARRIED parts, not only what the caller named", async () => {
+  // #140's measured harm on this very endpoint was a carried postalCode being wiped. A check keyed on the
+  // caller's own fields would have excluded exactly the field that was lost.
+  const { text } = await run(
+    "reai_set_customer_address",
+    { id: 5, city: "Bergen" },
+    customerRecord(),
+    customerRecord({ city: "Bergen", postalCode: null }),
+  );
+  assert.match(text, /WARNING: postalCode \(sent "0150", the address came back with null\)/);
+});
+
+test("reai_set_supplier_address checks the parts against the nested response", async () => {
+  const { text } = await run(
+    "reai_set_supplier_address",
+    { id: 5, city: "Bergen" },
+    supplierRecord(),
+    supplierRecord({ city: "Oslo" }),
+  );
   assert.match(text, /WARNING: city \(sent "Bergen", the address came back with "Oslo"\)/);
 });
 
@@ -164,26 +212,29 @@ test("reai_set_supplier_address checks the parts against the response", async ()
  * requires the tool to say so. The test is named, so the claim is checkable rather than asserted.
  */
 const VERIFIES_AGAINST_RESPONSE = {
-  reai_update_salary_line: "this file: reports the amounts from the response, not from args",
-  reai_update_share_investment: "this file: checks its fields against the response",
-  reai_set_customer_address: "this file: checks the parts against the response",
-  reai_set_supplier_address: "this file: checks the parts against the response",
-  reai_update_creditor: "test/loans.test.mjs: a rename whose replacement drops the carried account …",
-  reai_update_company_bank: "test/loans.test.mjs: does not call a bodyless response an empty account",
-  reai_update_subscription: "test/subscriptions.test.mjs: a CARRIED arming value the response contradicts …",
-  reai_update_order: "test/update-order.test.mjs: a value stored differently from what was sent is flagged",
-  reai_update_offer: "test/update-offer.test.mjs: a value stored differently from what was sent is flagged",
-  reai_update_agreement: "test/agreements.test.mjs: a value the API silently did not store is reported",
+  reai_update_salary_line: ["test/confirm-against-response.test.mjs", "reports the amounts from the response, not from args"],
+  reai_update_share_investment: ["test/confirm-against-response.test.mjs", "checks its fields against the response"],
+  reai_set_customer_address: ["test/confirm-against-response.test.mjs", "checks the parts against the nested response"],
+  reai_set_supplier_address: ["test/confirm-against-response.test.mjs", "checks the parts against the nested response"],
+  reai_update_creditor: ["test/loans.test.mjs", "a rename whose replacement drops the carried account"],
+  reai_update_company_bank: ["test/loans.test.mjs", "does not call a bodyless response an empty account"],
+  reai_update_subscription: ["test/subscriptions.test.mjs", "a CARRIED arming value the response contradicts"],
+  reai_update_order: ["test/update-order.test.mjs", "a value stored differently from what was sent is flagged"],
+  reai_update_offer: ["test/update-offer.test.mjs", "a value stored differently from what was sent is flagged"],
+  reai_update_agreement: ["test/agreements.test.mjs", "a value the API silently did not store is reported"],
+  // Proven twice, and the strongest example in the repo — it compares digit-normalised and refuses. An earlier
+  // version of this file listed it as UNVERIFIED with a reason that was wrong on both clauses, which is the
+  // error class this whole list exists to prevent, occurring inside the list.
+  reai_set_employee_bank_account: ["test/employees.test.mjs", "a stored account that does not match what was sent is flagged"],
 };
 
 /**
- * Not proven, with the reason. Each of these still reports something, so being here is a statement that
- * nobody has checked it against a disagreeing response — not that it is fine.
+ * Not proven, with the reason. Being here is a statement that nobody has driven this tool with a disagreeing
+ * response — not that it is fine.
  */
 const UNVERIFIED = {
-  reai_update_loan: "verifies the stored relatedParty and the interest accounts off res.data, but no test drives a disagreement",
-  reai_set_employee_bank_account: "compares digit-normalised before/after and re-reads — the best in the repo, but the comparison is untested against a disagreement",
-  reai_add_employment_line: "reports the line it added from args; no per-field outcome claim was reviewed",
+  reai_update_loan: "reads missingInterestAccounts off the response, and now reports the stored relatedParty — but no test drives a disagreement",
+  reai_add_employment_line: "checks the line COUNT against the response and that is tested; the per-field content of the added line is not",
 };
 
 test("every merge tool is classified, so a new one cannot slip in unexamined", async () => {
@@ -194,6 +245,22 @@ test("every merge tool is classified, so a new one cannot slip in unexamined", a
     })
     .map((t) => t.name)
     .sort();
+
+  // The naming has to be CHECKED, or the list is prose. Verified: repointing an entry at
+  // "test/no-such-file.test.mjs" and promoting a tool with an invented test name both passed, because only
+  // Object.keys was ever read. Now the file must exist and must contain a test with that title.
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const [name, [file, title]] of Object.entries(VERIFIES_AGAINST_RESPONSE)) {
+    assert.ok(existsSync(join(repo, file)), `${name} names ${file}, which does not exist`);
+    const body = readFileSync(join(repo, file), "utf8");
+    assert.ok(
+      body.includes(title),
+      `${name} claims to be proven by a test titled "${title}" in ${file}, and no such title is there`,
+    );
+  }
 
   const classified = new Set([...Object.keys(VERIFIES_AGAINST_RESPONSE), ...Object.keys(UNVERIFIED)]);
   const unclassified = merge.filter((n) => !classified.has(n));
@@ -211,7 +278,7 @@ test("every merge tool is classified, so a new one cannot slip in unexamined", a
   // A floor, so deleting entries cannot quietly shrink what this covers.
   assert.equal(merge.length, 13, `the merge-tool count moved to ${merge.length}; classify the difference`);
   assert.ok(
-    Object.keys(VERIFIES_AGAINST_RESPONSE).length >= 10,
+    Object.keys(VERIFIES_AGAINST_RESPONSE).length >= 11,
     `${Object.keys(VERIFIES_AGAINST_RESPONSE).length} of ${merge.length} verify; that number should not fall`,
   );
 });
