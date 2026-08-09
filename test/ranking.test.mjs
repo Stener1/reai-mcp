@@ -279,7 +279,8 @@ test("an empty query still returns something", () => {
  * GET /api/vouchers scored 21 for "periodisering".
  */
 test("a hyphenated term matches as a token when every part is present", () => {
-  const strength = (haystack, term) => matchStrength(haystack, fieldTokens(haystack), term);
+  // The fourth argument is the opt-in, and it is the point rather than a detail: see the test below.
+  const strength = (haystack, term) => matchStrength(haystack, fieldTokens(haystack), term, true);
   // The two that were worst hit, and the reason: "vat" is three characters, so the >= 4 prefix branch that
   // rescued "opening-balances" to 0.6 could not fire at all and they fell to the 0.2 substring floor.
   assert.equal(strength("/api/vat-returns", "vat-returns"), 1);
@@ -303,6 +304,12 @@ test("a hyphenated term matches as a token when every part is present", () => {
   // adds a singular for every plural, so "voucher" is a real token of /api/vouchers and always matched
   // exactly — the inflection branch was never involved.
   assert.equal(strength("/api/vouchers", "voucher"), 1);
+  // And WITHOUT the opt-in, a hyphenated term scores exactly what it always did. Asserted so the flag cannot
+  // quietly become the default, which is the form of this change that broke three ordinary synonyms.
+  const weak = (haystack, term) => matchStrength(haystack, fieldTokens(haystack), term);
+  assert.equal(weak("/api/vat-returns", "vat-returns"), 0.2);
+  assert.equal(weak("/api/opening-balances", "opening-balances"), 0.6);
+  assert.equal(weak("/api/company-banks", "bank-transactions"), 0.6);
   // And a hyphenated PREFIX of a path scores 1 too, which follows from the rule as defined rather than
   // contradicting it: both parts of "chart-of" are present. Recorded because it shows the rule is
   // all-parts-present and not adjacency — no term in the table has this shape, but the next one might.
@@ -314,10 +321,76 @@ test("a query that names a resource outranks a synonym pointing elsewhere", () =
   // named family is reachable at all, which it was not — zero vat-return operations appeared in the top ten.
   const top = (q, n = 3) => searchOperations({ query: q, limit: n }).map((h) => `${h.method} ${h.path}`);
   assert.match(top("periodisering av mva-melding")[0], /\/api\/vat-returns/);
-  assert.match(top("periodisering skattemelding")[0], /\/api\/tax-returns/);
+  // "periodisering skattemelding", the second case Codex reported, is NOT fixed and is asserted as it stands.
+  // `mva-melding` is a PHRASE_SYNONYMS entry and gets exact-compound scoring; `skattemelding` is an ordinary
+  // TERM_SYNONYMS key mapping to "tax-returns", and ordinary synonyms are deliberately excluded from that
+  // scoring — see the test below for the three operations that broke when they were not. Promoting
+  // `skattemelding` to a phrase entry is the obvious follow-up and is deliberately not done here: the
+  // tax-return family contains POST /api/tax-returns/{year}/submit, which transmits to Skatteetaten, and
+  // boosting a family with an external send in it needs its own measurement rather than a line in this PR.
+  assert.match(top("periodisering skattemelding")[0], /\/api\/vouchers/);
   // And the synonym still works on its own, so this is a fix rather than a removal: `periodisering` alone
   // has no resource of its own in this API and an accrual is booked as a voucher.
   assert.match(top("periodisering")[0], /\/api\/vouchers/);
+});
+
+test("an ordinary hyphenated synonym is not promoted to an exact compound", () => {
+  // Codex's P1 on PR #120. Applying exact-compound scoring to every hyphenated term promoted the ordinary
+  // TERM_SYNONYMS values as well — 38 keys have one — and they were written and tuned under the old scoring.
+  // Three moved onto the wrong side-effecting operation, and these are the measured cases:
+  //
+  //   krediter -> credit-note   matched .../manual-credit-note-applications at 1, which APPLIES an existing
+  //                             credit note, while POST /api/invoices/{id}/credit — the one that creates the
+  //                             requested one — has no "note" segment and scored 0.
+  //   diett -> per-diem         promoted approving an existing expense claim over creating one.
+  const top = (q) => searchOperations({ query: q, limit: 2 }).map((h) => `${h.method} ${h.path}`);
+  for (const query of ["krediter faktura", "kreditere faktura", "krediter"]) {
+    assert.equal(top(query)[0], "POST /api/invoices/{id}/credit", `"${query}" -> ${top(query).join(", ")}`);
+  }
+  assert.equal(top("opprett diett")[0], "POST /api/expenses");
+});
+
+test("reading a-melding feedback is not answered with the operation that files it", () => {
+  // Codex's other P1 on PR #120, and the sharpest one: the filing rule fired unconditionally, so
+  // "a-melding raw feedback" — a READ — ranked POST /api/salary-payments/{id}/complete, which files payroll
+  // with Skatteetaten. Handled by rule ORDER: the feedback phrase is consumed first.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const query of [
+    "a-melding raw feedback",
+    "get a-melding feedback",
+    "list a-melding feedback",
+    "a-melding feedback",
+    "amelding feedback raw",
+    "tilbakemelding pa a-melding",
+    "feedback for ameldingen",
+  ]) {
+    const hit = top(query);
+    assert.equal(hit.method, "GET", `"${query}" ranked ${hit.method} ${hit.path} — a read must not file anything`);
+    assert.equal(hit.path, "/amelding/{id}/feedback-raw", `"${query}" -> ${hit.path}`);
+  }
+  // And the bare filing query still finds the filing, so this is a split rather than a removal.
+  assert.equal(top("a-melding").path, "/api/salary-payments/{id}/complete");
+
+  // A READ VERB keeps it a read. "vis amelding", "list amelding" and "hent amelding" answered with the
+  // filing POST on `main` too — a pre-existing defect that no test caught because no sweep had crossed a read
+  // verb with this phrase — and "apne a-melding" was about to join them. Asking to OPEN or SHOW something
+  // must never file it.
+  for (const query of [
+    "vis amelding",
+    "list amelding",
+    "hent amelding",
+    "apne amelding",
+    "apne a-melding",
+    "se ameldingen",
+    "get a-melding",
+  ]) {
+    const hit = top(query);
+    assert.equal(hit.method, "GET", `"${query}" ranked ${hit.method} ${hit.path} first`);
+  }
+  // But a verb that states filing intent still reaches the filing.
+  for (const query of ["lever amelding", "send amelding"]) {
+    assert.equal(top(query).path, "/api/salary-payments/{id}/complete", `"${query}" -> ${top(query).path}`);
+  }
 });
 
 test("a bank account, a bank transaction and a bank reconciliation are three different things", () => {
@@ -339,27 +412,49 @@ test("a bank account, a bank transaction and a bank reconciliation are three dif
   for (const query of ["delete bank transactions", "slett bank transactions"]) {
     assert.equal(top(query)[0], "GET /api/bank-transactions/{id}", `"${query}" -> ${top(query)[0]}`);
   }
-  // The manual reconciliation is a THIRD resource and keeps its own operations: the phrase rule for
-  // "bank reconciliations" matched inside "manual bank reconciliations" until it was given a lookbehind.
-  for (const query of ["manual bank reconciliations", "vis manual bank reconciliations"]) {
+  // A bank account modified by another resource noun keeps that noun. The bank-account phrase matched inside
+  // the longer phrase and consumed the words the transaction rule needed, so "bank account transactions"
+  // answered GET /api/company-banks — Codex, PR #120. Both word orders, because both are natural English.
+  for (const query of [
+    "bank account transactions",
+    "transactions between bank accounts",
+    "transactions on bank accounts",
+    "delete bank account transactions",
+  ]) {
+    assert.match(top(query)[0], /\/api\/bank-transactions/, `"${query}" -> ${top(query)[0]}`);
+  }
+
+  // The manual reconciliation is a THIRD resource and keeps its own operations. Claimed by an earlier, more
+  // specific rule rather than excluded by a lookbehind: the lookbehind matched exactly one whitespace
+  // character while the phrase it guarded accepted any run, so two spaces or a tab slipped past it while the
+  // single-space form routed correctly. Separators and the Norwegian spellings are all covered here.
+  for (const query of [
+    "manual bank reconciliations",
+    "vis manual bank reconciliations",
+    "list manual  bank reconciliation",
+    "list manual\tbank reconciliation",
+    "list manual-bank reconciliation",
+    "manuelle bank reconciliations",
+    "manuell bank reconciliation",
+  ]) {
     assert.match(top(query)[0], /\/api\/manual-reconciliations/, `"${query}" -> ${top(query)[0]}`);
   }
 });
 
-test("the a-melding still finds the filing, with room to spare", () => {
-  // The property is asserted in discovery-heldout.test.mjs; what is pinned here is the MARGIN, because the
-  // hyphen fix briefly inverted it. Once "salary-payments" scored 1 against the whole family, the collection
-  // overtook POST /api/salary-payments/{id}/complete, and the phrase replacement had to name the nested
-  // operation explicitly to say which one it meant.
+test("the a-melding filing cannot be overtaken by the collection", () => {
+  // This replaces a test that asserted a MARGIN of at least a tenth of the winning score. The margin was the
+  // right worry and the wrong instrument: with the term "salary-payments-complete" the collection has no
+  // "complete" segment, so an all-or-nothing hyphenated term scores it 0 and it does not appear at all. That
+  // is what is asserted now, because it is the actual guarantee.
   //
-  // On the old scoring this led by 0.28 points (26.12 to 25.84) — a safety property deciding which document
-  // gets filed with Skatteetaten, resting on a quarter of a point. It is a wider gap now, and this test fails
-  // if it narrows to less than a tenth of the winning score.
-  const hits = searchOperations({ query: "a-melding", limit: 3 });
-  assert.equal(`${hits[0].method} ${hits[0].path}`, "POST /api/salary-payments/{id}/complete");
-  const margin = hits[0].score - hits[1].score;
+  // Why it needed guarding: on the OLD scoring the filing led the collection by 0.28 points (26.12 to 25.84),
+  // and the hyphen fix inverted it outright, putting GET /api/salary-payments above the operation that files
+  // payroll with Skatteetaten. A property deciding which document reaches a tax authority should not rest on
+  // a quarter of a point.
+  const hits = searchOperations({ query: "a-melding", limit: 5 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(hits[0], "POST /api/salary-payments/{id}/complete");
   assert.ok(
-    margin > hits[0].score * 0.1,
-    `the filing leads by ${margin.toFixed(2)} of ${hits[0].score.toFixed(2)} — too close to call`,
+    !hits.includes("GET /api/salary-payments"),
+    `the collection should not compete for a filing query: ${hits.join(", ")}`,
   );
 });

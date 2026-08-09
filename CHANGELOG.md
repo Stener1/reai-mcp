@@ -11,49 +11,60 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **A hyphenated term could never match as a token, so the phrase mappings written to be high-confidence
   were scoring as a fraction of themselves.** `FIELD_TOKENS` splits on the hyphen, so every hyphenated
-  `PHRASE_SYNONYMS` replacement fell through to a partial-credit branch — and unevenly, because whether it
-  got 0.6 or 0.2 depended on whether its first segment happened to be four characters long:
-  `opening-balances` scored 0.6 by luck, `vat-returns` and `vat-codes` scored 0.2 because "vat" is three
-  letters. `PHRASE_WEIGHT = 2.6` was therefore largely illusory for exactly the mappings that exist to
-  override a looser word.
+  replacement fell through to a partial-credit branch — and unevenly, because whether it got 0.6 or 0.2
+  depended on whether its first segment happened to be four characters long: `opening-balances` scored 0.6 by
+  luck, `vat-returns` and `vat-codes` scored 0.2 because "vat" is three letters. `PHRASE_WEIGHT = 2.6` was
+  therefore largely illusory for exactly the mappings that exist to override a looser word.
   - **Found by Codex on PR #118, from the other end.** "periodisering av mva-melding" returned ten voucher
-    operations and *nothing* from the vat-return family, although `mva-melding` names it outright;
-    "periodisering skattemelding" lost the tax-return family the same way. Codex proposed weakening the
-    `periodisering → voucher` synonym. That reading was wrong and the measurement it rested on was right:
-    the synonym was not too strong, the named resource could not score. `POST /api/vat-returns` scored 1.45
-    for "mva-melding" while `GET /api/vouchers` scored 21 for "periodisering". I addressed Codex's other two
-    comments on that PR and missed this one; it was still live on `main`.
-  - A hyphenated term now scores 1 when every one of its parts is a token, and **0 otherwise** — all or
-    nothing. The second half matters as much as the first: letting one fall through to the prefix branch gave
-    `bank-transactions` 0.6 against `/api/company-banks`, because `bank` is a token there and the term starts
-    with it. With write intent narrowing candidates to a single method and `/api/bank-transactions` having no
-    DELETE at all, that fraction was enough to answer **"delete bank transactions" with
-    `DELETE /api/company-banks/{id}`** — an offer to delete a bank account, first result, for a query about
-    transactions. Measured on the branch before the clause existed, so it is a regression this change would
-    have introduced rather than one it inherited.
-  - **"bank accounts" did not reach `/api/company-banks` at all, on `main`.** `bankkonto` got there through
-    compound decomposition, but the spaced English form tokenised into `bank` + `account` and `account` pulled
-    the CHART OF ACCOUNTS: "bank accounts" and "our bank accounts" returned
-    `GET /api/chart-of-accounts/accounts`. A ledger account and a bank account are different things. Each of
-    the three bank resources now asserts its own spaced spelling as a consumed phrase, so the generic
-    `bank → company-banks` synonym cannot override a resource the user named — and `bank reconciliations`
-    reaches `/api/bank-reconciliations` rather than the separate manual one, which needed a negative
-    lookbehind so it would stop hijacking "manual bank reconciliations".
-  - **The a-melding safety property was inverted by the fix and is now stronger than before it.** Once
-    `salary-payments` scored 1 against the whole family, the collection overtook
-    `POST /api/salary-payments/{id}/complete` — the operation that files the payroll report with
-    Skatteetaten. The phrase replacement now names the nested operation explicitly. Worth recording why this
-    is not merely restored: on the old scoring the filing led the collection by **0.28 points** (26.12 to
-    25.84). A property deciding which document gets filed with a tax authority was resting on a quarter of a
-    point, and a test now fails if the margin falls below a tenth of the winning score.
-  - Measured over **3187 queries** — every path segment (spelled hyphenated, spaced and joined), every tag,
-    every tag and domain noun crossed with 20 read and write verbs, plus the phrase surfaces: 42 rank-1
-    changes, **no query lost its answer**, one write newly at rank 1 (`POST /api/vat-returns`, which is the
-    only shape that family has — there is no read endpoint for a VAT return) and **seven writes demoted from
-    rank 1**, including "close annual accounts" and "close chart of accounts", which had both been answering
-    with `POST /api/bank-reconciliations/{bankAccountId}/close`. Ten of the 42 are internal `ztl-bank-*-ctrl`
-    tag strings where neither the old nor the new answer was the internal operation itself; they are noted
-    rather than fixed.
+    operations and *nothing* from the vat-return family, although `mva-melding` names it outright. Codex
+    proposed weakening the `periodisering → voucher` synonym; that reading was wrong and the measurement under
+    it was right — the synonym was not too strong, the named resource could not score. `POST /api/vat-returns`
+    scored **1.45** for "mva-melding" while `GET /api/vouchers` scored **21** for "periodisering". I addressed
+    Codex's other two comments on that PR and missed this one, so it was still live.
+  - A hyphenated term now scores 1 when every part is a token and **0 otherwise** — all or nothing, which
+    stops a term leaking onto a sibling resource. And it is **opt-in, restricted to `PHRASE_SYNONYMS`
+    replacements**. Codex's review of PR #120 caught the first version applying it to every hyphenated term:
+    38 `TERM_SYNONYMS` keys have one, they were tuned under the old scoring, and three moved onto the wrong
+    side-effecting operation — `krediter faktura` went from `POST /api/invoices/{id}/credit`, which creates the
+    credit note asked for, to `.../manual-credit-note-applications`, which applies an existing one, and
+    `opprett diett` went from creating an expense claim to approving one. A phrase replacement is a deliberate
+    statement about the user's words; an ordinary synonym is a hint, and a hint must not name an exact compound.
+  - **"bank accounts" did not reach `/api/company-banks` at all.** `bankkonto` got there through compound
+    decomposition, but the spaced English form tokenised into `bank` + `account` and `account` pulled the
+    CHART OF ACCOUNTS. Each of the three bank resources now claims its own spelling as a consumed phrase, in
+    **rule order** rather than by lookahead — Codex found that a bare `bank accounts?` rule swallowed the noun
+    in "bank account transactions" and "transactions between bank accounts", both of which had correctly
+    reached `/api/bank-transactions` before. `/api/manual-reconciliations` is claimed first for the same
+    reason: the negative lookbehind that guarded it recognised exactly one whitespace character while the
+    phrase it guarded accepted any run, so "manual  bank reconciliation" with two spaces or a tab slipped past
+    while the single-space form routed correctly.
+  - **Reading an a-melding's feedback is no longer answered with the operation that files it.** The filing
+    phrase fired unconditionally, so "a-melding raw feedback" — a read — ranked
+    `POST /api/salary-payments/{id}/complete`, which files payroll with Skatteetaten. Found by Codex. A read
+    verb now keeps it a read as well, which fixes a **pre-existing** defect the same sweep exposed: "vis
+    amelding", "list amelding" and "hent amelding" already returned that POST on `main`, and no test had
+    caught it because no sweep had ever crossed a read verb with this phrase.
+  - **The a-melding filing itself was inverted by the fix and is now protected by construction.** Once
+    `salary-payments` scored 1 against the whole family, `GET /api/salary-payments` overtook the filing. The
+    replacement now names the nested operation, `salary-payments-complete`, and because the collection has no
+    "complete" segment an all-or-nothing term scores it **0** — it cannot compete at all. That replaced an
+    earlier attempt which added a second bare word and was far too strong: a 15,533-query sweep showed 33
+    queries like "amelding lonn" and "apne amelding" moving from a read to the filing. Worth recording that on
+    the **old** scoring the filing led the collection by **0.28 points** (26.12 to 25.84) — a property
+    deciding which document reaches a tax authority was resting on a quarter of a point.
+  - Measured over **16,232 queries**: every path segment spelled hyphenated, spaced and joined; every tag;
+    tags, domain nouns and **every synonym-table key** crossed with 22 read and write verbs. **112 rank-1
+    changes, no query lost its answer, 26 writes demoted from rank 1 and 19 promoted** — one of which is the
+    intended `POST /api/vat-returns` (the only shape that family has) and two of which are "lever a-melding",
+    where filing is what the verb asks for. Crossing the synonym keys was the dimension every earlier sweep in
+    this repository had missed, and it is where all four of Codex's findings lived.
+  - **Not fixed, and stated rather than implied.** "periodisering skattemelding", the second query Codex
+    reported on #118, still returns `/api/vouchers`: `skattemelding` is an ordinary synonym, and promoting it
+    to a phrase entry would boost a family containing `POST /api/tax-returns/{year}/submit`, which transmits
+    to Skatteetaten — that needs its own measurement. Sixteen neutral noun pairs ("a-melding lønn", "a-melding
+    saldo", "a-melding avgift", "a-melding betaling", both spellings and both orders) do now rank the filing
+    where `main` returned the salary-payments collection; the a-melding *is* the payroll report, so it is a
+    defensible reading of those words, but it is a write promoted for a query that states no intent.
 
 ### Added
 
