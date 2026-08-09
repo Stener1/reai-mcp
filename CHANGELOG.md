@@ -188,6 +188,10 @@ All notable changes to `reai-mcp`. Format loosely follows
       carry list fails one; removing the line count fails two; calling every contradiction LOST fails two. The
       `Changed NOTHING` rewording survived until the three existing assertions were tightened — they matched
       the new wording as a substring.
+    - The `ALTERED` note names the **differing key** for a nested record — `deliveryAddress (differs in id:
+      carried 9, stored 12)` — rather than printing two near-identical objects and leaving the agent to diff
+      seven keys. Deliberately not special-cased to ignore `id`: that ReAI renumbers a nested record on write
+      is a hypothesis nothing has measured, and suppressing the note on that guess would hide a real swap.
     - **The first version of these tests asserted `/comment carried over/`**, which matched a one-item list by
       luck for orders and matched *neither* case for offers, where the note names five fields and `comment`
       falls mid-list — so the offer negative assertion was vacuous. They parse the list now.

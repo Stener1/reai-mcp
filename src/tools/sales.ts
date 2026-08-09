@@ -1058,6 +1058,34 @@ function lineCountNote(sent: number, after: unknown, subject: string): string[] 
   ];
 }
 
+/**
+ * How a carried value and the stored one differ, in a form an agent can act on.
+ *
+ * Dumping both sides whole is what review called out, and it is worst exactly where this fires most: a nested
+ * `deliveryAddress` echoed with a fresh `id` puts two near-identical objects in one sentence and leaves the
+ * reader to diff seven keys by eye. Naming the keys that actually differ lets the agent see at a glance that
+ * only `id` moved.
+ *
+ * Deliberately NOT special-cased to ignore `id`: that ReAI renumbers a nested record on write is the review's
+ * hypothesis and mine, and nothing has measured it. Suppressing the note on that guess would hide a real
+ * address swap. Naming the difference is honest either way.
+ */
+function describeDifference(sent: unknown, stored: unknown): string {
+  const isPlain = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  if (isPlain(sent) && isPlain(stored)) {
+    const keys = [...new Set([...Object.keys(sent), ...Object.keys(stored)])].filter(
+      (k) => JSON.stringify(sent[k]) !== JSON.stringify(stored[k]),
+    );
+    if (keys.length > 0) {
+      return `differs in ${keys
+        .map((k) => `${k}: carried ${JSON.stringify(sent[k])}, stored ${JSON.stringify(stored[k])}`)
+        .join(", ")}`;
+    }
+  }
+  return `carried ${JSON.stringify(sent)}, stored ${JSON.stringify(stored)}`;
+}
+
 /** The notes for a carry outcome. Separate from the classification so both tools word it identically. */
 function describeCarry(o: CarryOutcome, subject: string): string[] {
   const notes: string[] = [];
@@ -1075,7 +1103,7 @@ function describeCarry(o: CarryOutcome, subject: string): string[] {
   if (o.altered.length > 0) {
     notes.push(
       `The record came back with a different value for ${o.altered
-        .map((x) => `${x.field} (carried ${JSON.stringify(x.sent)}, stored ${JSON.stringify(x.stored)})`)
+        .map((x) => `${x.field} (${describeDifference(x.sent, x.stored)})`)
         .join("; ")}. This tool sent the stored value back to preserve it, so either the API rewrote it — ` +
         `which it does, for dates, names and nested records — or something else changed it. Not treated as a ` +
         `loss, because a value is there; read it back if it matters.`,

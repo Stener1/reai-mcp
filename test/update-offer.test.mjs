@@ -444,3 +444,25 @@ test("an offer's carried field the API DID keep is still named as carried over",
   assert.doesNotMatch(text, /WARNING/);
   assert.doesNotMatch(text, /NOT confirmed/);
 });
+
+test("a nested carried record that differs names the differing key, not both objects whole", async () => {
+  // reai_update_offer: this is where the ALTERED note fires most — a `deliveryAddress` echoed with a fresh
+  // `id` — and dumping both 7-key objects into one sentence left the agent to diff them by eye.
+  const withAddress = (o = {}) =>
+    offer({ deliveryAddress: { id: 9, addressLine1: "Gata 1", postalCode: "0150", city: "Oslo" }, ...o });
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1
+      ? withAddress()
+      : withAddress({
+          daysUntilDue: 30,
+          deliveryAddress: { id: 12, addressLine1: "Gata 1", postalCode: "0150", city: "Oslo" },
+        }),
+  );
+  // Scoped to the SENTENCE, not the whole text: every response appends the record as JSON, so a bare
+  // /addressLine1/ assertion matched that dump and failed a correct note. Third too-broad regex in these
+  // tests, hence the narrowing.
+  const sentence = /The record came back with a different value for [^\n]*/.exec(text)?.[0] ?? "";
+  assert.match(sentence, /deliveryAddress \(differs in id: carried 9, stored 12\)/);
+  assert.doesNotMatch(sentence, /addressLine1/, "the keys that match are not repeated back");
+  assert.doesNotMatch(text, /LOST unless/, "a renumbered nested record is not a destroyed one");
+});
