@@ -676,3 +676,39 @@ test("the arming flags are read with the coercion-tolerant predicates, not === t
     assert.match(text, /Still armed:[^\n]*sendEhf/, `sendEhf=${JSON.stringify(value)} must count as armed`);
   }
 });
+
+test("the disarm warning fires in the DEFAULT configuration, not only with external sending enabled", async () => {
+  // The tests above pass allowExternalSend: true so the transmit gate cannot pre-empt the reporting under
+  // test — which would hide the question of whether the warning is reachable at all for a real caller. It is:
+  // `sendEhf` is not in BILLING_SUBSTANCE, so a disarm-ONLY edit does not trip assertTransmitAllowed and
+  // reaches the PUT with external sending off. Worth pinning, because a warning that only exists behind the
+  // permission it protects against would be close to useless.
+  const calls = [];
+  const queue = [{ data: armed(), status: 200 }, { data: armed(), status: 200 }];
+  const result = await tool("reai_update_subscription").handler(
+    { id: 4, sendEhf: false, tenantId: 2783 },
+    {
+      client: { request: async (req) => { calls.push(req.method); return queue.shift(); }, deepLink: () => "link" },
+      config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+      session: {},
+    },
+  );
+  assert.deepEqual(calls, ["GET", "PUT"], "a disarm-only edit must not be gated by the transmit check");
+  assert.notEqual(result.isError, true);
+  assert.match(result.content.find((c) => c.type === "text").text, /WARNING: you asked to turn off sendEhf/);
+});
+
+test("disarming is not itself gated as a transmission — you can turn the dangerous thing off", async () => {
+  // The trap #140 had with invoiceEmail: if passing the field escalated regardless of VALUE, a caller could
+  // not disarm without the permission that arming needs. The escalation is value-aware, and that is worth a
+  // test rather than a reading of the code.
+  const paths = tool("reai_update_subscription").apiPaths;
+  for (const field of ["sendEhf", "automaticBillingGeneration"]) {
+    assert.equal(curatedArgsEscalate(paths, { [field]: false }), undefined, `${field}: false must not escalate`);
+    const armedCall = curatedArgsEscalate(paths, { [field]: true });
+    assert.ok(armedCall, `${field}: true must escalate`);
+    assert.equal(armedCall.transmits, true);
+  }
+  assert.equal(curatedArgsEscalate(paths, { outputMode: "create_order" }), undefined);
+  assert.ok(curatedArgsEscalate(paths, { outputMode: "create_invoice" }));
+});
