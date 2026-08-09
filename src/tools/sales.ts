@@ -1054,26 +1054,26 @@ const updateOrder = defineTool({
     currencyCode: CURRENCY.optional(),
     daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
     issueDate: isoDate.optional().describe("Order date."),
-    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
-    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass null to clear it."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
+    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
       .nullable()
       .optional()
-      .describe("The customer's own reference (deres ref). Pass null to clear it."),
+      .describe("The customer's own reference (deres ref). Pass null to clear it — measured, this field does honour a null."),
     externalReference: z
       .string()
       .max(100, "The API caps externalReference at 100 characters.")
       .nullable()
       .optional()
-      .describe("Your reference from an external system. Pass null to clear it."),
+      .describe("Your reference from an external system. Pass null to clear it — measured, this field does honour a null."),
     projectId: z
       .number()
       .int()
       .nullable()
       .optional()
-      .describe("Link the order to a project, or null to unlink it — `UpdateOrderReq.projectId` is nullable."),
+      .describe("Link the order to a project. `UpdateOrderReq.projectId` is declared nullable, so null is accepted, but whether it actually UNLINKS was not established — /api/projects answers 403 on the test tenant, so no order could be linked to one to unlink. Nulls are ignored on several other fields here, so do not assume."),
     invoiceEmail: z
       .string()
       .nullable()
@@ -1089,6 +1089,22 @@ const updateOrder = defineTool({
     const { tenantId, id, ...changes } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
+    // A null on these two is accepted by the API with 200 and then discarded — measured on 2783, where
+    // `comment: null` left "ZZ c" in place while `comment: ""` stored null. Reporting "changed comment" after
+    // a write the API ignored is the kind of confident-and-wrong answer this server exists to avoid, so the
+    // no-op is refused and the thing that works is named.
+    const ignoredNulls = (["comment", "internalComment"] as const).filter(
+      (f) => (changes as Record<string, unknown>)[f] === null,
+    );
+    if (ignoredNulls.length > 0) {
+      return fail(
+        `${ignoredNulls.join(" and ")} cannot be cleared with null: this API accepts it with a 200 and then ` +
+          `keeps the existing text, so nothing was written rather than reporting a change that would not ` +
+          `have happened. Send an EMPTY STRING instead — measured, that clears the field and the API stores ` +
+          `it back as null.`,
+      );
+    }
+
     if (asked.length === 0) {
       return fail(
         `No changes were given, so nothing was written. Passing nothing here would rewrite the order with ` +
@@ -1479,25 +1495,41 @@ const updateOffer = defineTool({
     customerId: z.number().int().positive().optional().describe("Move the offer to a different customer."),
     currencyCode: CURRENCY.optional(),
     daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
-    issueDate: isoDate.nullable().optional().describe("Offer date. Not required by this endpoint, unlike an order."),
-    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
+    issueDate: isoDate.nullable().optional().describe("Offer date. Not required by this endpoint, unlike an order — and a null is accepted and then ignored, the API keeping the existing date."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     internalComment: z
       .string()
       .nullable()
       .optional()
-      .describe("Internal note, not shown to the customer. Pass null to clear it."),
+      .describe("Internal note, not shown to the customer. Pass an EMPTY STRING to clear it — a null is accepted with 200 and then silently ignored, measured, so this tool refuses null here rather than reporting a change that did not happen."),
     email: z
       .string()
       .nullable()
       .optional()
-      .describe("Offer-specific email address. Returned by the API, so it is carried unless you change it."),
-    projectId: z.number().int().nullable().optional().describe("Link the offer to a project, or null to unlink it."),
+      .describe("Offer-specific email address. Returned by the API, so it is carried unless you change it. A null is accepted and then ignored — measured — so it cannot be emptied this way."),
+    projectId: z.number().int().nullable().optional().describe("Link the offer to a project. Null is accepted but whether it UNLINKS was not established — see reai_update_order's note; /api/projects is 403 on the test tenant."),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
     const { tenantId, id, ...changes } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
+    // A null on these two is accepted by the API with 200 and then discarded — measured on 2783, where
+    // `comment: null` left "ZZ c" in place while `comment: ""` stored null. Reporting "changed comment" after
+    // a write the API ignored is the kind of confident-and-wrong answer this server exists to avoid, so the
+    // no-op is refused and the thing that works is named.
+    const ignoredNulls = (["comment", "internalComment"] as const).filter(
+      (f) => (changes as Record<string, unknown>)[f] === null,
+    );
+    if (ignoredNulls.length > 0) {
+      return fail(
+        `${ignoredNulls.join(" and ")} cannot be cleared with null: this API accepts it with a 200 and then ` +
+          `keeps the existing text, so nothing was written rather than reporting a change that would not ` +
+          `have happened. Send an EMPTY STRING instead — measured, that clears the field and the API stores ` +
+          `it back as null.`,
+      );
+    }
+
     if (asked.length === 0) {
       return fail(
         `No changes were given, so nothing was written. Passing nothing here would rewrite the offer with ` +

@@ -150,15 +150,24 @@ test("a field the PUT requires but the record lacks is named, not sent as undefi
   assert.match(text, /daysUntilDue/);
 });
 
-test("nullable fields can be cleared, and null reaches the body", async () => {
+test("null is refused where the API would ignore it, and reaches the body where it works", async () => {
   const schema = z.object(tool().inputSchema);
+  // The schemas still ACCEPT null — the API does too, with a 200. What changed is that the tool no longer
+  // reports a change the API discards.
   for (const field of ["comment", "internalComment", "email", "projectId", "issueDate"]) {
-    const parsed = schema.safeParse({ id: 81, [field]: null });
-    assert.equal(parsed.success, true, `${field} must accept null`);
-    assert.equal(parsed.data[field], null, `${field}: null must survive parsing`);
+    assert.equal(schema.safeParse({ id: 81, [field]: null }).success, true, `${field} must still parse`);
   }
-  const { calls } = await run({ id: 81, comment: null }, (req, n) => (n === 1 ? offer() : offer()));
-  assert.equal(calls[1].body.comment, null);
+  // Measured on 2783: comment/internalComment null -> 200, value UNCHANGED; "" -> 200, stored null.
+  for (const field of ["comment", "internalComment"]) {
+    const { calls, result, text } = await run({ id: 81, [field]: null }, () => offer());
+    assert.equal(result.isError, true, `${field}: a null the API ignores must not be reported as a change`);
+    assert.deepEqual(calls, [], `${field}: nothing may be written`);
+    assert.match(text, /EMPTY STRING/, "the refusal must name what actually works");
+  }
+  // And the empty string goes through.
+  const cleared = await run({ id: 81, comment: "" }, (req, n) => (n === 1 ? offer() : offer({ comment: null })));
+  assert.notEqual(cleared.result.isError, true);
+  assert.equal(cleared.calls[1].body.comment, "");
 });
 
 test("an offer line needs vatCode where an order line does not — and itemName on both", async () => {

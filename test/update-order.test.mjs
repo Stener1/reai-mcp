@@ -218,23 +218,29 @@ test("invoiceEmail is an argument because it can never be read back", async () =
   assert.match(text, /invoiceEmail/, "every update must say it cannot be preserved");
 });
 
-test("a nullable field can actually be cleared", async () => {
-  // TWO halves, because the first version only exercised the handler. `run()` calls tool().handler directly,
-  // so zod never runs there — the test passed with `.nullable()` removed, which is precisely the bug it was
-  // written to pin. The schema is asserted separately, the way test/reference.test.mjs does it.
+test("null clears where the API honours it, and is refused where the API ignores it", async () => {
   const schema = z.object(tool().inputSchema);
   for (const field of ["comment", "internalComment", "buyerReference", "externalReference", "projectId", "invoiceEmail"]) {
-    const parsed = schema.safeParse({ id: 4105, [field]: null });
-    assert.equal(parsed.success, true, `${field} must accept null, or there is no way to clear it`);
-    assert.equal(parsed.data[field], null, `${field}: null must survive parsing, not be stripped`);
+    assert.equal(schema.safeParse({ id: 4105, [field]: null }).success, true, `${field} must parse`);
   }
-  // And null must reach the body rather than being filtered out with undefined.
+  // Measured on 2783: buyerReference and externalReference DO clear on null; comment and internalComment are
+  // accepted with a 200 and silently ignored, and an empty string is what clears them.
   const { calls } = await run(
-    { id: 4105, projectId: null, buyerReference: null },
-    (req, n) => (n === 1 ? order({ projectId: 77, buyerReference: "ZZ-REF" }) : order()),
+    { id: 4105, buyerReference: null, externalReference: null },
+    (req, n) => (n === 1 ? order({ buyerReference: "ZZ-REF", externalReference: "ZZ-EXT" }) : order()),
   );
-  assert.equal(calls[1].body.projectId, null, "null must reach the body to unlink");
-  assert.equal(calls[1].body.buyerReference, null);
+  assert.equal(calls[1].body.buyerReference, null, "null must reach the body for a field that honours it");
+  assert.equal(calls[1].body.externalReference, null);
+
+  for (const field of ["comment", "internalComment"]) {
+    const refused = await run({ id: 4105, [field]: null }, () => order());
+    assert.equal(refused.result.isError, true, `${field}: a null the API ignores must not be reported as a change`);
+    assert.deepEqual(refused.calls, [], `${field}: nothing may be written`);
+    assert.match(refused.text, /EMPTY STRING/);
+  }
+  const cleared = await run({ id: 4105, comment: "" }, (req, n) => (n === 1 ? order() : order({ comment: null })));
+  assert.notEqual(cleared.result.isError, true);
+  assert.equal(cleared.calls[1].body.comment, "");
 });
 
 test("replacement lines can carry accrual settings", async () => {

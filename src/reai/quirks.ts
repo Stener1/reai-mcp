@@ -539,7 +539,30 @@ export const QUIRKS: readonly Quirk[] = [
       '?usage=customer-invoice yourself rather than trusting acceptance.',
   },
   {
+    id: "null-in-a-replacement-is-often-ignored",
+    paths: ["/api/orders/{id}", "/api/offers/{id}"],
+    methods: ["PUT"],
+    kind: "gotcha",
+    note:
+      "A null in the body is accepted with 200 and then SILENTLY IGNORED for most fields — the stored value " +
+      "does not change, and nothing in the response says the value you sent was discarded. Which fields " +
+      "honour a null is not uniform, so it was measured field by field on 2783:\n\n" +
+      "  comment            null IGNORED   \"\" clears (stored back as null)\n" +
+      "  internalComment    null IGNORED   \"\" clears (stored back as null)\n" +
+      "  buyerReference     null CLEARS    (orders only)\n" +
+      "  externalReference  null CLEARS    (orders only)\n" +
+      "  email              null IGNORED   (offers only)\n" +
+      "  issueDate          null IGNORED   the API keeps the existing date\n" +
+      "  deliveryAddress    null IGNORED   the API keeps the existing address object\n\n" +
+      "So to empty a comment, send an EMPTY STRING, not null. `projectId` was not measured: /api/projects " +
+      "answers 403 on the test tenant, so no order could be linked to one to unlink.\n\n" +
+      "Also worth knowing when creating: the API fills in `issueDate` (today), `email` (the customer\'s) and " +
+      "`deliveryAddress` (an object) even when the POST omits them, so a freshly created order or offer does " +
+      "not have them null in the first place.",
+  },
+  {
     id: "order-and-offer-put-rename-the-lines",
+
     paths: ["/api/orders/{id}", "/api/offers/{id}"],
     methods: ["PUT"],
     kind: "gotcha",

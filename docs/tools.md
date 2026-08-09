@@ -354,6 +354,25 @@ Like every read-merge-write here it leaves a **lost-update window**: an edit mad
 
 `PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `vatCode` is (`itemName` is required on both), seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
 
+### Null in a replacement is usually a no-op
+
+Measured on 2783 on 2026-08-09, because a previous version of both update tools told agents "pass null to clear it" and that is **false for most fields**. A null is accepted with `200` and then silently discarded — the stored value does not change, and nothing in the response says the value you sent was thrown away.
+
+| field | `null` | `""` |
+|---|---|---|
+| `comment` (order + offer) | **ignored** | clears, stored back as `null` |
+| `internalComment` (order + offer) | **ignored** | clears, stored back as `null` |
+| `buyerReference` (order) | **clears** | — |
+| `externalReference` (order) | **clears** | — |
+| `email` (offer) | **ignored** | not measured |
+| `issueDate` (offer) | **ignored**, the existing date is kept | n/a |
+| `deliveryAddress` (offer) | **ignored**, the existing object is kept | n/a |
+| `projectId` | **not established** — `/api/projects` answers `403` on the test tenant, so no record could be linked to one to unlink | n/a |
+
+So `reai_update_order` and `reai_update_offer` **refuse** a null on `comment` and `internalComment` and name the empty string, rather than reporting a change the API discarded. Nulls still pass through on the fields that honour them.
+
+Worth knowing when creating, too: the API fills in `issueDate` (today), `email` (the customer's) and `deliveryAddress` (an object) even when the POST omits them — so a freshly created order or offer does not have them null to begin with, which is why this went unnoticed. It surfaced only because the carry was changed to state nulls explicitly and that path was flagged as unverified.
+
 ## Payroll
 | Tool | Purpose | Risk |
 |---|---|---|

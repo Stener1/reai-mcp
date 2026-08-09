@@ -80,6 +80,28 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **"Pass null to clear it" was false for most fields, and both update tools said it.** The claim came from
+  `UpdateOrderReq`/`OfferReq` declaring the fields nullable; the API disagrees. Measured on 2783 field by
+  field, because #139 shipped the null-carry path flagged as an unverified schema inference and this is what
+  verifying it turned up:
+  - `comment` and `internalComment` — a null is accepted with `200` and **silently ignored**; an **empty
+    string** clears them and is stored back as null.
+  - `buyerReference` and `externalReference` (orders) — a null genuinely clears.
+  - `email`, `issueDate` and `deliveryAddress` (offers) — null accepted, ignored, existing value kept.
+  - `projectId` — **not established**: `/api/projects` answers `403` on the test tenant, so no record could
+    be linked to a project to unlink. The description no longer claims it unlinks.
+  - Both tools now **refuse** a null on `comment`/`internalComment` and name the empty string, rather than
+    reporting a change the API discarded. New quirk `null-in-a-replacement-is-often-ignored` carries the
+    table, so `reai_describe_endpoint` warns a `reai_request` caller too.
+  - Also measured, and the reason this went unnoticed: the API fills in `issueDate`, `email` and
+    `deliveryAddress` on creation even when the POST omits them, so a fresh order or offer never has them
+    null in the first place.
+  - The good news on the flagged inference itself: sending an explicit null is **safe** — `200`, nothing
+    corrupted, lines and totals intact. The unconditional carry that satisfies the replacement-omission gate
+    works; it just does not clear anything.
+- **124 quirks.**
+
+
 - **A coercible value bypassed the enum preflight in `reai_update_agreement` and issued the write.** Shipped
   behaviour, not new: the check compared `String(value)`, so `{ leaseDurationType: ["indefinite"] }` — or any
   object with a `toString` returning a member — stringified to a valid member, passed a check whose entire
