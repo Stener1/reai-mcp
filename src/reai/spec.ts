@@ -1234,6 +1234,27 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],
   [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
   [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
+  // "innkommende ehf" is the supplier-invoice INBOX, not an attachment's EHF payload. `innkommende` reached
+  // nothing on its own and `ehf` reached GET /api/attachments/{id}/ehf, so the query landed on the wrong side
+  // of the same word — the corpus declares /api/invoice-reception-documents and it was missing the top 20.
+  //
+  // A phrase rather than a synonym, deliberately. Bare `inngaende` was mapped in PR #119 and WITHDRAWN,
+  // because the adjective pairs with utgående for faktura, MVA and balanse and mapping it alone evicted the
+  // correct answers for two of the three senses. Pairing it with the noun is the scoping that finding asked
+  // for: this says something about "incoming EHF", not about the word "incoming".
+  [
+    /\b(innkommende|inngaende|inngående|mottatt|mottatte)\s+(ehf|faktura\w*|peppol)\b/g,
+    "invoice-reception-documents",
+  ],
+  // Invoicing the subscriptions is what POST /api/subscriptions/generate-due does, and the corpus declares it
+  // the answer for "lag faktura for abonnementene". It sat at rank 34: `lag` is deliberately not a write verb
+  // — it is also the everyday noun for a team — so the query reads as neutral and the invoice GETs win, while
+  // nothing connected the word pairing to the operation that actually does it.
+  //
+  // This makes it REACHABLE, not first. The query states no intent to write, so the neutral-query penalty
+  // still holds the GETs above it, which is the behaviour this repository wants and what the corpus floors
+  // measure.
+  [/\bfaktura\w*\s+(for\s+|til\s+|pa\s+|på\s+)?abonnement\w*/g, "subscriptions generate-due"],
   // "bank account" is the English for what Norwegian writes as one word, and the two spellings behaved
   // completely differently. `bankkonto` reached /api/company-banks through compound decomposition, but the
   // spaced form tokenised into `bank` + `account`, and `account` pulled the CHART OF ACCOUNTS: "bank
@@ -1566,6 +1587,18 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   timeforing: ["timesheet"],
   // Documents and attachments — both returned nothing, and both are real endpoints.
   vedlegg: ["attachment", "attachments"],
+  // `kvittering` reached NOTHING — a bare hole, and the reason "last opp kvittering" returned
+  // POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes: with the noun matching no
+  // operation, only the upload method hint survived and it landed on whatever else scored. /api/attachments
+  // was absent from sixty results. "last opp vedlegg" worked the whole time, which is what made the gap
+  // invisible — the corpus in discovery-heldout.test.mjs declares /api/attachments the answer for the
+  // kvittering phrasing and it was one of three pairs missing the top 20.
+  //
+  // NOT mapped to receipt-reception-documents, although that inbox exists: a scanned receipt an agent uploads
+  // is an attachment, and the inbox is what the API fills from EHF and email. "registrer kvittering" still
+  // reaches the inbox's registration through `registrer`.
+  kvittering: ["attachment", "attachments"],
+  kvitteringer: ["attachment", "attachments"],
   dokument: ["document", "documents"],
   dokumenter: ["document", "documents"],
   // Access control, added with the tools that read it.

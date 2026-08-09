@@ -65,6 +65,36 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Three queries this repository's own corpora declared, and could not reach.** Sweeping all **169 declared
+  pairs** across both discovery corpora found three that were not in the top 20 at all. They were invisible
+  because the corpora are scored against floors rather than per pair, so three misses sat inside a passing
+  count — which is how the last one was found at all: the independent review of #124 spotted one while checking
+  a different claim.
+  - **`kvittering` reached NOTHING**, so "last opp kvittering" answered `POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes`
+    — the upload method hint with no noun to anchor it — and `/api/attachments` was absent from sixty results.
+    "last opp vedlegg" worked the whole time, which is what hid the hole. Mapped to `attachment`, deliberately
+    not to the receipt-reception inbox: a receipt an agent uploads is an attachment, and the inbox is what the
+    API fills from EHF and email. Now rank 1.
+  - **"innkommende ehf" is the supplier-invoice inbox, not an attachment's EHF payload.** `innkommende` reached
+    nothing and `ehf` reached `GET /api/attachments/{id}/ehf`, so the query landed on the wrong side of its own
+    word. Fixed as a **phrase** pairing the adjective with the noun, which is the scoping that PR #119's finding
+    asked for — bare `inngaende` was mapped there and withdrawn, because the adjective pairs with utgående for
+    faktura, MVA and balanse and mapping it alone evicted the correct answers for two of the three senses. Now
+    rank 1 on `/api/invoice-reception-documents`.
+  - **"lag faktura for abonnementene" sat at rank 34.** `lag` is deliberately not a write verb — it is also the
+    everyday noun for a team — so the query reads as neutral and the invoice reads win, while nothing connected
+    the word pairing to `POST /api/subscriptions/generate-due`, which is what the corpus declares and what
+    actually invoices the due subscriptions. A phrase rule makes it **reachable, not first**: it is rank 4 with
+    `GET /api/subscriptions` above it, because the query states no intent to write and the neutral-query penalty
+    still holds. That distinction is the point, and it is asserted as a bound rather than a position.
+  - **All five corpus floors ratcheted** to the new figures — CASES 38→39 top-3 and 39→41 top-10, FRESH 26→27,
+    EVERYDAY 19→20 top-3 and 24→26 top-10 — and the three pairs pinned individually, because a floor cannot say
+    which pair it lost. Four tests fail against `main`, so the ratchets are load-bearing rather than decorative.
+  - Measured over **8225 queries**: 80 rank-1 changes, **no answer lost**, 20 gained. Six writes newly at rank 1,
+    every one `kvittering` with an explicit write verb where the query previously returned nothing — and
+    `slett kvittering` reaches the same operation `slett vedlegg` already did, because the API has no plain
+    `DELETE /api/attachments/{id}`, only the order and voucher variants.
+
 - **Four places told agents the agreement enums are undocumented. The spec declares all fourteen.** The source
   file already carried the correction — "The enums ARE documented — an earlier version of this comment said
   otherwise … there are 14 such fields across the five templates" — and it had been applied to that comment and
