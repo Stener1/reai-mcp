@@ -1445,9 +1445,11 @@ const updateOffer = defineTool({
     "`lineTotal`, `lineTotalExclVat`, `lineVat` and `lineDiscount`, five of them computed. And `projectId`, " +
     "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a PUT that " +
     "omits them keeps the offer and empties those fields.\n\n" +
-    "Offer lines are STRICTER than order lines: `itemName` and `vatCode` are required on every line, not " +
-    "just `quantity` and `unitPrice`. `issueDate`, by contrast, is NOT required here though it is on an " +
-    "order.\n\n" +
+    "Offer lines are stricter than order lines in exactly ONE field, not two: `vatCode` is required here " +
+    "and genuinely optional on an order line — but `itemName` is required on BOTH, and an order line " +
+    "without it is refused with 400 \"Produkt er obligatorisk for alle ordrelinjer.\" So a line carrying " +
+    "`itemName` works on both, and `vatCode` is what an offer additionally needs. `issueDate`, by " +
+    "contrast, is genuinely NOT required here though it is on an order.\n\n" +
     "Unlike reai_update_order this runs in the DEFAULT write mode, and the reason is worth stating because " +
     "it is a real difference rather than a looser rule: everything `OfferReq` accepts, `OfferRes` returns, " +
     "so this tool can carry every field and its replacement omits nothing. An order update cannot — " +
@@ -1540,11 +1542,32 @@ const updateOffer = defineTool({
           `you mean to set them.`,
       );
     }
-    if (!changes.offerLines && (existingLines ?? []).some((line) => !line || typeof line !== "object")) {
+    // `typeof [] === "object"`, so an array element passed the old guard and produced `offerLines: [{}]`.
+    if (!changes.offerLines && (existingLines ?? []).some((line) => !line || typeof line !== "object" || Array.isArray(line))) {
       return fail(
         `Offer ${id} has a line this tool cannot read, so nothing was written. Guessing at a line would ` +
           `replace the offer's contents.`,
       );
+    }
+    // And the fields OfferLineReq requires, per line, for the same reason the top-level precheck exists: a
+    // carried line missing one produces a 400 that names no field. Measured — a response line without
+    // `itemName` produced `offerLines: [{quantity, unitPrice}]` and the PUT went out. This is the odd one to
+    // have skipped, given that stricter per-line requirements are the headline difference from an order.
+    const OFFER_LINE_REQUIRED = ["itemName", "quantity", "unitPrice", "vatCode"] as const;
+    if (!changes.offerLines) {
+      const badLine = (existingLines ?? []).findIndex((line) =>
+        OFFER_LINE_REQUIRED.some((f) => line[f] === undefined || line[f] === null),
+      );
+      if (badLine >= 0) {
+        const missing = OFFER_LINE_REQUIRED.filter(
+          (f) => (existingLines ?? [])[badLine][f] === undefined || (existingLines ?? [])[badLine][f] === null,
+        );
+        return fail(
+          `Offer ${id} line ${badLine + 1} came back without ${missing.join(", ")}, which every offer line ` +
+            `requires, so nothing was written — the replacement would have earned a 400 naming no field. ` +
+            `Pass \`offerLines\` explicitly to set the lines you want.`,
+        );
+      }
     }
     // Only when the caller did NOT supply replacements. Mapping unconditionally threw a TypeError on a
     // record carrying a null line — blocking the very recovery path the refusal above names, since passing
@@ -1567,6 +1590,11 @@ const updateOffer = defineTool({
     // the RESPONSE's shape rather than this tool's — measured, a response omitting `email` produced a body
     // omitting `email`. Every field here is nullable in OfferReq, so null is the correct way to say "the
     // record has no value", and stating all of them makes completeness independent of what the GET returns.
+    //
+    // That last step is a SCHEMA inference, not a measurement: OfferReq declares all six nullable, and the
+    // tool now actively sends `issueDate: null` and `deliveryAddress: null` where it previously omitted
+    // them. `OfferRes.issueDate` is declared non-nullable, so an explicit null there is the least-tested
+    // path on live data. Unverified against 2783 rather than assumed safe.
     const carried = Object.fromEntries(
       OFFER_CARRIED_FIELDS.map((f) => [f, offer[f] === undefined ? null : offer[f]]),
     );
@@ -1588,7 +1616,12 @@ const updateOffer = defineTool({
     });
 
     const changedKeys = asked.map(([k]) => k);
-    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
+    // What was PRESERVED, which is not the same as what the body states. Every carryable field is sent — nulls
+    // included, to satisfy the replacement-omission gate — so naming all of them told a caller that six
+    // fields were carried over when all six were null and stayed null. Only fields with a value are named.
+    const carriedOnly = Object.keys(carried).filter(
+      (k) => !changedKeys.includes(k) && carried[k] !== null && carried[k] !== undefined,
+    );
     const notes = [
       `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
         `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +

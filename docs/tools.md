@@ -142,14 +142,6 @@ The one genuine exception in the API is the **employee** phone, which stores an 
 
 That ambiguity is also why the delete does not simply report a 404 as "already gone": a wrong `customerId` answers 404 while the contact survives, so claiming the job is done would be a guess. It reports what it knows — nothing was changed — and how to confirm which case it was.
 
-`reai_update_offer` exists for the same reason `reai_update_order` does: `PUT /api/offers/{id}` is a full replacement whose response does not have the shape the request wants. The lines come back under **`lines`** and must be sent as **`offerLines`** — which is required, so a body echoing `lines` back has no lines at all — and each returned line carries **seven** fields the PUT does not declare (`id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`), five of them computed. `projectId`, `issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a replacement that omits them empties them.
-
-Two differences from orders, both measured on offer 81 rather than assumed: offer lines are **stricter** — `itemName` and `vatCode` are required on every line, not just `quantity` and `unitPrice` — while `issueDate` is **not** required here though it is on an order.
-
-And it runs in the **default** write mode where the order tool needs `full`. That is a real difference, not a looser rule: everything `OfferReq` accepts, `OfferRes` returns — including `email` and a `deliveryAddress` whose request and response shapes are property-for-property identical — so this tool carries every field and its replacement omits nothing. Verified: `omittedReplacementFields` returns no fields for the body it sends, where a partial body omits six. An order update cannot do that, because `invoiceEmail` is accepted and never returned, so that tool omits a field the replacement-omission gate refuses by default and sits at `full` rather than becoming the soft route around it.
-
-Like every read-merge-write here it leaves a **lost-update window**: an edit made between the read and the write is silently reverted, lines included, and there is no ETag or version field to prevent it.
-
 ## Purchase
 | Tool | Purpose | Risk |
 |---|---|---|
@@ -352,7 +344,15 @@ Smaller things it handles, each because a review found the version that did not:
 
 Like every read-merge-write here, it leaves a **lost-update window**: an edit made in the ReAI UI or by another client between the read and the write is silently reverted, lines included. There is no ETag, `If-Match` or version field, so it is stated rather than papered over.
 
-`PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `itemName` and `vatCode` are, seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
+`reai_update_offer` exists for the same reason `reai_update_order` does: `PUT /api/offers/{id}` is a full replacement whose response does not have the shape the request wants. The lines come back under **`lines`** and must be sent as **`offerLines`** — which is required, so a body echoing `lines` back has no lines at all — and each returned line carries **seven** fields the PUT does not declare (`id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`), five of them computed. `projectId`, `issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a replacement that omits them empties them.
+
+Two differences from orders. Offer lines are stricter in **exactly one field, not two**: `vatCode` is required here and genuinely optional on an order line — but `itemName` is required on **both**, and an order line without it is refused with `400 "Produkt er obligatorisk for alle ordrelinjer."`. That was re-measured on 2026-08-09 and is recorded in `offer-lines-stricter`; an earlier version of this page read the spec's `required` list as measured behaviour and got it wrong. And `issueDate` is genuinely **not** required here though it is on an order.
+
+And it runs in the **default** write mode where the order tool needs `full`. That is a real difference, not a looser rule: everything `OfferReq` accepts, `OfferRes` returns — including `email` and a `deliveryAddress` whose request and response shapes are property-for-property identical — so this tool carries every field and its replacement omits nothing. Verified: `omittedReplacementFields` returns no fields for the body it sends, where a partial body omits six. An order update cannot do that, because `invoiceEmail` is accepted and never returned, so that tool omits a field the replacement-omission gate refuses by default and sits at `full` rather than becoming the soft route around it.
+
+Like every read-merge-write here it leaves a **lost-update window**: an edit made between the read and the write is silently reverted, lines included, and there is no ETag or version field to prevent it.
+
+`PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `vatCode` is (`itemName` is required on both), seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
 
 ## Payroll
 | Tool | Purpose | Risk |

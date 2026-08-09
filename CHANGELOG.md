@@ -16,8 +16,11 @@ All notable changes to `reai-mcp`. Format loosely follows
     sent as **`offerLines`**, and each returned line carries **seven** fields the PUT does not declare (`id`,
     `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`) against four on an
     order.
-  - Offer lines are **stricter**: `itemName` and `vatCode` are required per line, not just `quantity` and
-    `unitPrice`. `issueDate` is **not** required here, though it is on an order.
+  - Offer lines are stricter in **exactly one field, not two**: `vatCode` is required here and genuinely
+    optional on an order line — but `itemName` is required on BOTH, and an order line without it is refused
+    with `400 "Produkt er obligatorisk for alle ordrelinjer."`. The first version of this entry read the
+    spec's `required` list as measured behaviour, which `offer-lines-stricter` had already re-measured and
+    corrected on the same day. `issueDate` is genuinely not required here, though it is on an order.
   - **It runs in the default write mode where the order tool needs `full`**, and that is a measured difference
     rather than a looser rule. Everything `OfferReq` accepts, `OfferRes` returns, including a
     `deliveryAddress` whose request and response shapes are property-for-property identical. So this tool

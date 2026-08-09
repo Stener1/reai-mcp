@@ -161,11 +161,31 @@ test("nullable fields can be cleared, and null reaches the body", async () => {
   assert.equal(calls[1].body.comment, null);
 });
 
-test("an offer line must carry itemName and vatCode, which order lines do not require", async () => {
-  const schema = z.object(tool().inputSchema);
-  assert.equal(schema.safeParse({ id: 81, offerLines: [{ quantity: 1, unitPrice: 5 }] }).success, false,
-    "offer lines require itemName and vatCode");
-  assert.equal(schema.safeParse({ id: 81, offerLines: [{ itemName: "x", quantity: 1, unitPrice: 5, vatCode: "0" }] }).success, true);
+test("an offer line needs vatCode where an order line does not — and itemName on both", async () => {
+  // The title used to claim "which order lines do not require", asserted nothing about order lines, and was
+  // FALSE for itemName: `offer-lines-stricter` re-measured it on 2026-08-09 and an order line without
+  // itemName is refused with 400 "Produkt er obligatorisk for alle ordrelinjer.". Both schemas are checked
+  // here so the asymmetry cannot be restated wrongly again.
+  const { salesTools: tools } = await import("../dist/tools/sales.js");
+  const offerSchema = z.object(tool().inputSchema);
+  const orderSchema = z.object(tools.find((t) => t.name === "reai_update_order").inputSchema);
+
+  // vatCode: required on an offer line, optional on an order line. THIS is the difference.
+  assert.equal(offerSchema.safeParse({ id: 81, offerLines: [{ itemName: "x", quantity: 1, unitPrice: 5 }] }).success, false,
+    "an offer line without vatCode must be refused");
+  assert.equal(orderSchema.safeParse({ id: 1, orderLines: [{ itemName: "x", quantity: 1, unitPrice: 5 }] }).success, true,
+    "an order line without vatCode is accepted — vatCode is the one field offers add");
+
+  // itemName: required by the API on BOTH, so neither schema may present it as dispensable.
+  assert.equal(offerSchema.safeParse({ id: 81, offerLines: [{ quantity: 1, unitPrice: 5, vatCode: "0" }] }).success, false,
+    "an offer line without itemName must be refused");
+  const { QUIRKS } = await import("../dist/reai/quirks.js");
+  const quirk = QUIRKS.find((q) => q.id === "offer-lines-stricter");
+  assert.ok(quirk, "offer-lines-stricter must exist — it is what this asymmetry rests on");
+  assert.match(quirk.note, /only in ONE field/);
+  assert.match(quirk.note, /Produkt er obligatorisk/, "the order-line refusal must stay recorded");
+  // And a valid line on each still parses.
+  assert.equal(offerSchema.safeParse({ id: 81, offerLines: [{ itemName: "x", quantity: 1, unitPrice: 5, vatCode: "0" }] }).success, true);
 });
 
 test("a null line element is refused rather than thrown", async () => {
@@ -231,4 +251,83 @@ test("moving an offer to another customer says whose payment terms it kept", asy
   ]);
   assert.match(text, /KEPT payment terms of 14 days/);
   assert.match(text, /new customer's own terms are 45 days/);
+});
+
+test("a value the API did not store is reported against what was sent", async () => {
+  const { text } = await run({ id: 81, comment: "ZZ new" }, (req, n) => (n === 1 ? offer() : offer({ comment: "ZZ old" })));
+  assert.match(text, /WARNING/);
+  assert.match(text, /comment: sent "ZZ new", stored "ZZ old"/);
+});
+
+test("an offer with no readable lines is refused rather than having its contents invented", async () => {
+  for (const lines of [[], undefined]) {
+    const { calls, result, text } = await run({ id: 81, comment: "ZZ" }, () => offer({ lines }));
+    assert.equal(result.isError, true, `lines=${JSON.stringify(lines)} must be refused`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+    assert.match(text, /no readable lines/);
+  }
+});
+
+test("every gate that could make this a softer route is checked, not just the omission one", async () => {
+  // The PR's whole claim is "not a softer route than reai_request", and the first version of this file
+  // asserted only the omission gate and classifyRequest — leaving half the ladder unchecked.
+  const { curatedArgsEscalate, classifyTransmission } = await import("../dist/policy.js");
+  assert.equal(classifyTransmission("PUT", "/api/offers/7"), "none");
+  assert.ok(!tool().transmits, "an offer update must not be marked as transmitting");
+  // No argument may escalate the call, or the tool would be unusable in the default mode for that argument
+  // and the description says nothing about it — the trap reai_update_order fell into with invoiceEmail.
+  const probes = [{}, ...Object.keys(tool().inputSchema).flatMap((k) => [{ [k]: "probe" }, { [k]: null }, { [k]: 1 }, { [k]: true }])];
+  for (const args of probes) {
+    assert.equal(
+      curatedArgsEscalate(tool().apiPaths, args),
+      undefined,
+      `${JSON.stringify(args)} escalates the call, which the description does not mention`,
+    );
+  }
+});
+
+test("the link prefers the API's own URL and falls back when it is absent", async () => {
+  const withUrl = await run({ id: 81, comment: "ZZ" }, () => offer());
+  assert.match(withUrl.text, /https:\/\/app\.reai\.no\/offers\/81/);
+  const without = await run({ id: 81, comment: "ZZ" }, () => { const o = offer(); delete o.webUrl; return o; });
+  assert.match(without.text, /Open in ReAI: link/, "the deep-link fallback must fire when webUrl is absent");
+});
+
+test("the note names only the fields that actually carried a value", async () => {
+  // Every carryable field is SENT, nulls included, to satisfy the omission gate — but naming all six told a
+  // caller six fields were carried over when all six were null and stayed null.
+  const bare = (() => {
+    const o = offer();
+    for (const f of ["projectId", "issueDate", "internalComment", "email", "deliveryAddress"]) o[f] = null;
+    return o;
+  })();
+  const { calls, text } = await run({ id: 81, daysUntilDue: 30 }, () => bare);
+  // The body still states them all, or the tier claim breaks.
+  for (const f of ["projectId", "issueDate", "internalComment", "email", "deliveryAddress"]) {
+    assert.ok(f in calls[1].body, `${f} must still be sent`);
+  }
+  assert.doesNotMatch(text, /projectId.*carried over/, "a null field must not be reported as carried over");
+  assert.match(text, /comment carried over/, "the one field with a value is still named");
+});
+
+test("a carried line missing a required field is refused, not sent as a 400", async () => {
+  const { calls, result, text } = await run({ id: 81, comment: "ZZ" }, () =>
+    offer({ lines: [{ id: 1, quantity: 1, unitPrice: 5 }] }),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"]);
+  assert.match(text, /itemName/);
+  assert.match(text, /vatCode/);
+  // And passing lines explicitly is the way past it.
+  const ok = await run({ id: 81, offerLines: [{ itemName: "x", quantity: 1, unitPrice: 5, vatCode: "0" }] }, () =>
+    offer({ lines: [{ id: 1, quantity: 1, unitPrice: 5 }] }),
+  );
+  assert.notEqual(ok.result.isError, true);
+});
+
+test("an array line element is not mistaken for a readable line", async () => {
+  // typeof [] === "object", so it passed the old guard and produced offerLines: [{}].
+  const { calls, result } = await run({ id: 81, comment: "ZZ" }, () => offer({ lines: [[]] }));
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls.map((c) => c.method), ["GET"]);
 });
