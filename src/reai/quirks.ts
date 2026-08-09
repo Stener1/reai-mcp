@@ -568,12 +568,12 @@ export const QUIRKS: readonly Quirk[] = [
       "not have them null in the first place — which is why this went unnoticed.\n\n" +
       "SCOPE: measured on these two endpoints only, and it does NOT generalise. 14 curated tools take a " +
       "nullable argument on a PUT or PATCH — 12 besides these two — and the phrase \"null clears it\" appears " +
-      "in eight source files. Every one of those is unverified against this behaviour. The one to check first " +
-      "is reai_update_creditor: it promises a null clears bankAccountNumber, a PAYMENT DESTINATION, and its " +
-      "success note is computed from what was SENT rather than from the response, so if nulls are ignored " +
-      "there it states confidently that repayments have no destination when they still do. No creditor " +
-      "exists on the test tenant to measure it. reai_update_subscription was deliberately not probed: " +
-      "subscriptions are created ACTIVE, so a throwaway one on a real company could generate an invoice.",
+      "in eight source files. Those are unverified against this behaviour, with one exception now settled: " +
+      "PUT /api/creditors/{id} DOES honour a null on bankAccountNumber — cleared by a null, by omitting the " +
+      "field and by an empty string alike, measured on three throwaway creditors. So creditors behave like " +
+      "buyerReference, not like a comment, which is the third endpoint to disagree with the other two and the " +
+      "reason not to generalise. reai_update_subscription remains unprobed on purpose: subscriptions are " +
+      "created ACTIVE, so a throwaway one on a real company could generate an invoice.",
   },
   {
     id: "order-and-offer-put-rename-the-lines",

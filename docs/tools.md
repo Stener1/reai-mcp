@@ -370,6 +370,7 @@ On `PUT /api/orders/{id}` and `PUT /api/offers/{id}` there are **two families**,
 | `email` — **offers only** | — | **kept** | not measured |
 | `issueDate` — **offers only** | — | **kept**, existing date preserved | on an *order* `issueDate` is **required**, so a null there is a different question and was not measured |
 | `deliveryAddress` — **offers only** | — | **kept**, existing object preserved | `UpdateOrderReq` does not declare this field at all |
+| `bankAccountNumber` on `PUT /api/creditors/{id}` | **emptied** | **clears** | **clears** — all three shapes measured |
 
 The first two behave like `if (value != null) set(value)`; the rest like a plain replacement. An earlier version of this page said a partial PUT "empties those fields" for all six — true for three of them, false for the two comments.
 
@@ -377,7 +378,7 @@ Both tools therefore report from the **response** rather than from what was sent
 
 Counter-examples elsewhere, all measured previously and none of them contradicted: `PUT /api/leads/{…}/notes` does clear on null, and so does an employee's `endDateOfEmployment`. **Do not generalise between endpoints.**
 
-**Scope, stated because the fix is much narrower than the hazard.** Fourteen curated tools take a nullable argument on a `PUT` or `PATCH` — twelve besides these two — and the phrase "null clears it" appears in **eight** source files. All of that is unverified against the behaviour above. The one to check first is **`reai_update_creditor`**: it promises a null clears `bankAccountNumber`, a *payment destination*, and its success note is computed from what was **sent** rather than from the response — so if nulls are ignored there it announces that loan repayments have no destination when they still do. No creditor exists on the test tenant to measure it. `reai_update_subscription` was deliberately not probed: subscriptions are created **active**, so a throwaway one on a real company could generate an invoice.
+**Scope, stated because the fix is much narrower than the hazard.** Fourteen curated tools take a nullable argument on a `PUT` or `PATCH` — twelve besides these two — and the phrase "null clears it" appears in **eight** source files. All of that is unverified against the behaviour above. The case that looked worst has been **settled**: `reai_update_creditor` promises a null clears `bankAccountNumber`, a *payment destination*, and its success note was computed from what was **sent** rather than from the response. Measured on three throwaway creditors — the field is cleared by a null, by omitting it, and by an empty string alike — so the claim was true, and creditors behave like `buyerReference` rather than like a comment. That is the **third** endpoint to disagree with the other two, which is the whole reason for the rule above. The tool now reports from the response regardless, because the cost of being wrong there is a payment destination and the check is two lines. `reai_update_subscription` was deliberately not probed: subscriptions are created **active**, so a throwaway one on a real company could generate an invoice.
 
 ## Payroll
 | Tool | Purpose | Risk |

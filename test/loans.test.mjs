@@ -888,3 +888,57 @@ test("a 409 on creating a counterparty is reported, not diagnosed", async () => 
     assert.match(textOf(res), /probably not it/, "it must not assert a cause it cannot know");
   }
 });
+
+/**
+ * `reai_update_creditor` announces where loan repayments no longer go. It used to do that from what it
+ * SENT — `merged.bankAccountNumber` — never checking that the API agreed, while `reai_update_company_bank`,
+ * the sibling tool for the same hazard, has always compared the response against the request. On a payment
+ * destination that is the wrong half to trust, because this API silently discards some values.
+ *
+ * For creditors it does not: measured on 2783, `bankAccountNumber` is cleared by a null, by omitting the
+ * field, and by an empty string alike. So the claim was true; it was just unverified.
+ */
+test("clearing a creditor's account is reported from the response, not from what was sent", async () => {
+  const { ctx, sent } = ctxFor([
+    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
+    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: null } },
+  ]);
+  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
+  assert.notEqual(res.isError, true);
+  assert.deepEqual(sent.map((s) => s.method), ["GET", "PUT"]);
+  const text = textOf(res);
+  assert.match(text, /has NO bank account number/);
+  assert.match(text, /Confirmed from the response/, "the claim must be sourced from the response");
+});
+
+test("a creditor account the API did not store as sent is flagged as a payment-destination risk", async () => {
+  // The case the old code could not see: the PUT succeeds, the response disagrees, and the tool used to
+  // report the request as though it were the outcome.
+  const { ctx } = ctxFor([
+    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
+    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
+  ]);
+  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
+  const text = textOf(res);
+  assert.match(text, /WARNING: bankAccountNumber came back as "15031234567"/);
+  assert.match(text, /read the creditor back/);
+  assert.doesNotMatch(text, /has NO bank account number/, "it must not claim an emptying the response denies");
+});
+
+test("a response that omits the account says the emptying is inferred, not confirmed", async () => {
+  const { ctx } = ctxFor([
+    { status: 200, data: { id: 7, name: "ZZ Kreditor", bankAccountNumber: "15031234567" } },
+    { status: 200, data: { id: 7, name: "ZZ Kreditor" } },
+  ]);
+  const res = await tool("reai_update_creditor").handler({ id: 7, bankAccountNumber: null, tenantId: 2783 }, ctx);
+  const text = textOf(res);
+  assert.match(text, /has NO bank account number/);
+  assert.match(text, /Inferred from the request/);
+  assert.match(text, /read the .*creditor back/);
+});
+
+test("the measured null behaviour is stated in the tool text, since it differs by endpoint", () => {
+  // orders and offers ignore a null on their comment fields; creditors honour one. The repo's own quirk says
+  // not to generalise, so each tool that depends on the answer has to carry it.
+  assert.match(tool("reai_update_creditor").description, /cleared by a null, by OMITTING it, and by an empty string/);
+});

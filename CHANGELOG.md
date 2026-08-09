@@ -80,6 +80,26 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its success note
+  read *"This creditor now has NO bank account number, so a loan repayment to it has no destination"* off
+  `merged.bankAccountNumber`, never checking that the API agreed — while `reai_update_company_bank`, the
+  sibling tool for the same hazard, has always compared the response against the request. On a payment
+  destination that is the wrong half to trust, because this API silently discards some values.
+  - Flagged as the priority unverified case by #140's review, and recorded there as unmeasurable because the
+    test tenant had no creditor. `POST /api/creditors` exists, so it was measurable after all: three
+    throwaway creditors, one per shape, each read back with a separate GET.
+  - **The claim was true.** `bankAccountNumber` on `PUT /api/creditors/{id}` is cleared by a null, by
+    OMITTING the field, and by an empty string alike. So creditors behave like `buyerReference` rather than
+    like a comment — the third endpoint to disagree with the other two, which is exactly why
+    `order-and-offer-put-ignores-most-nulls` says not to generalise.
+  - Verified anyway: the note now reports emptiness from the response, warns when the stored account differs
+    from what was sent, and says *"Inferred from the request"* rather than *"Confirmed from the response"*
+    when the response does not carry the field at all. Mutation-tested — reading emptiness from `merged`
+    again, or dropping the disagreement warning, each fails.
+  - `reai_update_debtor` is unaffected: `DebtorReq` accepts only `name`, so there is no merge and no payment
+    destination.
+
+
 - **"Pass null to clear it" was false for most fields, and both update tools said it.** The claim came from
   the request schemas declaring the fields nullable; the API disagrees. #139 shipped the null-carry path
   flagged as an unverified schema inference, and verifying it is what turned this up. Measured on 2783, and
