@@ -166,7 +166,7 @@ test("a value the API ignored is not reported as a change", async () => {
     const { calls, result, text } = await run({ id: 81, [field]: null }, () => populated);
     assert.notEqual(result.isError, true, "the write is harmless, so it is not refused");
     assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
-    assert.match(text, /Changed NOTHING/, "the headline must not claim a change the API discarded");
+    assert.match(text, /Changed NOTHING you asked for/, "the headline must not claim a change the API discarded");
     assert.match(text, /IGNORED by the API/);
     assert.match(text, /EMPTY STRING/, "and must name what actually works");
   }
@@ -392,28 +392,55 @@ const carriedOver = (text) => {
   return m ? m[1].split(", ").map((s) => s.trim()) : [];
 };
 
-test("a CARRIED field the offer PUT dropped is warned about, not listed as carried over", async () => {
+test("a CARRIED field the offer PUT emptied is warned about, not listed as carried over", async () => {
   // reai_update_offer: same carried half as the order tool. Both routed through `appliedChanges`, which
   // answered only for the fields the caller ASKED to change, so a dropped carry was invisible.
   const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
     n === 1 ? offer() : offer({ daysUntilDue: 30, comment: null }),
   );
-  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", offer TB-81 came back with null\)/);
+  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", offer TB-81 came back empty\)/);
   assert.match(text, /LOST unless you set it again/);
-  assert.ok(
-    !carriedOver(text).includes("comment"),
-    `comment must not be listed as carried over: ${JSON.stringify(carriedOver(text))}`,
+  const named = carriedOver(text);
+  assert.ok(!named.includes("comment"), `comment must not be listed as carried over: ${JSON.stringify(named)}`);
+  assert.ok(named.includes("internalComment"), "the fields that DID survive are still named");
+});
+
+test("an offer's carried field returned CHANGED is reported, and not called lost", async () => {
+  // reai_update_offer: the review's mutation, which counted only a null echo as a loss and passed every test.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30, comment: "someone else's text" }),
   );
-  assert.ok(carriedOver(text).includes("internalComment"), "the fields that DID survive are still named");
+  assert.match(text, /different value for comment \(carried "ZZ customer-visible", stored "someone else's text"\)/);
+  assert.ok(!carriedOver(text).includes("comment"));
+  assert.doesNotMatch(text, /LOST unless/);
+});
+
+test("an offer's carried fields are not claimed when the response does not mention them", async () => {
+  // reai_update_offer: a bodyless PUT listed all five carried fields as preserved, on no evidence at all.
+  const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : undefined));
+  assert.deepEqual(carriedOver(text), []);
+  assert.match(text, /Sent back unchanged but NOT confirmed: .*comment/);
+});
+
+test("an offer's lines dropped by the API are reported", async () => {
+  // reai_update_offer: the count check the source comments claimed existed and did not.
+  const dropped = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? offer() : offer({ daysUntilDue: 30, lines: [] }),
+  );
+  assert.match(dropped.text, /WARNING: 1 line\(s\) were sent and offer TB-81 came back with 0/);
+  const intact = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : offer({ daysUntilDue: 30 })));
+  assert.doesNotMatch(intact.text, /line\(s\) were sent and/);
 });
 
 test("an offer's carried field the API DID keep is still named as carried over", async () => {
   // reai_update_offer: the positive control, so a warning that always fires, or a headline that stopped
-  // naming survivors at all, cannot pass the test above.
+  // naming survivors at all, cannot pass the tests above.
   const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) =>
     n === 1 ? offer() : offer({ daysUntilDue: 30 }),
   );
-  assert.ok(carriedOver(text).includes("comment"), `comment should be carried: ${JSON.stringify(carriedOver(text))}`);
-  assert.doesNotMatch(text, /WARNING: comment/);
-  assert.doesNotMatch(text, /LOST unless/);
+  const named = carriedOver(text);
+  assert.ok(named.includes("comment"), `comment should be carried: ${JSON.stringify(named)}`);
+  assert.ok(named.includes("internalComment"), `internalComment should be carried: ${JSON.stringify(named)}`);
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /NOT confirmed/);
 });

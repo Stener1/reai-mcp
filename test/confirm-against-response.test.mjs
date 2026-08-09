@@ -374,6 +374,12 @@ test("the order and offer tools no longer count an unanswered field as applied",
       { client: { request: async () => queue.shift(), deepLink: () => "l" }, config: { writeMode: "full", tenantId: 2783 }, session: {} },
     );
     const text = result.content.find((c) => c.type === "text").text;
-    assert.match(text, /Changed NOTHING/, `${label}: an unconfirmable change must not be claimed`);
+    assert.match(
+      text,
+      // "you asked for" is part of the claim, not decoration: the record may well have changed, and review
+      // built the case where a bare "Changed NOTHING" sat above a warning that a comment had been destroyed.
+      /Changed NOTHING you asked for/,
+      `${label}: an unconfirmable change must not be claimed`,
+    );
   }
 });

@@ -774,7 +774,8 @@ export function mergeForReplacement(opts: {
  *
  * `skip` is for fields whose shape differs between request and response and so cannot be compared here —
  * `orderLines` against `lines`, for instance. Skipping is a claim that something else checks them; the line
- * counts in the order, offer and subscription tools are checked separately for that reason.
+ * counts in the order, offer and subscription tools are checked separately for that reason. (That was
+ * false for order and offer when written — review caught it, and `lineCountNote` in sales.ts now makes it true.)
  */
 export type ResponseConfirmation = {
   /** Sent and the response agrees. */

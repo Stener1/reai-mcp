@@ -236,7 +236,7 @@ test("a value the API ignored is not reported as a change", async () => {
     const { calls, result, text } = await run({ id: 4105, [field]: null }, () => populated);
     assert.notEqual(result.isError, true, "the write is harmless, so it is not refused");
     assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
-    assert.match(text, /Changed NOTHING/, "the headline must not claim a change the API discarded");
+    assert.match(text, /Changed NOTHING you asked for/, "the headline must not claim a change the API discarded");
     assert.match(text, /IGNORED by the API/);
     assert.match(text, /EMPTY STRING/, "and must name what actually works");
   }
@@ -365,32 +365,86 @@ test("the kept-terms note states what the record says, not what was sent", async
 /** Same parse as the offer tests, and for the same reason: a bare /comment carried over/ regex was matching a
  * one-item list by luck, and would have gone vacuous the moment a second field joined it. */
 const carriedOver = (text) => {
-  const m = /, and ([^\u2014]+?) carried over/.exec(text);
+  const m = /, and ([^—]+?) carried over/.exec(text);
   return m ? m[1].split(", ").map((s) => s.trim()) : [];
 };
 
-test("a CARRIED field the API dropped is warned about, not listed as carried over", async () => {
+/** An order whose optional carries are all POPULATED, so a survivor list has more than one member to lose. */
+const richOrder = (overrides = {}) =>
+  order({ internalComment: "ZZ internal", buyerReference: "ZZ-BR", ...overrides });
+
+test("a CARRIED field the API emptied is warned about, not listed as carried over", async () => {
   // reai_update_order: the carried half of the same claim. `appliedChanges` only ever answered for the fields
   // the caller ASKED to change, so a comment the merge carried and the API then dropped printed
-  // "\u2026and comment carried over" with no warning \u2014 measured against the built handler before the fix.
+  // "…and comment carried over" with no warning — measured against the built handler before the fix.
   const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
-    n === 1 ? order() : order({ daysUntilDue: 30, comment: null }),
+    n === 1 ? richOrder() : richOrder({ daysUntilDue: 30, comment: null }),
   );
-  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", order OR-4105 came back with null\)/);
+  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", order OR-4105 came back empty\)/);
   assert.match(text, /LOST unless you set it again/);
-  assert.ok(
-    !carriedOver(text).includes("comment"),
-    `comment must not be listed as carried over one sentence before the warning says it was lost: ${JSON.stringify(carriedOver(text))}`,
+  const named = carriedOver(text);
+  assert.ok(!named.includes("comment"), `comment must not be listed as carried over: ${JSON.stringify(named)}`);
+  // The survivors are still named, so deleting the clause outright cannot pass this test.
+  assert.ok(named.includes("internalComment"), `survivors must still be named: ${JSON.stringify(named)}`);
+});
+
+test("a carried field the API returned CHANGED is reported, and not called lost", async () => {
+  // reai_update_order: the review's mutation. Counting only a null echo as a loss passed every other test
+  // here while a customer-visible comment replaced by other text was reported as preserved.
+  const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? richOrder() : richOrder({ daysUntilDue: 30, comment: "someone else's text" }),
   );
+  assert.match(text, /different value for comment \(carried "ZZ customer-visible", stored "someone else's text"\)/);
+  assert.ok(!carriedOver(text).includes("comment"), "a changed field is not a preserved field");
+  // Ambiguous, not a loss: ReAI renormalises what it stores, so claiming destruction here would be false.
+  assert.doesNotMatch(text, /LOST unless/);
+  assert.doesNotMatch(text, /came back empty/);
+});
+
+test("carried fields the response does not mention are NOT claimed as carried over", async () => {
+  // reai_update_order: a PUT answering with no body listed every carried field as preserved, on no evidence.
+  const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) => (n === 1 ? richOrder() : undefined));
+  assert.deepEqual(carriedOver(text), [], "nothing may be claimed as carried over from an empty response");
+  assert.match(text, /Sent back unchanged but NOT confirmed: .*comment/);
+  assert.doesNotMatch(text, /LOST unless/, "silence is not destruction either");
+});
+
+test("a required field carried from the record is checked too", async () => {
+  // reai_update_order: currencyCode, customerId, daysUntilDue and issueDate are carried from the record
+  // because the PUT requires them. Review found them escaping every check, so a response that moved the order
+  // to a different customer produced a note that said nothing at all — the most expensive fields in it.
+  const { text } = await run({ id: 4105, comment: "new" }, (req, n) =>
+    n === 1 ? richOrder() : richOrder({ comment: "new", customerId: 999999, currencyCode: "EUR" }),
+  );
+  assert.match(text, /different value for .*customerId \(carried 5941, stored 999999\)/);
+  assert.match(text, /currencyCode \(carried "NOK", stored "EUR"\)/);
+});
+
+test("lines dropped by the API are reported, and a matching count is silent", async () => {
+  // reai_update_order: two comments in the source licensed excluding the lines from the field comparison by
+  // claiming each tool checked their count. Review found that false for this tool and the offer one.
+  const dropped = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? richOrder() : richOrder({ daysUntilDue: 30, lines: [] }),
+  );
+  assert.match(dropped.text, /WARNING: 1 line\(s\) were sent and order OR-4105 came back with 0/);
+  const intact = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? richOrder() : richOrder({ daysUntilDue: 30 }),
+  );
+  assert.doesNotMatch(intact.text, /line\(s\) were sent and/);
+  const silent = await run({ id: 4105, daysUntilDue: 30 }, (req, n) => (n === 1 ? richOrder() : undefined));
+  assert.doesNotMatch(silent.text, /line\(s\) were sent and/, "an absent `lines` is not evidence of a drop");
 });
 
 test("a carried field the API DID keep is still named as carried over", async () => {
-  // reai_update_order: the positive control for the test above \u2014 a warning that fires on every update, or a
-  // headline that stopped naming survivors, would both pass it while making the tool worse.
+  // reai_update_order: the positive control for the tests above — a warning that fires on every update, or a
+  // headline that stopped naming survivors, would both pass them while making the tool worse.
   const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
-    n === 1 ? order() : order({ daysUntilDue: 30 }),
+    n === 1 ? richOrder() : richOrder({ daysUntilDue: 30 }),
   );
-  assert.ok(carriedOver(text).includes("comment"), `comment should be carried: ${JSON.stringify(carriedOver(text))}`);
-  assert.doesNotMatch(text, /WARNING: comment/);
-  assert.doesNotMatch(text, /LOST unless/);
+  const named = carriedOver(text);
+  assert.ok(named.includes("comment"), `comment should be carried: ${JSON.stringify(named)}`);
+  assert.ok(named.includes("internalComment"), `internalComment should be carried: ${JSON.stringify(named)}`);
+  assert.doesNotMatch(text, /WARNING/);
+  assert.doesNotMatch(text, /NOT confirmed/);
+  assert.doesNotMatch(text, /different value for/);
 });

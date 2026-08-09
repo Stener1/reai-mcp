@@ -158,10 +158,36 @@ All notable changes to `reai-mcp`. Format loosely follows
     the merge had carried it printed *"…and comment carried over"* with no warning anywhere in the note. Same
     class as the `given` gate at the four call sites; `asked` is only what it is called here. It is the worse
     half, too, because the caller never mentioned the field and so has no reason to check it.
-    - Both tools now name the carried fields from what came **back**, so a dropped field appears in a `WARNING`
-      that says it is LOST unless set again, instead of in the list of things preserved one sentence earlier.
-    - Four tests, two per tool, and each positive control is load-bearing: mutating the survivor list to empty
-      fails both controls, and turning `wholeRecord` off fails both dropped-carry tests.
+    - Both tools now name the carried fields from what came **back** — meaning the `confirmed` bucket only.
+    - **My first fix for this was itself the same overstatement, and the review caught it.** `survived` was
+      *sent minus contradicted*, so an `unanswered` field counted as preserved: a PUT answering with **no body**
+      listed every carried field as carried over, on zero evidence, in the same note that correctly demoted the
+      caller's own field to unconfirmed. The changelog sentence above was false as first written.
+    - **Three outcomes now, not two**, because collapsing them is what made it dishonest in both directions:
+      `EMPTIED` (came back null or blank — the write destroyed it, warned as LOST), `ALTERED` (came back with a
+      *different* value — reported, but **not** called a loss) and `UNANSWERED` (named as *"sent back unchanged
+      but NOT confirmed"*). The middle one matters: ReAI renormalises what it stores, and `src/tools/leads.ts`
+      already documents that a date echoed as a timestamp would read as a failed write. The first version would
+      have warned `LOST` about `issueDate` and about a nested `deliveryAddress` echoed with a fresh `id`.
+    - **The required-from-record fields escaped every check**, which the review found and which was the largest
+      hole: `currencyCode`, `customerId`, `daysUntilDue` and `issueDate` are carried from the record because the
+      PUT requires them, so they were in neither `asked` nor the optional-carry list. A response that moved the
+      order to another customer, changed its currency and changed its payment terms produced a note that said
+      **nothing at all**. The check is now read off `body` rather than a hardcoded list, and the headline still
+      names only the optional carries so a required echo does not read as a change the caller made.
+    - **The lines were excluded on a false premise.** Two comments — `src/tools/sales.ts` and
+      `src/tools/registry.ts` — licensed skipping them because "each tool checks separately by count"; only the
+      subscription tool did. `lineCountNote` now checks the count in both, so the largest payload these PUTs
+      carry can no longer be dropped silently. An absent `lines` is not treated as evidence.
+    - **`Changed NOTHING` → `Changed NOTHING you asked for`.** The review constructed the case where a caller's
+      field was ignored *and* a carried comment destroyed in the same call: the headline said the write changed
+      nothing while the warning below said a customer-visible comment was gone. The record did change.
+    - Fifteen tests across the two tools, one per outcome class plus positive controls. Mutation-verified by
+      failing test **name**, six mutations: treating only a null echo as a loss (the review's own defeat of the
+      first version) fails three; counting `unanswered` as preserved fails two; restoring the optional-only
+      carry list fails one; removing the line count fails two; calling every contradiction LOST fails two. The
+      `Changed NOTHING` rewording survived until the three existing assertions were tightened — they matched
+      the new wording as a substring.
     - **The first version of these tests asserted `/comment carried over/`**, which matched a one-item list by
       luck for orders and matched *neither* case for offers, where the note names five fields and `comment`
       falls mid-list — so the offer negative assertion was vacuous. They parse the list now.
