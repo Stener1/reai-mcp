@@ -919,6 +919,25 @@ function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
  * having none.
  */
 const WRITE_INTENT_VERBS = new Set([
+  // "make" is NOT here, and the reasoning is the point rather than the omission. Codex found on PR #121 that
+  // "how do I make a rent agreement" became a READ once question words carried intent -- `make` is a POST hint
+  // in METHOD_INTENT and absent from this table -- and moved off POST /api/agreements/rent-agreement onto the
+  // agreements collection. That is a regression read intent introduced, and BOTH available fixes were measured
+  // and both surfaced a write on a read question:
+  //
+  //   treat any METHOD_INTENT hint as write intent    "which invoices did we cancel" -> DELETE
+  //                                                    /api/invoices/{id}/manual-credit-note-applications
+  //   add "make" here                                 "which invoices did we make" and "how many invoices did
+  //                                                    we make" -> POST /api/invoices
+  //
+  // The first breaks a case this file already pins as held-out. The second is the same shape one word further
+  // on: `make` is as common in a past-tense question as in an imperative, which is exactly why `lag` is
+  // excluded from METHOD_INTENT a few lines below with the same argument.
+  //
+  // So the regression is accepted and named instead: "how do I make a rent agreement" returns GET
+  // /api/agreements. An unhelpful read for a create question is worse than nothing and better than a write
+  // ranked first for "which invoices did we make". Fixing it properly needs procedural phrasing ("how do I X")
+  // to be recognised as intent in its own right, which is a change of its own.
   "create", "register", "add", "delete", "remove", "update", "edit", "modify",
   "rename", "upload", "pay", "issue", "credit", "reverse", "settle", "file",
   // Safe as exact tokens: "postings" and "submission" tokenize to themselves, so
@@ -982,9 +1001,12 @@ const READ_INTENT_VERBS: ReadonlySet<string> = new Set([
   "vis", "vise", "se", "list", "liste", "hent", "finn", "finne", "sok", "søk", "soke", "søke",
   // Question words. Every one of these is a STOPWORD, which is why intent is matched against the unfiltered
   // query rather than against rawTerms.
-  "hvilke", "hvilken", "hvor", "hva", "hvem", "hvorfor",
+  "hvilke", "hvilken", "hvor", "hva", "hvem", "hvorfor", "hvordan", "naar", "nar",
+  // `hvordan`, `naar`/`nar`, `when`, `where` and `why` were omitted from the first version, so "where are
+  // contracts", "when is contract" and "hvordan er leieavtalen" still ranked a contract-CREATION POST --
+  // the exact failure this feature exists to prevent. Codex, PR #121.
   // English.
-  "show", "get", "find", "search", "display", "which", "what", "who", "how",
+  "show", "get", "find", "search", "display", "which", "what", "who", "how", "when", "where", "why",
 ]);
 
 // DELIBERATELY NOT HERE: `status`, `rapport`, `oversikt`, `report`, `overview`, `summary`, `total`, `many`,
@@ -1165,7 +1187,7 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // filing for every query including "lever amelding" and the bare noun, which is the property the filing
   // rule exists to protect.
   [
-    /\b(vis|vise|se|list|liste|hent|finn|finne|sok|søk|soke|søke|oversikt|rapport|hvilke|hvilken|hva|hvem|apne|apn|open|show|get|find|search|view|display|report|overview)\s+(?:(?:alle|siste|min|mine|denne|en|et|er|the|my|all|last|latest)\s+)?(a[-\s]?melding\w*)\b/g,
+    /\b(vis|vise|se|list|liste|hent|finn|finne|sok|søk|soke|søke|hvilke|hvilken|hva|hvem|apne|apn|open|show|get|find|search|display)\s+(?:(?:alle|siste|min|mine|denne|en|et|er|the|my|all|last|latest)\s+)?(a[-\s]?melding\w*)\b/g,
     "salary-payments",
   ],
   [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],
@@ -1216,11 +1238,24 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   inventory: ["warehouse"],
   stock: ["warehouse"],
   contract: ["agreement"],
-  // The Norwegian was missing while the English was present, so "vis kontrakter" returned NOTHING AT ALL
-  // while "list contracts" reached the family. Found by the same audit: a bare vocabulary hole rather than a
-  // ranking problem, and the kind this table exists to close.
-  kontrakt: ["agreement"],
-  kontrakter: ["agreement"],
+  // `kontrakt`/`kontrakter` were added here and then WITHDRAWN, which makes four retractions from this table
+  // for one recurring reason. The gap is real: the English `contract`/`contracts` are present and the Norwegian
+  // was not, so "vis kontrakter" returned nothing at all, and adding it turned 38 empty queries into answers.
+  //
+  // The price was that EVERY operation under /api/agreements matches "agreement", so the word cannot choose
+  // between them and the ranking falls to text. That let it name the wrong write:
+  //
+  //     upload kontrakt    POST /api/attachments  ->  POST /api/agreements/{id}/sign-request
+  //     opprett kontrakt   (nothing)              ->  POST /api/agreements/{id}/sign-request
+  //
+  // The first is the one that settles it. `main` answered an upload with the attachment POST, correctly, and
+  // the synonym replaced that with an operation that SENDS a signing request to a counterparty. Storing a
+  // document and starting a signature round are not the same act. The second merely extends a pre-existing
+  // defect -- "opprett avtale" does the same on main -- but the first is a regression this table would have
+  // introduced. Found by Codex on PR #121.
+  //
+  // Recovering the read value needs the ranker to prefer a collection over a nested action for a bare resource
+  // noun, which is a change to scoring rather than another row here. Same conclusion as `fordring`.
   contracts: ["agreement"],
   signing: ["sign", "agreement"],
   vat: ["vat", "mva"],

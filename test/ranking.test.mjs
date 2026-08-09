@@ -481,7 +481,6 @@ test("a query that states read intent does not rank a write first", () => {
   for (const query of [
     "vis leieavtale",
     "list contracts",
-    "vis kontrakter",
     "hent leiekontrakt",
     "finn arbeidskontrakt",
     // The question words matter as much as the verbs, and they are the reason intent is matched against the
@@ -491,9 +490,14 @@ test("a query that states read intent does not rank a write first", () => {
     "get contract",
     "hvilke contract",
     "hva er contracts",
-    "hvor mange kontrakter",
     "which agreements",
     "what agreements do we have",
+    // The remaining question-word stopwords, added after Codex found them missing on PR #121: "where are
+    // contracts", "when is contract" and "hvordan er leieavtalen" all still ranked a contract-CREATION POST.
+    "where are contracts",
+    "when is contract",
+    "hvordan er leieavtalen",
+    "naar er leieavtalen",
   ]) {
     const hit = top(query);
     assert.ok(hit, `"${query}" returned nothing`);
@@ -590,14 +594,42 @@ test("a two-letter read verb does not become substring noise", () => {
   assert.equal(top("se kunde").method, "GET");
 });
 
-test("the Norwegian word for a contract reaches the agreements family", () => {
-  // A bare vocabulary hole rather than a ranking problem: `contract` and `contracts` were in the table and
-  // the Norwegian `kontrakt`/`kontrakter` were not, so "vis kontrakter" returned NOTHING AT ALL.
-  for (const query of ["kontrakt", "kontrakter", "vis kontrakter", "hvor mange kontrakter"]) {
-    const hits = searchOperations({ query, limit: 3 }).map((h) => h.path);
-    assert.ok(hits.length > 0, `"${query}" returned nothing`);
-    assert.ok(hits.some((p) => p.startsWith("/api/agreements")), `"${query}" -> ${hits.join(", ")}`);
-  }
+test("the Norwegian word for a contract stays unmapped, and why", () => {
+  // `kontrakt`/`kontrakter` were added and WITHDRAWN — the fourth retraction from TERM_SYNONYMS for the same
+  // recurring reason. The gap is real: the English `contract`/`contracts` are mapped and the Norwegian was not,
+  // so "vis kontrakter" returns nothing, and adding it turned 38 empty queries into answers.
+  //
+  // The price was that every operation under /api/agreements matches "agreement", so the word cannot choose
+  // between them and the ranking falls to text — which named the wrong write:
+  //
+  //     upload kontrakt    POST /api/attachments  ->  POST /api/agreements/{id}/sign-request
+  //
+  // `main` answered an upload with the attachment POST, correctly, and the synonym replaced it with an
+  // operation that SENDS a signing request. Storing a document and starting a signature round are different
+  // acts. Found by Codex on PR #121. Asserted so the temptation is recorded with its price.
+  assert.equal(searchOperations({ query: "upload kontrakt", limit: 1 })[0].path, "/api/attachments");
+  assert.equal(searchOperations({ query: "vis kontrakter", limit: 1 }).length, 0);
+  // The English spelling still works, and the Norwegian compounds reach the family by decomposition.
+  assert.equal(searchOperations({ query: "list contracts", limit: 1 })[0].path, "/api/agreements");
+  assert.equal(searchOperations({ query: "vis leiekontrakt", limit: 1 })[0].path, "/api/agreements");
+});
+
+test("a METHOD_INTENT hint alone is not write intent", () => {
+  // Codex proposed, on PR #121, that any verb implying a writing method should count as write intent. Tried and
+  // REVERTED: the two tables are deliberately asymmetric. METHOD_INTENT holds words that say which method
+  // WITHOUT licensing a write, so "which invoices did we cancel" — already a held-out case in this file —
+  // ranked DELETE /api/invoices/{id}/manual-credit-note-applications first. One unambiguous verb was added
+  // instead.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(top("which invoices did we cancel").method, "GET");
+  // And adding `make` to WRITE_INTENT_VERBS instead was also measured and rejected: it is as common in a
+  // past-tense question as in an imperative, so "which invoices did we make" ranked POST /api/invoices — the
+  // same shape one word further on. Both are asserted, so neither fix can be reintroduced without failing here.
+  assert.equal(top("which invoices did we make").method, "GET");
+  assert.equal(top("how many invoices did we make").method, "GET");
+  // The accepted cost, asserted rather than described: a create question gets the collection. Unhelpful, and
+  // better than a write ranked first for a question about the past.
+  assert.equal(top("how do I make a rent agreement").path, "/api/agreements");
 });
 
 test("widening a synonym to reach a family would displace the families it names", () => {

@@ -85,11 +85,30 @@ All notable changes to `reai-mcp`. Format loosely follows
       there is no score floor, so a multiplicative penalty can never empty a result set. The figures above
       replace it — writes demoted, answers gained, answers lost, counted separately. Pointed out by the
       independent review, along with every defect in the four bullets above.
-  - **Found and not fixed, stated plainly.** "opprett kontrakt" reaches `POST /api/agreements/{id}/sign-request`,
-    which *sends* a signing request. Pre-existing rather than new — "opprett avtale" does the same on `main` at
-    an identical score, verified — and the Norwegian word simply reaches it now. There is no generic create for
-    an agreement, only five typed ones, and a risk-aware write boost was tried and did not change the outcome
-    because the operation wins on text score. It is gated in practice: `classifyRequest` calls it irreversible,
+  - **`kontrakt`/`kontrakter` were added and then WITHDRAWN**, the fourth retraction from this table for one
+    recurring reason. The gap is real — the English `contract`/`contracts` are mapped, the Norwegian was not, so
+    "vis kontrakter" returns nothing — but every operation under `/api/agreements` matches "agreement", so the
+    word cannot choose between them and the ranking falls to text. That named the wrong write:
+    `upload kontrakt` moved from `POST /api/attachments`, which is correct on `main`, to
+    `POST /api/agreements/{id}/sign-request`. Storing a document and starting a signature round are different
+    acts. Found by Codex; the 38 gained answers went with it.
+  - **`when`, `where`, `why`, `hvordan` and `naar` were missing from the read words**, so "where are contracts",
+    "when is contract" and "hvordan er leieavtalen" still ranked a contract-CREATION POST — the exact failure
+    this feature exists to prevent. Codex again.
+  - **A `METHOD_INTENT` hint alone is not write intent, and neither is `make`.** Read intent regressed "how do I
+    make a rent agreement" from `POST /api/agreements/rent-agreement` to the agreements collection, because
+    `make` is a POST hint and not a write verb. Both available fixes were measured and both surfaced a write on
+    a read question: treating any hint as write intent put `DELETE` first for "which invoices did we cancel" — a
+    case this repository already pins as held-out — and adding `make` put `POST /api/invoices` first for "which
+    invoices did we make". The regression is accepted and named instead. An unhelpful read for a create question
+    is better than a write ranked first for a question about the past, and both rejected fixes are now asserted
+    so neither can return quietly.
+  - **Found and not fixed, stated plainly.** "opprett avtale" reaches `POST /api/agreements/{id}/sign-request`,
+    which *sends* a signing request, and `get employee contract` reaches the employee ledger rather than the
+    agreements collection. Both are pre-existing or a partial win: `main` answered "get employee contract" with
+    a POST that CREATES an employment contract, so the read is less wrong and still not right. There is no
+    generic create for an agreement, only five typed ones, and a risk-aware write boost was tried and did not
+    change the outcome because the operation wins on text score. It is gated in practice: `classifyRequest` calls it irreversible,
     so a deployment in the default `reversible` mode refuses it.
 
 ### Added
