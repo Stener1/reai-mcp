@@ -524,6 +524,16 @@ type LoanRecord = {
   accruedInterestBalance?: number | null;
 };
 
+/**
+ * The loan as the RECORD describes it, or a statement that it did not describe it.
+ *
+ * Returned `""` when the response carried none of these fields, which produced the note
+ * **"Loan 77 recorded: ."** — a sentence that reads like a successful record of nothing, on a tool that has just
+ * created a loan. Found by driving the tool with a response that answered only `{id}`, while checking whether
+ * its enum fields were echoed (they are not — this tool already reported them from the record).
+ *
+ * An empty description is a fact about the RESPONSE, so it says that instead of nothing.
+ */
 const describeLoan = (loan: LoanRecord): string => {
   const bits = [
     loan.reference,
@@ -534,7 +544,10 @@ const describeLoan = (loan: LoanRecord): string => {
     loan.counterpartyName ? `counterparty ${loan.counterpartyName}` : undefined,
     loan.status,
   ].filter(Boolean);
-  return bits.join(" · ");
+  return bits.length > 0
+    ? bits.join(" · ")
+    : "the response carried no readable terms, so nothing here describes the loan — read it back with " +
+        "reai_get_loan";
 };
 
 /**

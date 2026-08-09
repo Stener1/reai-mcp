@@ -432,7 +432,20 @@ artifacts; and skipping optional fields meant seven update tools were driven whi
 green sweep is only as good as its samples.
 
 **What it still cannot see**, named rather than implied: a value the note RENDERS rather than prints (nine enum
-fields, listed in the test), a value it reformats, and five tools whose arguments it cannot construct.
+fields), a value it reformats, and five tools whose arguments it cannot construct.
+
+All nine rendered fields have since been driven **by hand** with a response naming a different member. One was
+echoing — `documentType` on a supplier document, where the two kinds are opposite signs in the ledger — and the
+other eight already reported from the record. Each now carries either a named test or an explicit `null` meaning
+nothing covers it, and those references are checked the same way the census entries are, so the map cannot decay
+into prose.
+
+Of the five tools the sweep cannot drive, two *refuse before sending anything* — each requires one of two
+arguments, which no schema expresses. One of those, `reai_apply_reconciliation_rules`, had been counted as
+covered while never reaching the API stub at all; the sweep now checks the request actually went out, which is
+the same "measured nothing" hole that made `reai_update_expense` look covered while it returned *"No fields were
+given"*. Each tool is driven twice, with required fields only and with the optional fields the response can
+answer for, and counts as unreachable only if both attempts fail.
 
 What is left on the list is the residue the sweep genuinely cannot construct arguments for — 3 tools, named
 rather than counted. **What the sweep cannot see:** a note that RE-FORMATS the value it echoes reads as "mentions

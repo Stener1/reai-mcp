@@ -472,3 +472,34 @@ test("every instrument type has a measured asset account, or the refusal cannot 
     assert.match(table, new RegExp(`${type}:\\s*"\\d{4}"`), `${type} needs a measured account`);
   }
 });
+
+test("reai_create_share_investment names the instrument type the record stored", async () => {
+  // One of nine enum fields the behavioural sweep cannot judge: their value is a WORD, so a note may print a
+  // label derived from it and an echo looks identical to a read-back. All nine were driven by hand with a
+  // response naming a DIFFERENT member; this tool already reported from the record, and this test says so
+  // rather than leaving the claim resting on a probe nobody kept.
+  const { ctx } = ctxFor([{ data: { ...POSITION, id: 77, instrumentType: "UNLISTED_SHARE" }, status: 200 }]);
+  const res = await tool("reai_create_share_investment").handler(
+    { name: "Zz Holding AS", instrumentType: "LISTED_SHARE", tenantId: 2783 },
+    ctx,
+  );
+  const text = textOf(res).split("\n\n")[0];
+  assert.match(text, /UNLISTED_SHARE/, `the stored member, not the sent one: ${text}`);
+  // A boundary BEFORE the token: "LISTED_SHARE" is a substring of "UNLISTED_SHARE", so the obvious negative
+  // assertion matches the correct note and fails it. Fifth regex-scoping slip in this line of work.
+  assert.doesNotMatch(text, /(^|[^A-Z_])LISTED_SHARE/, `the sent member must not appear: ${text}`);
+});
+
+test("reai_add_share_investment_event names the event type the record stored", async () => {
+  // reai_add_share_investment_event: same class. A PURCHASE reported as a SALE is a sign error on a position.
+  const { ctx } = ctxFor([
+    { data: { id: 88, eventType: "SALE", eventDate: "2026-08-09", quantity: 10 }, status: 200 },
+  ]);
+  const res = await tool("reai_add_share_investment_event").handler(
+    { investmentId: 19, eventType: "PURCHASE", eventDate: "2026-08-09", quantity: 10, pricePerUnit: 100, tenantId: 2783 },
+    ctx,
+  );
+  const text = textOf(res).split("\n\n")[0];
+  assert.match(text, /SALE/, `the stored member: ${text}`);
+  assert.doesNotMatch(text, /PURCHASE/);
+});

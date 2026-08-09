@@ -9,6 +9,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The two gaps the previous PR named are closed, and the closing found two more.**
+  - **All nine rendered enum fields driven by hand.** The sweep cannot judge them — their value is a word, so a
+    note printing a label derived from one looks identical to a read-back. Eight had never been examined. Result:
+    they already report from the record, which is worth knowing rather than assuming in either direction. Each now
+    carries a named test or an explicit `null` meaning nothing covers it, and those references are **checked**
+    with the same anchoring as the census entries, so the map cannot decay into prose.
+    - `test/purchase.test.mjs` is new — there was no purchase-side test file at all, and `documentType` needed
+      one.
+  - **`reai_create_loan` reported a loan with no terms as though that were a description.** `describeLoan`
+    returned `""` when the response carried none of the fields it names, so the note read *"Loan 77 recorded:
+    ."* — a sentence that looks like a successful record of nothing, on an irreversible create. Found while
+    checking the enum fields, not by the sweep, which reads only whether a sent value appears.
+  - **Each tool is now driven twice** — required fields only, and with the optional fields the response can
+    answer for — and counts as unreachable only if both attempts fail. That recovers
+    `reai_create_customer_contact`, which the previous PR lost to unwrapping optionals and listed as a casualty.
+  - **The sweep now checks the request actually went out.** `reai_apply_reconciliation_rules` had been counted as
+    covered while never reaching the stub: it refuses without a month or a date range, which is correct behaviour
+    and means nothing was measured. Same hole that made `reai_update_expense` look covered while returning "No
+    fields were given". Two tools refuse this way, each requiring one of two arguments — a shape no schema
+    expresses — and both are listed with the refusal text.
+  - Seven mutations, seven named failures, including three ways to defeat the new proof references: naming a test
+    that does not exist, moving a proof to an unrelated file, and dropping a field from the list.
+  - **A fifth regex-scoping slip**, for the record: `/LISTED_SHARE/` matched inside `UNLISTED_SHARE`, so the
+    obvious negative assertion failed a correct note. It needs a boundary before the token, not after.
+
 - **The 40-tool "nobody has checked" list was replaced by a measurement, which found five tools echoing their
   requests and six that crashed on an unexpected 200.** The previous PR left a ratchet: 40 names, meaning nobody
   had examined whether each tool's note quotes the request or the record. A ratchet on a hand-kept list is only
