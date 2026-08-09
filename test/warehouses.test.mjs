@@ -450,3 +450,31 @@ test("the negative-line summary is bounded, since ok() does not shorten a note",
   assert.ok(note.length < 1200, `the note alone grew to ${note.length} characters`);
   assert.equal((note.match(/SKU-/g) ?? []).length, 10, "exactly the sample, not every line");
 });
+
+test("renaming a warehouse states the name the response carries, not the one sent", async () => {
+  // reai_rename_warehouse: a rename is the case where quoting the request back is least defensible —
+  // reai_create_customer already documents this API storing a name title-cased.
+  const { text } = await run("reai_rename_warehouse", { warehouseId: 4, name: "hovedlager" }, {
+    id: 4,
+    name: "Hovedlager",
+  });
+  assert.match(text, /is now named "Hovedlager", read back from the response/);
+  assert.match(text, /WARNING: name \(sent "hovedlager", warehouse 4 came back with "Hovedlager"\)/);
+});
+
+test("renaming a warehouse says so plainly when the response carries no name", async () => {
+  // The negative branch: a bodyless 200 must not be reported as a confirmed rename.
+  const { text } = await run("reai_rename_warehouse", { warehouseId: 4, name: "Nytt navn" }, undefined);
+  assert.match(text, /was sent the name "Nytt navn", but the response does not carry it/);
+  assert.doesNotMatch(text, /read back from the response/);
+});
+
+test("renaming a warehouse to the name it stores reports no discrepancy", async () => {
+  // Positive control: a warning on every rename would pass the tests above and make the tool worse.
+  const { text } = await run("reai_rename_warehouse", { warehouseId: 4, name: "Hovedlager" }, {
+    id: 4,
+    name: "Hovedlager",
+  });
+  assert.match(text, /is now named "Hovedlager", read back from the response/);
+  assert.doesNotMatch(text, /WARNING/);
+});

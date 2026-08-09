@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { defineTool, ok, okList, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import {
+  confirmAgainstResponse,
+  defineTool,
+  describeConfirmation,
+  ok,
+  okList,
+  requireTenantId,
+  tenantIdArg,
+  type ToolDef,
+} from "./registry.js";
 
 /**
  * General sub-accounts (underkonti) — the partition inside a ledger account.
@@ -228,10 +237,21 @@ const renameSubAccount = defineTool({
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // From the RESPONSE, not from `args`. A rename is the case where quoting the request back is least
+    // defensible: `reai_create_customer` already documents this API storing a name title-cased, so the
+    // stored name is the one thing here a caller cannot assume. `GeneralSubAccountRes` carries `name`, so
+    // there is nothing to infer — the previous version simply did not look.
+    const stored = res.data?.name;
+    const confirmation = confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true });
     return ok(res.data, {
-      note:
-        `Sub-account ${args.id} renamed to "${args.name}". Only the name changed — the ledger ` +
-        `account it belongs to cannot be changed through this endpoint.`,
+      note: [
+        (stored === undefined
+          ? `Sub-account ${args.id} was sent the name "${args.name}", but the response does not carry it, ` +
+            `so that is what was SENT rather than what is stored.`
+          : `Sub-account ${args.id} is now named ${JSON.stringify(stored)}, read back from the response.`) +
+          ` Only the name changed — the ledger account it belongs to cannot be changed through this endpoint.`,
+        ...describeConfirmation(confirmation, `sub-account ${args.id}`),
+      ].join("\n\n"),
     });
   },
 });

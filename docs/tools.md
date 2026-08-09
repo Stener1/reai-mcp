@@ -375,6 +375,30 @@ The first two behave like `if (value != null) set(value)`; the rest like a plain
 
 Both tools therefore report from the **response** rather than from what was sent: a value the API discarded is named as `IGNORED by the API`, the headline drops it (down to `Changed NOTHING you asked for` if that is all there was — the record may still have changed, which is why the sentence is qualified), and for the two clearable fields the note says to send an empty string. An earlier version *refused* a null on those two, which covered two of the five ignored fields and refused legitimate calls — including a null against an already-empty field, whose outcome is what the caller asked for.
 
+### Which tools state what the API stored, and which state what you sent
+
+A note that says *"renamed to X"* while X is the value you just passed is not a report, it is an echo. It matters
+here because ReAI **rewrites what it stores** — a name comes back title-cased, a phone in E.164, a date as a
+timestamp — so on a rename the stored value is the one thing the caller cannot assume.
+
+Two populations, both derived rather than listed by hand, and both enforced by
+`test/confirm-against-response.test.mjs`:
+
+| population | how it is found | state |
+|---|---|---|
+| read-merge-write | declares a `GET` **and** a `PUT`/`PATCH` | 13 tools, 11 certified against the response, 2 recorded as unverified with the reason |
+| no `GET` at all | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts | 39 tools, 4 proven, 35 **not examined** |
+
+The second row is the blind spot that let three tools echo their arguments through five rediscoveries: the first
+tripwire was gated on declaring a `GET`, and none of them does. Deriving the population from the spec instead
+means a new tool joins it automatically. Identity fields (`id`, `orgNumber`) are excluded — they go out in the
+path and come back unchanged whatever the API did with the payload, so they confirm nothing.
+
+The 35 is a **ratchet**: it may fall and must never rise. Being on that list is a statement that nobody has
+checked whether the tool quotes the request or the record — not that it is fine. Most are `create` tools, where
+the question is softer, because a caller who supplied every field has more reason to re-read anyway than one
+whose carried field was destroyed without mention.
+
 Counter-examples elsewhere, all measured: `PUT /api/leads/{…}/notes` clears on null, so does an employee's `endDateOfEmployment`, and so does `bankAccountNumber` on `PUT /api/creditors/{id}` — cleared by a null, by omitting the field and by an empty string alike, on three throwaway creditors. Creditors therefore fall in the **plain replacement** family above, with `buyerReference`, rather than in the comment family. **The split is per-field, not per-endpoint** — which is the rule, and the reason each field has to be measured where it matters.
 
 **Scope, stated because the fix is much narrower than the hazard.** Fourteen curated tools take a nullable argument on a `PUT` or `PATCH` — twelve besides these two — and the phrase "null clears it" appears in **eight** source files. Those remain unverified against the behaviour above, with one exception now measured: `reai_update_creditor` promised a null clears `bankAccountNumber`, a *payment destination*, and its success note was computed from what was **sent** rather than from the response. Measured on three throwaway creditors — the field is cleared by a null, by omitting it, and by an empty string alike — so the claim was true, and creditors behave like `buyerReference` rather than like a comment. That is the **third** endpoint to disagree with the other two, which is the whole reason for the rule above. The tool now reports from the response regardless, because the cost of being wrong there is a payment destination and the check is two lines. `reai_update_subscription` was deliberately not probed: subscriptions are created **active**, so a throwaway one on a real company could generate an invoice.

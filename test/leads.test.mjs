@@ -572,7 +572,50 @@ test("reai_update_lead carries the contact field it is not changing, never sendi
   // single-key body, so a regression fails here even before the state assertions.
   assert.deepEqual(contact[0].body, { email: "keep@b.no", phone: "41000000" });
   assert.equal(fake.state.email, "keep@b.no", "the email must survive a phone-only request");
-  assert.match(text, /email carried over unchanged/);
+  // "sent to preserve it", NOT "carried over unchanged". The value printed is the one from the REQUEST, so
+  // the old wording asserted an outcome nothing had checked. Whether it survived is answered by the re-read.
+  assert.match(text, /email sent to preserve it \("keep@b\.no"\)/);
+  assert.doesNotMatch(text, /carried over unchanged/);
+  // And the state line now shows the contact fields, so a destroyed carry leaves a trace somewhere.
+  assert.match(text, /State now: .*email "keep@b\.no"/);
+});
+
+test("reai_update_lead reports a carried contact field the API destroyed", async () => {
+  // reai_update_lead: `check()` returns early for any field the caller did not mention, which left the
+  // carried half of a REPLACEMENT unverified — the note said "carried over unchanged" with the request's own
+  // value while the re-read covered only what the caller named. Same class as the merge tools in #143, one
+  // mechanism over: a re-read rather than a PUT response.
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  // The API accepts the carried email and drops it anyway. Measured behaviour is not being asserted here —
+  // this is the failure the note must be capable of reporting.
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) fake.state.email = null;
+    return out;
+  };
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.equal(result.isError, true, "a destroyed field is a failure, not a footnote");
+  assert.match(text, /THE WRITE DID NOT FULLY TAKE/);
+  assert.match(text, /email: not mentioned, so "keep@b\.no" was sent to preserve it .* DESTROYED it/);
+});
+
+test("reai_update_lead does not report a carried contact field that survived", async () => {
+  // The positive control: a check that always fires would pass the test above while making the tool useless.
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(text, /DESTROYED it/);
+  assert.doesNotMatch(text, /THE WRITE DID NOT FULLY TAKE/);
+});
+
+test("reai_update_lead says nothing about a carried contact field that was already empty", async () => {
+  // Nothing was at stake, so a note about it is noise — and `null` sent against a stored `null` would
+  // otherwise read as a destroyed value on every phone-only edit of a lead with no email.
+  const fake = fakeLead({ id: 700, email: null, phone: "+4740000000" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(text, /DESTROYED it/);
 });
 
 test("reai_update_lead carries a null contact field as null, not as absent", async () => {

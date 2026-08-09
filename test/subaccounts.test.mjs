@@ -667,3 +667,31 @@ test("a voucher needing BOTH dimensions is refused once, naming both", async () 
   assert.match(text, /line 2, account 1920 → companyBankId/);
   assert.match(text, /2 posting\(s\)/, "both are counted in one refusal");
 });
+
+test("renaming a sub-account states the name the response carries, not the one sent", async () => {
+  // reai_rename_sub_account: GeneralSubAccountRes carries `name`, so echoing args was never necessary.
+  const { text } = await run("reai_rename_sub_account", { id: 12, name: "shopify sales" }, () => ({
+    id: 12,
+    accountNumber: "1579",
+    name: "Shopify sales",
+  }));
+  assert.match(text, /is now named "Shopify sales", read back from the response/);
+  assert.match(text, /WARNING: name \(sent "shopify sales", sub-account 12 came back with "Shopify sales"\)/);
+});
+
+test("renaming a sub-account says so plainly when the response carries no name", async () => {
+  const { text } = await run("reai_rename_sub_account", { id: 12, name: "Nytt" }, () => undefined);
+  assert.match(text, /was sent the name "Nytt", but the response does not carry it/);
+  assert.doesNotMatch(text, /read back from the response/);
+});
+
+test("renaming a sub-account to the name it stores reports no discrepancy", async () => {
+  const { text } = await run("reai_rename_sub_account", { id: 12, name: "Shopify sales" }, () => ({
+    id: 12,
+    accountNumber: "1579",
+    name: "Shopify sales",
+  }));
+  assert.doesNotMatch(text, /WARNING/);
+  // The standing caveat about the ledger account must survive the rewrite.
+  assert.match(text, /the ledger account it belongs to cannot be changed/);
+});

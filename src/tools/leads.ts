@@ -564,7 +564,11 @@ const updateLead = defineTool({
     // itself. Sending both fields removes the question: under the replacement reading the carried
     // value preserves what the caller kept, and under the no-op reading the call is no longer
     // single-key, so it applies. The one thing not to do is send one field and trust either story.
-    if (given("email") || given("phone")) {
+    // Whether the contact PUT ran at all. The carried-field check below must not fire when it did not: this
+    // tool only touches the contact endpoint when one of the two fields is mentioned, so an untouched email is
+    // not something this call "sent to preserve".
+    const contactWasSent = given("email") || given("phone");
+    if (contactWasSent) {
       const carry = <K extends "email" | "phone">(key: K) =>
         given(key) ? (args[key] as string | null) : (before.state[key] ?? null);
       const body: Record<string, unknown> = { email: carry("email"), phone: carry("phone") };
@@ -579,7 +583,10 @@ const updateLead = defineTool({
           .map((k) =>
             given(k)
               ? `${k} ${args[k] === null ? "cleared" : "set"}`
-              : `${k} carried over unchanged (${JSON.stringify(body[k])})`,
+              // "sent to preserve", not "carried over unchanged": the value printed here is the one from the
+              // REQUEST, and whether the API kept it is a separate question the re-read below now answers.
+              // The old wording asserted the answer.
+              : `${k} sent to preserve it (${JSON.stringify(body[k])})`,
           )
           .join(" and ")}`,
       );
@@ -622,6 +629,24 @@ const updateLead = defineTool({
     check("email");
     check("phone");
     check("followUpAt");
+    // The CARRIED half. `check` returns early on any field the caller did not mention, which is right for a
+    // change nobody asked for — but the contact PUT is a REPLACEMENT and this tool sends the stored email or
+    // phone precisely so it survives. Until now nothing verified that: the note said "carried over unchanged"
+    // with the value from the request, and the re-read a few lines below covered only what the caller named.
+    // Same class as the four merge tools fixed in #143, one mechanism over — a re-read rather than a response.
+    for (const key of ["email", "phone"] as const) {
+      if (given(key) || !contactWasSent) continue;
+      const carried = before.state[key] ?? null;
+      if (carried === null) continue; // nothing was at stake
+      if ((after.state[key] ?? null) === null) {
+        failures.push(
+          `${key}: not mentioned, so ${show(carried)} was sent to preserve it — and it reads null now, ` +
+            `so this write DESTROYED it`,
+        );
+      } else if (String(carried) !== String(after.state[key])) {
+        rewritten.push(`${key}: carried ${show(carried)}, stored ${show(after.state[key])}`);
+      }
+    }
     // The row itself, which is the failure the whole save-first exists to prevent: without this the
     // note could read "this CREATED lead null" and still report success, because every field the
     // caller named happened to come back as asked.
@@ -643,6 +668,9 @@ const updateLead = defineTool({
         `.\n\nCalls made:\n` +
         calls.map((c) => `  - ${c}`).join("\n") +
         `\n\nState now: ${field("status")}, ${field("notes")}, ${field("followUpAt")}` +
+        // email and phone were missing here, which is why a destroyed carry left no trace anywhere in the
+        // note: not in the calls line (which quoted the request), not in the checks, not in the state.
+        (contactWasSent ? `, ${field("email")}, ${field("phone")}` : ``) +
         (after.state.convertedCustomerId
           ? `. Still linked to customer ${after.state.convertedCustomerId} from an earlier conversion.`
           : `.`) +

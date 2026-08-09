@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
+  confirmAgainstResponse,
   defineTool,
+  describeConfirmation,
   fail,
   ok,
   okList,
@@ -206,13 +208,27 @@ const renameWarehouse = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request({
+    const res = await ctx.client.request<{ name?: string }>({
       method: "PUT",
       path: `/api/warehouses/${args.warehouseId}`,
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data, { note: `Warehouse ${args.warehouseId} renamed to ${args.name}.` });
+    // From the RESPONSE. `WarehouseRes` carries `name`, and a rename is exactly where this API is known to
+    // rewrite what it was given — reai_create_customer documents a stored name coming back title-cased.
+    const stored = res.data?.name;
+    return ok(res.data, {
+      note: [
+        stored === undefined
+          ? `Warehouse ${args.warehouseId} was sent the name ${JSON.stringify(args.name)}, but the response ` +
+            `does not carry it, so that is what was SENT rather than what is stored.`
+          : `Warehouse ${args.warehouseId} is now named ${JSON.stringify(stored)}, read back from the response.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true }),
+          `warehouse ${args.warehouseId}`,
+        ),
+      ].join("\n\n"),
+    });
   },
 });
 

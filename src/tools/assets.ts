@@ -1,7 +1,9 @@
 import { z } from "zod";
 import {
   CURRENCY_CODE,
+  confirmAgainstResponse,
   defineTool,
+  describeConfirmation,
   ok,
   okList,
   requiredName,
@@ -196,10 +198,30 @@ const setAssetDepreciation = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // From the RESPONSE. This tool is declared IRREVERSIBLE — it changes the schedule future depreciation
+    // postings follow — and it was the last one still stating that schedule from `args`. `AssetRes` carries
+    // both `depreciationMethod` and `usefulLifeInMonths` and this PUT returns it, so there was nothing to
+    // infer. A sentence saying an asset "now depreciates linear over 60 months" is the kind an agent acts on
+    // without checking.
+    const record = res.data as { depreciationMethod?: unknown; usefulLifeInMonths?: unknown } | undefined;
+    const sent = {
+      usefulLifeInMonths: args.usefulLifeInMonths,
+      depreciationMethod: args.depreciationMethod,
+    };
+    const confirmation = confirmAgainstResponse(sent, record, { wholeRecord: true });
+    const readBack =
+      record?.depreciationMethod !== undefined && record?.usefulLifeInMonths !== undefined;
     return ok(res.data, {
-      note:
-        `Asset ${args.assetId} now depreciates ${args.depreciationMethod} over ` +
-        `${args.usefulLifeInMonths} month(s). Future depreciation follows the new schedule.`,
+      note: [
+        (readBack
+          ? `Asset ${args.assetId} now depreciates ${String(record.depreciationMethod)} over ` +
+            `${String(record.usefulLifeInMonths)} month(s), read back from the response.`
+          : `Asset ${args.assetId} was sent ${args.depreciationMethod} over ` +
+            `${args.usefulLifeInMonths} month(s), which is what was SENT — the response does not carry ` +
+            `both fields back, so the stored schedule was not confirmed here.`) +
+          ` Future depreciation follows the new schedule.`,
+        ...describeConfirmation(confirmation, `asset ${args.assetId}`),
+      ].join("\n\n"),
     });
   },
 });

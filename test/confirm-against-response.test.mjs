@@ -383,3 +383,155 @@ test("the order and offer tools no longer count an unanswered field as applied",
     );
   }
 });
+
+/**
+ * The other blind spot: tools with NO declared GET.
+ *
+ * The classification above is gated on `apiPaths` containing a GET, which is what a read-merge-write tool
+ * looks like. Three tools that report an outcome from `args` were therefore invisible to it, and survived five
+ * rediscoveries for exactly that reason — `reai_set_asset_depreciation`, `reai_rename_warehouse` and
+ * `reai_rename_sub_account`, each of whose write endpoint returns a record carrying the field it echoed.
+ *
+ * So this population is DERIVED from the spec rather than from a list anyone maintains: a tool qualifies when
+ * one of its write endpoints answers with a schema that carries a field the tool's own inputSchema accepts.
+ * If the response can answer the question, quoting the request is a choice.
+ *
+ * Identity fields are excluded. An echoed `id` or `orgNumber` went out in the path and comes back unchanged
+ * whatever the API did with the payload, so it cannot confirm anything.
+ */
+const IDENTITY_FIELDS = ["id", "tenantId", "orgNumber", "organizationNumber"];
+
+/** Proven to state the stored value, each with the test that drives a DISAGREEING response. */
+const READS_BACK_FROM_RESPONSE = {
+  reai_set_asset_depreciation: [
+    "test/assets.test.mjs",
+    "setting a depreciation schedule states what the response stored, not what was sent",
+  ],
+  reai_rename_warehouse: [
+    "test/warehouses.test.mjs",
+    "renaming a warehouse states the name the response carries, not the one sent",
+  ],
+  reai_rename_sub_account: [
+    "test/subaccounts.test.mjs",
+    "renaming a sub-account states the name the response carries, not the one sent",
+  ],
+  reai_update_lead: ["test/leads.test.mjs", "reai_update_lead reports a carried contact field the API destroyed"],
+};
+
+/**
+ * NOT examined. Being here is a statement that nobody has checked whether this tool's note quotes the request
+ * or the record — not that it is fine. The list may only ever shrink, which is what makes it a ratchet rather
+ * than a TODO: moving one out requires a test that drives a disagreeing response.
+ *
+ * Most are `create` tools, where the question is real but softer — a caller who just supplied every field has
+ * more reason to re-read than one whose carried field was destroyed without mention. That is a reason to do
+ * them second, not a reason to call them done.
+ */
+const NOT_ESTABLISHED = [
+  "reai_add_share_investment_event",
+  "reai_book_bank_transactions",
+  "reai_close_manual_reconciliation",
+  "reai_create_agreement",
+  "reai_create_asset",
+  "reai_create_company_bank",
+  "reai_create_creditor",
+  "reai_create_customer",
+  "reai_create_customer_contact",
+  "reai_create_debtor",
+  "reai_create_department",
+  "reai_create_employee",
+  "reai_create_expense",
+  "reai_create_invoice_from_order",
+  "reai_create_loan",
+  "reai_create_product",
+  "reai_create_reconciliation_rule",
+  "reai_create_salary_run",
+  "reai_create_share_investment",
+  "reai_create_subscription",
+  "reai_create_supplier",
+  "reai_create_supplier_invoice",
+  "reai_create_warehouse",
+  "reai_credit_invoice",
+  "reai_match_bank_transactions",
+  "reai_register_supplier_invoice_payment",
+  "reai_reopen_manual_reconciliation",
+  "reai_set_bank_statement_balance",
+  "reai_update_customer",
+  "reai_update_customer_contact",
+  "reai_update_debtor",
+  "reai_update_department",
+  "reai_update_employee",
+  "reai_update_expense",
+  "reai_update_supplier",
+];
+
+test("a write tool whose response could answer for it is classified, GET or no GET", async () => {
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  const schemas = spec.components?.schemas ?? {};
+
+  /** The property names of whatever schema a write endpoint answers 200/201 with. */
+  const responseFields = (method, path) => {
+    const op = spec.paths?.[path]?.[method.toLowerCase()];
+    const body = JSON.stringify(op?.responses?.["200"] ?? op?.responses?.["201"] ?? {});
+    const ref = /schemas\/([A-Za-z0-9_]+)/.exec(body);
+    return ref ? Object.keys(schemas[ref[1]]?.properties ?? {}) : [];
+  };
+
+  const candidates = registeredTools
+    .filter((t) => {
+      const paths = t.apiPaths ?? [];
+      // No GET: the other test owns those, and owning them twice would make the two counts fight.
+      if (paths.some(([m]) => m === "GET")) return false;
+      const accepts = new Set(Object.keys(t.inputSchema ?? {}));
+      return paths
+        .filter(([m]) => ["PUT", "PATCH", "POST"].includes(m))
+        .some(([m, p]) =>
+          responseFields(m, p).some((f) => accepts.has(f) && !IDENTITY_FIELDS.includes(f)),
+        );
+    })
+    .map((t) => t.name)
+    .sort();
+
+  const classified = new Set([...Object.keys(READS_BACK_FROM_RESPONSE), ...NOT_ESTABLISHED]);
+  const missing = candidates.filter((n) => !classified.has(n));
+  assert.deepEqual(
+    missing,
+    [],
+    `these tools write, and the response they get back carries a field they accept — so they CAN state what ` +
+      `was stored. Decide whether each does, and add it to READS_BACK_FROM_RESPONSE with the test that ` +
+      `proves it, or to NOT_ESTABLISHED: ${missing.join(", ")}`,
+  );
+  const stale = [...classified].filter((n) => !candidates.includes(n));
+  assert.deepEqual(stale, [], `no longer in this population (renamed, or gained a GET): ${stale.join(", ")}`);
+
+  // The ratchet. This may fall and must never rise: a new tool that quotes its request instead of the record
+  // cannot be parked here without the number moving, which is the visible act the previous version lacked.
+  assert.ok(
+    NOT_ESTABLISHED.length <= 35,
+    `NOT_ESTABLISHED grew to ${NOT_ESTABLISHED.length}. A new tool reporting from its request is the thing ` +
+      `this file exists to stop; fix it or justify the increase deliberately.`,
+  );
+
+  // Same anchoring as the merge-tool list, for the same reasons: a title in a comment, two entries sharing a
+  // title, or a test that never mentions its tool all passed the first version of that check.
+  const seen = new Set();
+  for (const [name, [file, title]] of Object.entries(READS_BACK_FROM_RESPONSE)) {
+    assert.ok(existsSync(join(repo, file)), `${name} names ${file}, which does not exist`);
+    const body = readFileSync(join(repo, file), "utf8");
+    const opener = `test("${title}"`;
+    assert.ok(body.includes(opener), `${name} claims a test titled "${title}" in ${file}; none OPENS with it`);
+    assert.ok(!seen.has(`${file}::${title}`), `two entries name the same test: ${file}::${title}`);
+    seen.add(`${file}::${title}`);
+    const from = body.indexOf(opener);
+    const next = body.indexOf("\ntest(", from + 1);
+    const testBody = body.slice(from, next === -1 ? body.length : next);
+    assert.ok(
+      testBody.includes(name) || testBody.includes(name.replace(/^reai_/, "")),
+      `the test "${title}" never mentions ${name}, so it cannot be what proves it`,
+    );
+  }
+});
