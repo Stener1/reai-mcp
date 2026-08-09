@@ -337,10 +337,45 @@ const addSalaryLine = defineTool({
     });
     const run = res.data;
     const employee = run?.employees?.find((e) => e.employeeId === args.employeeId);
+    // The LINE, from the response. This tool stated "Added 8 × 500 as HOURLY_WAGE" from `args` while already
+    // reading `payableAmount` out of the same object — and its sibling reai_update_salary_line is certified for
+    // walking exactly this path, in this file. Review found it by hand; the census now finds it too, because it
+    // descends into nested schemas instead of comparing top-level names only.
+    //
+    // A newly added line carries an id the request cannot know, so it is identified by MATCHING rather than by
+    // an invented rule like "the highest id is the newest". A unique match on all three sent values is a
+    // confirmation; several matches mean the figures are right but the row is ambiguous; none means the
+    // response does not show what was sent, which is the case worth a warning.
+    const specs = employee?.wageSpecs ?? [];
+    const sameNumber = (a: unknown, b: unknown) => Number(a) === Number(b);
+    const matches = specs.filter(
+      (l): l is NonNullable<typeof l> =>
+        !!l &&
+        l.specificationCode === args.specificationCode &&
+        sameNumber(l.quantity, args.quantity) &&
+        sameNumber(l.rate, args.rate),
+    );
+    const only = matches.length === 1 ? matches[0] : undefined;
+    const lineNote =
+      only !== undefined
+        ? `Added ${only.quantity} × ${only.rate} as ${only.specificationCode}` +
+          `${only.id === undefined ? "" : ` (line ${only.id})`}, read back from the response, ` +
+          `to employee ${args.employeeId} in run ${id}. `
+        : matches.length > 1
+          ? `Added ${args.quantity} × ${args.rate} as ${args.specificationCode} to employee ` +
+            `${args.employeeId} in run ${id} — ${matches.length} lines on that employee now match those ` +
+            `figures, so the amounts are confirmed but which row is the new one is not. `
+          : `Sent ${args.quantity} × ${args.rate} as ${args.specificationCode} for employee ` +
+            `${args.employeeId} in run ${id}. WARNING: no line on that employee in the response matches ` +
+            `those figures` +
+            (specs.length === 0
+              ? ` — the response carried no lines for them at all` +
+                `. Those are the figures SENT, not what is stored — read the run back with reai_get_salary_run.`
+              : `. The response lists ${specs.map((l) => `${l?.specificationCode} ${l?.quantity} × ${l?.rate}`).join("; ")}. ` +
+                `Those are the figures SENT, not what is stored — read the run back with reai_get_salary_run.`);
     return ok(run, {
       note:
-        `Added ${args.quantity} × ${args.rate} as ${args.specificationCode} to employee ` +
-        `${args.employeeId} in run ${id}. ` +
+        lineNote +
         (employee
           ? `That employee is now at ${employee.payableAmount ?? "?"} payable and ` +
             `${employee.taxDeducted ?? "?"} withheld (rate ${employee.taxDeductionRate ?? "?"}%). `

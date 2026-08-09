@@ -1,6 +1,10 @@
 import { z } from "zod";
 import {
+  confirmAgainstResponse,
   defineTool,
+  describeConfirmation,
+  describeShape,
+  isRecord,
   fail,
   ok,
   okList,
@@ -206,13 +210,40 @@ const renameWarehouse = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request({
+    const res = await ctx.client.request<{ name?: string }>({
       method: "PUT",
       path: `/api/warehouses/${args.warehouseId}`,
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data, { note: `Warehouse ${args.warehouseId} renamed to ${args.name}.` });
+    // From the RESPONSE. `WarehouseRes` carries `name`, and a rename is exactly where this API is known to
+    // rewrite what it was given — reai_create_customer documents a stored name coming back title-cased.
+    //
+    // Gated on a USABLE value, not merely a present one. Keying on `!== undefined` produced
+    // "Warehouse 4 is now named null, read back from the response" — a confident sentence stating a value the
+    // API is documented as substituting, with the contradiction warning only afterwards. And a response that
+    // is an array or a string is not a record at all, which is a different thing from a missing field: the
+    // note used to deny a name the payload printed directly below it.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const stored = record?.name;
+    return ok(res.data, {
+      note: [
+        stored === undefined || stored === null
+          ? `Warehouse ${args.warehouseId} was sent the name ${JSON.stringify(args.name)}, and ` +
+            (record === undefined
+              ? `the response is not a record (it came back as ${describeShape(res.data)}), so nothing ` +
+                `could be read from it`
+              : stored === null
+                ? `the response carries name: null`
+                : `the response does not carry the name`) +
+            ` — that is what was SENT rather than what is stored.`
+          : `Warehouse ${args.warehouseId} is now named ${JSON.stringify(stored)}, read back from the response.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true }),
+          `warehouse ${args.warehouseId}`,
+        ),
+      ].join("\n\n"),
+    });
   },
 });
 

@@ -9,6 +9,113 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The four tools that still stated an outcome from the request, and the reason the tripwire could not see
+  them.** #143 fixed thirteen read-merge-write tools and recorded four more it could not reach. All four now
+  report from the record, and the guard that missed them has been rebuilt around a population it derives rather
+  than one an author maintains.
+  - `reai_set_asset_depreciation` said an asset *"now depreciates linear over 60 month(s)"* from `args`, while
+    `AssetRes` carries both `depreciationMethod` and `usefulLifeInMonths` and the PUT returns it. This tool is
+    declared **irreversible** — it sets the schedule future depreciation postings follow — and that sentence is
+    one an agent acts on without checking.
+  - `reai_rename_warehouse` and `reai_rename_sub_account` echoed the name they were given. A rename is the worst
+    case for that: `reai_create_customer` already documents this API storing a name **title-cased**, so the
+    stored name is exactly what a caller cannot assume. Both now state what came back, and warn when it differs.
+  - `reai_update_lead` reported `email`/`phone` as *"carried over unchanged"* with the value from the
+    **request**. Its post-write re-read covered only the fields the caller named, by design, so the carried half
+    of a REPLACEMENT was unverified — the same class as #143 one mechanism over, a re-read rather than a
+    response. A carried value the API dropped is now a **failure** (`isError`), not a footnote; the calls line
+    says *"sent to preserve it"* rather than asserting the outcome; and `State now:` prints the contact fields,
+    which is why a destroyed carry previously left no trace anywhere in the note.
+  - **The tripwire's population is now derived from the spec.** It was gated on `apiPaths` containing a `GET`,
+    which is what a read-merge-write tool looks like — and none of these three declares one, which is precisely
+    why they survived five rediscoveries. A tool now qualifies when a write endpoint of its own answers with a
+    schema carrying a field its `inputSchema` accepts: if the response can answer the question, quoting the
+    request is a choice. That finds **47** tools, of which 7 are proven and **40 are recorded as not examined**. (This entry first said 39/4/35 and then, two bullets later, that the ceiling had moved to 40 — the census kept widening as review found holes in it, and the counts are now enforced by a test against `docs/tools.md` so they cannot drift again.)
+    - Identity fields are excluded. An echoed `id` or `orgNumber` went out in the path and comes back unchanged
+      whatever the API did with the payload, so it cannot confirm anything.
+    - The 35 is a **ratchet** — it may fall and must never rise. Being on it is a statement that nobody has
+      checked whether that tool quotes the request or the record, not that it is fine. Most are `create` tools,
+      where the question is softer rather than absent.
+    - Mutation-verified by failing test name: removing a classified tool, naming a test that does not exist,
+      parking a new name on the list without moving the number, and demoting a required title to a comment are
+      each caught — as is reverting a fixed tool to echoing `args`, which fails its own behavioural tests.
+  - **Codex found the census itself too narrow, twice over, and both holes were real.** It read only `200`/`201`
+    responses, so `reai_apply_reconciliation_rules` — whose POST is documented as **202**, carrying `month`,
+    `startDate` and `endDate`, all of which it accepts — fell out entirely. And it excluded any tool declaring a
+    `GET`, while the merge census only owns GET-*plus*-PUT/PATCH: `reai_create_order` and `reai_create_offer`
+    declare their POST alongside an ancillary customer GET, so each census skipped them for the other's reason.
+    A guard that silently drops the tools it cannot categorise is not a guard.
+    - Widening it made **six** tools visible, not the three named. The ceiling moved 35 → 40 for that reason,
+      recorded in the assertion itself: nothing regressed, the census started seeing further. A rise for any
+      other reason is what it asserts against.
+    - One of the six was a defect: **`reai_create_sub_account` echoed `args.name`** ten lines from the rename it
+      shares a response schema with. It is declared irreversible with no DELETE, so the name it reports is the
+      permanent one. Fixed and certified; the other five are recorded as not examined.
+  - **`reai_update_lead` had the emptiness bug in both directions**, also Codex, and `UpdateLeadContactReq`
+    permits a zero-length email and phone so both values genuinely occur. Keyed on `=== null`, a carried `""`
+    the API normalised to null was reported as **DESTROYED** — a failure over nothing — while a non-empty email
+    erased to `""` fell through to *"stored, but not exactly as sent"*, filing real data loss as a formatting
+    note. The asked half had the mirror bug: a field asked to be cleared that read back `""` was reported as
+    still holding a value. One blank class now, the same one `confirmAgainstResponse` uses.
+    - Both directions are pinned by name. The first attempt to check this reported nothing at all, because
+      `grep … | sed` returns *sed's* exit status, so the `|| echo "SURVIVED"` guard could never fire — the
+      mutation had in fact survived, and the run looked clean.
+  - **A third review found the census still too narrow, and two live tools escaping through it.** Both were
+    found by hand; the widened census then found exactly the same two, which is the check on the widening.
+    - **`reai_add_salary_line` stated "Added 8 × 500 as HOURLY_SALARY" from `args`** while already reading
+      `payableAmount` out of the same response object — and its sibling `reai_update_salary_line` is certified
+      in this repo for walking exactly the nested path it needed. The census could not see it because the stored
+      line lives at `employees[].wageSpecs[]` and it compared TOP-LEVEL names only. It now descends through
+      nested objects and arrays, and follows `allOf` (which had silently returned zero fields for
+      `BankReconciliationOverviewRes`). A new line carries an id the request cannot know, so it is identified by
+      MATCHING all three sent values rather than by an invented rule like "the highest id is the newest";
+      several matches and no match are reported as the different things they are.
+    - **`reai_log_lead_contact` echoed `contactedOn` and `source`** — a date this API may return as a timestamp
+      and an enum whose casing it may normalise, which are the two rewrite classes this section is about. Its
+      events are nested at `contactEvents[]`. Its ` as event ${res.data.id}` clause was also dead code against
+      the documented `LeadRes`, which has no top-level `id` — and **the test fixture that made it look alive
+      answered `{ id: 66150 }`, a shape nothing in this repo records measuring.** The fixture now follows the
+      documented schema. Same failure as the address shape retracted in #143: a test passing against an
+      invented response.
+  - **`null` is not `undefined`, at all four fixed sites.** Gating the read-back on `!== undefined` produced
+    *"Warehouse 4 is now named null, read back from the response"* and *"Asset 8 now depreciates null over null
+    month(s), read back from the response"* — confident sentences stating a value this API is documented as
+    substituting, with the contradiction warning only underneath. A stored `null` now counts as unanswered. A
+    response that is an **array or a string** is a third case, distinct from a missing field: the note used to
+    deny a value the payload printed directly below it.
+  - **`reai_set_asset_depreciation` gated both fields together**, so one missing field threw away the read-back
+    for the other — and it put the request's `linear` in front of the reader in a case where the response had
+    already come back `manual`. Per field now.
+  - **`reai_update_lead` filed a carried value the API REPLACED as normalisation.** A carried email coming back
+    as a different address went into *"this API rewrites values (a phone becomes E.164)"* — by the same commit
+    that claimed to stop filing data loss as a formatting note. Normalisation is not a plausible reading there:
+    the value sent was the one just read back from this same API. It has its own paragraph now, naming both
+    readings, and is deliberately **not** an `isError` — failing every phone edit on the suspicion of a
+    write-side rewrite would be its own defect.
+  - **A THIRD emptiness rule in the same handler.** The commit above claimed to unify two; the calls line still
+    had `args[k] === null` of its own, so `email: "   "` was announced as *"set"* while every other part of the
+    tool treated it as a clear, and the two cancelled out to no report at all. One `blank` in the file now.
+  - **The tripwire accepted a proof that proved nothing, and my comment claimed otherwise.** Review demonstrated
+    it: `assert.ok(true)` with the tool named in a **comment**, in an unrelated test file, satisfied every
+    condition — and moving a tool out of `NOT_ESTABLISHED` on that basis *lowers* the ratchet, so a fake proof
+    reads as progress. The comment asserting this check "kills a body that proves nothing" was false.
+    - No static check can establish that a test proves something, and the comment now says so. What it does
+      instead: the file must import the module the tool is defined in (derived by finding the tool's `name:`
+      under `src/tools`, not from a hand-kept table), the tool must be named **outside** comments, the body must
+      assert something, and it must mention one of the words this class of proof turns on.
+    - **The first version of that module check read `t.sourceModule`, a property no tool has** — so it was a
+      silent skip asserting nothing, which is the [allowlist-of-shapes] failure again. It now asserts that the
+      module was found at all.
+  - **One of my own new tests could not tell a read-back from an echo**, the same trap review had just caught in
+    the assets test: the positive case's stored values equalled the sent ones, so both implementations print the
+    same sentence. Reverting the handler to `args` left it green. The response now answers with the same numbers
+    spelled differently (`"8.0"`, `"500"`), which is what makes the assertion discriminate.
+  - **A pre-existing test asserted the old behaviour and passed for the wrong reason.** `assets.test.mjs` fed
+    the depreciation tool a response of `{ id: 42 }` — carrying neither field — and still matched
+    *"depreciates manual over 36 month(s)"*, because the note quoted `args`. Its title, *"the note says what it
+    now is"*, was the unfounded claim. The fixture now answers as `AssetRes` does, which is what makes the
+    assertion mean *read from the record*.
+
 - **`reai_update_offer`: the offers half of the same gap.** #138 curated the order update and left this one
   deliberately uncurated, because the test tenant had no offers to measure. One throwaway offer later it is
   measured — and the parity claim #138 made was wrong in three ways, corrected there and here.

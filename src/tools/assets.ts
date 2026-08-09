@@ -1,7 +1,11 @@
 import { z } from "zod";
 import {
   CURRENCY_CODE,
+  confirmAgainstResponse,
   defineTool,
+  describeConfirmation,
+  describeShape,
+  isRecord,
   ok,
   okList,
   requiredName,
@@ -196,10 +200,47 @@ const setAssetDepreciation = defineTool({
       },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // From the RESPONSE. This tool is declared IRREVERSIBLE — it changes the schedule future depreciation
+    // postings follow — and it was the last one still stating that schedule from `args`. `AssetRes` carries
+    // both `depreciationMethod` and `usefulLifeInMonths` and this PUT returns it, so there was nothing to
+    // infer. A sentence saying an asset "now depreciates linear over 60 months" is the kind an agent acts on
+    // without checking.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const sent = {
+      usefulLifeInMonths: args.usefulLifeInMonths,
+      depreciationMethod: args.depreciationMethod,
+    };
+    const confirmation = confirmAgainstResponse(sent, record, { wholeRecord: true });
+    // PER FIELD, not all-or-nothing. The first version gated the whole sentence on both fields being present,
+    // so one missing field threw away the read-back for the other — and it put the REQUEST's method in front
+    // of the reader in a case where the response had already contradicted it. Review measured that: sent
+    // `linear`/`60` against a response carrying `manual` and no life produced a headline naming `linear`, with
+    // the warning about `manual` further down.
+    //
+    // A stored `null` counts as unanswered here rather than as an answer, because "now depreciates null over
+    // null month(s), read back from the response" is a confident sentence stating a value this API is
+    // documented as substituting. The contradiction still gets its warning from `confirmAgainstResponse`.
+    const usable = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
+    const method = usable(record?.depreciationMethod);
+    const life = usable(record?.usefulLifeInMonths);
+    // The label belongs on BOTH branches: the first version appended it only to the read-back one, so an
+    // unconfirmed life printed "over 60 as SENT" with the unit dropped.
+    const part = (label: string, stored: string | undefined, was: unknown) =>
+      stored === undefined ? `${JSON.stringify(was)} as SENT${label}` : `${stored}${label}`;
     return ok(res.data, {
-      note:
-        `Asset ${args.assetId} now depreciates ${args.depreciationMethod} over ` +
-        `${args.usefulLifeInMonths} month(s). Future depreciation follows the new schedule.`,
+      note: [
+        `Asset ${args.assetId} now depreciates ${part("", method, args.depreciationMethod)} over ` +
+          `${part(" month(s)", life, args.usefulLifeInMonths)}` +
+          (method !== undefined && life !== undefined
+            ? `, both read back from the response.`
+            : method === undefined && life === undefined
+              ? ` — neither was read back` +
+                (record === undefined ? ` (the response came back as ${describeShape(res.data)})` : ``) +
+                `, so both are what was SENT, not what is stored.`
+              : `. The value marked SENT was not carried back by the response, so it is unconfirmed.`) +
+          ` Future depreciation follows the new schedule.`,
+        ...describeConfirmation(confirmation, `asset ${args.assetId}`),
+      ].join("\n\n"),
     });
   },
 });

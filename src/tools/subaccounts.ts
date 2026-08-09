@@ -1,5 +1,16 @@
 import { z } from "zod";
-import { defineTool, ok, okList, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
+import {
+  confirmAgainstResponse,
+  defineTool,
+  describeConfirmation,
+  describeShape,
+  isRecord,
+  ok,
+  okList,
+  requireTenantId,
+  tenantIdArg,
+  type ToolDef,
+} from "./registry.js";
 
 /**
  * General sub-accounts (underkonti) — the partition inside a ledger account.
@@ -185,10 +196,31 @@ const createSubAccount = defineTool({
       body,
       tenantId: resolved,
     });
+    // The stored name, not `args.name`. Widening the census caught this one ten lines from the rename it was
+    // fixed alongside: the same GeneralSubAccountRes carries `name`, and this tool is declared IRREVERSIBLE
+    // with no DELETE, so the name it reports is the name that is permanent.
+    const createdRecord = isRecord(res.data) ? res.data : undefined;
+    const storedName = createdRecord?.name;
     return ok(res.data, {
       note:
-        `Sub-account ${res.data?.id ?? "?"} "${args.name}" created on account ${args.accountNumber}. ` +
+        `Sub-account ${createdRecord?.id ?? "?"} ${
+          storedName === undefined || storedName === null
+            ? `"${args.name}" (as SENT — ${
+                createdRecord === undefined
+                  ? `the response came back as ${describeShape(res.data)}`
+                  : storedName === null
+                    ? `the response carries name: null`
+                    : `the response does not carry the name back`
+              })`
+            : JSON.stringify(storedName)
+        } created on account ${args.accountNumber}. ` +
         `There is no DELETE for this resource, so it is permanent.` +
+        describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true }),
+          `sub-account ${createdRecord?.id ?? "?"}`,
+        )
+          .map((n) => `\n\n${n}`)
+          .join("") +
         (existing === 0
           ? `\n\nThis is the FIRST sub-account on ${args.accountNumber}, which changes the rules for ` +
             `that account: every posting to it must now name a subAccountId, and anything that ` +
@@ -228,10 +260,30 @@ const renameSubAccount = defineTool({
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // From the RESPONSE, not from `args`. A rename is the case where quoting the request back is least
+    // defensible: `reai_create_customer` already documents this API storing a name title-cased, so the
+    // stored name is the one thing here a caller cannot assume. `GeneralSubAccountRes` carries `name`, so
+    // there is nothing to infer — the previous version simply did not look.
+    // A USABLE value, not merely a present one: `!== undefined` reported "is now named null, read back from
+    // the response", stating a value this API is documented as substituting. An unreadable shape is a third
+    // case, distinct from a missing field.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const stored = record?.name;
+    const confirmation = confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true });
     return ok(res.data, {
-      note:
-        `Sub-account ${args.id} renamed to "${args.name}". Only the name changed — the ledger ` +
-        `account it belongs to cannot be changed through this endpoint.`,
+      note: [
+        (stored === undefined || stored === null
+          ? `Sub-account ${args.id} was sent the name "${args.name}", and ` +
+            (record === undefined
+              ? `the response is not a record (it came back as ${describeShape(res.data)})`
+              : stored === null
+                ? `the response carries name: null`
+                : `the response does not carry the name`) +
+            ` — so that is what was SENT rather than what is stored.`
+          : `Sub-account ${args.id} is now named ${JSON.stringify(stored)}, read back from the response.`) +
+          ` Only the name changed — the ledger account it belongs to cannot be changed through this endpoint.`,
+        ...describeConfirmation(confirmation, `sub-account ${args.id}`),
+      ].join("\n\n"),
     });
   },
 });

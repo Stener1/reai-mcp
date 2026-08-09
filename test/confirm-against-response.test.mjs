@@ -383,3 +383,288 @@ test("the order and offer tools no longer count an unanswered field as applied",
     );
   }
 });
+
+/**
+ * The other blind spot: tools with NO declared GET.
+ *
+ * The classification above is gated on `apiPaths` containing a GET, which is what a read-merge-write tool
+ * looks like. Three tools that report an outcome from `args` were therefore invisible to it, and survived five
+ * rediscoveries for exactly that reason — `reai_set_asset_depreciation`, `reai_rename_warehouse` and
+ * `reai_rename_sub_account`, each of whose write endpoint returns a record carrying the field it echoed.
+ *
+ * So this population is DERIVED from the spec rather than from a list anyone maintains: a tool qualifies when
+ * one of its write endpoints answers with a schema that carries a field the tool's own inputSchema accepts.
+ * If the response can answer the question, quoting the request is a choice.
+ *
+ * Identity fields are excluded. An echoed `id` or `orgNumber` went out in the path and comes back unchanged
+ * whatever the API did with the payload, so it cannot confirm anything.
+ */
+const IDENTITY_FIELDS = ["id", "tenantId", "orgNumber", "organizationNumber"];
+
+/** Proven to state the stored value, each with the test that drives a DISAGREEING response. */
+const READS_BACK_FROM_RESPONSE = {
+  reai_set_asset_depreciation: [
+    "test/assets.test.mjs",
+    "setting a depreciation schedule states what the response stored, not what was sent",
+  ],
+  reai_rename_warehouse: [
+    "test/warehouses.test.mjs",
+    "renaming a warehouse states the name the response carries, not the one sent",
+  ],
+  reai_rename_sub_account: [
+    "test/subaccounts.test.mjs",
+    "renaming a sub-account states the name the response carries, not the one sent",
+  ],
+  reai_update_lead: ["test/leads.test.mjs", "reai_update_lead reports a carried contact field the API destroyed"],
+  reai_create_sub_account: [
+    "test/subaccounts.test.mjs",
+    "creating a sub-account states the name the response stored, not the one sent",
+  ],
+  reai_add_salary_line: [
+    "test/salary.test.mjs",
+    "reai_add_salary_line reports the added line from the response, not from args",
+  ],
+  reai_log_lead_contact: [
+    "test/leads.test.mjs",
+    "reai_log_lead_contact reports the event from the response, not from args",
+  ],
+};
+
+/**
+ * NOT examined. Being here is a statement that nobody has checked whether this tool's note quotes the request
+ * or the record — not that it is fine. The list may only ever shrink, which is what makes it a ratchet rather
+ * than a TODO: moving one out requires a test that drives a disagreeing response.
+ *
+ * Most are `create` tools, where the question is real but softer — a caller who just supplied every field has
+ * more reason to re-read than one whose carried field was destroyed without mention. That is a reason to do
+ * them second, not a reason to call them done.
+ */
+const NOT_ESTABLISHED = [
+  "reai_add_share_investment_event",
+  "reai_adjust_inventory",
+  "reai_apply_reconciliation_rules",
+  "reai_book_bank_transactions",
+  "reai_close_manual_reconciliation",
+  "reai_create_agreement",
+  "reai_create_asset",
+  "reai_create_company_bank",
+  "reai_create_creditor",
+  "reai_create_customer",
+  "reai_create_customer_contact",
+  "reai_create_debtor",
+  "reai_create_department",
+  "reai_create_employee",
+  "reai_create_expense",
+  "reai_create_invoice_from_order",
+  "reai_create_offer",
+  "reai_create_order",
+  "reai_create_loan",
+  "reai_create_product",
+  "reai_create_reconciliation_rule",
+  "reai_create_salary_run",
+  "reai_create_share_investment",
+  "reai_create_subscription",
+  "reai_create_supplier",
+  "reai_create_supplier_invoice",
+  "reai_create_voucher",
+  "reai_create_warehouse",
+  "reai_credit_invoice",
+  "reai_match_bank_transactions",
+  "reai_register_supplier_invoice_payment",
+  "reai_reopen_manual_reconciliation",
+  "reai_set_bank_statement_balance",
+  "reai_update_customer",
+  "reai_update_customer_contact",
+  "reai_update_debtor",
+  "reai_update_department",
+  "reai_update_employee",
+  "reai_update_expense",
+  "reai_update_supplier",
+];
+
+test("a write tool whose response could answer for it is classified, GET or no GET", async () => {
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  const schemas = spec.components?.schemas ?? {};
+
+  /**
+   * The property names of whatever schema a write endpoint answers SUCCESSFULLY with.
+   *
+   * Every 2xx, not just 200/201. Review found the hole: `reai_apply_reconciliation_rules` posts to an endpoint
+   * documented as **202**, whose record carries `month`, `startDate` and `endDate` — all accepted by that
+   * tool — so it fell out of the census entirely and neither list had to account for it. A guard that skips
+   * the tools it cannot categorise is not a guard.
+   */
+  /**
+   * Property names reachable in a schema, following `allOf` and descending through nested objects and arrays.
+   *
+   * Both refinements came from review finding a real tool escaping:
+   *
+   *   NESTED — `reai_add_salary_line` echoed `args.quantity`, `args.rate` and `args.specificationCode` while
+   *   the POST answers with `SalaryPaymentDetailRes`, which carries the stored line at
+   *   `employees[].wageSpecs[]`. Comparing only TOP-LEVEL names found none of them, so the tool was in neither
+   *   list and the tripwire was green — while its own sibling `reai_update_salary_line` is certified by the
+   *   older census for walking exactly that path, ten lines away in the same file.
+   *
+   *   allOf — `BankReconciliationOverviewRes` declares its 30-odd fields inside an `allOf` member, so reading
+   *   `schemas[name].properties` returned nothing. Latent rather than live (no registered tool declares those
+   *   two paths today), but a census that returns zero fields drops the tool silently, which is the failure
+   *   mode this whole file exists to stop.
+   */
+  const fieldsOf = (schema, depth = 0, seen = new Set()) => {
+    if (!schema || depth > 4) return [];
+    if (schema.$ref) {
+      const name = schema.$ref.split("/").pop();
+      if (seen.has(name)) return [];
+      return fieldsOf(schemas[name], depth, new Set([...seen, name]));
+    }
+    const names = [];
+    for (const member of schema.allOf ?? []) names.push(...fieldsOf(member, depth, seen));
+    if (schema.items) names.push(...fieldsOf(schema.items, depth + 1, seen));
+    for (const [key, prop] of Object.entries(schema.properties ?? {})) {
+      names.push(key);
+      names.push(...fieldsOf(prop, depth + 1, seen));
+    }
+    return names;
+  };
+
+  /** The fields any SUCCESSFUL response of this write endpoint can carry, at any depth. */
+  const responseFields = (method, path) => {
+    const op = spec.paths?.[path]?.[method.toLowerCase()];
+    const names = new Set();
+    for (const [code, body] of Object.entries(op?.responses ?? {})) {
+      if (!/^2\d\d$/.test(code)) continue;
+      for (const media of Object.values(body?.content ?? {})) {
+        for (const k of fieldsOf(media?.schema)) names.add(k);
+      }
+    }
+    return [...names];
+  };
+
+  const candidates = registeredTools
+    .filter((t) => {
+      const paths = t.apiPaths ?? [];
+      // Exclude only what the OTHER census actually owns — GET *plus* PUT/PATCH — rather than anything that
+      // declares a GET at all. Review found tools falling between the two: `reai_create_order` and
+      // `reai_create_offer` declare their POST plus an ancillary customer GET, so the first census skipped them
+      // for having no PUT/PATCH and this one skipped them for having a GET. Neither list had to account for
+      // them, which is a hole in the thing this file calls a ratchet.
+      const methods = paths.map(([m]) => m);
+      const ownedByMergeCensus =
+        methods.includes("GET") && (methods.includes("PUT") || methods.includes("PATCH"));
+      if (ownedByMergeCensus) return false;
+      const accepts = new Set(Object.keys(t.inputSchema ?? {}));
+      return paths
+        .filter(([m]) => ["PUT", "PATCH", "POST"].includes(m))
+        .some(([m, p]) =>
+          responseFields(m, p).some((f) => accepts.has(f) && !IDENTITY_FIELDS.includes(f)),
+        );
+    })
+    .map((t) => t.name)
+    .sort();
+
+  const classified = new Set([...Object.keys(READS_BACK_FROM_RESPONSE), ...NOT_ESTABLISHED]);
+  const missing = candidates.filter((n) => !classified.has(n));
+  assert.deepEqual(
+    missing,
+    [],
+    `these tools write, and the response they get back carries a field they accept — so they CAN state what ` +
+      `was stored. Decide whether each does, and add it to READS_BACK_FROM_RESPONSE with the test that ` +
+      `proves it, or to NOT_ESTABLISHED: ${missing.join(", ")}`,
+  );
+  const stale = [...classified].filter((n) => !candidates.includes(n));
+  assert.deepEqual(stale, [], `no longer in this population (renamed, or gained a GET): ${stale.join(", ")}`);
+
+  // The numbers in docs/tools.md are ENFORCED here, because the last commit moved this population and left
+  // three of them stale in the doc and self-contradictory in the CHANGELOG (39/4/35 against an actual 45/5/40).
+  // A count in prose that nothing checks is a count that rots.
+  const doc = readFileSync(join(repo, "docs", "tools.md"), "utf8");
+  const proven = Object.keys(READS_BACK_FROM_RESPONSE).length;
+  assert.ok(
+    doc.includes(`${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} **not examined**`),
+    `docs/tools.md must say "${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} ` +
+      `**not examined**" for this census; update it when the population moves`,
+  );
+
+  // The ratchet. It may fall and must never rise for a FIXED population: a new tool that quotes its request
+  // instead of the record cannot be parked here without the number moving, which is the visible act the first
+  // version lacked.
+  //
+  // It moved once, from 35 to 40, and the reason belongs here rather than in a commit message: review found the
+  // census itself too narrow twice over — it read only 200/201 responses, and it excluded any tool declaring a
+  // GET when the other census only owns GET-plus-PUT/PATCH. Widening it made five tools visible that had been
+  // falling between the two lists. Nothing regressed; the guard simply started seeing further. A rise for any
+  // other reason is the thing this asserts against.
+  assert.ok(
+    NOT_ESTABLISHED.length <= 40,
+    `NOT_ESTABLISHED grew to ${NOT_ESTABLISHED.length}. A new tool reporting from its request is the thing ` +
+      `this file exists to stop; fix it, or widen the ceiling only alongside a stated reason like the one above.`,
+  );
+
+  // What this can and cannot check, stated honestly, because the version of this comment on the merge-tool
+  // list overclaimed and review demonstrated it: a test reading `assert.ok(true)` with the tool's name in a
+  // COMMENT, placed in an unrelated file, satisfied every condition — and moving a tool out of NOT_ESTABLISHED
+  // on that basis LOWERS the ratchet, so the fake proof reads as progress.
+  //
+  // No static check can establish that a test proves something. These raise the cost of a fake to the point
+  // where writing the real test is easier:
+  //
+  //   - the file must actually exercise the tool's module (it must import the module the tool is defined in),
+  //     which stops a proof living in a file that has nothing to do with it;
+  //   - the tool name must appear OUTSIDE comments in the test's body, so a naming comment is not enough;
+  //   - the body must assert on something, and must mention at least one of the words this class of proof
+  //     turns on — a disagreement has to be visible for the test to be about one.
+  // tool name -> the src/tools module that defines it, read off the source rather than from a property on the
+  // tool (there is none) or a hand-kept table.
+  const { readdirSync } = await import("node:fs");
+  const toolModules = new Map();
+  for (const entry of readdirSync(join(repo, "src", "tools"))) {
+    if (!entry.endsWith(".ts")) continue;
+    const src = readFileSync(join(repo, "src", "tools", entry), "utf8");
+    for (const m of src.matchAll(/name:\s*"(reai_[a-z0-9_]+)"/g)) toolModules.set(m[1], entry.replace(/\.ts$/, ""));
+  }
+
+  const seen = new Set();
+  const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  for (const [name, [file, title]] of Object.entries(READS_BACK_FROM_RESPONSE)) {
+    assert.ok(existsSync(join(repo, file)), `${name} names ${file}, which does not exist`);
+    const body = readFileSync(join(repo, file), "utf8");
+    const opener = `test("${title}"`;
+    assert.ok(body.includes(opener), `${name} claims a test titled "${title}" in ${file}; none OPENS with it`);
+    assert.ok(!seen.has(`${file}::${title}`), `two entries name the same test: ${file}::${title}`);
+    seen.add(`${file}::${title}`);
+
+    // The file has to be about the module this tool lives in, so a proof cannot be parked in whichever test
+    // file happens to be convenient. The module is found by looking for the tool's `name:` in src/tools —
+    // the FIRST version of this read `t.sourceModule`, a property no tool has, so it was a silent skip that
+    // asserted nothing. Hence the assertion that the module was found at all.
+    const module = toolModules.get(name);
+    assert.ok(module !== undefined, `could not find where ${name} is defined under src/tools`);
+    assert.ok(
+      body.includes(`dist/tools/${module}.js`),
+      `${name} is defined in src/tools/${module}.ts, but ${file} does not import that module — a proof for ` +
+        `it cannot live there`,
+    );
+
+    const from = body.indexOf(opener);
+    const next = body.indexOf("\ntest(", from + 1);
+    const testBody = body.slice(from, next === -1 ? body.length : next);
+    const code = stripComments(testBody);
+    assert.ok(
+      code.includes(name) || code.includes(name.replace(/^reai_/, "")),
+      `the test "${title}" mentions ${name} only in a comment, so it cannot be what proves it`,
+    );
+    assert.ok(
+      /assert\.(match|equal|deepEqual|ok|doesNotMatch|notEqual)\(/.test(code),
+      `the test "${title}" asserts nothing`,
+    );
+    assert.ok(
+      /read back|WARNING|stored|SENT|carried|DESTROYED/.test(code),
+      `the test "${title}" never asserts on what the response said versus what was sent, which is the only ` +
+        `thing that would make it a proof for ${name}`,
+    );
+  }
+});

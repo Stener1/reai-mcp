@@ -293,7 +293,15 @@ function fakeLead(initial = {}) {
       }
       if (method === "POST" && path.endsWith("/contact-events")) {
         materialise();
-        return { data: { id: 66150 }, status: 200 };
+        // `LeadRes`, which is what the spec documents for the 201 — the event is NESTED under contactEvents.
+        // The previous fixture answered `{ id: 66150 }`, a shape nothing in this repo records measuring, and
+        // the tool's ` as event ${res.data.id}` clause was written against it. So the assertion passed against
+        // an invented response while being dead code against the documented one.
+        state.contactEvents = [
+          ...(state.contactEvents ?? []),
+          { id: 66150, contactedOn: body?.contactedOn, source: body?.source, note: body?.note ?? null },
+        ];
+        return { data: { orgNumber: ORG, lead: { ...state }, contactEvents: state.contactEvents }, status: 200 };
       }
       if (method === "POST" && path.endsWith("/convert")) {
         materialise();
@@ -455,8 +463,8 @@ test("reai_log_lead_contact records the event and warns that it cannot be taken 
     { orgNumber: ORG, contactedOn: "2026-08-08", source: "phone", note: "left a message" },
     fake,
   );
-  assert.match(text, /Logged phone contact/);
-  assert.match(text, /as event 66150/);
+  // Read back from the response's own contactEvents, not echoed from args.
+  assert.match(text, /Logged phone contact with .* on 2026-08-08, read back from the response as event 66150/);
   assert.match(text, /also created the lead/);
   assert.match(text, /cannot be removed on its own/);
   assert.equal(tool("reai_log_lead_contact").inputSchema.note.safeParse("x".repeat(181)).success, false);
@@ -572,7 +580,50 @@ test("reai_update_lead carries the contact field it is not changing, never sendi
   // single-key body, so a regression fails here even before the state assertions.
   assert.deepEqual(contact[0].body, { email: "keep@b.no", phone: "41000000" });
   assert.equal(fake.state.email, "keep@b.no", "the email must survive a phone-only request");
-  assert.match(text, /email carried over unchanged/);
+  // "sent to preserve it", NOT "carried over unchanged". The value printed is the one from the REQUEST, so
+  // the old wording asserted an outcome nothing had checked. Whether it survived is answered by the re-read.
+  assert.match(text, /email sent to preserve it \("keep@b\.no"\)/);
+  assert.doesNotMatch(text, /carried over unchanged/);
+  // And the state line now shows the contact fields, so a destroyed carry leaves a trace somewhere.
+  assert.match(text, /State now: .*email "keep@b\.no"/);
+});
+
+test("reai_update_lead reports a carried contact field the API destroyed", async () => {
+  // reai_update_lead: `check()` returns early for any field the caller did not mention, which left the
+  // carried half of a REPLACEMENT unverified — the note said "carried over unchanged" with the request's own
+  // value while the re-read covered only what the caller named. Same class as the merge tools in #143, one
+  // mechanism over: a re-read rather than a PUT response.
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  // The API accepts the carried email and drops it anyway. Measured behaviour is not being asserted here —
+  // this is the failure the note must be capable of reporting.
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) fake.state.email = null;
+    return out;
+  };
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.equal(result.isError, true, "a destroyed field is a failure, not a footnote");
+  assert.match(text, /THE WRITE DID NOT FULLY TAKE/);
+  assert.match(text, /email: not mentioned, so "keep@b\.no" was sent to preserve it .* DESTROYED it/);
+});
+
+test("reai_update_lead does not report a carried contact field that survived", async () => {
+  // The positive control: a check that always fires would pass the test above while making the tool useless.
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(text, /DESTROYED it/);
+  assert.doesNotMatch(text, /THE WRITE DID NOT FULLY TAKE/);
+});
+
+test("reai_update_lead says nothing about a carried contact field that was already empty", async () => {
+  // Nothing was at stake, so a note about it is noise — and `null` sent against a stored `null` would
+  // otherwise read as a destroyed value on every phone-only edit of a lead with no email.
+  const fake = fakeLead({ id: 700, email: null, phone: "+4740000000" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(text, /DESTROYED it/);
 });
 
 test("reai_update_lead carries a null contact field as null, not as absent", async () => {
@@ -786,4 +837,114 @@ test("readLeadState carries every field when a response arrives flattened", asyn
   await runLive("reai_update_lead", { orgNumber: ORG, email: "new@b.no" }, second);
   const call = second.calls.find((c) => c.path.endsWith("/contact"));
   assert.deepEqual(call.body, { email: "new@b.no", phone: "+4740000000" });
+});
+
+test("reai_update_lead treats an empty string and null as one emptiness class", async () => {
+  // reai_update_lead: keying on `=== null` got two cases backwards, both found by review.
+  // UpdateLeadContactReq permits a zero-length email and phone, so both values genuinely occur.
+
+  // (a) a carried "" the API normalises to null is NOT a destroyed value — nothing was at stake.
+  const normalised = fakeLead({ id: 700, email: "", phone: "+4740000000" });
+  const a = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, normalised);
+  assert.notEqual(a.result.isError, true, `a carried "" normalised to null is not a failure: ${a.text}`);
+  assert.doesNotMatch(a.text, /DESTROYED it/);
+
+  // (b) a carried NON-EMPTY value erased to "" IS a destroyed value, not a formatting note. This is the
+  // direction that matters: it used to fall through to "stored, but not exactly as sent".
+  const erased = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const inner = erased.client.request;
+  erased.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) erased.state.email = "";
+    return out;
+  };
+  const b = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, erased);
+  assert.equal(b.result.isError, true, `an email erased to "" is data loss: ${b.text}`);
+  assert.match(b.text, /email: not mentioned, so "keep@b\.no" was sent to preserve it .* DESTROYED it/);
+  assert.doesNotMatch(b.text, /not exactly as sent/);
+});
+
+test("reai_update_lead counts a field cleared to an empty string as cleared", async () => {
+  // reai_update_lead: the mirror of the same bug on the ASKED half — a field the caller asked to clear that
+  // reads back "" was reported as still holding a value, which is a failure over a successful clear.
+  const fake = fakeLead({ id: 700, notes: "old notes" });
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/notes")) fake.state.notes = "";
+    return out;
+  };
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, notes: null }, fake);
+  assert.notEqual(result.isError, true, `"" is cleared: ${text}`);
+  assert.doesNotMatch(text, /asked to clear it/);
+});
+
+test("reai_log_lead_contact reports the event from the response, not from args", async () => {
+  // reai_log_lead_contact echoed args.contactedOn and args.source — a date the API may return as a timestamp
+  // and an enum whose casing it may normalise, which are the two rewrite classes this repo documents. The
+  // event is nested at contactEvents[], which is why the census could not see it until it learned to descend.
+  const fake = fakeLead({ id: 700 });
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "POST" && req.path.endsWith("/contact-events")) {
+      // The API normalising both values it was sent — the whole reason not to quote the request.
+      out.data.contactEvents = [{ id: 66150, contactedOn: "2026-08-08T00:00:00Z", source: "PHONE" }];
+    }
+    return out;
+  };
+  const { text } = await runLive(
+    "reai_log_lead_contact",
+    { orgNumber: ORG, contactedOn: "2026-08-08", source: "phone" },
+    fake,
+  );
+  assert.match(text, /Logged PHONE contact with .* on 2026-08-08T00:00:00Z, read back from the response/);
+  assert.doesNotMatch(text, /values SENT/);
+});
+
+test("reai_log_lead_contact says the values are what was SENT when the response shows no such event", async () => {
+  const fake = fakeLead({ id: 700 });
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "POST" && req.path.endsWith("/contact-events")) out.data.contactEvents = [];
+    return out;
+  };
+  const { text } = await runLive(
+    "reai_log_lead_contact",
+    { orgNumber: ORG, contactedOn: "2026-08-08", source: "phone" },
+    fake,
+  );
+  assert.match(text, /no event in the response matches that date and channel/);
+  assert.match(text, /values SENT/);
+  assert.doesNotMatch(text, /read back from the response/);
+});
+
+test("reai_update_lead does not blame normalisation for a carried value the API replaced", async () => {
+  // reai_update_lead: a carried email coming back as a DIFFERENT address was filed under "this API rewrites
+  // values (a phone becomes E.164)" — by the same commit that claimed to stop filing data loss as a
+  // formatting note. Normalisation is not a plausible reading: the value sent was the one just read back from
+  // this API, so it was already in whatever form the API stores.
+  const fake = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) fake.state.email = "someone-else@x.no";
+    return out;
+  };
+  const { text } = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, fake);
+  assert.match(text, /CARRIED, and the record came back with something else/);
+  assert.match(text, /email: carried "keep@b\.no", stored "someone-else@x\.no"/);
+  assert.doesNotMatch(text, /this API rewrites values/, "a carried value is not a normalisation case");
+  assert.match(text, /pointing somewhere unintended is worth checking/);
+});
+
+test("reai_update_lead routes a whitespace-only value the same way it verifies it", async () => {
+  // reai_update_lead: `email: "   "` was routed as a SET — body carried it, calls line said "email set" —
+  // while the verification treated it as a CLEAR, and the two cancelled out to no report at all. One
+  // predicate now, so it is a clear on both sides.
+  const fake = fakeLead({ id: 700, email: "old@b.no", phone: "+4740000000" });
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, email: "   " }, fake);
+  assert.match(text, /email cleared/, `a blank value is a clear on the calls line too: ${text}`);
+  assert.notEqual(result.isError, true);
 });

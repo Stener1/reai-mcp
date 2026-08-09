@@ -127,16 +127,23 @@ test("a non-depreciable asset can be registered", async () => {
   assert.deepEqual(calls[0].body, { name: "Tomt", accountNumber: "1150" });
 });
 
-test("the depreciation schedule is replaced whole, and the note says what it now is", async () => {
+test("the depreciation schedule is replaced whole, and the note says what the RECORD now is", async () => {
+  // The fixture used to answer `{ id: 42 }` and the assertion still passed, because the note quoted `args`.
+  // AssetRes carries both fields and this PUT returns it, so the fixture now answers as the API does.
+  //
+  // Correcting a claim this comment used to make: the fixture is NOT what makes the assertion meaningful. Its
+  // stored values EQUAL the sent ones, so an echo and a read-back print the same figures — review proved that
+  // by mutating the handler back to `args` with the wording kept, and only the sibling test below failed. What
+  // distinguishes this one is the literal ", both read back from the response" suffix.
   const { calls, text } = await run(
     "reai_set_asset_depreciation",
     { assetId: 42, usefulLifeInMonths: 36, depreciationMethod: "manual" },
-    { id: 42 },
+    { id: 42, depreciationMethod: "manual", usefulLifeInMonths: 36 },
   );
   assert.equal(calls[0].method, "PUT");
   assert.equal(calls[0].path, "/api/assets/42/depreciation");
   assert.deepEqual(calls[0].body, { usefulLifeInMonths: 36, depreciationMethod: "manual" });
-  assert.match(text, /depreciates manual over 36 month\(s\)/);
+  assert.match(text, /depreciates manual over 36 month\(s\), both read back from the response/);
 });
 
 test("an empty register is not the same as owning nothing", async () => {
@@ -168,4 +175,75 @@ test("every asset write is gated at full, and the deletes are flagged destructiv
   // Both of these dispose of something; a client that confirms destructive calls must be told.
   assert.equal(tool("reai_write_off_asset").destructive, true);
   assert.equal(tool("reai_delete_asset").destructive, true);
+});
+
+test("setting a depreciation schedule states what the response stored, not what was sent", async () => {
+  // reai_set_asset_depreciation: declared IRREVERSIBLE, and it was the last tool stating the resulting
+  // schedule from `args`. AssetRes carries both fields and this PUT returns it.
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    { id: 8, depreciationMethod: "manual", usefulLifeInMonths: 60 },
+  );
+  assert.match(text, /now depreciates manual over 60 month\(s\), both read back from the response/);
+  assert.match(text, /WARNING: depreciationMethod \(sent "linear", asset 8 came back with "manual"\)/);
+});
+
+test("a depreciation response missing the fields is not reported as a confirmed schedule", async () => {
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    undefined,
+  );
+  assert.match(text, /neither was read back .*the response came back as no body.*so both are what was SENT/);
+  assert.doesNotMatch(text, /read back from the response\./);
+});
+
+test("a depreciation schedule the API stored as sent reports no discrepancy", async () => {
+  // Positive control, and it also pins the numeric read-back: 60 must not be quoted from args by accident.
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    { id: 8, depreciationMethod: "linear", usefulLifeInMonths: 60 },
+  );
+  assert.match(text, /now depreciates linear over 60 month\(s\), both read back from the response/);
+  assert.match(text, /Future depreciation follows the new schedule/);
+  assert.doesNotMatch(text, /WARNING/);
+});
+
+test("a depreciation response of nulls is not read as the stored schedule", async () => {
+  // reai_set_asset_depreciation: gating on `!== undefined` printed "now depreciates null over null month(s),
+  // read back from the response" — a confident sentence stating a value this API is documented as
+  // substituting. A stored null counts as unanswered here; the contradiction still gets its warning.
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    { id: 8, depreciationMethod: null, usefulLifeInMonths: null },
+  );
+  assert.doesNotMatch(text, /depreciates null/);
+  assert.match(text, /"linear" as SENT over 60 as SENT month\(s\)/);
+  assert.match(text, /WARNING: usefulLifeInMonths .*depreciationMethod /);
+});
+
+test("one depreciation field read back does not throw away the other", async () => {
+  // reai_set_asset_depreciation: the all-or-nothing gate put the REQUEST's method in front of the reader in a
+  // case where the response had already contradicted it — sent linear, stored manual, headline said linear.
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    { id: 8, depreciationMethod: "manual" },
+  );
+  assert.match(text, /now depreciates manual over 60 as SENT month\(s\)/);
+  assert.match(text, /The value marked SENT was not carried back by the response/);
+  assert.match(text, /WARNING: depreciationMethod \(sent "linear", asset 8 came back with "manual"\)/);
+});
+
+test("a depreciation response that is not a record says so, rather than denying the fields", async () => {
+  // reai_set_asset_depreciation: an array response made the note deny values a payload below it might carry.
+  const { text } = await run(
+    "reai_set_asset_depreciation",
+    { assetId: 8, usefulLifeInMonths: 60, depreciationMethod: "linear" },
+    [{ id: 8, depreciationMethod: "manual", usefulLifeInMonths: 12 }],
+  );
+  assert.match(text, /neither was read back \(the response came back as an array of 1\)/);
 });
