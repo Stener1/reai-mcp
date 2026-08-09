@@ -254,10 +254,13 @@ books actually turned out to do.
 | [Loans](docs/tools.md#loans) | Loans borrowed and lent, and the creditors and debtors at each end |
 | [Share investments](docs/tools.md#share-investments) | The portfolio and its events — purchases, sales, dividends, write-downs |
 
-Three tools sit outside those groups because they exist to stop a rename destroying a payment
-destination, and they are listed together in
-[docs/tools.md](docs/tools.md#renaming-something-must-not-erase-where-money-goes). One more,
-`reai_reconcile_ui`, is off unless `REAI_ENABLE_UI=1`: it is the only *view* here, and the only
+Three tools are documented together, apart from their domains, because they exist for one reason: to
+stop a rename destroying a payment destination
+([docs/tools.md](docs/tools.md#renaming-something-must-not-erase-where-money-goes)). That is a
+documentation grouping only — `reai_update_company_bank` belongs to `bank`,
+`reai_set_supplier_address` to `purchase` and `reai_update_creditor` to `loans`, they are inside the
+165, and narrowing with `REAI_TOOLSETS` enables each one with its own domain. One tool genuinely is
+outside all thirteen: `reai_reconcile_ui` is off unless `REAI_ENABLE_UI=1`, because it is the only *view* here, and the only
 payload in this API that does not fit comfortably in text
 ([why](docs/tools.md#the-one-ui-surface)).
 

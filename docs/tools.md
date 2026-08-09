@@ -321,9 +321,9 @@ What the API does **not** check: Norwegian tenancy law caps a deposit at six mon
 ## Renaming something must not erase where money goes
 | Tool | Purpose | Risk |
 |---|---|---|
-| `reai_update_company_bank` | Change a company account — label, currency, SWIFT, or the number itself — **without emptying `bban`** | **irreversible** |
-| `reai_set_supplier_address` | Change part of a supplier's address without dropping the postcode | reversible |
-| `reai_update_creditor` | Rename a loan counterparty **without emptying the account its repayments go to** — listed with the [loans](#loans) below, where they now live | **irreversible** |
+| `reai_update_company_bank` | Change a company account — label, currency, SWIFT, or the number itself — **without emptying `bban`** — in the [bank](#bank--vat) toolset | **irreversible** |
+| `reai_set_supplier_address` | Change part of a supplier's address without dropping the postcode — in the [purchase](#purchase) toolset | reversible |
+| `reai_update_creditor` | Rename a loan counterparty **without emptying the account its repayments go to** — in the [loans](#loans) toolset, listed with it below | **irreversible** |
 
 Each of these wraps a `PUT` that replaces rather than patches, on a record carrying a payment destination the schema does not require — so the body an ordinary rename produces is accepted and empties the account. All three read the record first and merge. The measurements, and why the two account-carrying ones need `REAI_WRITE_MODE=full` even though they are the *safe* way to do the job, are in [docs/safety.md](safety.md#the-three-curated-merge-tools).
 

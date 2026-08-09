@@ -549,7 +549,7 @@ test("the audited quirks are a documented subset, not a claim of coverage", () =
 });
 
 test("an unverifiable claim fails the run unless it says WHY it cannot be verified", () => {
-  // `audit-storage.mjs` exits 3 on inconclusive, for the reason docs/development.md records: "a claim
+  // `audit-storage.mjs` exits 3 on inconclusive, for the reason docs/audits.md records: "a claim
   // nobody checked is not a claim that held". This audit adopts that — but one case is unanswerable by
   // construction rather than by accident (the tenant-header claim needs a single-tenant token; ours reaches
   // four), and a gate that fails forever is a gate everyone learns to ignore. So the escape hatch exists

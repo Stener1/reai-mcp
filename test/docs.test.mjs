@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { allTools, alwaysOnTools, registeredTools, selectTools, TOOL_GROUPS, SERVER_VERSION } from "../dist/server.js";
+import { uiTools } from "../dist/tools/ui.js";
 import { QUIRKS } from "../dist/reai/quirks.js";
 import { getSpecIndex } from "../dist/reai/spec.js";
 import { TOOLSETS } from "../dist/config.js";
@@ -132,6 +133,72 @@ test("the documentation file list is real, so the haystack cannot shrink by a re
   const onDisk = readdirSync(join(repo, "docs")).filter((f) => f.endsWith(".md")).sort();
   const listed = DOC_FILES.filter((f) => f.startsWith("docs/")).map((f) => f.slice("docs/".length)).sort();
   assert.deepEqual(onDisk, listed, "a docs/ page is not in DOC_FILES, so nothing above searches it");
+});
+
+test("every live audit has a documented invocation", () => {
+  // The audit harness is only run by a maintainer following the docs. When the README split moved the
+  // audits to docs/audits.md, `audit-quirks-write.mjs` was described there as one of the four audits but
+  // its command never made it into the invocation block — so anyone following the documented workflow ran
+  // three of four and silently skipped its six refusal probes. Presence in prose is not an invocation.
+  // The population is every `scripts/audit-*.mjs` UNION every script an `audit:*` npm alias points at, so
+  // renaming a harness out of the filename pattern does not quietly remove it from the guard —
+  // `storage-census.mjs` is already an audit reached only through its `audit:census` alias.
+  const scripts = PKG.scripts;
+  const byAlias = Object.entries(scripts)
+    .filter(([name]) => name.startsWith("audit:"))
+    .flatMap(([, cmd]) => [...cmd.matchAll(/scripts\/([\w.-]+\.mjs)/g)].map((m) => m[1]));
+  const audits = [...new Set([...readdirSync(join(repo, "scripts")).filter((f) => /^audit-.*\.mjs$/.test(f)), ...byAlias])].sort();
+  // Only RUNNABLE lines count. Searching the whole corpus would accept a prose mention of the path, and
+  // `docs/audits.md` names every audit in prose by design — the page that documents them is the page most
+  // likely to satisfy a lax check while still showing no command. Commented lines are dropped for the same
+  // reason: a `#`-prefixed line inside a fenced block is documentation of a command, not one.
+  const COMMANDS = DOCS.flatMap(({ text }) => [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)])
+    .flatMap((m) => m[1].split("\n"))
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+  const undocumented = audits.filter((file) => {
+    if (COMMANDS.includes(`scripts/${file}`)) return false;
+    // Or via its npm alias, bounded on BOTH sides. `audit:quirks` is a prefix of `audit:quirks:write`, so
+    // without a right boundary the write audit's command satisfies the read-only audit and hides the gap
+    // this test exists to catch; without a left boundary the reverse holds for any alias that is a suffix
+    // of a documented one.
+    const aliases = Object.entries(scripts)
+      .filter(([, cmd]) => cmd.includes(`scripts/${file}`))
+      .map(([name]) => name);
+    return !aliases.some((name) => new RegExp(`(?<![\\w:-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w:-])`).test(COMMANDS));
+  });
+  assert.deepEqual(undocumented, [], `live audits with no documented command: ${undocumented.join(", ")}`);
+});
+
+test("the README's group assignment for each rename-safety tool is the real one", () => {
+  // The README described these three as sitting "outside those groups" when in fact each belongs to a
+  // toolset and is enabled by it — an operator narrowing the server by that sentence would have expected a
+  // smaller surface than they configured. The prose now names a group per tool, so the pairing is the thing
+  // that can drift, and the pairing is what this asserts.
+  //
+  // A tempting assertion here is "no curated tool is in zero groups". It is VACUOUS: `allTools` is built as
+  // `[...alwaysOnTools, ...groupArrays]`, so nothing in it can be ungrouped and the check cannot ever fail.
+  // Asserting through `selectTools` instead tests the operator-visible claim rather than set arithmetic.
+  const RENAME_SAFETY = { reai_update_company_bank: "bank", reai_set_supplier_address: "purchase", reai_update_creditor: "loans" };
+  for (const [tool, group] of Object.entries(RENAME_SAFETY)) {
+    const members = TOOL_GROUPS[group].map((t) => (typeof t === "string" ? t : t.name));
+    assert.ok(members.includes(tool), `README puts ${tool} in ${group}; TOOL_GROUPS.${group} does not contain it`);
+    const narrowed = selectTools([group]).map((t) => t.name);
+    assert.ok(narrowed.includes(tool), `REAI_TOOLSETS=${group} does not enable ${tool}, which the README says it does`);
+    assert.match(README, new RegExp(`\`${tool}\`(?: belongs)? to \`${group}\``),
+      `the README must state which group ${tool} is in, so this pairing stays checkable`);
+  }
+
+  // The README's next sentence claims exactly ONE tool is outside all thirteen groups. A prose tripwire on
+  // the phrase was tried and dropped: it fired on true sentences ("`reai_reconcile_ui` sits outside these
+  // groups") while every paraphrase of the false one walked past it. This asserts the claim instead — and
+  // unlike "no curated tool is ungrouped", it can fail, because `registeredTools` is not built from the
+  // groups. A second independently gated tool added without a docs decision fails here.
+  const grouped = new Set(Object.values(TOOL_GROUPS).flat().map((t) => (typeof t === "string" ? t : t.name)));
+  const alwaysOn = new Set(alwaysOnTools.map((t) => t.name));
+  const outside = registeredTools.map((t) => t.name).filter((n) => !grouped.has(n) && !alwaysOn.has(n));
+  assert.deepEqual(outside, uiTools.map((t) => t.name),
+    "the README says one tool is outside all thirteen groups; the set of such tools has changed");
 });
 
 test("no documentation table calls an irreversible tool reversible", () => {

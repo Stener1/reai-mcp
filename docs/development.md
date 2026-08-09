@@ -76,7 +76,15 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
   node scripts/audit-storage.mjs --tenant 2783
 
-# Are the QUIRKS still true? Read-only, so this one is safe against any tenant.
+# The quirks whose claim is that a WRITE is refused. Every probe is built to BE refused -- but a refusal
+# that stopped being one is exactly what this looks for, and an unexpected 2xx creates a record on the
+# allowlisted tenant. The audit reports that as SAFETY and its count snapshots see it; neither prevents nor
+# undoes it. So it takes the tenant allowlist like the others, and 2783 is the only tenant to point it at.
+REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
+  node scripts/audit-quirks-write.mjs --tenant 2783
+
+# Are the QUIRKS still true? Read-only, so this one is safe against any tenant. Last on purpose: every
+# command above it writes, and this is the only line here that names 2634.
 REAI_USER_API_TOKEN=... node scripts/audit-quirks.mjs --tenant 2634
 
 # How many storage claims exist, and how many are probed?

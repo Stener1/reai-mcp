@@ -72,7 +72,7 @@
  * answer it.
  *
  * An UNEXPECTED inconclusive exits **3**, matching `audit-storage.mjs`, for the reason recorded in
- * `docs/development.md`: a claim nobody checked is not a claim that held, and "7 of 8" printed next to a
+ * `docs/audits.md`: a claim nobody checked is not a claim that held, and "7 of 8" printed next to a
  * zero exit code reads as a pass. But one case here is inconclusive *by construction* — the tenant-header
  * claim is conditional on a token reaching exactly one tenant, and ours reaches four, so it can never be
  * answered from this repository's credentials. Failing the run forever on that would train everyone to
