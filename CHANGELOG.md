@@ -9,6 +9,66 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Round two of the Norwegian vocabulary work: one term mapped, eight withdrawn, the rest refused.** This
+  entry began as "nine terms mapped" and is a retraction. Eight of the nine additions were withdrawn, and
+  the headline claim was false in both halves.
+  - **`aga` → `/api/salary-payments`** is the only addition that survives, and it does what the
+    unabbreviated `arbeidsgiveravgift` already did.
+  - **`fordring` was withdrawn last, after passing review, and it is the one worth reading about.** Its read
+    sense is right — a receivable *is* the kundereskontro, and `fordring`, `fordringer`, "sum fordringer" and
+    "vis fordringer" reached nothing or `/api/tax-returns/{year}` before. It is given up anyway, because
+    `/api/ledger/customer` cannot be named without naming `/api/customers`, and this API has no POST for a
+    receivable, so a write verb had nowhere correct to land: `opprett fordring` → `POST /api/customers`
+    (creating a *customer*), `slett fordringer` → `DELETE /api/customers/{id}`, `endre fordring` →
+    `PATCH /api/customers/{id}`. That is the `kontonummer` defect — a synonym broad enough to promote a write
+    on the wrong resource — reappearing in the mapping that had survived. Three measured attempts to keep the
+    read and drop the write each produced a *different* wrong write: two tokens displaced `/api/invoices`,
+    `/api/vouchers` and `/api/postings` in compounds; routing write verbs to the invoice put `endre fordring`
+    on the **supplier** side; routing them to the credit note (`POST /api/invoices/{id}/credit`, which is how
+    a receivable is actually cancelled) lost to `slett`, which ranked a DELETE of a credit-note *application*
+    instead. Recovering the read value needs the ranker to name an exact path without its resource family —
+    an engine change, not another table row, and not something to bolt onto a PR about overreaching in this
+    table.
+  - **The claim this PR opened with was wrong twice over.** "Two of the nine fix a confident wrong answer
+    rather than an empty one" — `aga` had returned seven operations **all tied at the bare-substring floor
+    of 0.16**, so the top hit was index order rather than a confident answer, and `inngaende` had returned
+    **nothing at all**, so it was the empty case it was cited as being better than. Noise is not confidence.
+  - **Also withdrawn, each with the measurement in the source:** `kontonummer` (two different things are called
+    kontonummer here, and mapping it to `account` promoted `PUT /api/general-sub-accounts/{id}` — a write on
+    the wrong resource — to first place for "endre kontonummer på bankkonto", where `PUT /api/company-banks/{id}`
+    had been correct); `dimensjon` (the premise was false — `departmentId` appears on two employee writes,
+    `projectId` is the posting dimension — and it demoted `/api/projects`); `driftskostnader` (`/api/expenses`
+    is employee expense *claims*, as this repository's own tool description says, not operating costs);
+    `inngaende` (right for one sense of a standard pair, and it evicted all three vat-return operations from
+    "inngående mva" and three of four `/api/opening-balances` from "inngående balanse"); `termin` (a loan
+    instalment as well as a VAT period, and "betale termin" pointed at VAT filing); `anskaffelseskost`
+    (evicted `/api/share-investments` from "anskaffelseskost aksjer", where PURCHASE events carry a
+    `pricePerUnit`); and `fordringer`, dead code the `-er` rule already derives.
+  - **Four refusal reasons were fabricated and are corrected in place.** The first version said `kredit`'s
+    "closest match is `/api/creditors`", and that `trekk`, `styre` and `valutakurs` reached named endpoints.
+    All four return **zero hits**. The refusals stand; the measurements never existed. Also corrected:
+    `utbytte` was refused as "no endpoint reports it" when DIVIDEND is an eventType on
+    `/api/share-investments/{id}/events`, and `valutakurs`'s note contradicted the correct note twelve lines
+    above it.
+  - **Codex reached six of the eight withdrawals independently**, and added one the author's review did not:
+    `/vat-return/altinn-sync`, which bare `termin` ranked first, is classified by `test/policy.test.mjs` as
+    an external transmission — so a neutral discovery query was steering toward a side-effecting call to
+    Altinn.
+  - These stay refused, with reasons in the source: `debet`, `kredit`, `egenkapital`, `omsetning`,
+    `utbytte`, `varekostnad`, `permisjon`, `fravaer`, `sykepenger`, `trekk`, `kid`/`kidnummer`, `valutakurs`,
+    `saldobalanse`, `arsberetning`, `generalforsamling`, `styre`.
+  - **`betalingsbetingelser` was mapped and then removed.** The target exists and is public — `POST
+    /invoice/setting/daysUntilDue`, and querying `daysuntildue` reaches it — but the synonym is outvoted by
+    compound decomposition: the word splits into `betaling` + `betingelser`, and the payment endpoints win.
+    The English "payment terms" fails the same way.
+  - **The regression harness was the root cause and was replaced.** The first version compared rank lists
+    across 388 queries and reported two changes; it drew every query from strings already committed to test
+    files, which contain almost no multi-word Norwegian, so it could not see any of the regressions
+    above. The replacement generates **1170 queries** — each candidate term crossed with 25 domain nouns and
+    10 Norwegian verbs, plus every path segment in the spec — and it is what found both `fordring` defects,
+    which the review itself had not.
+
+
 - **Nine core Norwegian bookkeeping terms reached the wrong endpoint, or nothing at all.** The escape hatch
   is how an agent reaches operations no curated tool covers, and it is reached by searching — so a term that
   does not resolve costs it the endpoint it was looking for. `merverdiavgift`, the name on the Norwegian tax

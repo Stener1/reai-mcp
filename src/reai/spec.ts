@@ -1369,6 +1369,111 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // actually creates a posting nowhere: a write verb pointed at unrelated mutations, which is the failure
   // the rest of this table is written to avoid. Codex caught it on PR #118. Measured: the bare `postering`
   // still ranks GET /api/postings first, and "opprett postering" now ranks POST /api/vouchers first.
+  // --- Round two, from the review of PR #118 -----------------------------------------------------------
+  //
+  // Nine terms were added here and SEVEN were withdrawn after review. What survives is the two whose
+  // destination could be defended; the rest are recorded below because the reasons they failed are worth
+  // more than the mappings would have been.
+  //
+  // `fordring` was the ninth withdrawal, and it took three measured attempts to establish that it had to be.
+  // The read sense is right and valuable: a receivable IS the kundereskontro, and `fordring`, `fordringer`,
+  // "sum fordringer" and "vis fordringer" all returned nothing or /api/tax-returns/{year} before. The token
+  // that delivers it is the problem. "customer" is a RESOURCE NAME, so it drags the whole /api/customers
+  // family in behind it, writes included -- and this API has no POST for a receivable, so a write verb had
+  // nowhere correct to land:
+  //
+  //     opprett fordring   (nothing)  ->  POST /api/customers          creating a CUSTOMER
+  //     slett fordringer   (nothing)  ->  DELETE /api/customers/{id}   deleting one
+  //     endre fordring     (nothing)  ->  PATCH /api/customers/{id}
+  //
+  // That is the `kontonummer` defect exactly -- a synonym broad enough to promote a write on the wrong
+  // resource -- reappearing in the one mapping that had survived review. Three attempts to keep the read and
+  // drop the write each produced a DIFFERENT wrong write, which is what settled it:
+  //   1. ["ledger", "customer"] -- two tokens outscore one named resource, so the customer ledger displaced
+  //      /api/invoices, /api/vouchers and /api/postings in any compound containing the word.
+  //   2. narrowed to ["customer"] plus a phrase rule sending write verbs to "invoice" -- a receivable is
+  //      created by issuing one. "opprett fordring" -> POST /api/invoices is right; "endre fordring" then
+  //      landed on PATCH /api/supplier-invoices/{id}, the SUPPLIER side of the books.
+  //   3. split further, write verbs to "credit invoice" -- crediting is how a receivable is actually
+  //      cancelled, and POST /api/invoices/{id}/credit exists. But `slett` maps to delete and the DELETE
+  //      operations outrank it, so "slett fordring" pointed at DELETE of a credit-note APPLICATION, and
+  //      "endre fordring" was never covered at all.
+  //
+  // No entry, and no phrase rule either: with nothing injected, `ansatt`/`leverandor` reach their own
+  // ledgers unaided, which is what they did before any of this. The read value is real and is left on the
+  // table deliberately. Reaching it needs the ranker to be able to name /api/ledger/customer without naming
+  // /api/customers -- a weight or an exact-path term, not another synonym. That is a change to the engine,
+  // not to this table, and it does not belong at the end of a PR about overreaching in this table.
+  // The abbreviation of arbeidsgiveravgift, which the unabbreviated word already reached. Before this,
+  // `aga` returned seven operations ALL TIED at the bare-substring floor of 0.16, so the top hit was
+  // whichever came first in index order. The commit message called that "a confident wrong answer being
+  // fixed"; it was noise, and calling noise confidence overstated the change.
+  aga: ["salary-payment"],
+  //
+  // WITHDRAWN after the review of PR #119 measured them. Each looked reasonable and each was wrong:
+  //
+  //   kontonummer     The worst of them. Two different things are called kontonummer here — a bank account
+  //                   number and a chart-of-accounts number — and mapping it to `account` resolved that
+  //                   ambiguity silently toward the chart. "endre kontonummer pa bankkonto" then ranked
+  //                   PUT /api/general-sub-accounts/{id} FIRST, a write on the wrong resource, where it had
+  //                   correctly ranked PUT /api/company-banks/{id}.
+  //   dimensjon       The premise was false. The comment claimed a department is what a posting is analysed
+  //                   by; `departmentId` appears on exactly two operations, both employee writes, while
+  //                   `projectId` is the query parameter on GET /api/postings and GET /api/ledger/general.
+  //                   It also demoted /api/projects for "dimensjon prosjekt".
+  //   driftskostnader A category error the repository already documents: /api/expenses is employee expense
+  //                   CLAIMS — `travel` is required, and expenses.ts calls it "utlegg og reiseregninger" —
+  //                   not operating costs. It turned a wrong-and-weak answer into a wrong-and-confident one.
+  //   inngaende       Right for one sense of a standard pair and damaging for the other two. Inngående
+  //                   pairs with utgående for faktura, MVA and balanse; mapping the adjective to
+  //                   supplier-invoice evicted all three vat-return operations from "inngående mva" and
+  //                   three of the four /api/opening-balances operations from "inngående balanse".
+  //   termin          Reached GET /vat-return/altinn-sync at a score of 1.7 on an empty summary, ahead of
+  //                   three period-locking writes. Termin is also the loan instalment, and "betale termin"
+  //                   and "terminbelop" now pointed at VAT filing.
+  //   anskaffelseskost Acquisition cost applies to share investments too — PURCHASE is an eventType with
+  //                   pricePerUnit — and the mapping evicted /api/share-investments from
+  //                   "anskaffelseskost aksjer" entirely.
+  //   fordringer      Dead code, derived by the `-er` rule.
+  //
+  // REFUSED, with the reasons corrected. The first version of this block asserted that four of these
+  // "reached" specific endpoints. They reach NOTHING — `kredit`, `trekk`, `styre` and `valutakurs` all
+  // return zero hits — and describing a result that does not exist is worse than leaving the note out:
+  //
+  //   debet, kredit          The two sides of an entry. Neither returns anything, and neither has a
+  //                          destination: a posting's sides are body fields on a voucher line. The first
+  //                          version claimed kredit's "closest match is /api/creditors" — it has no match,
+  //                          and the point being made (creditors are loan counterparties, not the credit
+  //                          side) stands as a warning without the false measurement attached to it.
+  //   egenkapital, omsetning No endpoint reports equity or turnover.
+  //   utbytte                Withdrawn as a refusal REASON, not as a refusal: DIVIDEND is an eventType on
+  //                          /api/share-investments/{id}/events, so "no endpoint reports it" was false. It
+  //                          stays unmapped because the word alone does not tell you whether the question
+  //                          is about recording one or reporting one, and the event type is a body field
+  //                          that fieldNamesOf excludes from the searchable text.
+  //   varekostnad            Cost of goods sold is computed, not a resource.
+  //   permisjon, fravaer     No absence model in this API.
+  //   sykepenger             A salary COMPONENT; /api/salary-payments is the disbursement.
+  //   trekk                  Returns nothing. Withholding is a payroll line, not an endpoint.
+  //   kid, kidnummer         A payment reference field on a body.
+  //   valutakurs             Returns nothing, and `valuta` is ALREADY refused twelve lines above this with
+  //                          the correct reason — /api/currencies is public but lists currencies rather
+  //                          than rates. The first version of this note claimed the only match was an
+  //                          internal operation, contradicting the note that got it right.
+  //   saldobalanse           Still refused, but the first version's reason was wrong: GET /api/ledger/general
+  //                          reports opening balance, postings and closing balance per account, which is a
+  //                          trial balance in all but name, so "nothing to point it at" was false. Left
+  //                          unmapped in THIS pass because it needs the same measurement the others turned
+  //                          out to need, and this round has already shown what happens when that is
+  //                          skipped.
+  //   arsberetning           The directors' report is not in this API.
+  //   generalforsamling      Reaches /api/general-sub-accounts on a spurious "general"; no AGM endpoint.
+  //   styre                  Returns nothing. The first version said it matched /onboarding/company-search,
+  //                          which it does not — and that path only contains "board" inside "onboarding".
+  //   betalingsbetingelser   The target is real and public, POST /invoice/setting/daysUntilDue, and
+  //                          querying "daysuntildue" reaches it. The synonym does not work: compound
+  //                          decomposition splits the word and `betaling` maps to payment, so the payment
+  //                          endpoints win. Verified by re-inserting it and watching the scores not move.
   postering: ["posting", "voucher"],
   posteringsgruppe: ["posting", "group"],
   resultat: ["result", "income"],

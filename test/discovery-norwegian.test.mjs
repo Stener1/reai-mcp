@@ -605,3 +605,120 @@ test("the domain probe still measures what the change reported", async () => {
   // empty, and pointing it somewhere would be the confident-wrong-answer failure this repo names.
   assert.deepEqual(empty, ["remittering"], `unexpected empty results: ${empty.join(", ")}`);
 });
+
+/**
+ * Round two of the vocabulary work — nine terms added, EIGHT withdrawn. One survives.
+ *
+ * The retraction is the honest summary. `kontonummer` promoted a PUT on the wrong resource to first place
+ * for "endre kontonummer pa bankkonto"; `dimensjon` rested on a premise the spec refutes (`departmentId` is
+ * an employee attribute, `projectId` is the posting dimension); `driftskostnader` pointed operating costs at
+ * employee expense CLAIMS, which this repository documents in its own words; `inngaende` was right for one
+ * sense of a standard pair and evicted the correct answers for the other two; `termin` and
+ * `anskaffelseskost` were weak or mis-sensed; `fordringer` was dead code the `-er` rule already derived; and
+ * `fordring` — which had survived the review — carried the same defect as `kontonummer`.
+ *
+ * The headline claim was also wrong. "Two of the nine fix a confident wrong answer" — `aga` had returned
+ * seven operations ALL TIED at the bare-substring floor, so the top hit was index order, and `inngaende`
+ * had returned nothing at all. Noise is not confidence, and neither "before" value was real.
+ *
+ * `fordring` is the one worth reading the source for, because its read sense was genuinely right and is
+ * given up anyway: /api/ledger/customer cannot be named without naming /api/customers, so the synonym that
+ * reached the ledger also promoted POST, PATCH and DELETE on customers for a query about a receivable. Three
+ * measured attempts to keep the read and drop the write each produced a different wrong write. Recovering it
+ * needs a change to the ranker, not another row in the table.
+ *
+ * The harness is the durable lesson. The first regression check compared 388 queries drawn from strings
+ * already committed to test files — which contain almost no multi-word Norwegian — reported two changes, and
+ * saw none of the regressions. The replacement crosses each term with 25 domain nouns and 10 verbs for 1170
+ * queries; it found both `fordring` defects, which the review itself had not.
+ */
+const ROUND_TWO = [
+  ["aga", "GET /api/salary-payments", "seven operations tied at the substring floor, ordered by index"],
+];
+
+test("round-two vocabulary reaches the exact operation it names, at rank 1", async () => {
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const failures = [];
+  for (const [term, wanted, was] of ROUND_TWO) {
+    const hits = searchOperations({ query: term, limit: 5 }).map((h) => `${h.method} ${h.path}`);
+    // Rank 1, not "first or second". The term ranks 0 today, so the slack bought nothing except room for
+    // a demotion to pass unnoticed — which is how the plural in `postering` got through the round before.
+    if (hits[0] !== wanted) {
+      failures.push(`${term} -> wanted ${wanted} FIRST, got ${hits.slice(0, 3).join(", ") || "(nothing)"} (before: ${was})`);
+    }
+  }
+  assert.deepEqual(failures, [], failures.join("\n  "));
+});
+
+test("round-two operations all exist", async () => {
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const operations = new Set(getSpecIndex().operations.map((o) => `${o.method} ${o.path}`));
+  for (const [term, wanted] of ROUND_TWO) {
+    assert.ok(operations.has(wanted), `${term} is asserted to reach ${wanted}, which this spec has no operation for`);
+  }
+});
+
+test("withdrawing `fordring` restored every answer it had displaced", async () => {
+  // Two defects in one mapping, both found by the 1170-query sweep rather than by reading.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const first = (q) => searchOperations({ query: q, limit: 3 }).map((h) => `${h.method} ${h.path}`)[0];
+
+  // 1. It promoted a write on the wrong resource — the `kontonummer` defect, in the mapping that had passed
+  //    review. A receivable has no POST in this API, so a write verb had nowhere correct to land and the
+  //    /api/customers family answered instead. Returning nothing beats a confidently wrong write.
+  for (const query of ["opprett fordring", "slett fordringer", "endre fordring"]) {
+    assert.equal(first(query), undefined, `"${query}" must not resolve rather than reach a customer write`);
+  }
+  // "registrer fordring" is deliberately NOT in that list, and the difference matters: it reaches
+  // POST /api/receipt-reception-documents/{id}/registration, which `registrer` reached on its own before any
+  // of this. Asserting `undefined` there would assert that a pre-existing answer disappeared — which is the
+  // shape of a guard that passes for the wrong reason. What the withdrawal must guarantee is narrower.
+  for (const query of ["registrer fordring", "opprett fordringer", "slett fordring", "endre fordringer"]) {
+    for (const hit of searchOperations({ query, limit: 5 }).map((h) => `${h.method} ${h.path}`)) {
+      assert.doesNotMatch(hit, /^(POST|PATCH|PUT|DELETE) \/api\/customers/, `"${query}" reached ${hit}`);
+    }
+  }
+
+  // 2. Two tokens outscored one named resource, so the customer ledger displaced the endpoint the OTHER
+  //    word in the query names. These three are the measured cases.
+  for (const [query, wanted] of [
+    ["faktura fordringer", "GET /api/invoices"],
+    ["bilag fordring", "GET /api/vouchers"],
+    ["postering fordringer", "GET /api/postings"],
+  ]) {
+    assert.equal(first(query), wanted, `"${query}" should reach the resource it names`);
+  }
+
+  // And with nothing injected, an explicitly named counterparty reaches its own ledger unaided — which is
+  // what it did before any of this, and why the phrase rules written to correct case 2 were removed too.
+  for (const [query, wanted] of [
+    ["fordring pa ansatt", "GET /api/ledger/employee"],
+    ["ansatt fordring", "GET /api/ledger/employee"],
+    ["leverandor fordringer", "GET /api/ledger/supplier"],
+    ["fordring debitor", "GET /api/debtors"],
+    ["kundefordringer", "GET /api/ledger/customer"],
+  ]) {
+    assert.equal(first(query), wanted, `"${query}" should reach ${wanted}`);
+  }
+});
+
+test("the withdrawn mappings stay withdrawn, because each broke a correct answer", async () => {
+  // This is the test the previous version should have been. The old one asserted `kredit` does not reach
+  // /api/creditors — which cannot fail, because `kredit` returns NOTHING, so `![].some(...)` is trivially
+  // true. It also stated the false premise it was built on. These four assertions can fail: each is a query
+  // that a withdrawn mapping demonstrably broke.
+  const { searchOperations } = await import("../dist/reai/spec.js");
+  const first = (q) => searchOperations({ query: q, limit: 3 }).map((h) => `${h.method} ${h.path}`)[0];
+  assert.equal(
+    first("endre kontonummer pa bankkonto"),
+    "PUT /api/company-banks/{id}",
+    "kontonummer -> account promoted a write on the chart of accounts over the bank account",
+  );
+  assert.equal(first("dimensjon prosjekt"), "GET /api/projects", "dimensjon -> department demoted projects");
+  assert.equal(first("inngaende mva"), "GET /api/vat-codes", "inngaende -> supplier-invoice evicted the VAT answers");
+  assert.equal(
+    first("anskaffelseskost aksjer"),
+    "GET /api/share-investments",
+    "anskaffelseskost -> assets evicted share investments",
+  );
+});
