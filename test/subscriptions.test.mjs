@@ -636,7 +636,7 @@ async function updateArmed(args, before, after) {
 
 test("a disarming the API discarded is WARNED about, not passed over in silence", async () => {
   const { text } = await updateArmed({ id: 4, sendEhf: false }, armed(), armed());
-  assert.match(text, /WARNING: you asked to turn off sendEhf/);
+  assert.match(text, /WARNING: this write sent sendEhf turned OFF/);
   assert.match(text, /STILL SET/);
   assert.match(text, /unattended billing this guards is not stopped/);
   assert.match(text, /reai_deactivate_subscription/, "the way to actually stop it is named");
@@ -662,7 +662,7 @@ test("arming by this edit is not reported as something carried over", async () =
 
 test("a response that omits the arming fields says so rather than implying disarmed", async () => {
   const { text } = await updateArmed({ id: 4, intervalMonths: 3 }, armed(), { id: 4, active: true, lines: [] });
-  assert.match(text, /did not carry outputMode, automaticBillingGeneration, sendEhf/);
+  assert.match(text, /did not answer for outputMode, automaticBillingGeneration, sendEhf/);
   assert.match(text, /could not be confirmed/);
   assert.match(text, /sendEhf=true/, "it must name what was sent");
   assert.doesNotMatch(text, /Still armed/, "an unconfirmable state is not a confirmed one");
@@ -695,7 +695,7 @@ test("the disarm warning fires in the DEFAULT configuration, not only with exter
   );
   assert.deepEqual(calls, ["GET", "PUT"], "a disarm-only edit must not be gated by the transmit check");
   assert.notEqual(result.isError, true);
-  assert.match(result.content.find((c) => c.type === "text").text, /WARNING: you asked to turn off sendEhf/);
+  assert.match(result.content.find((c) => c.type === "text").text, /WARNING: this write sent sendEhf turned OFF/);
 });
 
 test("disarming is not itself gated as a transmission — you can turn the dangerous thing off", async () => {
@@ -711,4 +711,70 @@ test("disarming is not itself gated as a transmission — you can turn the dange
   }
   assert.equal(curatedArgsEscalate(paths, { outputMode: "create_order" }), undefined);
   assert.ok(curatedArgsEscalate(paths, { outputMode: "create_invoice" }));
+});
+
+test("a CARRIED arming value the response contradicts is warned about — no `given` gate", async () => {
+  // The defect #141 found and fixed in reai_update_creditor, reintroduced here in the same shape: gating on
+  // the caller having NAMED the field blinds the check to a replacement changing a value it merely carried.
+  // Measured before the fix: the write sent sendEhf: false, the response returned true, and the tool narrated
+  // the API's arming as the caller's own status quo with no warning at all.
+  const { text } = await updateArmed(
+    { id: 4, internalComment: "ZZ" },
+    armed({ sendEhf: false }),
+    armed({ sendEhf: true }),
+  );
+  assert.match(text, /WARNING: this write sent sendEhf turned OFF/);
+  assert.match(text, /STILL SET/);
+  assert.match(text, /Still armed:[^\n]*sendEhf/);
+  assert.doesNotMatch(text, /This edit did not change that/, "it did change — the API changed it");
+});
+
+test("a contradicted disarm is not also reported as the caller arming it", async () => {
+  // `armedByThisEdit` keyed on the RESPONSE, so both fired at once and said opposite things. Reachable on a
+  // realistic input: SubscriptionRes has no `required` array, so a GET omitting sendEhf is spec-legal.
+  const { text } = await updateArmed({ id: 4, sendEhf: false }, armed({ sendEhf: undefined }), armed({ sendEhf: true }));
+  assert.match(text, /WARNING: this write sent sendEhf turned OFF/);
+  assert.doesNotMatch(text, /armed BY THIS EDIT/, "the caller asked to turn it off");
+});
+
+test("a null in the response is not folded into confirmed-disarmed", async () => {
+  // bindsToTrue(null) is false, so present-and-null silently dropped the flag out of "confirmed from the
+  // response" and suppressed the warning — this tool's own bug relocated from the request to the response.
+  const { text } = await updateArmed({ id: 4, sendEhf: false }, armed(), armed({ sendEhf: null }));
+  assert.match(text, /did not answer for sendEhf \(present but null\)/);
+  assert.match(text, /could not be confirmed/);
+  assert.doesNotMatch(text, /Still armed:[^\n]*sendEhf/, "a non-answer is not a confirmation");
+});
+
+test("a failed ARMING is reported too, not only a failed disarming", async () => {
+  const { text } = await updateArmed({ id: 4, sendEhf: true }, armed({ sendEhf: false }), armed({ sendEhf: false }));
+  assert.match(text, /sent sendEhf turned ON and the subscription came back WITHOUT it/);
+  assert.match(text, /the safe direction, but not what was asked for/);
+});
+
+test("a lost line is warned about, on the one field the response is recorded as disagreeing about", async () => {
+  // subscription-read-and-write-shapes-differ measured "a PUT carrying the eight required fields and one line
+  // answered 200 … with the second line gone". Asserting the count from the REQUEST on that field of all
+  // fields was the wrong half to trust.
+  const { text } = await updateArmed({ id: 4, internalComment: "ZZ" }, armed(), armed({ lines: [] }));
+  assert.match(text, /WARNING: this write sent 1 line\(s\) and the subscription came back with 0/);
+  const ok = await updateArmed({ id: 4, internalComment: "ZZ" }, armed(), armed());
+  assert.match(ok.text, /line\(s\) were carried over\. Confirmed from the response/);
+});
+
+test("active is read tolerantly, and not reported at all when nothing says", async () => {
+  // A strict `=== false` under a comment about Jackson coercion made `active: null` assert billing about a
+  // stopped subscription — worse than main, which fell back to the record.
+  const nulled = await updateArmed({ id: 4, internalComment: "ZZ" }, armed({ active: false }), armed({ active: null }));
+  assert.match(nulled.text, /INACTIVE/, "a null response must fall back to the record");
+  const unknown = await updateArmed({ id: 4, internalComment: "ZZ" }, armed({ active: undefined }), armed({ active: undefined }));
+  assert.match(unknown.text, /did not report whether it is active; assume it is/);
+  assert.doesNotMatch(unknown.text, /goes on billing as it was/, "unknown is not the same as active");
+});
+
+test("outputMode is read with the coercion-tolerant predicate, which is why it is exported", async () => {
+  // The only export this PR adds to policy.ts had no test exercising it through this tool: the coercion loop
+  // covered sendEhf only, so `bindsToCreateInvoice` -> `v === "create_invoice"` survived mutation.
+  const { text } = await updateArmed({ id: 4, internalComment: "ZZ" }, armed(), armed({ outputMode: 1 }));
+  assert.match(text, /Still armed:[^\n]*outputMode/, "the Jackson ordinal must count as create_invoice");
 });

@@ -431,13 +431,6 @@ const updateSubscription = defineTool({
   name: "reai_update_subscription",
   title: "Change a subscription",
   description:
-    "What this reports about ARMING now comes from the response, not from what was sent. It matters most " +
-    "when a disarming does not take: a caller who sends sendEhf: false to stop an unattended invoicing " +
-    "machine gets a WARNING if the record comes back with it still set, where the earlier version said " +
-    "nothing at all and silence read as confirmation. Whether this API ever discards such a value is NOT " +
-    "established — subscriptions are created ACTIVE, so a throwaway one on a real company could generate " +
-    "an invoice, and the test tenant has only a real subscription. So this reports what the response says, " +
-    "warns when the response disagrees with the request, and says so when the response cannot answer.\n\n" +
     "Change one or more things about a subscription, leaving the rest alone.\n\n" +
     "The call underneath is a full REPLACEMENT, and its own advice — read it first and send back " +
     "what you do not intend to change — is harder to follow than it sounds, because the read and " +
@@ -457,6 +450,15 @@ const updateSubscription = defineTool({
     'automaticBillingGeneration: false and outputMode: "create_order" are the three ways to stop ' +
     "it, and none of them needs REAI_ALLOW_EXTERNAL_SEND, because turning a send OFF is not a " +
     "send.\n\n" +
+    "What this reports about those three flags comes from the RESPONSE. That matters most when a disarming " +
+    "does not take: sending sendEhf: false and having it discarded earns a WARNING, where silence would read " +
+    "as confirmation that the machine is stopped. Whether this API ever discards such a value is NOT " +
+    "established, and the reason is worth stating precisely: it is not that subscriptions are created active " +
+    "— subscription-created-active measured that a new one with automaticBillingGeneration: false issues " +
+    "nothing, so \"newly created\" is not what makes one dangerous. It is that measuring means creating a " +
+    "subscription on a real company, and the only one on the test tenant is real. So this reports what the " +
+    "response says, warns when the response disagrees with what was sent, and says so when the response does " +
+    "not answer — correct under either behaviour.\n\n" +
     "What DOES need it: changing who or what an ARMED subscription bills. When the stored " +
     "subscription already arms a send, a change to customerId, serviceRecipients, " +
     "subscriptionLines, startDate, intervalMonths, billingTiming or currencyCode is refused " +
@@ -643,13 +645,25 @@ const updateSubscription = defineTool({
       tenantId: resolved,
     });
 
+    const after = res.data ?? {};
     const notes = [
       `Changed ${givenKeys.join(", ")} on subscription ${id}; the other ${kept.length} field(s) ` +
         `were read first and written back unchanged, because this endpoint replaces rather than ` +
         `patches.` +
-        (givenKeys.includes("subscriptionLines")
-          ? ` The ${lineCount} line(s) you sent are now the lines it has.`
-          : ` Its ${lineCount} line(s) were carried over.`),
+        // Verified against the response, because `lines` is the ONE field this endpoint is recorded as
+        // disagreeing about: subscription-read-and-write-shapes-differ measured "a PUT carrying the eight
+        // required fields and one line answered 200 … with the second line gone". Asserting the count from the
+        // request on that field of all fields was the wrong half to trust.
+        (() => {
+          const storedLines = Array.isArray(after.lines) ? after.lines.length : undefined;
+          const sent = givenKeys.includes("subscriptionLines")
+            ? ` The ${lineCount} line(s) you sent are now the lines it has.`
+            : ` Its ${lineCount} line(s) were carried over.`;
+          if (storedLines === undefined) return `${sent} (The response did not carry the lines, so that count is what was SENT.)`;
+          if (storedLines === lineCount) return `${sent} Confirmed from the response.`;
+          return ` WARNING: this write sent ${lineCount} line(s) and the subscription came back with ` +
+            `${storedLines}. Read it back with reai_get_subscription — a lost line is silent otherwise.`;
+        })(),
     ];
     // The arming state, read from the RESPONSE.
     //
@@ -669,7 +683,6 @@ const updateSubscription = defineTool({
     //
     // SubscriptionRes carries all three fields under the same names as SubscriptionWriteReq — checked, since
     // subscription-read-and-write-shapes-differ makes that the exception rather than the rule here.
-    const after = res.data ?? {};
     const ARMING: ReadonlyArray<readonly [string, (v: unknown) => boolean, string]> = [
       ["outputMode", bindsToCreateInvoice, 'outputMode="create_invoice"'],
       // bindsToTrue, not `=== true`: the backend coerces "true" and 1, and a flag that arms a send is the
@@ -677,47 +690,80 @@ const updateSubscription = defineTool({
       ["automaticBillingGeneration", bindsToTrue, "automaticBillingGeneration"],
       ["sendEhf", bindsToTrue, "sendEhf"],
     ];
-    const carried = ARMING.filter(([field]) => Object.hasOwn(after, field));
+    // A field is ANSWERED only if the response carries it AND the value is not null. Folding present-null
+    // into the predicates made the non-answer the safe answer: `bindsToTrue(null)` is false, so a response of
+    // `sendEhf: null` silently dropped it from "Still armed … confirmed from the response" and suppressed the
+    // warning. That is this tool's own bug relocated from the request to the response.
+    const answered = (field: string) => Object.hasOwn(after, field) && after[field] !== null;
+    const carried = ARMING.filter(([field]) => answered(field));
     const armedNow = carried.filter(([field, isArmed]) => isArmed(after[field])).map(([, , label]) => label);
-    // The caller asked to turn something OFF and the record still has it on. This is the case that used to
-    // produce nothing at all.
+    // NOT gated on the caller having named the field. reai_update_creditor was corrected for exactly this and
+    // says why: the hazard is a replacement that changes a CARRIED value, so keying the check on `given` blinds
+    // it to its own reason for existing. `merged` holds what was sent whether the caller named it or not.
     const notDisarmed = carried
-      .filter(([field, isArmed]) => givenKeys.includes(field) && !isArmed(merged[field]) && isArmed(after[field]))
+      .filter(([field, isArmed]) => !isArmed(merged[field]) && isArmed(after[field]))
       .map(([, , label]) => label);
+    // The other direction, so the asymmetry #141 objected to is not repeated: a failed ARMING is the safe
+    // failure, but silence about it is still a caller believing something happened.
+    const notArmed = carried
+      .filter(([field, isArmed]) => isArmed(merged[field]) && !isArmed(after[field]))
+      .map(([, , label]) => label);
+    // The caller ARMED it: what was SENT is armed, the response agrees, and the record did not have it.
+    // Keying this on the response alone reported a contradicted disarm as the caller's own arming — the
+    // warning and "armed BY THIS EDIT" fired together, saying opposite things.
     const armedByThisEdit = carried
-      .filter(([field, isArmed]) => givenKeys.includes(field) && isArmed(after[field]) && !isArmed(record[field]))
+      .filter(([field, isArmed]) => isArmed(merged[field]) && isArmed(after[field]) && !isArmed(record[field]))
       .map(([, , label]) => label);
 
     if (notDisarmed.length > 0) {
       notes.push(
-        `WARNING: you asked to turn off ${notDisarmed.join(", ")} and the subscription came back with ` +
+        `WARNING: this write sent ${notDisarmed.join(", ")} turned OFF and the subscription came back with ` +
           `${notDisarmed.length === 1 ? "it" : "them"} STILL SET. The unattended billing this guards is not ` +
           `stopped. Read the subscription back with reai_get_subscription, and use ` +
           `reai_deactivate_subscription if the intent was to stop it billing at all.`,
       );
     }
-    if (carried.length < ARMING.length) {
-      const missing = ARMING.filter(([field]) => !Object.hasOwn(after, field)).map(([field]) => field);
+    if (notArmed.length > 0) {
       notes.push(
-        `The response did not carry ${missing.join(", ")}, so whether this subscription still bills on its ` +
-          `own could not be confirmed. This write sent ` +
-          `${missing.map((f) => `${f}=${JSON.stringify(merged[f])}`).join(", ")}. Read it back with ` +
-          `reai_get_subscription before relying on it.`,
+        `This write sent ${notArmed.join(", ")} turned ON and the subscription came back WITHOUT ` +
+          `${notArmed.length === 1 ? "it" : "them"}. Nothing is armed that was not armed before — the safe ` +
+          `direction, but not what was asked for.`,
+      );
+    }
+    const unanswered = ARMING.filter(([field]) => !answered(field));
+    if (unanswered.length > 0) {
+      notes.push(
+        `The response did not answer for ${unanswered.map(([f]) => f).join(", ")}` +
+          `${unanswered.some(([f]) => Object.hasOwn(after, f)) ? " (present but null)" : ""}, so whether this ` +
+          `subscription still bills on its own could not be confirmed. This write ` +
+          `${unanswered
+            .map(([f]) =>
+              Object.hasOwn(merged, f) ? `sent ${f}=${JSON.stringify(merged[f])}` : `did not send ${f}`,
+            )
+            .join(", ")}. Read it back with reai_get_subscription before relying on it.`,
       );
     }
     if (armedNow.length > 0) {
+      // Three branches, matching reai_create_subscription: the API not reporting `active` is its own answer
+      // rather than a reason to assert billing. And read tolerantly — a strict `=== false` sitting under a
+      // comment about Jackson coercion made `active: null` assert billing about a stopped subscription, which
+      // main got right.
+      const activeAnswer = answered("active") ? after.active : record.active;
       notes.push(
         `Still armed: ${armedNow.join(", ")}, confirmed from the response. ` +
           (armedByThisEdit.length > 0
             ? `${armedByThisEdit.join(", ")} ${armedByThisEdit.length === 1 ? "was" : "were"} armed BY THIS ` +
               `EDIT, not carried over. `
-            : `This edit did not change that — it carries over what was already set. `) +
-          // "goes on billing" is false for a stopped subscription, and reai_list_subscriptions is
-          // careful about that distinction. Measured: a replacement does NOT reactivate one.
-          (after.active === false || (after.active === undefined && record.active === false)
-            ? `The subscription is INACTIVE, so it is not billing; if it is activated again it will ` +
-              `bill on its own. Editing it does not reactivate it — measured.`
-            : `So it goes on billing as it was.`) +
+            : notDisarmed.length > 0
+              ? ``
+              : `This edit did not change that — it carries over what was already set. `) +
+          (activeAnswer === undefined || activeAnswer === null
+            ? `The API did not report whether it is active; assume it is, and check with ` +
+              `reai_get_subscription.`
+            : bindsToTrue(activeAnswer)
+              ? `So it goes on billing as it was.`
+              : `The subscription is INACTIVE, so it is not billing; if it is activated again it will bill on ` +
+                `its own. Editing it does not reactivate it — measured.`) +
           ` Pass those fields explicitly to change them.`,
       );
     }

@@ -95,15 +95,35 @@ All notable changes to `reai-mcp`. Format loosely follows
   - The flags are read with `bindsToCreateInvoice` and `bindsToTrue` rather than `=== true`, because the
     backend coerces `"true"` and `1` and this repo has a recorded case of `{"sendEhf": "true"}` arming a send
     the policy scored as harmless. `bindsToCreateInvoice` is exported for it.
-  - **Deliberately not measured against the live API.** Subscriptions are created ACTIVE, so a throwaway one
-    on a real company could generate an invoice, and the only subscription on the test tenant is a real one.
-    So the tool does not claim to know whether the API discards a disarming value — it is correct under either
-    behaviour. That constraint is stated in the tool text rather than left implicit.
-  - Five mutations fail by name, including the armed list being computed from what was sent. Checked that the
-    disarm test asserts the response's state appears in the armed list too — the first version of it passed
-    under that mutation, which is the gap a review found in the equivalent creditor tests.
-  - Remaining instances of the pattern, unchanged and now the shortlist: `reai_update_share_investment`,
-    `reai_set_customer_address`, `reai_set_supplier_address`, `reai_update_salary_line`.
+  - **Deliberately not measured against the live API — and the first version of this entry gave a reason this
+    repo has measured to be false.** It said "subscriptions are created ACTIVE, so a throwaway one on a real
+    company could generate an invoice". But `subscription-created-active`, verified on a live create, says
+    exactly the opposite of the inference: *"What makes a new subscription harmless is
+    `automaticBillingGeneration: false` … being newly created does not."* So an inert throwaway is
+    constructible, and there is a design that answers the question without producing a document. The reason
+    that actually holds is the other one: measuring means creating a subscription on a real company, and the
+    only subscription on the test tenant is a real one. Corrected in the tool text too — the irony of getting
+    that wrong in the one paragraph about measured-versus-reasoned is not lost on me.
+  - Reachability, which is the obvious objection and now has tests: `sendEhf` is deliberately outside
+    `BILLING_SUBSTANCE`, so a disarm-only edit does not trip `assertTransmitAllowed` and reaches the PUT in the
+    **default** configuration. And the escalation is value-aware — `sendEhf: false` does not escalate while
+    `sendEhf: true` does — so a caller can turn the dangerous thing off without the permission arming needs.
+    That is the opposite of #140's `invoiceEmail` trap.
+  - **A review then found I had reintroduced #141's creditor defect in the same shape**: `notDisarmed` was
+    gated on the caller having NAMED the field, so a replacement that changed a value it merely CARRIED was
+    narrated as the caller's own status quo, with no warning. `reai_update_creditor` had been corrected for
+    exactly that and says why. Four more from the same review: `armedByThisEdit` keyed on the response, so a
+    contradicted disarm was also reported as the caller arming it; a present-but-`null` response was folded
+    into "confirmed disarmed", relocating this tool's own bug from the request to the response; `active: null`
+    asserted billing about a stopped subscription, which `main` got right; and the line count was still
+    asserted from the request — on the one field `subscription-read-and-write-shapes-differ` has **measured**
+    the response to disagree about ("the second line gone"). A lost line now warns.
+  - Six mutations that previously survived now fail by name, which is why they were found: the `given` gate,
+    the response-keyed attribution, present-null, the unknown-`active` branch, `bindsToCreateInvoice` (the one
+    export this change adds, and it had no test reaching it), and the line verification.
+  - Remaining instances of the pattern: `reai_update_share_investment`, `reai_set_customer_address`,
+    `reai_set_supplier_address`, `reai_update_salary_line`. This tool's own first sentence still reports the
+    carried-field count from `kept` rather than the response, so it is not fully off that list either.
 
 
 - **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its note read
