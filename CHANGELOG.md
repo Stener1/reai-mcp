@@ -80,22 +80,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
-- **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its success note
-  read *"This creditor now has NO bank account number, so a loan repayment to it has no destination"* off
+- **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its note read
+  *"This creditor now has NO bank account number, so a loan repayment to it has no destination"* off
   `merged.bankAccountNumber`, never checking that the API agreed — while `reai_update_company_bank`, the
-  sibling tool for the same hazard, has always compared the response against the request. On a payment
-  destination that is the wrong half to trust, because this API silently discards some values.
+  sibling for the same hazard, has always compared the response against the request.
   - Flagged as the priority unverified case by #140's review, and recorded there as unmeasurable because the
-    test tenant had no creditor. `POST /api/creditors` exists, so it was measurable after all: three
-    throwaway creditors, one per shape, each read back with a separate GET.
-  - **The claim was true.** `bankAccountNumber` on `PUT /api/creditors/{id}` is cleared by a null, by
-    OMITTING the field, and by an empty string alike. So creditors behave like `buyerReference` rather than
-    like a comment — the third endpoint to disagree with the other two, which is exactly why
-    `order-and-offer-put-ignores-most-nulls` says not to generalise.
-  - Verified anyway: the note now reports emptiness from the response, warns when the stored account differs
-    from what was sent, and says *"Inferred from the request"* rather than *"Confirmed from the response"*
-    when the response does not carry the field at all. Mutation-tested — reading emptiness from `merged`
-    again, or dropping the disagreement warning, each fails.
+    test tenant had no creditor. `POST /api/creditors` exists, so it was measurable: three throwaway
+    creditors, one per shape, each read back with a separate GET. **The claim was true** — `bankAccountNumber`
+    is cleared by a null, by omitting the field, and by an empty string alike.
+  - **The first version of this fix copied the sibling's strict comparison and not the guard that makes it
+    sound.** bankvat refuses null and `""` up front, so it can never see two spellings of empty. Here both are
+    legal and `""` is documented as a way to clear — so `sent "" / stored null`, which the measurement says is
+    the API doing exactly what was asked, fired a discard WARNING *and* the confirmation, saying opposite
+    things. That is the defect a review of #140 found in the sales tools, reintroduced inside the fix for it.
+    Emptiness is compared as a class now, `trim()` included.
+  - Three more from the same review:
+    - the warning was gated on the caller having NAMED the field, so a rename whose replacement drops a
+      *carried* account — the hazard this tool exists for — produced no warning while the note above still
+      said the account was "written back unchanged".
+    - the provenance half was deleted and not replaced, so a plain rename of a creditor that never had an
+      account was told to "read the creditor back". It now distinguishes *already empty*, *you cleared it*,
+      and *this write carried an account and the API did not keep it*.
+    - verification was asymmetric in the dangerous direction: an emptying got a caveat, a **repoint** got
+      nothing. A repoint is confirmed now, and an absent field is caveated in both directions.
+  - Re-measured in `scripts/smoke-full-write.mjs` — null, empty string, and omission through the raw call —
+    rather than asserted in four places and checked in none, which is this harness's own stated rule and how
+    #140's "no creditor exists to measure it" became false unnoticed.
+  - The earlier framing was wrong twice: creditors **agree** with the plain-replacement family
+    (`buyerReference`), so "the third endpoint to disagree" inverted what was measured, and endpoints that
+    clear on null were already recorded. **The split is per-field, not per-endpoint.**
+  - **A spot fix of a pattern, not a closed case.** Five other tools report a consequential outcome from the
+    request. `reai_update_subscription` is the worst and is next: "Still armed" for `sendEhf` and
+    `automaticBillingGeneration` is computed from what was sent, so a caller who disarms an unattended
+    invoicing machine and has it discarded is told **nothing** — and silence reads as confirmation.
+  - And the inverse defect in the sibling, found by looking for it: `reai_update_company_bank` called a
+    response that carried **no body** an emptied account, because `res.data ?? {}` makes an absent `bban` look
+    like `undefined`. It distinguishes the two now.
   - `reai_update_debtor` is unaffected: `DebtorReq` accepts only `name`, so there is no merge and no payment
     destination.
 
