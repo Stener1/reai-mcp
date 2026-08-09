@@ -48,6 +48,44 @@ It was written during a multi-hour GitHub Actions outage, when no workflow could
 
 ## Live harnesses
 
+### The tenant guard, and why the old one protected nothing
+
+Every script here that writes calls `requireWritableTenant()` from `scripts/lib/write-guard.mjs`, at the top
+level, before it can issue anything. There are two layers and they do different jobs:
+
+- **an allowlist** — `REAI_WRITE_TEST_TENANTS` must name the `--tenant` being written to. Catches the ordinary
+  typo.
+- **a denylist** — `PROTECTED_TENANTS` in that module, which **no environment variable can override**.
+
+The second layer exists because the first one is not a protection. It compares two values the *operator*
+supplies, so setting both to the same wrong number makes it agree with the mistake — and that is precisely the
+incident this repository already had: a full-write test reached tenant **2634**, a real business's books,
+because the intended test tenant was unreachable and the run was pointed elsewhere. The books were restored
+(37 vouchers, 84 postings, no MV-number gap), but the guard that should have stopped it had approved it.
+
+Measured 2026-08-09, before the denylist existed. With `REAI_WRITE_TEST_TENANTS=2634 --tenant 2634` against a
+local server mimicking `/api/me`, all three runnable write scripts proceeded and attempted:
+
+```
+POST /api/customers      PATCH /api/customers/{id}     DELETE /api/customers/{id}
+POST /api/suppliers      PATCH /api/suppliers/{id}     POST /api/subscriptions
+POST /api/warehouses     PUT   /api/warehouses/{id}    POST /api/agreements/rent-agreement
+```
+
+There is deliberately **no override flag**. The thing that failed was an environment variable, so adding
+another one would reintroduce it; if a protected tenant ever genuinely needs writing to, that is a code change
+in a diff someone reads. `2634` is not a fact about ReAI — it is this repository's operator's own company, and
+anyone self-hosting should put their own production tenants in that list.
+
+**The guard used to be four divergent copies**, one per script. It is one module now, so it cannot drift, and
+`test/write-guard.test.mjs` checks it two ways: the behavioural tests **call** `assertWritableTenant` rather
+than grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and
+fails if one can issue a non-GET without calling the guard. That shape is deliberate — PR #129 spent four
+review rounds watching seven regex-based guards get worded around, and a new write script that forgets the
+guard is the realistic way this protection would be lost. Verified by removing the guard, hiding it behind an
+`if`, and adding a fresh writing script: each fails the build.
+
+
 These run against the real API, and all of them assert the **negatives** as well as the happy path:
 
 ```bash
@@ -57,7 +95,7 @@ REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234
 # The whole OAuth flow against a deployment.
 REAI_USER_API_TOKEN=... node scripts/smoke-http.mjs --url https://…
 
-# WRITES. Reversible master data only.
+# WRITES. Reversible master data only. 2634 is refused whatever these say — see the tenant guard below.
 REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/smoke-write.mjs --tenant 1234
 

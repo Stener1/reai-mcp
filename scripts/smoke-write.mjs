@@ -20,6 +20,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { requireWritableTenant } from "./lib/write-guard.mjs";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function arg(name) {
@@ -45,30 +46,12 @@ if (!tenantId) {
 //
 // Added after a full-write run went against a live company: the intended test
 // tenant was unreachable, and "--tenant <the other one>" was all it took.
-const declaredTestTenants = (process.env.REAI_WRITE_TEST_TENANTS ?? "")
-  .split(",")
-  .map((t) => t.trim())
-  .filter(Boolean);
-
-if (declaredTestTenants.length === 0) {
-  console.error(
-    "REAI_WRITE_TEST_TENANTS is not set.\n\n" +
-      "This script writes to a live ReAI tenant, so it will only run against a tenant that has\n" +
-      "been explicitly declared safe to write to:\n\n" +
-      "  REAI_WRITE_TEST_TENANTS=2783 node " + process.argv[1].split("/").pop() + " --tenant 2783 ...\n\n" +
-      "Do not list a tenant that holds a real business's books.",
-  );
-  process.exit(2);
-}
-if (!declaredTestTenants.includes(String(tenantId))) {
-  console.error(
-    `Refusing to write to tenant ${tenantId}: it is not in REAI_WRITE_TEST_TENANTS ` +
-      `(${declaredTestTenants.join(", ")}).\n\n` +
-      `If ${tenantId} really is a test tenant, add it there deliberately. If it belongs to a real\n` +
-      `business, this refusal is the point.`,
-  );
-  process.exit(2);
-}
+// The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
+// divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
+// consistency check between two operator-supplied values: set both to the same wrong number and every
+// one of them proceeded. Measured — all three runnable ones attempted POST /api/customers against
+// tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
+requireWritableTenant(tenantId, { scriptName: "scripts/smoke-write.mjs" });
 
 let passed = 0;
 let failed = 0;

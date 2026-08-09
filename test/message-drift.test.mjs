@@ -228,10 +228,22 @@ test("every exemption names a real dependency, so the list cannot rot", () => {
   }
 });
 
-test("the audit refuses a tenant that has not been opted in, and reports a leak as failure", () => {
+test("the audit refuses a tenant that has not been opted in, and reports a leak as failure", async () => {
   const src = readFileSync(AUDIT, "utf8");
-  assert.match(src, /REAI_WRITE_TEST_TENANTS/);
-  assert.match(src, /Refusing to run against tenant/);
+  // The tenant check moved out of this file into scripts/lib/write-guard.mjs, because four scripts each had
+  // their own copy of it and all four checked only that --tenant appeared in REAI_WRITE_TEST_TENANTS — a
+  // comparison between two operator-supplied values, which agreed with the mistake that put a full-write test
+  // on real books. So this asserts the guard is CALLED rather than that a message string is present, and
+  // test/write-guard.test.mjs exercises the guard's behaviour directly.
+  const { default: ts } = await import("typescript");
+  const sf = ts.createSourceFile(AUDIT, src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
+  const calls = sf.statements.filter(
+    (st) =>
+      ts.isExpressionStatement(st) &&
+      ts.isCallExpression(st.expression) &&
+      st.expression.expression.getText(sf) === "requireWritableTenant",
+  );
+  assert.equal(calls.length, 1, "this audit must call requireWritableTenant exactly once at the top level");
   // A stranded record is a failed run, not a warning. DELETE /api/customers/{id} can answer
   // "archived", and an archived customer is invisible to the default list — so the first version could
   // leave a record on real books and still exit 0.

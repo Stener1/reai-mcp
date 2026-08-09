@@ -9,6 +9,34 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
+  guard instead of trusting it, before starting work that writes.
+  - Four scripts each carried their own copy of one check: refuse unless `--tenant` appears in
+    `REAI_WRITE_TEST_TENANTS`. That compares two values the **operator** supplies, so it cannot protect
+    anything — set both to the same wrong number and it agrees with the mistake. Which is exactly the incident
+    this repository already had: a full-write test reached 2634, a real business's books.
+  - **Measured against a local server** mimicking `/api/me`, with `REAI_WRITE_TEST_TENANTS=2634 --tenant 2634`,
+    all three runnable write scripts proceeded and attempted `POST /api/customers`, `POST /api/suppliers`,
+    `POST /api/warehouses`, `POST /api/subscriptions`, `POST /api/agreements/rent-agreement` and the matching
+    PATCH/PUT/DELETE follow-ups. Nothing real was touched — every request went to `127.0.0.1` — but against the
+    real base URL those would have landed in the books the hard rule exists to protect.
+  - `scripts/lib/write-guard.mjs` now holds the single check: the allowlist as before, plus a
+    **`PROTECTED_TENANTS` denylist that no environment variable can override**, evaluated first so the refusal
+    names the reason that actually applies rather than "not in the allowlist" — which an operator would fix by
+    adding it. Compared numerically, so `" 2634 "` cannot slip past a string equality.
+  - **No override flag, deliberately.** The thing that failed was an environment variable; another one would
+    reintroduce it. A test asserts the module reads no env var except the allowlist.
+  - Checked the way PR #129 established: the behavioural tests **call** `assertWritableTenant` rather than
+    grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and
+    fails if one can issue a non-GET without calling the guard. Exemptions are listed with reasons and a known
+    writing script may never appear among them. Verified by removing the guard, hiding it behind an `if`, and
+    adding a brand-new writing script — each fails the build.
+  - Four divergent copies collapsed into one module, so the check can no longer drift between scripts. A
+    pre-existing test had pinned the old inline message string; it now asserts the guard is called.
+  - Re-verified after the change: all four scripts refuse 2634 with the protected message, 2783 still works,
+    and `audit-storage.mjs` against 2783 reports 17 unchanged / 0 drifted with its sweep returning the tenant
+    to 0 suppliers.
+
 - **The read-only quirk audit doubles to 16 cases, and found two more false notes.**
   - `leads-are-the-company-register-not-your-records` claimed the over-cap 400 *"names no field"*. It names it
     precisely — `fieldErrors: [{ field: "pageSize", message: "must be less than or equal to 200" }]` — so the
