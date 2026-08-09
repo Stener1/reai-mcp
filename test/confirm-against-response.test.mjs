@@ -837,6 +837,7 @@ test("no candidate tool states a sent value the response contradicted", async ()
   const echoes = [];
   const reads = [];
   const unmeasurable = [];
+  const tooShort = [];
   const undrivable = [];
   for (const name of CANDIDATES) {
     // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
@@ -916,7 +917,14 @@ test("no candidate tool states a sent value the response contradicted", async ()
     const headline = note.split("\n\n")[0] ?? "";
     for (const [field, value] of sent) {
       const asSent = String(value);
-      if (asSent.length < 2) continue; // too short to find reliably in prose
+      if (asSent.length < 2) {
+        // NOT a silent `continue`. This guard is what made every integer field in the repo invisible while the
+        // sampler produced `7`, and reverting the sampler to a single digit left the sweep green — the one
+        // blindness nothing pinned. Recorded and asserted empty below, so a sample too short to find in prose
+        // is a failure of the SAMPLER rather than a quietly unmeasured field.
+        tooShort.push(`${name}.${field} sampled as ${JSON.stringify(value)}`);
+        continue;
+      }
       if (rendered.has(field)) {
         // An enum or literal. Its value is a WORD, and a note may legitimately print a label derived from it —
         // `reai_create_supplier_invoice` renders anything that is not `credit_note` as "invoice", so the sent
@@ -943,6 +951,13 @@ test("no candidate tool states a sent value the response contradicted", async ()
     reads.length >= 10,
     `only ${reads.length} field(s) were seen reported FROM the response; that number should not fall. If a ` +
       `tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+  );
+  assert.deepEqual(
+    tooShort,
+    [],
+    `the sampler produced values too short to find in prose, so these fields were not measured at all. That ` +
+      `is how every integer field in this repo went unchecked while an irreversible tool asserted four ` +
+      `contradicted values: ${tooShort.join(", ")}`,
   );
   // Named, not counted away. A rendered value is a real hole in this sweep — the tool could echo and look
   // identical — so each one is either covered by a hand-written test or it is not covered at all.
