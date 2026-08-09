@@ -1384,6 +1384,222 @@ const createOffer = defineTool({
   },
 });
 
+/**
+ * Fields the offer PUT accepts on a line, and the ones a GET adds that it does not.
+ *
+ * Same rename as orders — GET returns `lines`, PUT requires `offerLines` — but SEVEN returned fields are
+ * unaccepted rather than four, all but two computed: `id`, `rowNumber`, `vatRate`, `lineTotal`,
+ * `lineTotalExclVat`, `lineVat`, `lineDiscount`. Measured against offer 81 on 2783 and the document.
+ */
+const OFFER_LINE_REQUEST_FIELDS = [
+  "itemName",
+  "comment",
+  "quantity",
+  "unitPrice",
+  "discount",
+  "vatCode",
+  "variantId",
+] as const;
+
+/**
+ * The optional top-level fields a partial PUT would drop — and unlike orders, ALL of them are readable.
+ *
+ * This is the one way offers are easier than orders. Every field `OfferReq` accepts, `OfferRes` returns,
+ * including `email` and `deliveryAddress` — whose request and response shapes are property-for-property
+ * identical, so it carries verbatim. Orders have no such luck: `invoiceEmail` is accepted and never returned,
+ * which is why THAT tool needs REAI_WRITE_MODE=full and this one does not.
+ */
+const OFFER_CARRIED_FIELDS = [
+  "projectId",
+  "issueDate",
+  "comment",
+  "internalComment",
+  "email",
+  "deliveryAddress",
+] as const;
+
+/** Keys an offer response must share before it is treated as a base to merge into. */
+const OFFER_EXPECTED_KEYS = ["id", "customerId", "currencyCode", "daysUntilDue", "lines"] as const;
+
+type OfferRes = {
+  id?: number;
+  number?: string;
+  lines?: Array<Record<string, unknown>>;
+  webUrl?: string;
+} & Record<string, unknown>;
+
+const updateOffer = defineTool({
+  name: "reai_update_offer",
+  title: "Change an offer without losing its lines",
+  description:
+    "Change one or more fields on an existing offer (tilbud), leaving the rest alone.\n\n" +
+    "`PUT /api/offers/{id}` is a FULL REPLACEMENT whose response does not have the shape the request wants, " +
+    "the same trap as orders. The lines come back under `lines` and must be sent as `offerLines` — and " +
+    "`offerLines` is required, so a body that echoes `lines` back is a body with no lines at all. Each line " +
+    "the GET returns carries seven fields the PUT does not declare: `id`, `rowNumber`, `vatRate`, " +
+    "`lineTotal`, `lineTotalExclVat`, `lineVat` and `lineDiscount`, five of them computed. And `projectId`, " +
+    "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a PUT that " +
+    "omits them keeps the offer and empties those fields.\n\n" +
+    "Offer lines are STRICTER than order lines: `itemName` and `vatCode` are required on every line, not " +
+    "just `quantity` and `unitPrice`. `issueDate`, by contrast, is NOT required here though it is on an " +
+    "order.\n\n" +
+    "Unlike reai_update_order this runs in the DEFAULT write mode, and the reason is worth stating because " +
+    "it is a real difference rather than a looser rule: everything `OfferReq` accepts, `OfferRes` returns, " +
+    "so this tool can carry every field and its replacement omits nothing. An order update cannot — " +
+    "`invoiceEmail` is accepted and never returned — so that tool omits a field the replacement-omission " +
+    "gate refuses by default, and sits at `full` to avoid being the soft route around it. Here there is " +
+    "nothing to omit.\n\n" +
+    "Like every read-merge-write, this leaves a lost-update window: an edit made in the ReAI UI or by " +
+    "another client between the read and the write is silently reverted, lines included. There is no ETag, " +
+    "If-Match or version field to prevent it, so it is stated rather than papered over.",
+  risk: "reversible",
+  apiPaths: [
+    ["GET", "/api/offers/{id}"],
+    ["PUT", "/api/offers/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Offer id, as returned by reai_list_offers."),
+    offerLines: z
+      .array(offerLine)
+      .min(1)
+      .optional()
+      .describe(
+        "Replace the line items. Omit to keep the existing lines exactly as they are — they are read and " +
+          "sent back for you, which is what the underlying PUT requires.",
+      ),
+    customerId: z.number().int().positive().optional().describe("Move the offer to a different customer."),
+    currencyCode: CURRENCY.optional(),
+    daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
+    issueDate: isoDate.nullable().optional().describe("Offer date. Not required by this endpoint, unlike an order."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
+    internalComment: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("Internal note, not shown to the customer. Pass null to clear it."),
+    email: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("Offer-specific email address. Returned by the API, so it is carried unless you change it."),
+    projectId: z.number().int().nullable().optional().describe("Link the offer to a project, or null to unlink it."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (asked.length === 0) {
+      return fail(
+        `No changes were given, so nothing was written. Passing nothing here would rewrite the offer with ` +
+          `its current values, which is a pointless full replacement.`,
+      );
+    }
+
+    const current = await ctx.client.request<OfferRes>({
+      method: "GET",
+      path: `/api/offers/${id}`,
+      tenantId: resolved,
+    });
+    // Not a truthiness check: `{}` and a response envelope are both truthy and would become a valid base,
+    // and the merge would then send the caller's fields alone.
+    const { record: offer, problem } = readableRecord(current.data, undefined, OFFER_EXPECTED_KEYS);
+    if (!offer) {
+      return fail(
+        `Offer ${id} could not be read (${problem}), so nothing was written. A PUT here REPLACES the offer, ` +
+          `and merging into something that is not an offer would send your fields alone.`,
+      );
+    }
+
+    // `issueDate` is deliberately absent: the offer PUT does not require it, unlike the order one.
+    const REQUIRED_FROM_RECORD = ["currencyCode", "customerId", "daysUntilDue"] as const;
+    const missingFromRecord = REQUIRED_FROM_RECORD.filter(
+      (f) => (changes as Record<string, unknown>)[f] === undefined && (offer[f] === undefined || offer[f] === null),
+    );
+    if (missingFromRecord.length > 0) {
+      return fail(
+        `Offer ${id} came back without ${missingFromRecord.join(", ")}, which the PUT requires, so nothing ` +
+          `was written. Sending the replacement anyway would have produced a 400 naming no field. Pass ` +
+          `${missingFromRecord.length === 1 ? "it" : "them"} explicitly, or read the offer with ` +
+          `reai_list_offers to see what it carries.`,
+      );
+    }
+
+    const existingLines = Array.isArray(offer.lines) ? offer.lines : undefined;
+    if (!changes.offerLines && (!existingLines || existingLines.length === 0)) {
+      return fail(
+        `Offer ${id} came back with no readable lines, so nothing was written. \`offerLines\` is required by ` +
+          `the PUT, and inventing one would replace the offer's contents. Pass \`offerLines\` explicitly if ` +
+          `you mean to set them.`,
+      );
+    }
+    if (!changes.offerLines && (existingLines ?? []).some((line) => !line || typeof line !== "object")) {
+      return fail(
+        `Offer ${id} has a line this tool cannot read, so nothing was written. Guessing at a line would ` +
+          `replace the offer's contents.`,
+      );
+    }
+    const mappedLines = (existingLines ?? []).map((line) =>
+      Object.fromEntries(
+        OFFER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
+      ),
+    );
+
+    // Nulls are carried EXPLICITLY rather than dropped. Behaviourally it makes no difference — every field
+    // here is nullable in OfferReq, so on a full replacement an omitted nullable field and an explicit null
+    // land the same way. It matters for a different reason: `omittedReplacementFields` counts a dropped null
+    // as an omission, and this tool's whole claim to running in the DEFAULT write mode is that its body omits
+    // nothing that gate names. Dropping a null `projectId` was enough to break that, so the body states every
+    // field the record has, null included, and the claim is asserted in test/update-offer.test.mjs.
+    const carried = Object.fromEntries(
+      OFFER_CARRIED_FIELDS.filter((f) => Object.hasOwn(offer, f)).map((f) => [f, offer[f]]),
+    );
+
+    const body: Record<string, unknown> = {
+      currencyCode: offer.currencyCode,
+      customerId: offer.customerId,
+      daysUntilDue: offer.daysUntilDue,
+      offerLines: mappedLines,
+      ...carried,
+      ...Object.fromEntries(asked),
+    };
+
+    const res = await ctx.client.request<OfferRes>({
+      method: "PUT",
+      path: `/api/offers/${id}`,
+      body,
+      tenantId: resolved,
+    });
+
+    const changedKeys = asked.map(([k]) => k);
+    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
+    const notes = [
+      `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
+        `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
+        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `because this API replaces rather than patches.`,
+    ];
+    const after = res.data;
+    const notApplied = changedKeys.filter(
+      (k) =>
+        k !== "offerLines" &&
+        after?.[k] !== undefined &&
+        JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
+    );
+    if (notApplied.length > 0) {
+      notes.push(
+        `WARNING: ${notApplied
+          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
+          .join("; ")}. Check the value is one the API accepts.`,
+      );
+    }
+    return ok(res.data, {
+      note: notes.join("\n\n"),
+      ...(res.data?.webUrl ? { link: res.data.webUrl } : { link: ctx.client.deepLink(`/offers/${id}`, resolved) }),
+    });
+  },
+});
+
 // --- Invoices --------------------------------------------------------------
 
 const listInvoices = defineTool({
@@ -2111,6 +2327,7 @@ export const salesTools: ToolDef[] = [
   updateOrder,
   listOffers,
   createOffer,
+  updateOffer,
   listInvoices,
   getInvoice,
   createInvoiceFromOrder,

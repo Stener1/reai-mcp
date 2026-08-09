@@ -154,6 +154,6 @@ Regressions were measured with the committed sweep; benefit with a throwaway scr
 
 ### What is actually protecting the live case
 
-Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **59** bare operations no curated tool covers.
+Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **57** bare operations no curated tool covers.
 
 One caveat on the table above: among the operations tied at 16, which one is named first comes from `a.path.localeCompare(b.path)`, under which `{` sorts before letters. Codepoint order would put `accounting-services` first. `scripts/build-spec-index.mjs` deliberately refuses `localeCompare` for reproducibility; `searchOperations` does not. And with prose stripped from the whole family, `sign-requests` still comes out first — so "if only ReAI documented these evenly" would not by itself fix the symptom.

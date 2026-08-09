@@ -213,6 +213,7 @@ async function main() {
   const created = {
     agreementId: undefined,
     orderId: undefined,
+    offerId: undefined,
     creditorId: undefined,
     doomedBankId: undefined,
     warehouseId: undefined,
@@ -611,6 +612,63 @@ async function main() {
       });
       report(
         "reai_request PUT with a partial body is refused, not silently applied",
+        rawAttempt.isError === true,
+        textOf(rawAttempt).slice(0, 200),
+      );
+    }
+
+    // --- 4x. Offer terms, on real data ---------------------------------------
+    //
+    // Same replacement trap as the order above, with SEVEN unaccepted line fields instead of four. Kept here
+    // rather than in a scratch script for the reason a review made of #138: otherwise "the lines survive" is
+    // unreproducible.
+    console.log("\n  Offer terms (the underlying PUT replaces the record):");
+    const offerMade = await client.callTool({
+      name: "reai_create_offer",
+      arguments: {
+        customerId: created.customerId,
+        comment: `${STAMP} offer comment`,
+        internalComment: `${STAMP} offer internal`,
+        // itemName AND vatCode are required on an offer line, unlike an order line. vatCode 0 because the
+        // allowed set is tenant-specific and a tenant that is not VAT-registered accepts only 0.
+        offerLines: [{ itemName: `${STAMP} offer line`, quantity: 2, unitPrice: 300, vatCode: "0" }],
+      },
+    });
+    const offerRec = offerMade.isError ? undefined : jsonOf(offerMade);
+    if (Number.isInteger(offerRec?.id)) created.offerId = offerRec.id;
+    report(
+      "an offer exists to edit",
+      Number.isInteger(created.offerId),
+      created.offerId ? `offerId=${created.offerId}` : textOf(offerMade).slice(0, 180),
+    );
+
+    if (created.offerId) {
+      const edited = await client.callTool({
+        name: "reai_update_offer",
+        arguments: { id: created.offerId, daysUntilDue: 30 },
+      });
+      const after = edited.isError ? undefined : jsonOf(edited);
+      const lines = after?.lines ?? [];
+      report(
+        "changing one field leaves the offer lines intact",
+        lines.length === 1 && lines[0]?.quantity === 2 && lines[0]?.unitPrice === 300,
+        edited.isError ? textOf(edited).slice(0, 200) : `${lines.length} line(s), quantity=${lines[0]?.quantity}, unitPrice=${lines[0]?.unitPrice}`,
+      );
+      report(
+        "and does not empty the optional fields a partial PUT would drop",
+        after?.comment === `${STAMP} offer comment` && after?.internalComment === `${STAMP} offer internal`,
+        `comment=${JSON.stringify(after?.comment)} internal=${JSON.stringify(after?.internalComment)}`,
+      );
+      report("the change itself took effect", after?.daysUntilDue === 30, `daysUntilDue=${JSON.stringify(after?.daysUntilDue)}`);
+      // The control: the same replacement through the escape hatch is refused for omitting the six optional
+      // fields this tool carries — which is why the curated tool can run in the DEFAULT mode and the raw one
+      // cannot.
+      const rawAttempt = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "PUT", path: `/api/offers/${created.offerId}`, body: { daysUntilDue: 45 } },
+      });
+      report(
+        "reai_request PUT with a partial offer body is refused, not silently applied",
         rawAttempt.isError === true,
         textOf(rawAttempt).slice(0, 200),
       );
@@ -1964,6 +2022,13 @@ async function main() {
     }
     // Before the product and the customer it references: deleting a referenced record answers
     // 500 "Referenced record is not accessible", which is how a previous run stranded four orders.
+    if (created.offerId) {
+      await attempt(
+        "test offer deleted",
+        () => client.callTool({ name: "reai_delete_offer", arguments: { id: created.offerId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
     if (created.orderId) {
       await attempt(
         "test order deleted",

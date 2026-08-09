@@ -80,6 +80,7 @@ On a [bound remote connection](self-hosting.md#one-tenant-per-authorization) `re
 | `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
 | `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
 | `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
+| `reai_update_offer` | Change an offer **without losing its lines** — same response/request mismatch as orders, but everything is carryable, so it runs in the default write mode. See the note below | reversible |
 | `reai_create_invoice_from_order` | Issue an invoice from an order | **irreversible** |
 | `reai_credit_invoice` | Credit note — the correct way to undo an invoice | **irreversible** |
 | `reai_register_invoice_payment` | Record a customer payment | **irreversible** |
@@ -140,6 +141,14 @@ The one genuine exception in the API is the **employee** phone, which stores an 
 **The 404 is ambiguous, and reading it wrongly is how this shipped saying something false.** `"Contact person with id=N not found for customer with id=C"` is the answer *both* when the contact never existed or was already deleted *and* when the id is real but belongs to a different customer — measured, the same sentence word for word, because ids are scoped to the tenant rather than to the customer. A missing customer is a different message, `"Customer with id=C not found."` The first version of the translation matched the customer sentence case-insensitively, which the contact sentence also contains, so the commonest failure on these endpoints was reported as "the customer does not exist in this tenant" about a customer that was fine. The tools now name both readings and tell you to settle it with the list.
 
 That ambiguity is also why the delete does not simply report a 404 as "already gone": a wrong `customerId` answers 404 while the contact survives, so claiming the job is done would be a guess. It reports what it knows — nothing was changed — and how to confirm which case it was.
+
+`reai_update_offer` exists for the same reason `reai_update_order` does: `PUT /api/offers/{id}` is a full replacement whose response does not have the shape the request wants. The lines come back under **`lines`** and must be sent as **`offerLines`** — which is required, so a body echoing `lines` back has no lines at all — and each returned line carries **seven** fields the PUT does not declare (`id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`), five of them computed. `projectId`, `issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a replacement that omits them empties them.
+
+Two differences from orders, both measured on offer 81 rather than assumed: offer lines are **stricter** — `itemName` and `vatCode` are required on every line, not just `quantity` and `unitPrice` — while `issueDate` is **not** required here though it is on an order.
+
+And it runs in the **default** write mode where the order tool needs `full`. That is a real difference, not a looser rule: everything `OfferReq` accepts, `OfferRes` returns — including `email` and a `deliveryAddress` whose request and response shapes are property-for-property identical — so this tool carries every field and its replacement omits nothing. Verified: `omittedReplacementFields` returns no fields for the body it sends, where a partial body omits six. An order update cannot do that, because `invoiceEmail` is accepted and never returned, so that tool omits a field the replacement-omission gate refuses by default and sits at `full` rather than becoming the soft route around it.
+
+Like every read-merge-write here it leaves a **lost-update window**: an edit made between the read and the write is silently reverted, lines included, and there is no ETag or version field to prevent it.
 
 ## Purchase
 | Tool | Purpose | Risk |
@@ -471,7 +480,7 @@ Projects are the obvious omission here, and deliberate: the Project module is di
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count on this page and in the README is the default 174, and `REAI_ENABLE_UI=1` registers a 175th tool.
+It sits outside the default surface rather than inside it — every count on this page and in the README is the default 175, and `REAI_ENABLE_UI=1` registers a 176th tool.
 
 `reai_reconcile_ui` returns the unmatched bank transactions and unmatched ledger postings for a month side by side, so a person can pick which ones pair. It is off unless `REAI_ENABLE_UI=1`.
 
