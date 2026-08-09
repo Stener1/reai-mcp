@@ -70,6 +70,21 @@ test("strings are compared trimmed, and a real disagreement is reported with bot
   assert.match(note, /name \(sent "ZZ", customer 5 came back with "Other"\)/);
 });
 
+test("key order is not a disagreement, and neither is the spelling of a number", () => {
+  // Both were measured as false contradictions in the first version of this helper. An object-valued field —
+  // an offer's deliveryAddress, say — would have warned on every write purely because the API serialises its
+  // keys in a different order, and a payroll quantity would have warned on 3 vs "3".
+  assert.deepEqual(confirmAgainstResponse({ a: { x: 1, y: 2 } }, { a: { y: 2, x: 1 } }).confirmed, ["a"]);
+  assert.deepEqual(confirmAgainstResponse({ a: { p: { m: 1, n: 2 } } }, { a: { p: { n: 2, m: 1 } } }).confirmed, ["a"]);
+  assert.deepEqual(confirmAgainstResponse({ a: 5 }, { a: "5" }).confirmed, ["a"]);
+  assert.deepEqual(confirmAgainstResponse({ a: "3.0" }, { a: 3 }).confirmed, ["a"]);
+  // And a real difference still is one, in both shapes.
+  assert.equal(confirmAgainstResponse({ a: 5 }, { a: 6 }).contradicted.length, 1);
+  assert.equal(confirmAgainstResponse({ a: { x: 1 } }, { a: { x: 2 } }).contradicted.length, 1);
+  // A non-numeric string must not be coerced into agreeing with a number.
+  assert.equal(confirmAgainstResponse({ a: "abc" }, { a: 0 }).contradicted.length, 1);
+});
+
 test("skip is for fields whose shape differs between request and response", () => {
   // orderLines vs lines: not comparable here, and the line counts are checked by their own tools.
   const c = confirmAgainstResponse({ orderLines: [1], comment: "x" }, { comment: "x" }, { skip: ["orderLines"] });
@@ -199,4 +214,24 @@ test("every merge tool is classified, so a new one cannot slip in unexamined", a
     Object.keys(VERIFIES_AGAINST_RESPONSE).length >= 10,
     `${Object.keys(VERIFIES_AGAINST_RESPONSE).length} of ${merge.length} verify; that number should not fall`,
   );
+});
+
+test("the salary fallback distinguishes no lines from no matching line", async () => {
+  // SalaryWageSpecRes.id is assumed to BE the wageSpecId the path takes — read off the schema, not measured.
+  // If that is wrong the lookup finds nothing, and the two messages differ so the wrong assumption shows up
+  // rather than hiding behind "the response did not carry the line".
+  const none = await run(
+    "reai_update_salary_line",
+    { id: 9, wageSpecId: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500 },
+    { id: 9, employees: [{ id: 1, wageSpecs: [{ id: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500 }] }] },
+    { id: 9, employees: [] },
+  );
+  assert.match(none.text, /carried no lines/);
+  const mismatched = await run(
+    "reai_update_salary_line",
+    { id: 9, wageSpecId: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500 },
+    { id: 9, employees: [{ id: 1, wageSpecs: [{ id: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500 }] }] },
+    { id: 9, employees: [{ id: 1, wageSpecs: [{ id: 99, quantity: 3, rate: 500 }] }] },
+  );
+  assert.match(mismatched.text, /carried 1 line\(s\) but none with id 77/);
 });

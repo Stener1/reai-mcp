@@ -796,12 +796,31 @@ export function confirmAgainstResponse(
       ? (response as Record<string, unknown>)
       : undefined;
   const result: ResponseConfirmation = { confirmed: [], contradicted: [], unanswered: [] };
+  // Key order must not be a disagreement. `JSON.stringify` alone reported `{x:1,y:2}` against `{y:2,x:1}` as a
+  // contradiction — measured — and an object-valued field like an offer's deliveryAddress would then warn on
+  // every write purely because the API serialises its keys in a different order.
+  const stable = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+    if (v && typeof v === "object") {
+      return `{${Object.keys(v as Record<string, unknown>)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(v) ?? "null";
+  };
   const same = (a: unknown, b: unknown): boolean => {
     if (typeof a === "string" && typeof b === "string") return a.trim() === b.trim();
     // The API stores an empty string back as null. That is it doing what was asked, not refusing it.
     if (a === "" && b === null) return true;
     if (b === "" && a === null) return true;
-    return JSON.stringify(a) === JSON.stringify(b);
+    // 3 and "3" are the same value differently spelled, and this backend coerces freely. Warning about the
+    // spelling of a payroll quantity would be noise on the one report where noise is most expensive.
+    const numeric = (v: unknown) =>
+      typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined;
+    const [na, nb] = [numeric(a), numeric(b)];
+    if (na !== undefined && nb !== undefined) return na === nb;
+    return stable(a) === stable(b);
   };
   for (const [field, value] of Object.entries(sent)) {
     if (skip.includes(field) || value === undefined) continue;

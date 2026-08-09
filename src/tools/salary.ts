@@ -491,17 +491,29 @@ const updateSalaryLine = defineTool({
     // back as "Line N is now Q × R" states a figure nobody checked, and the response nests the stored line at
     // employees[].wageSpecs[] where it can be found by id. Of the five tools that reported an outcome from the
     // request, this was the one whose numbers matter most.
-    const storedLine = (Array.isArray(res.data?.employees) ? res.data.employees : [])
-      .flatMap((e: { wageSpecs?: unknown }) => (Array.isArray(e?.wageSpecs) ? e.wageSpecs : []))
-      .find((l: { id?: unknown }) => l?.id === wageSpecId) as Record<string, unknown> | undefined;
+    // `SalaryWageSpecRes.id` is assumed to BE the wageSpecId the path takes — both are int32 and the parameter
+    // carries no description, so that is read off the schema rather than measured. If the assumption is wrong
+    // the lookup finds nothing and the note falls back to reporting what was sent, which is safe; the two
+    // fallback messages are worded differently so a wrong assumption shows up as "no line matched" instead of
+    // hiding behind "the response did not carry the line".
+    const returnedLines = (Array.isArray(res.data?.employees) ? res.data.employees : []).flatMap(
+      (e: { wageSpecs?: unknown }) => (Array.isArray(e?.wageSpecs) ? e.wageSpecs : []),
+    );
+    const storedLine = returnedLines.find((l: { id?: unknown }) => l?.id === wageSpecId) as
+      | Record<string, unknown>
+      | undefined;
     const confirmation = confirmAgainstResponse(body, storedLine);
     const notes = [
       (storedLine
         ? `Line ${wageSpecId} in run ${id} is now ${storedLine.quantity} × ${storedLine.rate} as ` +
           `${storedLine.specificationCode}, read back from the response.`
         : `Line ${wageSpecId} in run ${id} was sent as ${args.quantity} × ${args.rate} as ` +
-          `${args.specificationCode}. The response did not carry the line, so that is what was SENT, not ` +
-          `what is stored — read it back with reai_get_salary_run.`) +
+          `${args.specificationCode}. ` +
+          (returnedLines.length === 0
+            ? `The response carried no lines, so that is what was SENT, not what is stored`
+            : `The response carried ${returnedLines.length} line(s) but none with id ${wageSpecId}, so that ` +
+              `is what was SENT, not what is stored`) +
+          ` — read it back with reai_get_salary_run.`) +
         ` Run total: ${res.data?.payableAmount ?? "?"} payable, ${res.data?.totalTaxDeducted ?? "?"} withheld.`,
       ...describeConfirmation(confirmation, `line ${wageSpecId}`),
     ];
