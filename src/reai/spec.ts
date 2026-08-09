@@ -320,43 +320,44 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
           score *= 0.7;
         }
       }
-      // An ACTION the query never asked for is demoted, however well its path happens to match.
+      // An ACTION the query never asked for is demoted -- but only in the one shape I could measure without
+      // causing worse harm elsewhere, and the scoping is the substance of this change rather than a caveat.
       //
-      // Measured on main, and the reason this is a safety fix rather than tuning: "opprett salary payments"
-      // ranked POST /api/salary-payments/{id}/complete at 63.8, the operation that FILES payroll with
-      // Skatteetaten, while POST /api/salary-payments — which creates one — sat fifth at 61.3. "opprett
-      // agreements" ranked POST /api/agreements/{id}/sign-request, which sends a signing request to a
-      // counterparty, above all five typed creates. An audit of 804 resource-only queries found 56 ranking an
-      // irreversible nested action first and 24 of those transmitting outside the tenant.
+      // The defect: /api/salary-payments is the collection and /api/salary-payments/{id}/complete is the action
+      // that FILES payroll with Skatteetaten. On main, "opprett salary payments" ranked the filing at 63.8 and
+      // the create fifth at 61.3. An audit of 804 resource-only queries found 108 ranking a nested action
+      // first, 56 of them irreversible and 24 transmitting outside the tenant.
       //
-      // The margins were 2.5 and 3.0 points, so the cut is deliberately larger than it needs to be for a
-      // transmitting or irreversible action: being handed a government filing for the word "opprett" is the
-      // failure worth over-correcting against. Naming the action exempts it entirely, so "fullfor
-      // lonnskjoring", "godkjenn utlegg" and the bare "a-melding" are untouched.
+      // A general rule over all of those was written, measured, and CUT BACK to this, because two reviews found
+      // it doing more damage than the defect:
+      //
+      //   - It inverted a request into its own undo. "Apply a manual credit note to an invoice" -- the
+      //     endpoint's own summary, verbatim -- returned DELETE .../manual-credit-note-applications/{id} first,
+      //     because `applications` was never in the query while the DELETE took a milder cut. Requiring every
+      //     hyphen part of a segment to be named makes a four-part segment effectively unexemptable.
+      //   - It pushed legitimate requests down or out. "signer avtalen" lost POST .../sign-request from the top
+      //     three; the rounding-adjustment endpoint lost its own summary as a query, at rank 29 -- past the
+      //     default limit of 25, so out of reach entirely.
+      //
+      // So: SINGLE-WORD action segments only, and only one of them. That is what makes exemption realistic --
+      // a one-word segment is a word a user can plausibly say -- and it excludes every case above, all of which
+      // are multi-part or multi-segment. It keeps the measured defect fixed.
+      //
+      // NOT claimed as a general safety property, because it is not one. Actions with no path parameter are
+      // untouched, and that includes POST /api/peppol/messages/sendsbdh and POST /api/invoices/reminders/bulk,
+      // which both transmit outside the tenant -- the review is right that those are the dangerous class and
+      // this does not cover them. Covering them needs its own change and its own measurement.
       const actions = nestedActionSegments(op.path);
-      if (score > 0 && actions.length > 0 && !namesAction(terms, actions)) {
-        // ONLY the risky ones. A first version also cut reversible actions and ordinary reads by 0.7, and the
-        // held-out corpora caught the cost immediately: corpus two fell from 26 of 28 in the top three to 25,
-        // corpus three from 26 of 27 to 24, an English rank regressed, and GET /api/invoices/{id}/payments fell
-        // to rank 10 for a query about invoice payments. A nested READ is very often the right answer for a
-        // query that never spells out its segment, and there is no safety argument for demoting it.
-        //
-        // What there is a safety argument for is the operation that files, sends or cannot be undone. Those are
-        // the 56 the audit found, and the 24 that leave the tenant.
+      const only = actions.length === 1 ? actions[0] : undefined;
+      const single = only !== undefined && !only.includes("-") ? only : undefined;
+      if (score > 0 && !wantMethod && single !== undefined && !namesAction(terms, [single])) {
         const risk = classifyRequest(op.method, op.path);
         const transmits = classifyTransmission(op.method, op.path) === "external";
         if (risk === "irreversible" || transmits) {
-          // Two strengths, because the family condition turned out to cut both ways. Demoting only when a
-          // same-method non-nested operation exists protected "åpne avstemmingen på nytt", whose family has no
-          // collection POST — but it also left POST /salary/{id}/payment-date untouched, and that operation
-          // already outranked POST /api/salary-payments on main (62.48 to 61.3). Removing the filing that had
-          // been masking it simply promoted the next unasked action.
-          //
-          // So: a hard cut where something better exists to take its place, and a mild one where nothing does,
-          // which is enough to lose to a resource-level operation elsewhere without pushing the only sensible
-          // answer out of reach. 0.9 rather than 0.8, measured: 0.8 pushed the reconciliation reopen from
-          // rank 9 to 10 in the ratcheted corpus, and breaking a 1.2-point tie needs nothing like that much.
-          // It is a tie-breaker, not a demotion, and it is described as one.
+          // A hard cut where a same-method resource-level operation exists to take its place, and a
+          // tie-breaker where none does. Demoting the only sensible answer promotes nothing: "åpne
+          // avstemmingen på nytt" asks to reopen a reconciliation, never says "reopen", and its family has no
+          // collection POST -- 0.8 moved it from rank 9 to 10, so 0.9 it is.
           score *= familyOffersNonNested(index, op.path, op.method) ? 0.45 : 0.9;
         }
       }
@@ -1985,9 +1986,21 @@ function familyOffersNonNested(index: SpecIndex, path: string, method: string): 
   return known.has(`${familyOf(path)}|${method}`);
 }
 
-/** The first two path segments, which is the resource family. */
+/**
+ * The resource family: leading path segments up to the first parameter.
+ *
+ * "First two segments" was wrong and produced ten nonsense families -- `/salary/{id}`, `/amelding/{id}`,
+ * `/attachments/{id}` and so on -- because a parameter counted as a segment. The same action then scored
+ * differently depending on where it lived: POST /api/salary-payments/{id}/complete was cut by 0.45 while
+ * POST /salary/{id}/complete, the same filing, was cut by 0.9. Found by the independent review of PR #122.
+ */
 function familyOf(path: string): string {
-  return `/${path.split("/").filter(Boolean).slice(0, 2).join("/")}`;
+  const segs: string[] = [];
+  for (const seg of path.split("/").filter(Boolean)) {
+    if (seg.startsWith("{")) break;
+    segs.push(seg);
+  }
+  return `/${segs.join("/")}`;
 }
 
 /**
