@@ -77,7 +77,12 @@ REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
   node scripts/audit-storage.mjs --tenant 2783
 
 # Are the QUIRKS still true? Read-only, so this one is safe against any tenant.
-REAI_USER_API_TOKEN=... node scripts/audit-quirks.mjs --tenant 2634
+REAI_USER_API_TOKEN=... npm run audit:quirks -- --tenant 2634
+
+# And the quirks whose claim is that a WRITE is refused. Every probe is built to fail, so nothing is
+# created — but it still sends writes, so it takes the tenant allowlist like the others.
+REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
+  npm run audit:quirks:write -- --tenant 2783
 
 # How many storage claims exist, and how many are probed?
 npm run audit:census

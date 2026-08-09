@@ -134,6 +134,42 @@ test("the documentation file list is real, so the haystack cannot shrink by a re
   assert.deepEqual(onDisk, listed, "a docs/ page is not in DOC_FILES, so nothing above searches it");
 });
 
+test("every live audit has a documented invocation", () => {
+  // The audit harness is only run by a maintainer following the docs. When the README split moved the
+  // audits to docs/audits.md, `audit-quirks-write.mjs` was described there as one of the four audits but
+  // its command never made it into the invocation block — so anyone following the documented workflow ran
+  // three of four and silently skipped its six refusal probes. Presence in prose is not an invocation.
+  const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
+  const audits = readdirSync(join(repo, "scripts")).filter((f) => /^audit-.*\.mjs$/.test(f)).sort();
+  const undocumented = audits.filter((file) => {
+    if (ALL_DOCS.includes(`scripts/${file}`)) return false;
+    // Or via its npm alias. `audit:quirks` is a prefix of `audit:quirks:write`, so the boundary matters:
+    // without it, the write audit's command would satisfy the read-only audit and hide the same gap.
+    const aliases = Object.entries(scripts)
+      .filter(([, cmd]) => cmd.includes(`scripts/${file}`))
+      .map(([name]) => name);
+    return !aliases.some((name) => new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w:-])`).test(ALL_DOCS));
+  });
+  assert.deepEqual(undocumented, [], `live audits with no documented command: ${undocumented.join(", ")}`);
+});
+
+test("no curated tool sits outside the toolset groups", () => {
+  // The README described the three rename-safety tools as sitting "outside those groups" because they are
+  // documented together, apart from their domains. They are not: they belong to `bank`, `purchase` and
+  // `loans`, they are inside the 165, and `REAI_TOOLSETS=bank` enables one of them. An operator narrowing
+  // the server by that sentence would have formed a wrong expectation about the surface they configured.
+  const grouped = new Set(Object.values(TOOL_GROUPS).flat().map((t) => (typeof t === "string" ? t : t.name)));
+  const alwaysOn = new Set(alwaysOnTools.map((t) => t.name));
+  const ungrouped = allTools.map((t) => t.name).filter((n) => !grouped.has(n) && !alwaysOn.has(n));
+  assert.deepEqual(ungrouped, [], `a curated tool is in no group, so no REAI_TOOLSETS value enables it: ${ungrouped.join(", ")}`);
+
+  // And no page may claim otherwise, which is the form the defect actually took: correct code, wrong prose.
+  for (const { file, text } of DOCS) {
+    assert.doesNotMatch(text, /outside (those|these|the toolset) groups/i,
+      `${file} says tools sit outside the toolset groups; every curated tool is in one`);
+  }
+});
+
 test("no documentation table calls an irreversible tool reversible", () => {
   // A risk column kept saying "reversible" after reconciliation rules were
   // escalated, so anyone following the documented default found them missing.
