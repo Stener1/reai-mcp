@@ -81,29 +81,39 @@ All notable changes to `reai-mcp`. Format loosely follows
 ### Fixed
 
 - **"Pass null to clear it" was false for most fields, and both update tools said it.** The claim came from
-  `UpdateOrderReq`/`OfferReq` declaring the fields nullable; the API disagrees. Measured on 2783 field by
-  field, because #139 shipped the null-carry path flagged as an unverified schema inference and this is what
-  verifying it turned up:
-  - `comment` and `internalComment` — a null is accepted with `200` and **silently ignored**; an **empty
-    string** clears them and is stored back as null.
-  - `buyerReference` and `externalReference` (orders) — a null genuinely clears.
-  - `email`, `issueDate` and `deliveryAddress` (offers) — null accepted, ignored, existing value kept.
-  - `projectId` — **not established**: `/api/projects` answers `403` on the test tenant, so no record could
-    be linked to a project to unlink. The description no longer claims it unlinks.
-  - Both tools now **refuse** a null on `comment`/`internalComment` and name the empty string, rather than
-    reporting a change the API discarded. New quirk `null-in-a-replacement-is-often-ignored` carries the
-    table, so `reai_describe_endpoint` warns a `reai_request` caller too.
-  - Also measured, and the reason this went unnoticed: the API fills in `issueDate`, `email` and
-    `deliveryAddress` on creation even when the POST omits them, so a fresh order or offer never has them
-    null in the first place.
-  - **Scope stated rather than implied**: measured on these two endpoints. Nine other curated tools take a
-    nullable argument on a PUT/PATCH and two (`reai_update_expense`, `reai_update_loan`) make the same
-    "null clears it" claim, which is unverified — and since the behaviour is per-field rather than uniform it
-    cannot be inferred. `reai_update_subscription` was deliberately not probed: subscriptions are created
-    ACTIVE, so a throwaway one on a real company could generate an invoice.
-  - The good news on the flagged inference itself: sending an explicit null is **safe** — `200`, nothing
-    corrupted, lines and totals intact. The unconditional carry that satisfies the replacement-omission gate
-    works; it just does not clear anything.
+  the request schemas declaring the fields nullable; the API disagrees. #139 shipped the null-carry path
+  flagged as an unverified schema inference, and verifying it is what turned this up. Measured on 2783, and
+  it is **two families** — omission follows the same split as null:
+
+  ```
+  comment            omitted KEPT      null KEPT      "" CLEARS (stored back as null)
+  internalComment    omitted KEPT      null KEPT      "" CLEARS
+  buyerReference     omitted EMPTIED   null CLEARS    (orders)
+  externalReference  omitted EMPTIED   null CLEARS    (orders)
+  projectId          omitted EMPTIED
+  email / issueDate / deliveryAddress  null KEPT      (offers)
+  ```
+
+  - So a **second** claim of mine was wrong, one the review inferred from the first and I then measured: both
+    tools said a PUT that omits those six "empties those fields". True for three, false for the two comments.
+  - Both tools now report from the **response** rather than from what was sent: a discarded value is named
+    `IGNORED by the API`, the headline drops it (to `Changed NOTHING` if that is all there was), and the two
+    clearable fields get told to send an empty string.
+  - A first version **refused** a null on those two. A review argued the response-driven fix is better and it
+    is right: the refusal covered two of five ignored fields, needed a hardcoded list, and refused legitimate
+    calls — including a null against an already-empty field, whose outcome is what the caller asked for.
+  - It also fixed the path this recommends warning against itself: `""` comes back as `null`, and comparing
+    them naively flagged **every successful clear** with "check the value is one the API accepts".
+  - Encoded in `scripts/smoke-full-write.mjs` rather than left in prose — three `report()` calls covering
+    both families — because claiming it was not re-checkable was wrong: the harness already creates an order,
+    edits it and asserts stored values.
+  - **Scope, measured rather than estimated:** 14 tools take a nullable argument on a PUT/PATCH (12 besides
+    these two) and "null clears it" appears in **eight** source files. An earlier version of this note said
+    "nine tools, two claims" — undercounted. Check `reai_update_creditor` first: it promises a null clears
+    `bankAccountNumber`, a payment destination, and reports from what was sent rather than the response.
+  - New quirk `order-and-offer-put-ignores-most-nulls`, renamed from a version whose id asserted a general
+    rule about replacements that the repo's own measured counter-examples (`/api/leads/{…}/notes`,
+    `endDateOfEmployment`) contradict.
 - **124 quirks.**
 
 

@@ -914,6 +914,49 @@ const createOrder = defineTool({
 });
 
 /**
+ * Which of the caller's changes the record actually came back with.
+ *
+ * This exists because the API silently discards some values. Measured on 2783, and it is TWO families rather
+ * than one rule:
+ *
+ *   comment, internalComment          omitted KEPT   null KEPT   "" CLEARS
+ *   buyerReference, externalReference  omitted EMPTIED  null CLEARS
+ *   projectId                          omitted EMPTIED
+ *
+ * So `comment: null` is a no-op that answers 200, and a tool that reported "Changed comment" would be
+ * confidently wrong. Driven off the RESPONSE rather than a hardcoded field list: that covers every field the
+ * API ignores, including ones nobody has measured yet, and it cannot refuse a call that would have worked.
+ *
+ * An empty string counts as applied when the record comes back null — that is the API normalising it, not a
+ * value being rejected. Without this, the very path this server recommends for clearing a comment carried a
+ * warning telling the agent to doubt it.
+ */
+function appliedChanges(
+  asked: ReadonlyArray<readonly [string, unknown]>,
+  after: Record<string, unknown> | undefined,
+  skip: readonly string[],
+): { took: string[]; ignored: string[] } {
+  const took: string[] = [];
+  const ignored: string[] = [];
+  for (const [key, sent] of asked) {
+    if (skip.includes(key)) {
+      took.push(key);
+      continue;
+    }
+    const stored = after?.[key];
+    // The response does not carry it, so nothing can be concluded — reported as taken rather than doubted.
+    if (after === undefined || !Object.hasOwn(after, key)) {
+      took.push(key);
+      continue;
+    }
+    const same = JSON.stringify(stored) === JSON.stringify(sent);
+    const emptiedToNull = sent === "" && stored === null;
+    (same || emptiedToNull ? took : ignored).push(key);
+  }
+  return { took, ignored };
+}
+
+/**
  * Fields the order PUT accepts on a line, and the ones a GET adds that it does not.
  *
  * The response and the request disagree, which is the whole reason this tool exists. `GET /api/orders/{id}`
@@ -998,8 +1041,9 @@ const updateOrder = defineTool({
     "wants — so a read-modify-write done by hand goes wrong in three separate ways. The lines come back " +
     "under `lines` and must be sent as `orderLines`. Each line the GET returns carries `id`, `vatTitle`, " +
     "`vatRate` and `amounts`, none of which the PUT declares. And `comment`, `internalComment`, " +
-    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional, so a PUT that " +
-    "omits them keeps the order but empties those fields.\n\n" +
+    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional — and what a PUT " +
+    "that omits them does is NOT uniform. Measured: omitting `buyerReference`, `externalReference` or " +
+    "`projectId` EMPTIES them, while omitting `comment` or `internalComment` KEEPS them.\n\n" +
     "The API does protect the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and " +
     "`issueDate` are REQUIRED, so a partial PUT is refused with a 400 rather than quietly dropping the " +
     "lines. That is the one thing you cannot break here by accident — everything else in the list above " +
@@ -1089,22 +1133,6 @@ const updateOrder = defineTool({
     const { tenantId, id, ...changes } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
-    // A null on these two is accepted by the API with 200 and then discarded — measured on 2783, where
-    // `comment: null` left "ZZ c" in place while `comment: ""` stored null. Reporting "changed comment" after
-    // a write the API ignored is the kind of confident-and-wrong answer this server exists to avoid, so the
-    // no-op is refused and the thing that works is named.
-    const ignoredNulls = (["comment", "internalComment"] as const).filter(
-      (f) => (changes as Record<string, unknown>)[f] === null,
-    );
-    if (ignoredNulls.length > 0) {
-      return fail(
-        `${ignoredNulls.join(" and ")} cannot be cleared with null: this API accepts it with a 200 and then ` +
-          `keeps the existing text, so nothing was written rather than reporting a change that would not ` +
-          `have happened. Send an EMPTY STRING instead — measured, that clears the field and the API stores ` +
-          `it back as null.`,
-      );
-    }
-
     if (asked.length === 0) {
       return fail(
         `No changes were given, so nothing was written. Passing nothing here would rewrite the order with ` +
@@ -1280,14 +1308,21 @@ const updateOrder = defineTool({
     }
 
     const after = res.data;
-    const notApplied = changedKeys.filter(
-      (k) => k !== "orderLines" && after?.[k] !== undefined && JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
-    );
-    if (notApplied.length > 0) {
+    // What the record actually came back with, so the headline cannot claim a change the API discarded.
+    const { took, ignored } = appliedChanges(asked, after, ["orderLines"]);
+    if (ignored.length > 0) {
+      notes[0] = (notes[0] ?? "").replace(
+        `Changed ${changedKeys.join(", ")}`,
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+      );
+      const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
-        `WARNING: ${notApplied
-          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
-          .join("; ")}. Check the value is one the API accepts.`,
+        `IGNORED by the API, with a 200 and no error: ${ignored
+          .map((k) => `${k} (sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, still ${JSON.stringify(after?.[k])})`)
+          .join("; ")}.` +
+          (clearable.length > 0
+            ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
+            : ` Check the value is one the API accepts for that field.`),
       );
     }
     return ok(res.data, {
@@ -1459,8 +1494,9 @@ const updateOffer = defineTool({
     "`offerLines` is required, so a body that echoes `lines` back is a body with no lines at all. Each line " +
     "the GET returns carries seven fields the PUT does not declare: `id`, `rowNumber`, `vatRate`, " +
     "`lineTotal`, `lineTotalExclVat`, `lineVat` and `lineDiscount`, five of them computed. And `projectId`, " +
-    "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a PUT that " +
-    "omits them keeps the offer and empties those fields.\n\n" +
+    "`issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional — and what a PUT " +
+    "that omits them does is NOT uniform: omitting `projectId` empties it, while omitting `comment` or " +
+    "`internalComment` KEEPS them. Measured on the order side; carried here regardless.\n\n" +
     "Offer lines are stricter than order lines in exactly ONE field, not two: `vatCode` is required here " +
     "and genuinely optional on an order line — but `itemName` is required on BOTH, and an order line " +
     "without it is refused with 400 \"Produkt er obligatorisk for alle ordrelinjer.\" So a line carrying " +
@@ -1514,22 +1550,6 @@ const updateOffer = defineTool({
     const { tenantId, id, ...changes } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
-    // A null on these two is accepted by the API with 200 and then discarded — measured on 2783, where
-    // `comment: null` left "ZZ c" in place while `comment: ""` stored null. Reporting "changed comment" after
-    // a write the API ignored is the kind of confident-and-wrong answer this server exists to avoid, so the
-    // no-op is refused and the thing that works is named.
-    const ignoredNulls = (["comment", "internalComment"] as const).filter(
-      (f) => (changes as Record<string, unknown>)[f] === null,
-    );
-    if (ignoredNulls.length > 0) {
-      return fail(
-        `${ignoredNulls.join(" and ")} cannot be cleared with null: this API accepts it with a 200 and then ` +
-          `keeps the existing text, so nothing was written rather than reporting a change that would not ` +
-          `have happened. Send an EMPTY STRING instead — measured, that clears the field and the API stores ` +
-          `it back as null.`,
-      );
-    }
-
     if (asked.length === 0) {
       return fail(
         `No changes were given, so nothing was written. Passing nothing here would rewrite the offer with ` +
@@ -1687,17 +1707,21 @@ const updateOffer = defineTool({
     }
 
     const after = res.data;
-    const notApplied = changedKeys.filter(
-      (k) =>
-        k !== "offerLines" &&
-        after?.[k] !== undefined &&
-        JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
-    );
-    if (notApplied.length > 0) {
+    // What the record actually came back with, so the headline cannot claim a change the API discarded.
+    const { took, ignored } = appliedChanges(asked, after, ["offerLines"]);
+    if (ignored.length > 0) {
+      notes[0] = (notes[0] ?? "").replace(
+        `Changed ${changedKeys.join(", ")}`,
+        took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING`,
+      );
+      const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
-        `WARNING: ${notApplied
-          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
-          .join("; ")}. Check the value is one the API accepts.`,
+        `IGNORED by the API, with a 200 and no error: ${ignored
+          .map((k) => `${k} (sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, still ${JSON.stringify(after?.[k])})`)
+          .join("; ")}.` +
+          (clearable.length > 0
+            ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
+            : ` Check the value is one the API accepts for that field.`),
       );
     }
     return ok(res.data, {

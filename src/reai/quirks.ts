@@ -539,32 +539,36 @@ export const QUIRKS: readonly Quirk[] = [
       '?usage=customer-invoice yourself rather than trusting acceptance.',
   },
   {
-    id: "null-in-a-replacement-is-often-ignored",
+    id: "order-and-offer-put-ignores-most-nulls",
     paths: ["/api/orders/{id}", "/api/offers/{id}"],
     methods: ["PUT"],
     kind: "gotcha",
     note:
-      "A null in the body is accepted with 200 and then SILENTLY IGNORED for most fields — the stored value " +
-      "does not change, and nothing in the response says the value you sent was discarded. Which fields " +
-      "honour a null is not uniform, so it was measured field by field on 2783:\n\n" +
-      "  comment            null IGNORED   \"\" clears (stored back as null)\n" +
-      "  internalComment    null IGNORED   \"\" clears (stored back as null)\n" +
-      "  buyerReference     null CLEARS    (orders only)\n" +
-      "  externalReference  null CLEARS    (orders only)\n" +
-      "  email              null IGNORED   (offers only)\n" +
-      "  issueDate          null IGNORED   the API keeps the existing date\n" +
-      "  deliveryAddress    null IGNORED   the API keeps the existing address object\n\n" +
-      "So to empty a comment, send an EMPTY STRING, not null. `projectId` was not measured: /api/projects " +
-      "answers 403 on the test tenant, so no order could be linked to one to unlink.\n\n" +
-      "Also worth knowing when creating: the API fills in `issueDate` (today), `email` (the customer\'s) and " +
+      "A null in the body is accepted with 200 and then SILENTLY IGNORED for some fields — the stored value " +
+      "does not change, and nothing in the response says the value you sent was discarded. It is TWO families " +
+      "rather than one rule, and OMITTING a field follows the same split, so measured on 2783 field by field:\n\n" +
+      "  comment            omitted KEPT      null KEPT      \"\" CLEARS (stored back as null)\n" +
+      "  internalComment    omitted KEPT      null KEPT      \"\" CLEARS\n" +
+      "  buyerReference     omitted EMPTIED   null CLEARS    (orders)\n" +
+      "  externalReference  omitted EMPTIED   null CLEARS    (orders)\n" +
+      "  projectId          omitted EMPTIED\n" +
+      "  email              null KEPT         (offers)\n" +
+      "  issueDate          null KEPT — the API keeps the existing date\n" +
+      "  deliveryAddress    null KEPT — the API keeps the existing address object\n\n" +
+      "So to empty a comment send an EMPTY STRING; a null there is a no-op that answers 200. The first two " +
+      "behave like `if (value != null) set(value)`; the rest like a plain replacement. Do not generalise from " +
+      "one to the other.\n\n" +
+      "Also worth knowing when creating: the API fills in `issueDate` (today), `email` (the customer's) and " +
       "`deliveryAddress` (an object) even when the POST omits them, so a freshly created order or offer does " +
-      "not have them null in the first place.\n\n" +
-      "SCOPE: measured on these two endpoints only. Nine other curated tools take a nullable argument on a " +
-      "PUT or PATCH, and two of them (reai_update_expense, reai_update_loan) tell the caller outright that " +
-      "\"null clears it\" — that is UNVERIFIED, and the behaviour here is per-field rather than uniform, so it " +
-      "cannot be assumed either way. reai_update_subscription is the closest case, taking a nullable " +
-      "internalComment on a replacement, and it was deliberately not probed: subscriptions are created ACTIVE " +
-      "on this API, so a throwaway one on a real company could generate an invoice.",
+      "not have them null in the first place — which is why this went unnoticed.\n\n" +
+      "SCOPE: measured on these two endpoints only, and it does NOT generalise. 14 curated tools take a " +
+      "nullable argument on a PUT or PATCH — 12 besides these two — and the phrase \"null clears it\" appears " +
+      "in eight source files. Every one of those is unverified against this behaviour. The one to check first " +
+      "is reai_update_creditor: it promises a null clears bankAccountNumber, a PAYMENT DESTINATION, and its " +
+      "success note is computed from what was SENT rather than from the response, so if nulls are ignored " +
+      "there it states confidently that repayments have no destination when they still do. No creditor " +
+      "exists on the test tenant to measure it. reai_update_subscription was deliberately not probed: " +
+      "subscriptions are created ACTIVE, so a throwaway one on a real company could generate an invoice.",
   },
   {
     id: "order-and-offer-put-rename-the-lines",
