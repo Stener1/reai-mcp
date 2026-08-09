@@ -73,6 +73,9 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
   node scripts/audit-storage.mjs --tenant 2783
 
+# Are the QUIRKS still true? Read-only, so this one is safe against any tenant.
+REAI_USER_API_TOKEN=... node scripts/audit-quirks.mjs --tenant 2634
+
 # How many storage claims exist, and how many are probed?
 npm run audit:census
 ```
@@ -228,6 +231,46 @@ them, because `rankOneChanged` printed a count and no query:
 The #122 case is why there is a **risky new answers** category at all: that inversion is write-to-write, which
 `writesPromoted` deliberately excludes, so the defect appeared only inside an unnamed count of 346. A rank-1
 target that is irreversible or transmitting is now named whatever the previous method was.
+
+
+### `audit-quirks.mjs`: the 122 claims nobody was checking
+
+The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 122 of
+them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, **2 were
+named in a live audit** — 86 assert measured API behaviour, and 84 of those were verified by nothing. Both
+defects that motivated the other audits were in this channel: the `+47` phone claim (PR #115) and the four
+places calling the agreement enums undocumented (PR #123).
+
+This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
+coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
+is no write guard and no `REAI_WRITE_TEST_TENANTS`, and `test/quirk-drift.test.mjs` asserts that against
+`classifyRequest` rather than by grepping for method names.
+
+**Probe the request the note describes, not a shorter one.** This is the lesson worth carrying to the next
+audit, because it produced a false DRIFT against a correct quirk while this script was being written.
+`timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
+disabled"`. Sending `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
+**ordered**, so an under-specified request trips the first validator and never reaches the layer the claim
+is about. The probe now sends the full valid request and a test pins that it does. Generalised: a probe
+that sends less than a valid request measures a different claim than the one it reports on.
+
+Each case names its quirk id, a `marker` phrase from that quirk's `note`, and a `check`. The marker is the
+same binding `storage-drift` uses and has the same narrow job — stop a probe outliving the sentence it
+verifies — with the same limitation: `includes` is blind to direction, so **the live run is the only
+authority on whether a claim is true.** The guard adds one thing that file cannot: every case must contain
+a **drift branch**, because a case that can only return OK or INCONCLUSIVE is decoration. Comments are
+stripped before checking, since a commented-out `"drift"` defeated exactly that kind of assertion when
+PR #116 was reviewed. All seven ways of defeating these guards were tried and each fails the build.
+
+An unexpected INCONCLUSIVE exits **3**, as the storage audit does. One case is unanswerable by
+construction rather than by accident — `tenant-header-ignored-single-tenant` needs a token reaching exactly
+one tenant, and this repository's reaches four — and a gate that fails forever is a gate everyone learns to
+ignore. So a case may declare `conditional:` with the missing precondition, and only cases without it
+affect the exit status. The reason must be at least twenty characters and name what is missing, and at most
+one case may use the hatch; both are asserted, because it is the field that suppresses a failure.
+
+Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634. The 114 unprobed quirks are mostly
+claims about what a write stores or refuses, which needs the test tenant, and that is the next slice.
 
 ### What it does not cover, stated rather than discovered later
 

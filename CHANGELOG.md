@@ -9,6 +9,39 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
+  The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
+  `reai_api_notes`, and were **named in a live audit twice out of 122** — 86 assert measured API behaviour,
+  84 of those verified by nothing. Both defects that motivated the other audits were in this channel: the
+  `+47` phone claim (#115) and the four places calling the agreement enums undocumented (#123).
+  - Covers the **8 a GET can answer**, and prints `of 122` so a pass is not mistaken for coverage. Everything
+    is a read, which is what makes it safe against tenant 2634's real books — no write guard, no
+    `REAI_WRITE_TEST_TENANTS`, and `test/quirk-drift.test.mjs` asserts that through `classifyRequest` rather
+    than by grepping method names.
+  - **Result: 7 unchanged, 0 drifted, 1 conditional.** Every quoted string in those seven was verified
+    verbatim against the live API, including the two details `empty-state-is-404` quotes and all three lead
+    wrappers `leads-paginated-object` enumerates.
+  - **A false DRIFT was nearly shipped against a correct quirk, and the fix is a general rule.**
+    `timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
+    disabled"`. `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
+    **ordered**, so an under-specified request trips the first validator and never reaches the layer the claim
+    describes. The quirk was right; the probe was shallow. It now sends the full request and a test pins that.
+  - Guards, and the fact that they were **verified by defeating them**: seven mutations — a marker no longer in
+    the note, a nonexistent quirk id, a removed drift branch, a drift branch left only in a comment, a
+    parameterised HTTP method, the shallow timesheets probe, and an exact key comparison downgraded to
+    `includes` — each fails the build, and the file was byte-identical afterwards. The commented-out case is
+    there because that exact trick defeated two assertions in `storage-drift.test.mjs` during #116's review.
+  - Shape claims compare the **whole wrapper**: `keys.includes("items")` passes on a wrapper that has grown
+    three paging fields, and these claims are specifically about which fields are present.
+  - An unexpected INCONCLUSIVE exits **3**, matching `audit-storage.mjs`. One case is unanswerable by
+    construction — `tenant-header-ignored-single-tenant` needs a single-tenant token and ours reaches four — so
+    a case may declare `conditional:` with the missing precondition and be excluded from the exit status. At
+    most one may, and the reason must name what is missing; both asserted, since it is the field that
+    suppresses a failure.
+  - **What this does not touch: 114 quirks.** Mostly claims about what a write stores or refuses, which needs
+    the test tenant. The marker binding has `storage-drift`'s limitation too — `includes` is blind to
+    direction, so the live run remains the only authority on whether a claim is true.
+
 - **`npm run sweep:discovery` — the harness three reviews had to be, because mine kept under-covering.**
   Committed with its query generation exported and tested rather than rebuilt by hand for a fourth time.
   - The argument is a record. Three PRs in a row added a synonym or a phrase rule, swept it, reported the sweep,
