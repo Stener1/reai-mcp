@@ -558,7 +558,13 @@ export const QUIRKS: readonly Quirk[] = [
       "answers 403 on the test tenant, so no order could be linked to one to unlink.\n\n" +
       "Also worth knowing when creating: the API fills in `issueDate` (today), `email` (the customer\'s) and " +
       "`deliveryAddress` (an object) even when the POST omits them, so a freshly created order or offer does " +
-      "not have them null in the first place.",
+      "not have them null in the first place.\n\n" +
+      "SCOPE: measured on these two endpoints only. Nine other curated tools take a nullable argument on a " +
+      "PUT or PATCH, and two of them (reai_update_expense, reai_update_loan) tell the caller outright that " +
+      "\"null clears it\" — that is UNVERIFIED, and the behaviour here is per-field rather than uniform, so it " +
+      "cannot be assumed either way. reai_update_subscription is the closest case, taking a nullable " +
+      "internalComment on a replacement, and it was deliberately not probed: subscriptions are created ACTIVE " +
+      "on this API, so a throwaway one on a real company could generate an invoice.",
   },
   {
     id: "order-and-offer-put-rename-the-lines",

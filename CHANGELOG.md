@@ -96,6 +96,11 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Also measured, and the reason this went unnoticed: the API fills in `issueDate`, `email` and
     `deliveryAddress` on creation even when the POST omits them, so a fresh order or offer never has them
     null in the first place.
+  - **Scope stated rather than implied**: measured on these two endpoints. Nine other curated tools take a
+    nullable argument on a PUT/PATCH and two (`reai_update_expense`, `reai_update_loan`) make the same
+    "null clears it" claim, which is unverified — and since the behaviour is per-field rather than uniform it
+    cannot be inferred. `reai_update_subscription` was deliberately not probed: subscriptions are created
+    ACTIVE, so a throwaway one on a real company could generate an invoice.
   - The good news on the flagged inference itself: sending an explicit null is **safe** — `200`, nothing
     corrupted, lines and totals intact. The unconditional carry that satisfies the replacement-omission gate
     works; it just does not clear anything.

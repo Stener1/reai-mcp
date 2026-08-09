@@ -373,6 +373,9 @@ So `reai_update_order` and `reai_update_offer` **refuse** a null on `comment` an
 
 Worth knowing when creating, too: the API fills in `issueDate` (today), `email` (the customer's) and `deliveryAddress` (an object) even when the POST omits them — so a freshly created order or offer does not have them null to begin with, which is why this went unnoticed. It surfaced only because the carry was changed to state nulls explicitly and that path was flagged as unverified.
 
+
+**Scope, stated because the fix is narrower than the hazard.** This was measured on the order and offer PUTs. Nine other curated tools take a nullable argument on a `PUT` or `PATCH`, and two — `reai_update_expense` and `reai_update_loan` — tell the caller outright that "null clears it". That is **unverified**, and since the behaviour above is per-field rather than uniform it cannot be assumed either way. `reai_update_subscription` is the closest case, taking a nullable `internalComment` on a replacement; it was deliberately not probed, because subscriptions are created **active** on this API and a throwaway one on a real company could generate an invoice. Measuring the rest needs a tenant where that is safe.
+
 ## Payroll
 | Tool | Purpose | Risk |
 |---|---|---|
