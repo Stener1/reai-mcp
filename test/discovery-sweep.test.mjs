@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getSpecIndex } from "../dist/reai/spec.js";
+import { getSpecIndex, termSynonymKeys } from "../dist/reai/spec.js";
 import {
   ADJECTIVES,
   NOUNS,
@@ -24,7 +24,7 @@ import {
  */
 
 test("the sweep covers every dimension that has caught a defect", () => {
-  const queries = new Set(buildQueries(getSpecIndex()));
+  const queries = new Set(buildQueries(getSpecIndex(), { synonymKeys: termSynonymKeys() }));
 
   // A path segment, spelled all three ways a caller might type it.
   for (const q of ["vat-returns", "vat returns", "vatreturns"]) {
@@ -44,6 +44,16 @@ test("the sweep covers every dimension that has caught a defect", () => {
   for (const q of ["faktura for abonnement", "fakturagebyr abonnement", "faktura pa abonnementene"]) {
     assert.ok(queries.has(q), `noun+noun missing: ${q}`);
   }
+  // INTENT-PREFIXED, and this is the assertion that matters most: "vis faktura for abonnementet" is the exact
+  // #125 read regression the docs cite, and the first version of this file did not generate it while claiming
+  // the dimension had found it. Codex and the independent review both caught that.
+  for (const q of ["vis faktura for abonnementet", "opprett faktura for abonnement", "slett faktura for abonnementet"]) {
+    assert.ok(queries.has(q), `intent-prefixed noun pair missing: ${q}`);
+  }
+  // And the synonym table's own keys, the #120 dimension that was claimed and not implemented.
+  for (const q of ["diett", "opprett diett", "krediter faktura", "periodisering mva"]) {
+    assert.ok(queries.has(q), `synonym-key cross missing: ${q}`);
+  }
   // A write verb and a read verb in front of a noun, since the two have different failure modes.
   assert.ok(queries.has("opprett faktura") && queries.has("vis faktura"));
   // And the specific queries whose regressions were caught by review rather than by a sweep.
@@ -53,10 +63,13 @@ test("the sweep covers every dimension that has caught a defect", () => {
 });
 
 test("the corpus is large enough to be a sweep rather than a sample", () => {
-  const queries = buildQueries(getSpecIndex());
+  const queries = buildQueries(getSpecIndex(), { synonymKeys: termSynonymKeys() });
   // ~19,800 today. Floored well below, because the count moves with the spec index; what matters is that a
   // refactor cannot quietly reduce this to a handful.
   assert.ok(queries.length > 15000, `only ${queries.length} queries generated`);
+  // 69,143 with the synonym keys and intent-prefixed pairs the review of #126 added. The floor stays well
+  // below, because the count moves with the spec index and a number pinned at the actual is a brittleness trap
+  // this repository has now been told about three times.
   assert.equal(new Set(queries).size, queries.length, "queries must be deduplicated");
   assert.ok(
     queries.every((q) => typeof q === "string" && q.trim() === q && q.length > 1),
@@ -118,6 +131,30 @@ test("a write that was already a write is not reported as newly promoted", () =>
   const r = compare(before, after);
   assert.equal(r.writesPromoted.length, 0);
   assert.equal(r.rankOneChanged.length, 1);
+});
+
+test("buildQueries is a function of the spec, not a hardcoded list", () => {
+  // Every other test here asserts `queries.has(…)` against the real index, and the independent review of PR
+  // #126 pointed out that all of them are satisfied by returning a big literal array. This one drives a
+  // synthetic index, so the output has to be DERIVED.
+  const synthetic = {
+    operations: [
+      { method: "GET", path: "/api/zz-thing/{id}/sub-part", tag: "Zz Things", summary: "Do The Zz Thing" },
+    ],
+  };
+  const queries = new Set(buildQueries(synthetic, { synonymKeys: ["zzsynonym"] }));
+  // Path segments in all three spellings.
+  for (const q of ["zz-thing", "zz thing", "zzthing", "sub-part", "sub part", "subpart"]) {
+    assert.ok(queries.has(q), `synthetic path segment missing: ${q}`);
+  }
+  assert.ok(queries.has("zz things"), "the tag should be lowercased and swept");
+  assert.ok(queries.has("do the zz thing"), "the summary should be lowercased and swept");
+  assert.ok(queries.has("zzsynonym"), "a synonym key should be swept on its own");
+  assert.ok(queries.has("zzsynonym faktura"), "a synonym key should be crossed with the nouns");
+  assert.ok(queries.has("vis zz things"), "tags should be crossed with a read verb");
+  // And nothing from the real index leaks in, which is what proves it is derived rather than canned.
+  assert.ok(!queries.has("vat-returns"), "buildQueries must not carry hardcoded queries from the real spec");
+  assert.ok(!queries.has("apply a manual credit note to an invoice"));
 });
 
 test("importing the sweep does not run it", () => {

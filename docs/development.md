@@ -191,8 +191,10 @@ npm run sweep:discovery -- --against main
 npm run sweep:discovery -- --baseline /tmp/some-built-checkout   # faster for several variants
 ```
 
-It extracts the revision with `git archive`, builds it, and compares ~19,800 generated queries against what
-HEAD answers. This exists because of a repeated failure rather than a hypothetical: **three PRs in a row added
+It extracts the revision with `git archive`, builds it, rebuilds HEAD, and compares ~69,000 generated queries
+against what HEAD answers. The npm script runs `npm run build` first because it imports HEAD's `dist/`: without
+that, editing `src/reai/spec.ts` and forgetting to build compares a fresh baseline against stale output and
+prints zero changes in every category — a false clean, which is the worst thing this tool could do. This exists because of a repeated failure rather than a hypothetical: **three PRs in a row added
 a synonym or a phrase rule, swept it, reported the sweep, and had an independent review find an over-match the
 sweep had not covered.**
 
@@ -213,9 +215,33 @@ and so was always zero. **Newly answered** was nothing and is now something. **W
 split out by risk, because a query stating no intent to write and handed an irreversible or
 externally-transmitting operation is the failure this repository treats as most serious.
 
-Verified against the defect it was built for: reintroducing #125's unscoped `faktura + abonnement` rule makes
-the sweep report **24 rank-1 changes and 24 lost answers**, naming `fakturagebyr abonnement` and
-`fakturalinjer for abonnement` — exactly the queries the review found and the hand-rolled sweep had missed.
+Verified by reconstructing each defect and reading what the output actually names — the first version of this
+section claimed the dimensions "would have caught" all three, and an independent review refuted that for two of
+them, because `rankOneChanged` printed a count and no query:
+
+| reconstruction | what the sweep names |
+|---|---|
+| #125's unscoped `faktura + abonnement` | 24 rank-1 changes, **24 lost answers**, naming `fakturagebyr abonnement` and `fakturalinjer for abonnement` |
+| #122's general demotion | the inversion itself: `POST …/manual-credit-note-applications → DELETE …/{creditNoteInvoiceId} [irreversible]` |
+| #120's global exact-compound | the `krediter` over-match, on 9 lines. **`diett` is not named** — generated, but its ranking change is not one the report surfaces |
+
+The #122 case is why there is a **risky new answers** category at all: that inversion is write-to-write, which
+`writesPromoted` deliberately excludes, so the defect appeared only inside an unnamed count of 346. A rank-1
+target that is irreversible or transmitting is now named whatever the previous method was.
+
+### What it does not cover, stated rather than discovered later
+
+- **Only 146 of 430 operations have a `summary`**, so the endpoint-summary dimension covers about a third of the
+  surface.
+- **109 operations are internal** and `searchOperations` excludes them, so a ranking change confined to those is
+  invisible; their path segments still generate queries, which is part of why 489 of the corpus return nothing.
+- The four categories **overlap by design** — one query can appear in three — so they must not be summed. The
+  "24 rank-1 changes and 24 lost answers" above is the same 24 queries counted twice.
+- `NOUNS` is curated and thin in some domains; the synonym-key dimension is what covers the rest, and it is
+  derived from the table rather than hand-copied for exactly that reason.
+- Both spellings of `å` are kept deliberately. They fold to the same tokens, so for TERM matching they are
+  redundant — but `PHRASE_SYNONYMS` matches raw text **before** folding, and #125 needed `inngaaende` added to a
+  phrase rule for precisely that reason. Dropping them would stop the sweep noticing the next missing spelling.
 
 Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
 as "no longer reachable" for the family it replaced. Read the lines rather than counting them.

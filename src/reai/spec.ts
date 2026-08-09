@@ -1299,6 +1299,18 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bbank\s+reconciliations?\b/g, "bank-reconciliations"],
 ];
 
+/**
+ * The synonym table's own keys, for the discovery sweep.
+ *
+ * Exported because crossing these with domain nouns is the dimension that found PR #120's `krediter ->
+ * credit-note` over-match, and `scripts/discovery-sweep.mjs` claimed to generate it while actually crossing
+ * only two hand-maintained verb lists — so `kontonummer`, `fordring` and `periodisering` were never probed.
+ * Codex caught the gap between the claim and the code on PR #126.
+ */
+export function termSynonymKeys(): string[] {
+  return Object.keys(TERM_SYNONYMS);
+}
+
 const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   payroll: ["salary", "salary-payments"],
   wages: ["salary"],

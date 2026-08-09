@@ -9,61 +9,44 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **`npm run sweep:discovery` — the harness that three reviews in a row had to be, because mine kept
-  under-covering.** Committed with its query generation exported and tested, rather than rebuilt by hand in a
-  scratch directory for the fourth time.
-  - The argument is a record, not a hypothetical. Three PRs in a row added a synonym or a phrase rule, swept
-    it, reported the sweep, and had an independent review find an over-match the sweep had not covered:
-    #120's `krediter → credit-note` moved "krediter faktura" off the operation that *creates* a credit note
-    onto the one that applies an existing one, found by crossing the **synonym table's own keys** with nouns;
-    #122's demotion made "Apply a manual credit note to an invoice" return the DELETE that *unapplies* it,
-    found by using each **endpoint's own summary** as a query; #125's `inngående + faktura` swallowed
-    "endre inngående faktura" and `faktura + abonnement` erased the invoice family from "vis faktura for
-    abonnementet", found by crossing **adjectives with nouns** and **nouns with nouns in both orders**.
-  - Each time the harness was rebuilt differently and covered less. The dimensions are not clever — they are
-    the ones that have actually caught something — so `buildQueries` is exported and
-    `test/discovery-sweep.test.mjs` asserts that every one of them, and the specific queries a review had to
-    find, are still generated. ~19,800 queries today, floored well below so a refactor cannot quietly reduce it
-    to a sample.
-  - It reports four things, and the second is the one that has been reported wrongly twice: **answer no longer
-    reachable** means the baseline's top result is absent from the new window. Two CHANGELOG entries said "no
-    answer lost" on the strength of counting *empty result sets* — which, with no score floor in
-    `searchOperations`, can never happen, so the figure was always zero and always meaningless. `compare` keeps
-    a demotion (old answer still in the window) separate from a loss, and a test pins that distinction.
-  - **Writes newly at rank 1 are split out by risk**, using the policy that ships with the new revision, because
-    a query stating no intent to write and handed an irreversible or externally-transmitting operation is the
-    failure this repository treats as most serious.
-  - Verified against the defect it exists for: reintroducing #125's unscoped `faktura + abonnement` rule makes
-    the sweep report **24 rank-1 changes and 24 lost answers**, naming `fakturagebyr abonnement` and
-    `fakturalinjer for abonnement` — exactly the queries the review found and the hand-rolled sweep missed. On
-    this branch, which changes no ranking logic, it reports **0 in every category**.
-
-- **Two invariants that hold the curated tools to what the document says the API accepts.** Both properties
-  already held — this locks them in rather than fixing anything, which is worth saying plainly. They came out of
-  looking for a validation gap that turned out not to exist, and the looking is what belongs in the repository.
-  - **Every enum a tool declares is compared against the members the document declares** — 26 arguments across
-    **14** write tools, all in step today. This catches drift in the direction that hurts: a spec refresh that
-    ADDS a member leaves a tool's `z.enum` rejecting a value the API now accepts, and the agent is told the
-    value is invalid by the side that is wrong about it. Nothing else in the suite would notice, because each
-    tool's own tests use values from that tool's own list.
-  - **No write tool omits a body property the document marks required** — **51** operations carry one and none
-    is missing. That failure mode arrives as a 400 after a round-trip rather than locally.
-  - **Most of the first version's escape valves were unexercised slack, and the review took them out.** Each
-    was a hole rather than a nicety: twelve pairs were dropped *before* they could be recorded, because a spec
-    enum field with no matching argument hit a `continue` — all twelve belong to `reai_update_agreement`, which
-    checks a free-form `changes` record against `findOperation(...).body.fields` at runtime and so cannot drift,
-    but a thirteenth on a tool without that check would have vanished too. `notEnum.length <= 2` licensed two
-    future holes while the actual was zero, and the comment justifying the slack described a case that cannot
-    occur. The unwrapper did not follow `ZodArray`, so a correctly written `z.array(z.enum([...]))` would have
-    been counted as "not an enum" and swallowed by that same slack. And the free-form escape whitelisted eight
-    argument names on speculation that no tool used; it is a structural `z.record` check now.
-  - `ENUM_LIMIT = 24` in the index builder renders overflow as `enum(a|b|+21 more)`, and two live fields hit it,
-    so comparing against a literal member `+21 more` would be a spurious failure indistinguishable from real
-    drift. Those two are detected and skipped by name, and a third test pins the count at two so a spec refresh
-    cannot quietly add one.
-  - Mutation-tested: removing a member from `INSTRUMENT_TYPES` fails the first, renaming `accountNumber` out of
-    `reai_create_sub_account` fails the second, and **weakening a `z.enum` to `z.string()`** — which the old
-    slack permitted — now fails as well.
+- **`npm run sweep:discovery` — the harness three reviews had to be, because mine kept under-covering.**
+  Committed with its query generation exported and tested rather than rebuilt by hand for a fourth time.
+  - The argument is a record. Three PRs in a row added a synonym or a phrase rule, swept it, reported the sweep,
+    and had an independent review find an over-match the sweep had not covered: #120's `krediter → credit-note`,
+    #122's demotion inverting "Apply a manual credit note to an invoice" onto the DELETE that unapplies it, and
+    #125's `faktura + abonnement` erasing the invoice family from "vis faktura for abonnementet".
+  - **The first version of this entry said those dimensions "would have caught" all three, and a review refuted
+    it for two.** `rankOneChanged` printed a count and no query, so #120 and #122 landed in an unnamed 346 and
+    465. Verified now by reconstructing each defect and reading what the output actually names: #125 gives 24
+    lost answers naming `fakturagebyr abonnement`; #122 names the inversion itself as a risky new answer; #120
+    names the `krediter` case on nine lines. **`diett`, the second over-match from #120's own review, is
+    generated but still not named** — stated because that is the honest boundary.
+  - That gap is why there is a **risky new answers** category: the #122 inversion is write-to-write, which the
+    write-promotion category deliberately excludes, so a rank-1 target that is irreversible or transmitting is
+    now named whatever the previous method was.
+  - Four more holes the reviews found, each real: the npm script did not rebuild HEAD, so a forgotten build
+    compared a fresh baseline against stale output and printed zero in every category; `--limit` typo'd to `NaN`
+    made both revisions look empty, the same false clean by another route; the query set came from HEAD's index
+    only, so a spelling that existed only in the baseline was never searched; and the "synonym table's own keys"
+    dimension was **claimed in the docs and not implemented** — 176 of 208 keys, `diett` among them, were never
+    probed. `termSynonymKeys()` is exported from the spec now and the keys are crossed with the nouns.
+  - Also fixed: `git archive ${rev}` ran through `sh -c`, which the review demonstrated as a command injection;
+    a failed build leaked one temp directory per run; `--baseline` accepted an unbuilt directory and answered
+    with a module-not-found stack.
+  - **A claim of mine was false and is withdrawn.** I wrote, in three files, that "with no score floor a result
+    set can never empty, so that count was always zero and always meaningless", and used it to condemn two
+    earlier CHANGELOG entries. Measured: **489 of the 19,840 queries return nothing on main** — a query whose
+    every term matches no operation never pushes a hit. Those entries were measuring something real; the
+    weakness was that an emptied result set is a much weaker signal than an answer pushed out of the window,
+    which is what this sweep measures instead.
+  - **One finding declined, with evidence.** A review argued the three spellings of `å` are pure duplicates
+    adding zero coverage, since the ranker folds them. True for TERM matching — and `PHRASE_SYNONYMS` matches
+    raw text *before* folding, which is exactly why #125 had to add `inngaaende` to a phrase rule. They only
+    look equivalent now because that rule covers all three. Keeping them is what would notice the next missing
+    spelling.
+  - ~69,000 queries after the added dimensions, floored well below. Six tests, including one that drives a
+    **synthetic** index so the output must be derived — the review pointed out that every other assertion was
+    satisfiable by returning a large literal array.
 
 ### Verified, nothing to change
 
