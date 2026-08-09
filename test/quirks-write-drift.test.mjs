@@ -70,29 +70,59 @@ test("every probe names a real quirk and binds to text that still predicts what 
   }
 });
 
-test("no probe touches an irreversible or transmitting operation", () => {
-  // The property that makes a write audit safe at all: if a refusal stops working, the request goes through, so
-  // success has to be harmless. Asked of the policy engine rather than of a list someone maintains.
-  const src = auditSource();
-  const calls = [...src.matchAll(/call\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"/g)].map(([, method, p]) => ({
-    method,
-    path: p.split("?")[0],
-  }));
-  assert.ok(calls.length >= 8, `only ${calls.length} calls extracted — the extraction has stopped matching`);
-
-  const unsafe = calls
-    .filter((c) => c.method !== "GET")
-    .map((c) => ({
-      ...c,
-      risk: classifyRequest(c.method, c.path),
-      transmission: classifyTransmission(c.method, c.path),
-    }))
-    .filter((c) => c.risk === "irreversible" || c.transmission === "external");
-  assert.deepEqual(
-    unsafe.map((c) => `${c.method} ${c.path} (${c.risk}, ${c.transmission})`),
-    [],
-    "a probe may only target an operation whose accidental SUCCESS would be harmless",
+test("the transmitting exclusion is enforced INSIDE call(), not by reading this file", () => {
+  // The version this replaces extracted literal method/path pairs with a regex and asked the policy engine
+  // about each. Review defeated it with two lines — a template-literal path and a path held in a variable — and
+  // delivered a transmitting POST /api/salary-payments/{id}/complete plus an uncounted POST /api/suppliers to
+  // tenant 2634 with all 996 tests green. Same failure as PR #129: a guard that reads source loses to ordinary
+  // indirection. (It was also, finally, tripped by a COMMENT describing its own regex.)
+  //
+  // So the check moved into the call, where it sees the path actually being sent. This verifies the check exists
+  // and is unconditional; the behaviour is exercised by running the audit.
+  const text = auditSource();
+  const callDecl = text.indexOf("const call = async (method, path, body) => {");
+  assert.ok(callDecl > 0, "the single request helper must be named `call`");
+  const body = text.slice(callDecl, text.indexOf("\n};", callDecl));
+  assert.match(body, /classifyRequest\(method, canonical\)/, "call() must classify the path it is about to send");
+  assert.match(body, /classifyTransmission\(method, canonical\)/);
+  assert.match(
+    body,
+    /risk === "irreversible" \|\| transmission === "external"[\s\S]{0,200}throw new Error/,
+    "an irreversible or transmitting probe must throw before the request is made",
   );
+  assert.match(body, /writePathsSent\.add\(/, "every non-GET path must be recorded for the completeness check");
+
+  // One request helper, or the classification can be routed around.
+  const fetches = [...text.matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)];
+  assert.equal(fetches.length, 1, `expected one fetch call site in the audit, found ${fetches.length}`);
+});
+
+test("both tenant guards are called with the SAME value call() sends", async () => {
+  // Review's point: the previous tests checked the guards by callee NAME. Passing literals —
+  // requireWritableTenant(2783, …) — while call() keeps using tenantId from --tenant satisfies both while every
+  // request goes elsewhere. The argument must be the identifier the header is built from.
+  const { default: ts } = await import("typescript");
+  const text = auditSource();
+  const sf = ts.createSourceFile(AUDIT, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
+  const seen = {};
+  const walk = (n) => {
+    if (ts.isCallExpression(n)) {
+      const name = n.expression.getText(sf);
+      if (name === "requireWritableTenant" || name === "requireTokenReachesTenant") {
+        seen[name] = n.arguments[0]?.getText(sf);
+      }
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  for (const guard of ["requireWritableTenant", "requireTokenReachesTenant"]) {
+    assert.equal(
+      seen[guard],
+      "tenantId",
+      `${guard} must receive \`tenantId\` — the same binding call() puts in X-Tenant-Id — not ${seen[guard]}`,
+    );
+  }
+  assert.match(text, /"X-Tenant-Id": String\(tenantId\)/);
 });
 
 test("an unexpected success is a SAFETY outcome, not drift, and fails the run", () => {
@@ -110,32 +140,28 @@ test("an unexpected success is a SAFETY outcome, not drift, and fails the run", 
   assert.match(src, /Treat as an incident/);
 });
 
-test("record counts are snapshotted before and after, and any change fails the run", () => {
+test("the count check cannot be filtered, saturated or silently skipped", () => {
   const src = auditSource();
   assert.match(src, /const before = await snapshot\(\)/);
   assert.match(src, /const after = await snapshot\(\)/);
   assert.match(src, /RECORD COUNTS CHANGED/, "a count change must be reported as a leak");
-  assert.match(
-    src,
-    /moved\.length > 0[\s\S]{0,400}process\.exit\(1\)/,
-    "a count change must fail the run, not warn",
-  );
-  // The collections a probe could add to must all be watched. A probe against /api/products with no matching
-  // snapshot entry is a leak nobody would see.
-  const watched = [...(/const WATCHED = \[([\s\S]*?)\]/.exec(src)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(
-    ([, v]) => v.split("?")[0],
-  );
-  const posted = [...src.matchAll(/call\(\s*"POST"\s*,\s*"(\/api\/[^"?]+)"/g)].map(([, p]) => p);
-  for (const p of new Set(posted)) {
-    // A POST to a sub-resource or a nonexistent route cannot add a row to a watched collection; a POST to a
-    // collection itself can, and that collection must be counted.
-    const isCollection = /^\/api\/[a-z-]+$/.test(p);
-    if (!isCollection) continue;
-    assert.ok(
-      watched.includes(p),
-      `the audit POSTs to ${p} but does not snapshot it, so a probe that succeeded there would be invisible`,
-    );
-  }
+  assert.match(src, /moved\.length > 0[\s\S]{0,400}process\.exit\(1\)/, "a count change must fail the run");
+
+  // Review kept the required wide-date-range string in a COMMENT and set the orders entry to ?status=closed,
+  // which returns 0 permanently — the run then printed "nothing was created" while an order sat outside the
+  // filter. A test asserting a string appears somewhere in the file is what allowed that, so the rule is now
+  // enforced at runtime over the actual WATCHED array.
+  assert.match(src, /const COUNT_SAFE_PARAMS = new Set\(/, "WATCHED entries must be validated at runtime");
+  assert.match(src, /filters on \$\{key\}/, "a filtering WATCHED entry must stop the run");
+  assert.match(src, /saturates and hides changes/, "a small pageSize must stop the run");
+
+  // An unreadable collection means the check did not happen.
+  assert.match(src, /Cannot count \$\{path\}: HTTP/, "a non-200 snapshot must throw, not be recorded as a string");
+  assert.match(src, /neither an array nor a page object/, "an unrecognised body shape must throw");
+
+  // Completeness derived from what was SENT, not from a regex over the source.
+  assert.match(src, /which the snapshot does not count/, "a write to an uncounted collection must fail the run");
+  assert.match(src, /\[\.\.\.writePathsSent\]/);
 });
 
 test("the audit goes through the tenant guard, at the top level, before any request", async () => {
@@ -258,4 +284,30 @@ test("a claim that needs a successful write is declared unverified, not quietly 
     /NOT verified here/,
     "the unprobed half of the claim must be named in the case's own output",
   );
+});
+
+test("every case declares what it probes, so the report can say what it does not cover", () => {
+  // The read-only audit FAILS the build unless a case covers every path its quirk is served on. This one cannot
+  // reach that bar — several of these quirks are served on PUT and on paths needing a fixture — so the honest
+  // substitute is disclosure. Review was right that "five verified exactly as written" overstated things: the
+  // sentence a note leads with is often not the one probed. Every case declares `probes`, the run prints the
+  // declared paths it does not reach, and a case leaving a headline claim unverified must name it.
+  const byId = new Map(QUIRKS.map((q) => [q.id, q]));
+  for (const c of auditCases()) {
+    const probes = [...(/probes:\s*\[([\s\S]*?)\]/.exec(c.chunk)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(
+      ([, v]) => v,
+    );
+    assert.ok(probes.length > 0, `${c.quirk} declares no probes, so the report cannot say what it misses`);
+    const q = byId.get(c.quirk);
+    for (const p of probes) {
+      assert.ok(q.paths.includes(p), `${c.quirk} declares probing ${p}, which its quirk is not served on`);
+    }
+    if (q.paths.some((p) => !probes.includes(p))) {
+      assert.match(
+        c.chunk,
+        /(^|[^A-Za-z])unprobedClaims:/m,
+        `${c.quirk} does not probe every path its quirk declares, so it must name what is left uncovered`,
+      );
+    }
+  }
 });

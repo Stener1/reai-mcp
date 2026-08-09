@@ -48,6 +48,11 @@ import {
   requireWritableTenant,
 } from "./lib/write-guard.mjs";
 
+// The policy engine the server enforces with, used to classify each probe as it is sent.
+const { classifyRequest, classifyTransmission } = await import(
+  pathToFileURL(join(process.cwd(), "dist/policy.js")).href
+);
+
 const args = process.argv.slice(2);
 const at = (flag) => {
   const i = args.indexOf(flag);
@@ -77,7 +82,33 @@ installProtectedTenantFetchGuard();
 // reintroduced one file later by forgetting a line.
 await requireTokenReachesTenant(tenantId, { token, baseUrl });
 
+/**
+ * Every non-GET path this run actually sent, canonicalised. The safety rules are checked HERE, at the moment of
+ * sending, rather than by a test reading this file's source.
+ *
+ * Review defeated the source-reading version with two lines: a template-literal path
+ * (`` `/api/salary-payments/${id}/complete` ``) and a path held in a variable were invisible to the regex that
+ * extracted literal method/path pairs from this file — so a transmitting probe and an uncounted `POST /api/suppliers`
+ * were delivered to tenant 2634 with all 996 tests green. That is the same failure mode PR #129 spent three
+ * rounds on: a guard that reads source loses to ordinary indirection. So the guard moved into the call.
+ */
+const writePathsSent = new Set();
+
 const call = async (method, path, body) => {
+  const canonical = path.split("?")[0];
+  if (method !== "GET") {
+    // Rule 1, enforced rather than asserted: a probe is only safe if accidental SUCCESS would be harmless.
+    const risk = classifyRequest(method, canonical);
+    const transmission = classifyTransmission(method, canonical);
+    if (risk === "irreversible" || transmission === "external") {
+      throw new Error(
+        `Refusing to probe ${method} ${canonical}: classified ${risk}/${transmission}. This audit only sends ` +
+          `requests whose accidental success would be harmless, and a refusal that stops working means the ` +
+          `request goes through.`,
+      );
+    }
+    writePathsSent.add(`${method} ${canonical}`);
+  }
   const res = await fetch(baseUrl + path, {
     method,
     headers: {
@@ -121,14 +152,59 @@ const WATCHED = [
   "/api/orders?startDate=2000-01-01&endDate=2099-12-31",
   "/api/customers",
   "/api/employees",
-  "/api/leads?leadFilter=saved&pageSize=1",
+  // pageSize large enough not to saturate. At pageSize=1 this entry is a constant on any tenant that already
+  // has a saved lead — the same masking the order entry was just fixed for, one line below it.
+  "/api/leads?leadFilter=saved&pageSize=200",
 ];
+
+/**
+ * Only date bounds and page size may appear in a WATCHED entry.
+ *
+ * The count check is the backstop for every probe, so an entry that filters is an entry that lies. Review kept
+ * the required wide-date-range string in a comment and set the orders entry to `?status=closed`, which returns 0
+ * on this tenant permanently — the run then printed "Record counts unchanged … so nothing was created" while
+ * any created order sat outside the filter. Checked here rather than in a test, because a test asserting that a
+ * string appears SOMEWHERE in the file is what let that through.
+ */
+const COUNT_SAFE_PARAMS = new Set(["startDate", "endDate", "pageSize", "leadFilter", "archived"]);
+for (const entry of WATCHED) {
+  const query = entry.split("?")[1] ?? "";
+  for (const pair of query.split("&").filter(Boolean)) {
+    const key = pair.split("=")[0];
+    if (!COUNT_SAFE_PARAMS.has(key)) {
+      console.error(
+        `WATCHED entry "${entry}" filters on ${key}, so its count could stay constant while a probe creates a ` +
+          `record. Only ${[...COUNT_SAFE_PARAMS].join(", ")} may appear.`,
+      );
+      process.exit(2);
+    }
+  }
+  if (/pageSize=(\d+)/.test(query) && Number(/pageSize=(\d+)/.exec(query)[1]) < 50) {
+    console.error(`WATCHED entry "${entry}" has a small pageSize, which saturates and hides changes.`);
+    process.exit(2);
+  }
+}
 
 async function snapshot() {
   const counts = {};
   for (const path of WATCHED) {
     const r = await call("GET", path);
-    counts[path] = r.status === 200 ? rowsOf(r).length : `HTTP ${r.status}`;
+    // A non-200 used to be recorded as the string "HTTP 403" and compared with itself, so a collection whose GET
+    // started failing — a gated module, say — was silently unwatched while the summary still said "unchanged
+    // across 6 collections, so nothing was created". An unreadable collection means the check did not happen.
+    if (r.status !== 200) {
+      throw new Error(
+        `Cannot count ${path}: HTTP ${r.status}. The before/after check is what makes this audit safe, so a ` +
+          `collection that cannot be read is a stop, not a footnote.`,
+      );
+    }
+    if (!Array.isArray(r.body) && !Array.isArray(r.body?.items)) {
+      throw new Error(
+        `Cannot count ${path}: the response is neither an array nor a page object (keys: ` +
+          `${Object.keys(r.body ?? {}).join(", ") || "none"}). rowsOf would return [] and mask any change.`,
+      );
+    }
+    counts[path] = rowsOf(r).length;
   }
   return counts;
 }
@@ -148,6 +224,7 @@ function requiredFor(path) {
 const CASES = [
   {
     quirk: "stock-product-needs-a-variant",
+    probes: ["/api/products"],
     claim: "a stock product with no variants is refused, naming the synthetic validation field",
     marker: "Stock products must contain at least one variant",
     async check() {
@@ -165,6 +242,10 @@ const CASES = [
   },
   {
     quirk: "offer-lines-stricter",
+    probes: ["/api/offers"],
+    unprobedClaims:
+      "that vatCode is OPTIONAL on an order line — showing it needs a line that SUCCEEDS, which would create " +
+      "an order; measured by hand while scoping (itemName only -> 201, order deleted)",
     claim: "an offer line requires itemName AND vatCode; an order line requires itemName but not vatCode",
     marker: "itemName is NOT: an order line without it is refused",
     async check() {
@@ -232,6 +313,11 @@ const CASES = [
   },
   {
     quirk: "brreg-lookup-requires-and-overwrites-name",
+    probes: ["/api/customers"],
+    unprobedClaims:
+      "that the address is filled from organizationNumber and the name you send is DISCARDED (stored as " +
+      "the registry's own name) " +
+      "— both need a successful create, which audit-storage.mjs covers",
     claim: "a blank name is refused even alongside a valid organizationNumber",
     marker: 'A blank name is refused with "name is required"',
     async check() {
@@ -248,6 +334,10 @@ const CASES = [
   },
   {
     quirk: "lead-convert-is-addressable-by-id-only",
+    probes: ["/api/leads/{id}/convert"],
+    unprobedClaims:
+      "that converting is idempotent and the response body is the company record rather than the customer — " +
+      "both need a saved lead and a successful convert",
     claim: "the /org/{orgNumber} form of convert does not exist and answers 404 No static resource",
     marker: "the org form answers 404",
     async check() {
@@ -264,6 +354,10 @@ const CASES = [
   },
   {
     quirk: "days-until-due-mandatory",
+    probes: ["/api/orders", "/api/offers"],
+    unprobedClaims:
+      "the headline claim that whatever you send OVERRIDES the customer\u2019s payment terms — that needs a " +
+      "successful create and a read-back",
     claim: "daysUntilDue is declared required on both offers and orders, and omitting it is refused",
     marker: 'it answers a bare 400 "Failed to read request", with no fieldErrors',
     async check() {
@@ -320,6 +414,10 @@ const CASES = [
   },
   {
     quirk: "line-vat-code-subset",
+    probes: ["/api/orders"],
+    unprobedClaims:
+      "that SUBSCRIPTION lines are checked against the same list, and that OFFER lines are NOT — an offer can " +
+      "store a code that fails later; both need a successful create",
     claim: "an order line's vatCode must be one of the tenant's own codes, and the refusal lists them",
     marker: 'a purchase-side code is rejected with "Mva-kode N er ikke tillatt',
     async check() {
@@ -395,7 +493,7 @@ function today() {
 
 async function main() {
   const { QUIRKS } = await import(pathToFileURL(join(process.cwd(), "dist/reai/quirks.js")).href);
-  const known = new Set(QUIRKS.map((q) => q.id));
+  const known = new Map(QUIRKS.map((q) => [q.id, q]));
   const unknown = CASES.map((c) => c.quirk).filter((id) => !known.has(id));
   if (unknown.length > 0) {
     console.error(`These cases name quirks that no longer exist: ${unknown.join(", ")}`);
@@ -404,6 +502,22 @@ async function main() {
 
   console.log(`Checking ${CASES.length} refusal claims against tenant ${tenantId}.`);
   console.log("Every probe is built to FAIL: a refused write creates nothing.\n");
+
+  // What each case does NOT cover, printed rather than left for someone to reconstruct. The read-only audit
+  // fails the build unless a case covers every path its quirk is served on; this one cannot reach that bar —
+  // several of these quirks are served on PUT and on paths whose probe would need a fixture — so the honest
+  // substitute is disclosure. Review was right that "five verified exactly as written" overstated it: the
+  // sentences these notes lead with are often not the ones probed.
+  for (const c of CASES) {
+    const q = known.get(c.quirk);
+    const probed = new Set([...(c.probes ?? [])]);
+    const unprobed = q.paths.filter((p) => !probed.has(p));
+    if (unprobed.length > 0) {
+      console.log(`  ${c.quirk}: served on ${q.paths.length} path(s); NOT probed on ${unprobed.join(", ")}`);
+    }
+    if (c.unprobedClaims) console.log(`  ${c.quirk}: claim not covered — ${c.unprobedClaims}`);
+  }
+  console.log("");
 
   const before = await snapshot();
   const tally = { ok: 0, drift: 0, inconclusive: 0, conditional: 0, safety: 0 };
@@ -435,6 +549,21 @@ async function main() {
 
   // The invariant that makes this file safe. Not "I believe the probes were refused" — check.
   const after = await snapshot();
+
+  // Completeness, from what was SENT rather than from a regex over this file. A probe that added a row to a
+  // collection nothing counted would otherwise be invisible — review reached `POST /api/suppliers` that way.
+  const watchedCollections = new Set(WATCHED.map((p) => p.split("?")[0]));
+  const uncounted = [...writePathsSent]
+    .map((entry) => entry.split(" ")[1])
+    .filter((p) => /^\/api\/[a-z-]+$/.test(p) && !watchedCollections.has(p));
+  if (uncounted.length > 0) {
+    console.log(
+      `\nA probe wrote to ${[...new Set(uncounted)].join(", ")}, which the snapshot does not count, so a ` +
+        `record created there would be invisible. Add it to WATCHED.`,
+    );
+    process.exit(1);
+  }
+
   const moved = Object.keys(before).filter((k) => before[k] !== after[k]);
   console.log(
     `\n${tally.ok} unchanged, ${tally.drift} drifted, ${tally.safety} SAFETY, ` +

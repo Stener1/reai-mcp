@@ -60,6 +60,44 @@ All notable changes to `reai-mcp`. Format loosely follows
     without a write that SUCCEEDS, so it is declared unverified in the case's own output rather than folded into
     an OK, and a test requires that. And the CHANGELOG credited the `days-until-due-mandatory` note with
     documenting the bare `"Failed to read request"` when the note never mentioned it; the note now does.
+  - **An independent review then delivered a transmitting write to tenant 2634 with all 996 tests green**, and
+    its verdict is the one worth recording: *"the file is safe today because its author wrote it carefully, which
+    is the property the tests were supposed to replace."* Both safety rules were implemented as regexes over
+    literal call sites, so a template-literal path (`` `/api/salary-payments/${id}/complete` ``) and a path held
+    in a variable walked past both the transmitting exclusion and the count-completeness check. Same failure as
+    PR #129, one file later.
+    - **The exclusion moved into `call()`**, where it classifies the path actually being sent and throws before
+      the request is made. Verified: the exploit now dies with *"Refusing to probe POST
+      /api/salary-payments/12/complete: classified irreversible/external"*.
+    - **Count completeness is derived from what was SENT**, not from the source. The uncounted
+      `POST /api/suppliers` now fails the run: *"A probe wrote to /api/suppliers, which the snapshot does not
+      count."*
+    - **`installProtectedTenantFetchGuard` was header-spelling-blind** — a real bug in #130's merged code. It
+      tried `headers[k]` then `headers[k.toLowerCase()]`, so `X-Tenant-Id` and `x-tenant-id` were refused while
+      **`X-TENANT-ID` reached the socket**; HTTP header names are case-insensitive. Now normalised, and a
+      `Headers` object is handled too. All four spellings verified refused.
+    - **Both tenant guards were checked by callee NAME, not argument**, so passing a literal while `call()` used
+      `tenantId` satisfied them while every request went elsewhere. The test now requires the argument to be
+      `tenantId`, the same binding the `X-Tenant-Id` header is built from.
+    - **The count check was filterable and saturable.** `?status=closed` returns 0 on this tenant permanently, and
+      the date-window test only asserted a string appeared *somewhere in the file* — review kept it in a comment.
+      WATCHED entries are now validated at runtime: only date bounds, page size, `leadFilter` and `archived` may
+      appear, and a `pageSize` under 50 is refused. Both verified firing live. The leads entry was itself
+      saturating at `pageSize=1`.
+    - **A non-200 snapshot was recorded as the string `HTTP 403` and compared with itself**, so a collection whose
+      GET started failing was silently unwatched while the run still said "nothing was created". It throws now,
+      as does an unrecognised body shape.
+    - **"Five verified exactly as written" overstated it**, and the unprobed sentences are the actionable ones —
+      that `daysUntilDue` OVERRIDES the customer's terms, that the brreg name is discarded, that convert is
+      idempotent, that subscription lines share the VAT list while offer lines do not. Each case now declares
+      `probes` and `unprobedClaims`, and the run **prints what it does not cover** before any result. A test
+      requires the disclosure whenever a case does not reach every path its quirk is served on.
+    - Numbers: **100** quirks without a live case, not 104 — and not the 97 I first corrected it to, which
+      over-counted by substring-matching ids merely mentioned in comments. **998** tests, not 992. The "~23"
+      figure is withdrawn: review could not reproduce it under any definition and neither can I. And this is the
+      **second** documented appearance of the valid-except-for-the-field-under-test trap, not the fourth — three
+      rounds inside one PR is one appearance.
+
 
 - **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
   guard instead of trusting it, before starting work that writes.
