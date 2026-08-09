@@ -544,6 +544,9 @@ const adjustInventory = defineTool({
       transactionId?: number;
       quantityOnHand?: number;
       variantId?: number | null;
+      productId?: number | null;
+      warehouseId?: number | null;
+      quantityChange?: number | null;
     }>({
       method: "POST",
       path: "/api/warehouses/inventory/adjust",
@@ -552,11 +555,40 @@ const adjustInventory = defineTool({
     });
 
     const after = res.data?.quantityOnHand;
+    // WHICH product, variant and warehouse the movement landed on, from the response. This tool stated all four
+    // figures from `args` — the identifiers AND the quantity — while it is declared irreversible and its own
+    // note two paragraphs down says the movement cannot be deleted. A stock movement attributed to the wrong
+    // variant is found by a stock count, not by re-reading this note.
+    //
+    // Found by driving every candidate against a contradicting response, but only after the sweep stopped
+    // sampling integers as a single digit: every integer field in the repo had been dropped as "too short to
+    // find in prose", which is exactly the set these four are in.
+    const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+    const shown = {
+      productId: num(res.data?.productId) ?? args.productId,
+      variantId: num(res.data?.variantId) ?? args.variantId,
+      warehouseId: num(res.data?.warehouseId) ?? args.warehouseId,
+      quantityChange: num(res.data?.quantityChange) ?? args.quantityChange,
+    };
+    const fromRecord =
+      num(res.data?.productId) !== undefined &&
+      num(res.data?.variantId) !== undefined &&
+      num(res.data?.warehouseId) !== undefined &&
+      num(res.data?.quantityChange) !== undefined;
     const parts = [
-      `Adjusted product ${args.productId} variant ${args.variantId} in warehouse ` +
-        `${args.warehouseId} by ${args.quantityChange > 0 ? "+" : ""}${args.quantityChange}` +
+      `Adjusted product ${shown.productId} variant ${shown.variantId} in warehouse ` +
+        `${shown.warehouseId} by ${shown.quantityChange > 0 ? "+" : ""}${shown.quantityChange}` +
         `${after === undefined ? "" : `; ${after} now on hand`}` +
-        `${res.data?.transactionId ? ` (transaction ${res.data.transactionId})` : ""}.`,
+        `${res.data?.transactionId ? ` (transaction ${res.data.transactionId})` : ""}` +
+        `${fromRecord ? `, read back from the response` : `, as SENT — the response does not identify the movement, so read the stock back with reai_get_warehouse_inventory`}.`,
+      ...describeConfirmation(
+        confirmAgainstResponse(
+          { productId: args.productId, variantId: args.variantId, warehouseId: args.warehouseId, quantityChange: args.quantityChange },
+          res.data,
+          { wholeRecord: true },
+        ),
+        `this movement`,
+      ),
     ];
 
     // The detector that needs nothing from the pre-read: the API echoes the variant it acted

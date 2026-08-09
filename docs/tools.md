@@ -387,7 +387,7 @@ Two populations, both derived rather than listed by hand, and both enforced by
 | population | how it is found | state |
 |---|---|---|
 | read-merge-write | declares a `GET` **and** a `PUT`/`PATCH` | 13 tools, 11 certified against the response, 2 recorded as unverified with the reason |
-| not a merge tool | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts, at ANY depth | 47 tools, 7 proven, 3 **not examined** |
+| not a merge tool | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts, at ANY depth | 47 tools, 7 proven, 5 the sweep cannot drive |
 
 The second row is the blind spot that let tools echo their arguments through five rediscoveries. Three refinements
 were each forced by a tool that escaped:
@@ -409,7 +409,7 @@ is driven with arguments built from its own schema against a response whose fiel
 and the note is read. Three outcomes — it states the stored value (good), it states the sent one (a defect), or
 it mentions neither (no claim to be wrong about).
 
-That found five tools echoing their arguments, all of which had been sitting on the list:
+That found **ten** tools echoing their arguments, all of which had been sitting on the list:
 `reai_create_asset` (irreversible, and the field was the balance-sheet account carrying the asset),
 `reai_create_warehouse` (whose own description says names are not unique, so the wrong name leaves a caller
 unable to tell which of two they just made) and the three manual-reconciliation tools —
@@ -418,9 +418,21 @@ all irreversible, in the one family where this repo already documents the API ha
 month is in play (`"Godkjenning er kun tilgjengelig for 2026-07."`). A note reading "2026-08 is closed for this
 account" when the record says otherwise is a lock an agent will believe it holds.
 
-The last three were found only after the sweep was **scoped to the headline**. Reading the whole note let a tool
-assert the sent value in its first sentence while a confirmation paragraph below mentioned the stored one — and
-the sweep called that fine. A mutation battery caught that, not a review.
+— plus `reai_adjust_inventory` (irreversible, and it stated all four of product, variant, warehouse and quantity
+from the request, on a movement its own note says cannot be deleted), `reai_create_order` and
+`reai_create_offer` (the payment terms — a money figure), `reai_create_invoice_from_order` (the invoice date,
+which decides the accounting period) and `reai_create_supplier_invoice` (whether the document is an invoice or a
+credit note — opposite signs in the ledger).
+
+**Each of those five was found by fixing the sweep, not by running it.** In order: reading the whole note instead
+of the headline let a tool assert the sent value in its first sentence while a confirmation paragraph below
+mentioned the stored one; sampling integers as `7` made every integer field in the repo too short to find in
+prose; sampling every field to the SAME value flagged whole groups at once and buried the real hits in
+artifacts; and skipping optional fields meant seven update tools were driven while being judged on nothing. A
+green sweep is only as good as its samples.
+
+**What it still cannot see**, named rather than implied: a value the note RENDERS rather than prints (nine enum
+fields, listed in the test), a value it reformats, and five tools whose arguments it cannot construct.
 
 What is left on the list is the residue the sweep genuinely cannot construct arguments for — 3 tools, named
 rather than counted. **What the sweep cannot see:** a note that RE-FORMATS the value it echoes reads as "mentions

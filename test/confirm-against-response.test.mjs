@@ -453,6 +453,16 @@ const NOT_ESTABLISHED = [
   "reai_create_agreement",
   "reai_create_subscription",
   "reai_create_voucher",
+  // These two are reachable with REQUIRED fields only, and became unreachable when the sampler started also
+  // supplying the optional fields the response can answer for. That change is worth its cost — it is what made
+  // seven update tools measurable at all instead of being driven and judged on nothing — but it is a trade, not
+  // a free win, and these are the two tools it cost. Both refuse a combination the sampler now produces
+  // (mutually exclusive arguments), which is the tool behaving correctly.
+  //
+  // The fix is to drive each tool twice, required-only and optionals-unwrapped, and take the union. Not done
+  // here: it restructures the loop, and naming the gap is better than a half-done version of the fix.
+  "reai_create_customer_contact",
+  "reai_register_supplier_invoice_payment",
 ];
 test("a write tool whose response could answer for it is classified, GET or no GET", async () => {
   const { readFileSync, existsSync } = await import("node:fs");
@@ -555,9 +565,12 @@ test("a write tool whose response could answer for it is classified, GET or no G
   const doc = readFileSync(join(repo, "docs", "tools.md"), "utf8");
   const proven = Object.keys(READS_BACK_FROM_RESPONSE).length;
   assert.ok(
-    doc.includes(`${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} **not examined**`),
-    `docs/tools.md must say "${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} ` +
-      `**not examined**" for this census; update it when the population moves`,
+    doc.includes(
+      `${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} the sweep cannot drive`,
+    ),
+    `docs/tools.md must say "${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} the ` +
+      `sweep cannot drive" for this census. The phrasing matters: these are not tools nobody examined, they ` +
+      `are tools the sweep cannot construct arguments for, which is a narrower and more honest claim.`,
   );
 
   // What this can and cannot check, stated honestly, because the version of this comment on the merge-tool
@@ -625,6 +638,13 @@ test("a write tool whose response could answer for it is classified, GET or no G
   }
 });
 
+/** A stable per-field number, so every field's sample is distinct and the same on every run. */
+function hashOf(key) {
+  let h = 0;
+  for (const ch of String(key)) h = (h * 31 + ch.charCodeAt(0)) % 100000;
+  return h;
+}
+
 /**
  * Did this headline state the sent value as fact?
  *
@@ -636,11 +656,23 @@ test("a write tool whose response could answer for it is classified, GET or no G
  * reverting `reai_create_asset` to echo its account number survived exactly that way.
  */
 function judgeHeadline(headline, note, sentValue, storedValue) {
-  // "as SENT", "not what is stored", "unconfirmed" — the wording this repo uses when it declines to vouch for a
-  // figure. A headline carrying one of those is not asserting the value, it is flagging it.
-  const hedged = /\bSENT\b|not what is stored|unconfirmed|could not/.test(headline);
-  if (headline.includes(sentValue) && !headline.includes(storedValue) && !hedged) return "echo";
-  if (note.includes(storedValue)) return "read";
+  // Both verdicts read the HEADLINE. Judging "read" on the whole note was the asymmetry that let the three
+  // reconciliation fixes be reverted with the sweep still green: the headline quoted the request, and the
+  // `describeConfirmation` WARNING paragraph underneath — which names the stored value precisely BECAUSE the
+  // write disagreed — then scored the field as a read-back. So a note falsely claiming the response carried
+  // nothing while quoting the request was invisible, and the `reads` floor was satisfied by the warning.
+  // Whole-token matching in both directions. A substring test reported `documentType: "invoice"` as echoed
+  // because the word appears in "Supplier invoice registered" — a claim about a field the note never mentions.
+  const mentions = (text, value) =>
+    new RegExp(`(^|[^A-Za-z0-9_])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`).test(text);
+  if (mentions(headline, storedValue)) return "read";
+  // "as SENT", "not what is stored", "unconfirmed" — the wording this repo uses when it declines to vouch for
+  // a figure. Anchored to the value, not the whole headline: a headline can hedge one field and assert another
+  // in the same sentence, which reai_create_sub_account did.
+  const hedgedNearby = new RegExp(
+    `${sentValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^.]{0,80}?(\\bSENT\\b|not what is stored|unconfirmed|could not)`,
+  ).test(headline);
+  if (mentions(headline, sentValue) && !hedgedNearby) return "echo";
   return "neither";
 }
 
@@ -739,17 +771,29 @@ test("no candidate tool states a sent value the response contradicted", async ()
     return [...hits];
   };
 
-  const pick = (schema, key, depth = 0) => {
+  const pick = (schema, key, depth = 0, unwrapOptional = false) => {
     const def = schema?._def;
     if (!def || depth > 4) return { skip: true };
     const kind = def.typeName;
-    if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") return { optional: true };
+    if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") {
+      return unwrapOptional ? pick(def.innerType, key, depth + 1, true) : { optional: true };
+    }
     if (kind === "ZodEffects") return pick(def.schema, key, depth + 1);
-    if (kind === "ZodEnum") return { value: def.values[0] };
-    if (kind === "ZodNativeEnum") return { value: Object.values(def.values)[0] };
-    if (kind === "ZodLiteral") return { value: def.value };
+    if (kind === "ZodEnum") return { value: def.values[0], rendered: true };
+    if (kind === "ZodNativeEnum") return { value: Object.values(def.values)[0], rendered: true };
+    if (kind === "ZodLiteral") return { value: def.value, rendered: true };
     if (kind === "ZodBoolean") return { value: false };
-    if (kind === "ZodNumber") return { value: (def.checks ?? []).some((c) => c.kind === "int") ? 7 : 7.5 };
+    if (kind === "ZodNumber") {
+      // Multi-digit AND distinct per field. Sampling every integer as `7` made them all invisible (a
+      // one-character value is dropped by the "too short to find in prose" guard below, which hid
+      // `reai_adjust_inventory` asserting four contradicted values irreversibly). Sampling them all as the SAME
+      // multi-digit number then flagged every integer field a tool accepts whenever it echoed one of them —
+      // most of that run's hits were the artifact, not the defect.
+      const int = (def.checks ?? []).some((c) => c.kind === "int");
+      const min = (def.checks ?? []).find((c) => c.kind === "min")?.value;
+      const base = 200000 + (hashOf(key) % 90000) * (int ? 1 : 1) + (int ? 0 : 0.5);
+      return { value: typeof min === "number" && min > base ? min + 1 : base };
+    }
     if (kind === "ZodString") {
       const checks = def.checks ?? [];
       const pattern = checks.find((c) => c.kind === "regex")?.regex;
@@ -758,9 +802,12 @@ test("no candidate tool states a sent value the response contradicted", async ()
           if (pattern.test(c)) return { value: c };
         return { skip: true };
       }
-      if (/date/i.test(key)) return { value: "2026-08-09" };
+        if (/date/i.test(key)) return { value: "2026-08-09" };
       const max = checks.find((c) => c.kind === "max")?.value ?? 40;
-      return { value: "ZZ probe".slice(0, Math.max(2, Math.min(max, 40))) };
+      // Distinct per field, and deliberately not a word that occurs in prose. `"ZZ probe"` for everything meant
+      // one echoed string flagged every string field; an ENUM sampled as `"invoice"` matched the word in
+      // "Supplier invoice registered" and was reported as an echo of a field the note never mentioned.
+      return { value: `ZZQ${hashOf(key).toString(36).toUpperCase()}`.slice(0, Math.max(3, Math.min(max, 40))) };
     }
     if (kind === "ZodArray") {
       const inner = pick(def.type, key, depth + 1);
@@ -789,6 +836,7 @@ test("no candidate tool states a sent value the response contradicted", async ()
 
   const echoes = [];
   const reads = [];
+  const unmeasurable = [];
   const undrivable = [];
   for (const name of CANDIDATES) {
     // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
@@ -804,13 +852,21 @@ test("no candidate tool states a sent value the response contradicted", async ()
     if (Object.hasOwn(READS_BACK_FROM_RESPONSE, name)) continue;
     const tool = registeredTools.find((t) => t.name === name);
     const args = { tenantId: 2783 };
+    const rendered = new Set();
     let blocked = false;
+    // Optional fields the RESPONSE can answer for are supplied too. Skipping every optional field meant seven
+    // update tools — reai_update_customer, _customer_contact, _employee, _expense, _supplier,
+    // reai_create_invoice_from_order, reai_register_supplier_invoice_payment — were "driven" while being
+    // measured on zero fields, because everything they accept is optional. A sweep that runs a tool and judges
+    // nothing is the silent-skip failure in its purest form.
+    const answerable = new Set(overlapOf(tool));
     for (const [key, schema] of Object.entries(tool.inputSchema ?? {})) {
       if (key === "tenantId") continue;
-      const r = pick(schema, key);
+      const r = pick(schema, key, 0, answerable.has(key));
       if (r.optional) continue;
       if (r.skip) { blocked = true; break; }
       args[key] = r.value;
+      if (r.rendered) rendered.add(key);
     }
     const parsed = blocked ? undefined : z.object(tool.inputSchema ?? {}).safeParse(args);
     if (!parsed?.success) { undrivable.push(name); continue; }
@@ -821,8 +877,16 @@ test("no candidate tool states a sent value the response contradicted", async ()
       const value = parsed.data[field];
       if (value === undefined || value === null) continue;
       sent.set(field, value);
+      // A DISTINCT sentinel per field. One shared literal meant that a tool naming any single stored value in
+      // its headline satisfied `!headline.includes(storedValue)` for every other field at once — so a tool
+      // reading back one field was immune to echo detection on all the rest.
+      const nth = sent.size;
       record[field] =
-        typeof value === "number" ? 999777 : typeof value === "boolean" ? !value : "SENTINEL_STORED";
+        typeof value === "number"
+          ? 900000 + nth
+          : typeof value === "boolean"
+            ? !value
+            : `STORED_${field.toUpperCase()}_${nth}`;
     }
     let note = "";
     try {
@@ -853,6 +917,15 @@ test("no candidate tool states a sent value the response contradicted", async ()
     for (const [field, value] of sent) {
       const asSent = String(value);
       if (asSent.length < 2) continue; // too short to find reliably in prose
+      if (rendered.has(field)) {
+        // An enum or literal. Its value is a WORD, and a note may legitimately print a label derived from it —
+        // `reai_create_supplier_invoice` renders anything that is not `credit_note` as "invoice", so the sent
+        // member and the sentinel produce the SAME headline and this sweep cannot tell a read-back from an
+        // echo. Reported as unmeasurable rather than flagged: the first version raised it as an echo against a
+        // tool that had just been fixed to read from the response.
+        unmeasurable.push(`${name}.${field}`);
+        continue;
+      }
       const verdict = judgeHeadline(headline, note, asSent, String(record[field]));
       if (verdict === "echo") echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`);
       else if (verdict === "read") reads.push(`${name}.${field}`);
@@ -870,6 +943,29 @@ test("no candidate tool states a sent value the response contradicted", async ()
     reads.length >= 10,
     `only ${reads.length} field(s) were seen reported FROM the response; that number should not fall. If a ` +
       `tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+  );
+  // Named, not counted away. A rendered value is a real hole in this sweep — the tool could echo and look
+  // identical — so each one is either covered by a hand-written test or it is not covered at all.
+  assert.deepEqual(
+    [...new Set(unmeasurable)].sort(),
+    [
+      // MEASURED. Nine enum fields across five tools, all with the same property: their value is a word, and a
+      // note may print a label derived from it rather than the value itself. Of these, only
+      // `reai_create_supplier_invoice.documentType` has been looked at by hand — it was echoing, and now reads
+      // the kind back from the response, which matters because the two kinds are opposite signs in the ledger.
+      // The other eight are NOT covered by anything. That is the honest state of this hole.
+      "reai_add_share_investment_event.eventType",
+      "reai_create_asset.depreciationMethod",
+      "reai_create_loan.dayCountConvention",
+      "reai_create_loan.interestTreatment",
+      "reai_create_loan.loanType",
+      "reai_create_loan.perspective",
+      "reai_create_loan.repaymentType",
+      "reai_create_share_investment.instrumentType",
+      "reai_create_supplier_invoice.documentType",
+    ],
+    `the set of fields this sweep cannot measure because their value is a word a note may RENDER has changed. ` +
+      `Each needs a hand-written test or an explicit decision: ${[...new Set(unmeasurable)].join(", ")}`,
   );
   assert.deepEqual(
     undrivable.sort(),

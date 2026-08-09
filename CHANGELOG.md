@@ -35,6 +35,35 @@ All notable changes to `reai-mcp`. Format loosely follows
   - **And the verdict function had no positive control**, so setting its hedge branch to a constant `true`
     disarmed the whole sweep with every other check green. It is extracted and tested directly now, on five
     cases including the whole-note one that survived before.
+- **Review found the sweep's green result was an artifact of its own samples, and five more echoes behind it —
+  three irreversible.** Every one was found by fixing the sweep, not by running it, which is the finding that
+  matters more than the individual tools.
+  - **It read the whole note, not the headline.** A tool could assert the sent value in its first sentence while
+    a `describeConfirmation` paragraph below named the stored one, and this counted as a read-back. Reverting
+    `reai_create_asset` to an echo survived. (Caught by my own mutation battery.)
+  - **It sampled integers as `7`,** which the "too short to find in prose" guard then dropped — so **every
+    integer field in the repo was invisible**. That hid `reai_adjust_inventory` stating all four of product,
+    variant, warehouse and quantity from the request, on a movement its own note says cannot be deleted.
+  - **It sampled every field to the SAME value,** so one echoed integer flagged every integer field a tool
+    accepts. The first run after the integer fix reported 14 fields; 10 were that artifact.
+  - **It skipped optional fields,** so seven update tools were driven while being judged on **nothing**.
+  - **`reads` was judged on the whole note while `echo` was judged on the headline.** That asymmetry meant
+    reverting all three reconciliation fixes left the sweep green: the WARNING paragraph — which names the
+    stored value precisely BECAUSE the write disagreed — scored the field as a read-back.
+  - The five further echoes: `reai_adjust_inventory` (above), `reai_create_order` and `reai_create_offer` (the
+    payment terms, a money figure), `reai_create_invoice_from_order` (the invoice date, which decides the
+    accounting period — and this was a HALF-APPLIED fix: the comment said to report the date the API used, and
+    the fallback branch did, while the branch where the caller passed a date quoted it back) and
+    `reai_create_supplier_invoice` (invoice versus credit note — opposite signs in the ledger).
+  - **What the sweep still cannot see, now named rather than implied:** a value the note RENDERS rather than
+    prints (nine enum fields, listed by name in the test — only one has been looked at by hand), a value it
+    reformats, and five tools whose arguments it cannot construct. Two of those five became unreachable *because*
+    unwrapping optional fields made them refuse a mutually-exclusive combination — a trade recorded with its
+    cost, not a free win.
+  - `docs/tools.md` now says "**the sweep cannot drive**" rather than "not examined", because the narrower claim
+    is the true one.
+  - **The repo's own guard caught me inventing a tool name** in one of these notes: `reai_warehouse_inventory`
+    does not exist, the real one is `reai_get_warehouse_inventory`.
 - **Six tools threw on a 200 whose shape their declared type did not predict — four irreversible.** Driving all
   172 tools against bodies that keep the keys and break the shapes found `reai_create_expense`
   (`(expense.costs ?? []).filter` on a non-array), `reai_match_bank_transactions`, `reai_book_bank_transactions`,
