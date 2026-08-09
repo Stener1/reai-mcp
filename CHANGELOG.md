@@ -72,8 +72,33 @@ All notable changes to `reai-mcp`. Format loosely follows
     comments for elsewhere. It reads stripped source now, **and the anchor is back**: a second review then
     satisfied the un-anchored pattern with a bare string containing `["ok"]`, which `stripComments` cannot
     help with because it preserves string contents.
-  - **A second independent review found two more read-only bypasses, both delivered real writes to a local
-    server with all ten guard tests green.** The call-site count was `/fetch\(/g` — a case-sensitive substring
+  - **A third, narrowly-scoped review broke it again — and its diagnosis is why the check is now an AST walk
+    rather than a pattern.** Two more working bypasses: `const raw = fetch;` placed *above* the guard IIFE
+    captures the still-native function without ever naming `globalThis.fetch` (the IIFE protects its own
+    binding, but nothing stopped re-capturing the same function earlier under another name); and
+    `const N = ["node","http"].join(":"); await import(N)` moves the specifier assembly one statement before the
+    `import()`, where no inspection of the argument text can reach it. Both delivered real writes to a local
+    server with 10/10 green.
+  - The root cause was the same each round: **every check was a regex over the source text of one line**, so any
+    indirection across statements sailed through. Seven bypasses in four rounds, each fixed by a better pattern
+    and each beaten by the next indirection. So the read-only test now **parses the file with the TypeScript
+    compiler** — already a devDependency — and asks structural questions instead: is any binding initialised
+    from the identifier `fetch`, is `globalThis` referenced outside the guard, is every dynamic `import()`
+    argument a string literal or `pathToFileURL(...)`, is there more than one call to `fetch`. Exact rather than
+    heuristic, and the guard is installed as the **first executable statement** so the native function is never
+    nameable. Verified: both bypasses plus five further variants — `globalThis["fetch"]`,
+    `import("node:htt" + "p")`, `const { fetch: alias } = globalThis`, a second `fetch(` call, and
+    `createRequire` — all fail the build.
+  - **Monkey-patching `node:http` was tried as an alternative and does not work**, which is worth recording:
+    patching `.default.request` IS visible to a later `await import("node:http")` (same module object), but is
+    **invisible through the named export** — `const { request } = await import("node:http")` gets the original
+    binding, and that is exactly what the working bypass destructured. `http.get({method:"POST"})` and
+    `new http.ClientRequest({method:"POST"})` both send POSTs without going through the exported `request` at
+    all. So the claim is now narrower and accurate: **no accidental or casual edit can make this file write, and
+    CI proves the committed text has no second network path.** A determined rewrite with raw sockets is out of
+    reach of any in-file check, and the docs say so instead of implying otherwise.
+  - **An earlier second review had found two read-only bypasses, both delivering real writes with all ten guard
+    tests green.** The call-site count was `/fetch\(/g` — a case-sensitive substring
     — so the module-scope `const nativeFetch = globalThis.fetch` was invisible to it and callable directly. The
     unguarded function now lives inside an IIFE closure, so it is unreachable by construction: the same exploit
     produces a `ReferenceError` and **no request at all**, which is stronger than a test catching it. A

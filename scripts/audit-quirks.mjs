@@ -102,6 +102,20 @@ import { join } from "node:path";
 // prevent — see the fetch wrapper below.
 import { readFileSync } from "node:fs";
 
+(() => {
+  const unguarded = globalThis.fetch;
+  globalThis.fetch = (input, init = {}) => {
+    const method = String(init?.method ?? (typeof input === "object" && input ? input.method : "GET") ?? "GET");
+    if (method.toUpperCase() !== "GET") {
+      throw new Error(
+        `audit-quirks may only issue GET; a ${method.toUpperCase()} was attempted. This audit runs against ` +
+          `real books and nothing here is permitted to write.`,
+      );
+    }
+    return unguarded(input, init);
+  };
+})();
+
 const args = process.argv.slice(2);
 const at = (flag) => {
   const i = args.indexOf(flag);
@@ -151,22 +165,17 @@ if (!Number.isInteger(tenantId)) {
  * ACCIDENT, which is the realistic failure mode for an audit pointed at a real company's books.
  */
 // Installed inside an IIFE so the UNGUARDED function is closure-scoped and unreachable from the rest of the
-// file. A first version kept `const nativeFetch = globalThis.fetch` at module scope; review then called
-// `nativeFetch(...)` directly and delivered a POST /api/vouchers and a DELETE, with all ten guard tests green
-// — the call-site count used a case-sensitive /fetch\(/ and never saw the capital F.
-(() => {
-  const unguarded = globalThis.fetch;
-  globalThis.fetch = (input, init = {}) => {
-    const method = String(init?.method ?? (typeof input === "object" && input ? input.method : "GET") ?? "GET");
-    if (method.toUpperCase() !== "GET") {
-      throw new Error(
-        `audit-quirks may only issue GET; a ${method.toUpperCase()} was attempted. This audit runs against ` +
-          `real books and nothing here is permitted to write.`,
-      );
-    }
-    return unguarded(input, init);
-  };
-})();
+// file, and installed as the FIRST executable statement so there is no window in which the native function is
+// nameable. Both matter, and each was learned from a working exploit:
+//
+//   1. A module-scope `const nativeFetch = globalThis.fetch` was callable directly, and the call-site counter
+//      used a case-sensitive /fetch\(/ that never saw the capital F.
+//   2. With the IIFE in place but not first, `const raw = fetch;` placed ABOVE it captured the still-native
+//      function without ever naming `globalThis.fetch`, dodging the alias check entirely.
+//
+// Ordering closes (2) by construction: any `fetch` captured after this line is the wrapper. `test/quirk-drift`
+// enforces both properties from the AST rather than from a regex, because every text-level version of these
+// checks was defeated by an indirection a pattern could not see.
 
 const request = async (path, { omitTenant = false, tenantOverride } = {}) => {
   const init = {

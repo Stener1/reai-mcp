@@ -288,93 +288,183 @@ test("every quirk probe can report drift, and its comparisons are not tautologie
   }
 });
 
-test("the quirk audit is read-only, and it is ENFORCED rather than asserted", () => {
-  const src = auditSource();
+/**
+ * The read-only property, checked from the AST rather than from patterns.
+ *
+ * Three review rounds each defeated a text-level version of this test, and the third one named the reason:
+ * every check was a regex over source text, so any indirection across statements sailed through. The bypasses
+ * were not exotic —
+ *
+ *   `...EXTRA` spread over `method: "GET"`            → real POSTs, 9/9 green
+ *   `init.method = "POST"` after the check            → real POSTs, 10/10 green
+ *   `import http from "node:http"`                    → real PUT,  10/10 green
+ *   `import * as x from 'node:http'` (single quotes)   → real PUT,  10/10 green
+ *   `nativeFetch(...)` (case-sensitive /fetch\(/)      → real POST, 10/10 green
+ *   `const raw = fetch;` placed ABOVE the guard IIFE  → real POST, 10/10 green
+ *   `const N = ["node","http"].join(":"); import(N)`  → real PUT,  10/10 green
+ *
+ * The last two are the general form: name the unguarded function without writing `globalThis.fetch`, or build a
+ * forbidden module specifier before the `import()` call. No pattern over one line can see either.
+ *
+ * So this parses the file with the TypeScript compiler (already a devDependency, used by `npm run lint`) and
+ * asks structural questions instead. `const raw = fetch` is a VariableDeclaration whose initializer is the
+ * identifier `fetch`; `import(N)` is a CallExpression whose argument is an Identifier rather than a string.
+ * Both are exact, not heuristic.
+ *
+ * ## What this still does not do, stated because the prose here has overclaimed twice
+ *
+ * It constrains the file **as committed**. It cannot stop a determined rewrite: `node:net` sockets, a
+ * hand-rolled `http.ClientRequest`, `createRequire`. Monkey-patching the http module was tried and does not
+ * close it either — patching `.default.request` is invisible through the NAMED export
+ * (`const { request } = await import("node:http")` gets the original binding), which is exactly what the
+ * working bypass destructured.
+ *
+ * The honest claim is therefore narrower than "read-only is enforced": **no accidental or casual edit can make
+ * this file write, and CI proves the committed text has no second network path.** Defeating it now requires
+ * deliberately writing an HTTP client to defeat a guard, which is no longer a mistake someone makes while
+ * adding a probe. That is the property worth having for a script pointed at a real company's books, and the
+ * runtime wrapper below is what covers the case the AST cannot see.
+ */
+test("the quirk audit is read-only, checked from the AST rather than from patterns", async () => {
+  const { default: ts } = await import("typescript");
+  const text = readFileSync(AUDIT, "utf8");
+  const sf = ts.createSourceFile(AUDIT, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
 
-  // The runtime guard is the primary defence, because every static check here is defeatable by editing the
-  // file the check reads. Review demonstrated exactly that: `method: "GET"` kept, `...EXTRA` added after it,
-  // and the audit issued real POSTs to /api/vouchers and /api/opening-balances with all nine tests green.
-  // The init object is now built and then checked, so a spread that overrides the method throws before the
-  // socket opens.
+  // The guard-installing IIFE is the one place allowed to name the unguarded function. Locate it by position
+  // so everything else can be judged as "outside it".
+  const guard = { start: -1, end: -1 };
+  const findGuard = (n) => {
+    if (
+      ts.isExpressionStatement(n) &&
+      ts.isCallExpression(n.expression) &&
+      (ts.isArrowFunction(n.expression.expression) || ts.isParenthesizedExpression(n.expression.expression)) &&
+      /globalThis\.fetch\s*=/.test(n.getText(sf))
+    ) {
+      guard.start = n.getStart(sf);
+      guard.end = n.getEnd();
+    }
+    ts.forEachChild(n, findGuard);
+  };
+  findGuard(sf);
+  assert.ok(guard.start >= 0, "the guard-installing IIFE was not found");
+
+  // FIRST executable statement. `const raw = fetch` above the IIFE captured the native function and delivered a
+  // POST; ordering closes that by construction, since anything captured afterwards is the wrapper.
+  const firstExecutable = sf.statements.find((st) => !ts.isImportDeclaration(st));
+  assert.equal(
+    firstExecutable?.getStart(sf),
+    guard.start,
+    "the fetch guard must be the first executable statement, or there is a window in which the native " +
+      "function can be captured under another name",
+  );
+
+  const outside = (n) => n.getStart(sf) < guard.start || n.getEnd() > guard.end;
+  const problems = [];
+  const dynamicImports = [];
+  let bareFetchCalls = 0;
+
+  const walk = (n) => {
+    // Any binding that captures fetch, however it is spelled: `= fetch`, `= globalThis.fetch`,
+    // `= globalThis["fetch"]`, `{ fetch: alias } = globalThis`.
+    if (outside(n)) {
+      if (ts.isIdentifier(n) && n.text === "globalThis") {
+        problems.push(`\`globalThis\` is referenced outside the guard at line ${line(n)} — the only legitimate ` +
+          `use is installing the wrapper, and every bypass so far went through a handle on it`);
+      }
+      if (ts.isIdentifier(n) && n.text === "fetch") {
+        const parent = n.parent;
+        const isCallee = ts.isCallExpression(parent) && parent.expression === n;
+        if (!isCallee) {
+          problems.push(`the identifier \`fetch\` appears at line ${line(n)} somewhere other than as a call — ` +
+            `capturing it under another name is how the guard was bypassed`);
+        } else {
+          bareFetchCalls += 1;
+        }
+      }
+      // require / createRequire / process.binding are other ways to a socket.
+      if (ts.isIdentifier(n) && ["require", "createRequire"].includes(n.text)) {
+        problems.push(`\`${n.text}\` at line ${line(n)} can load a network module outside the import checks`);
+      }
+    }
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      dynamicImports.push(n.arguments[0]);
+    }
+    ts.forEachChild(n, walk);
+  };
+  function line(n) {
+    return sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  }
+  walk(sf);
+
+  assert.deepEqual(problems, [], `read-only violations:\n${problems.join("\n")}`);
+  assert.equal(
+    bareFetchCalls,
+    1,
+    `expected exactly one call to \`fetch\` outside the guard, found ${bareFetchCalls}`,
+  );
+
+  // Static imports: an allowlist, from the AST, so quote style and `import x from` vs bare `import "…"` are
+  // irrelevant — a single-quoted namespace import defeated the regex version and issued a real PUT.
+  // node:fs is permitted because it cannot reach the network; it reads the pinned OpenAPI document.
+  const allowed = new Set(["node:url", "node:path", "node:fs"]);
+  const staticSpecs = sf.statements
+    .filter(ts.isImportDeclaration)
+    .map((d) => d.moduleSpecifier.text);
+  assert.deepEqual(
+    staticSpecs.filter((m) => !allowed.has(m)),
+    [],
+    `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
+      `network without passing the fetch wrapper`,
+  );
+
+  // Dynamic imports must be a plain string literal, or pathToFileURL(...) for a dist/ module. An Identifier is
+  // refused outright: `const N = ["node","http"].join(":"); await import(N)` is a working bypass that no
+  // inspection of the argument TEXT can catch.
+  for (const arg of dynamicImports) {
+    if (ts.isStringLiteral(arg)) {
+      assert.doesNotMatch(
+        arg.text,
+        /^node:(http|https|net|dgram|tls)/,
+        `dynamic import of ${arg.text} bypasses the fetch wrapper`,
+      );
+      continue;
+    }
+    // `pathToFileURL(join(process.cwd(), "dist/…")).href` — a property access on the call, which is the form
+    // actually used. The check is on the whole expression being rooted at pathToFileURL, so an identifier or
+    // any assembled string still fails.
+    const rooted = arg.getText(sf).startsWith("pathToFileURL(");
+    const viaPathToFileUrl =
+      rooted && /^pathToFileURL\(join\(process\.cwd\(\), "dist\/[a-z/.-]+"\)\)(\.href)?$/.test(arg.getText(sf));
+    assert.ok(
+      viaPathToFileUrl,
+      `the dynamic import at line ${line(arg)} takes ${ts.SyntaxKind[arg.kind]} \`${arg.getText(sf)}\` — only a ` +
+        `string literal or pathToFileURL(...) is allowed, because a specifier assembled at runtime cannot be ` +
+        `checked at all`,
+    );
+  }
+
+  // The runtime layer, which is what covers the paths the AST cannot see.
+  const src = auditSource();
   assert.match(
     src,
     /if \(init\.method !== "GET"\)[\s\S]{0,200}throw new Error/,
     "the request helper must check the assembled init object at runtime and throw on any non-GET",
   );
-  assert.match(src, /const res = await fetch\(baseUrl \+ path, init\)/, "fetch must receive the checked object");
-  // Frozen, because the check was check-then-USE: `init.method = "POST"` on the following line sent every
-  // request as a POST with all ten tests green.
   assert.match(
     src,
     /Object\.freeze\(init\);\n\s*const res = await fetch/,
     "the init object must be frozen between the check and the fetch, or the check can be undone after it",
   );
-  // And the channel itself, because counting `fetch(` call sites cannot prove no other channel exists —
-  // review reached the network with fourteen lines of node:http and the count still said 1.
-  // Brace-matched, not a windowed regex. The first version used `[\s\S]{0,400}` after the assignment, so
-  // review's neutering — assign a pass-through, then declare an UNUSED function containing the guard — matched
-  // across the boundary and passed. The guard has to be inside the body actually assigned.
-  const assignments = [...src.matchAll(/globalThis\.fetch\s*=/g)];
-  assert.equal(
-    assignments.length,
-    1,
-    `globalThis.fetch must be assigned exactly once, found ${assignments.length} — a later assignment ` +
-      `replaces the guard`,
-  );
-  // From the ARROW, not from the assignment: the first `{` after `globalThis.fetch =` is the `{}` default in
-  // the parameter list `(input, init = {})`, so matching from there returned an empty block.
-  const arrow = src.indexOf("=>", assignments[0].index);
-  assert.ok(arrow > 0, "the fetch wrapper must be a function expression");
-  const wrapperBody = balancedBlockAfter(src, arrow);
-  assert.ok(wrapperBody, "could not find the body assigned to globalThis.fetch");
+  const wrapperBody = balancedBlockAfter(text, text.indexOf("=>", text.indexOf("globalThis.fetch =")));
   assert.match(
-    wrapperBody,
-    /method\.toUpperCase\(\) !== "GET"/,
-    "the function assigned to globalThis.fetch must itself reject any non-GET, not delegate to a helper that " +
-      "may not be called",
+    wrapperBody ?? "",
+    /method\.toUpperCase\(\) !== "GET"[\s\S]{0,200}throw new Error/,
+    "the function assigned to globalThis.fetch must itself reject any non-GET",
   );
-  assert.match(wrapperBody, /throw new Error/, "the wrapper must throw rather than warn");
-  // Both quote styles, and side-effect imports with no `from`. The first version matched double quotes after a
-  // `from` only, so `import * as evilHttp from 'node:http';` was never collected, `forbidden` came back empty,
-  // and review issued a PUT /api/opening-balances through node:http with all ten tests green.
-  const imports = [
-    ...[...src.matchAll(/^\s*import\s+[^;'"]*?from\s*['"]([^'"]+)['"]/gm)].map(([, m]) => m),
-    ...[...src.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)].map(([, m]) => m),
-  ];
-  // node:fs is permitted: the allowlist exists to keep the audit off any channel that can reach the network,
-  // and reading the pinned OpenAPI document is not one. node:http/https/net remain forbidden.
-  const allowed = new Set(["node:url", "node:path", "node:fs"]);
-  const forbidden = imports.filter((m) => !allowed.has(m));
-  assert.deepEqual(
-    forbidden,
-    [],
-    `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
-      `network without passing the fetch wrapper, which is how review issued a POST with every test green`,
-  );
-  // Dynamic imports are used for dist/ modules; they must not be a way back to a network module either. Text
-  // matching alone is not enough — `import("node:" + "http")` reads as neither — so a concatenated or
-  // otherwise computed specifier is refused outright.
-  const dynamic = [...src.matchAll(/import\(([^)]*)\)/g)].map(([, a]) => a.trim());
-  for (const arg of dynamic) {
-    assert.doesNotMatch(
-      arg,
-      /node:(http|https|net|dgram|tls)/,
-      `dynamic import of a network module (${arg}) bypasses the fetch wrapper`,
-    );
-    // Allowed: a bare string, or pathToFileURL(join(...)) for a dist/ module. Not allowed: string arithmetic.
-    const computed = /\+/.test(arg) && !/pathToFileURL/.test(arg);
-    assert.ok(
-      !computed,
-      `dynamic import specifier ${arg} is assembled at runtime, so no static check can tell what it loads`,
-    );
-  }
 
-  // Every path it touches, classified. A GET the policy engine thinks is a write would be a bug in one of
-  // the two, and either way this audit must not run against 2634.
-  //
-  // Two sources, unioned: the `probes` arrays (the authoritative endpoint list each case declares, and what
-  // the coverage guard compares against) and any literal path passed to get(). Template-literal calls such
-  // as `get(\`${path}?${DATES}\`)` iterate `this.probes`, so the first source already covers them.
+  // And the stakes, which is the honest use of classifyRequest: `classifyRequest("GET", …)` returns "read" for
+  // every path by an early return in policy.ts, so asserting that could not fail. What it can show is that
+  // these paths are destructive under a write verb, which is why the guard exists.
   const paths = [
     ...new Set([
       ...[...src.matchAll(/probes:\s*\[([\s\S]*?)\]/g)].flatMap(([, body]) =>
@@ -384,88 +474,17 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
     ]),
   ];
   assert.ok(paths.length >= 24, `only ${paths.length} requests extracted — the extraction has stopped matching`);
-  // NOT `classifyRequest("GET", …)`. Review showed that assertion could not fail: policy.ts returns "read"
-  // for every GET by an early return, so it was a tautology dressed as a policy check, and the PR claimed it
-  // proved read-only. What classifyRequest can honestly establish is the STAKES — that these very paths are
-  // destructive under a write verb, which is why the runtime guard above is the thing that matters.
-  const dangerous = paths.filter((p) => {
-    const concrete = p.replace(/\$\{[^}]*\}/g, "7");
-    return ["POST", "PUT", "PATCH", "DELETE"].some(
-      (m) => classifyRequest(m, concrete) === "irreversible",
-    );
+  const dangerous = paths.filter((pth) => {
+    const concrete = pth.replace(/\$\{[^}]*\}/g, "7");
+    return ["POST", "PUT", "PATCH", "DELETE"].some((m) => classifyRequest(m, concrete) === "irreversible");
   });
   assert.ok(
     dangerous.length >= 5,
-    `expected several audited paths to be irreversible under a write verb (found ${dangerous.length}); if ` +
-      `none are, this audit is harmless and the runtime guard's justification needs restating`,
+    `expected several audited paths to be irreversible under a write verb (found ${dangerous.length})`,
   );
 
-  // And no way to make a non-GET at all. Exactly one fetch call site, and ITS method must be the literal.
-  //
-  // The first version asserted `/method:\s*"GET"/` appears somewhere and that a small blacklist of
-  // non-literal spellings does not. Review defeated it: keep `{ method: "GET" }` as a destructured default
-  // and change the fetch to `method: options.method`, and both assertions still pass while the helper can
-  // issue a POST or DELETE against a real tenant's books. Since path classification also hardcodes "GET",
-  // nothing else would have noticed. So inspect the fetch call itself.
-  // A word boundary, and case-sensitively distinguishing `fetch(` from `nativeFetch(`. The first version used
-  // /fetch\(/g, which is a SUBSTRING match: review aliased the unguarded function and called `nativeFetch(...)`,
-  // which the count never saw (capital F), and delivered a POST /api/vouchers with all ten tests green.
-  const fetches = [...src.matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)];
-  assert.equal(fetches.length, 1, `expected exactly one fetch call site, found ${fetches.length}`);
-  // And no reachable handle on the unguarded function. It must live inside the wrapper's closure, so that
-  // installing the guard is the only way to reach the network from this file.
-  // Column 0 only. The wrapper's own `const unguarded = globalThis.fetch` lives INDENTED inside an IIFE, which
-  // is exactly the fix — closure-scoped and unreachable. What must not exist is a binding at module scope.
-  const aliases = [...src.matchAll(/^(?:const|let|var)\s+(\w+)\s*=\s*globalThis\.fetch/gm)].map(([, n]) => n);
-  assert.deepEqual(
-    aliases,
-    [],
-    `the unguarded fetch must not be bound at module scope (found ${aliases.join(", ")}) — anything in this ` +
-      `file could then call it and bypass the guard entirely`,
-  );
-  // The init object literal, which is what fetch receives. Read from its declaration rather than from the
-  // call site, because the call passes a variable — deliberately, so the runtime guard above can inspect the
-  // fully-assembled object before it is used.
-  const decl = src.indexOf("const init = {");
-  assert.ok(decl > 0, "the request helper must build a named init object so the runtime guard can check it");
-  const open = src.indexOf("{", decl);
-  let depth = 0;
-  let close = -1;
-  for (let i = open; i < src.length; i += 1) {
-    if (src[i] === "{") depth += 1;
-    else if (src[i] === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        close = i;
-        break;
-      }
-    }
-  }
-  assert.ok(close > open, "could not find the end of the init object");
-  const options = src.slice(open, close + 1);
-  const method = /(^|[^a-zA-Z])method\s*:\s*([^,\n]+)/.exec(options)?.[2]?.trim();
-  assert.equal(
-    method,
-    '"GET"',
-    `the init object must set the literal "GET" as its method, not ${JSON.stringify(method)} — anything ` +
-      `resolved at runtime can become a write against a real tenant`,
-  );
-  // And no top-level spread, which is how the literal above was bypassed. A spread inside `headers` is fine
-  // and is used for the tenant header, so only the outer level is checked.
-  const outer = options.replace(/headers:\s*\{[\s\S]*?\n {4}\},?/, "headers: {},");
-  assert.doesNotMatch(
-    outer,
-    /\.\.\./,
-    "the request init must not contain a spread at the top level: `...EXTRA` after `method: \"GET\"` " +
-      "silently overrode it and the audit issued POSTs with every test passing",
-  );
-
-  // Read-only is *why* there is no write guard, so the absence has to be deliberate rather than forgotten.
-  assert.doesNotMatch(
-    src,
-    /REAI_WRITE_TEST_TENANTS/,
-    "a read-only audit must not consult the write guard — if it needs one, it is no longer read-only",
-  );
+  // Read-only is why there is no write guard, so the absence has to be deliberate rather than forgotten.
+  assert.doesNotMatch(src, /REAI_WRITE_TEST_TENANTS/, "a read-only audit must not consult the write guard");
 });
 
 test("probes that depend on validation ORDER send a full request", () => {

@@ -209,15 +209,41 @@ This covers the **16 that a GET can answer**, and the report prints `of 122` so 
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
 is no write guard and no `REAI_WRITE_TEST_TENANTS`.
 
-**How that is enforced, after a first version claimed something false.** The original text said the property
-was asserted "against `classifyRequest` rather than by grepping for method names". It was the reverse:
-`classifyRequest("GET", …)` returns `read` for every path by an early return, so the assertion could not
-fail, and the only live checks were greps — which review defeated in one line by keeping `method: "GET"` and
-adding `...EXTRA` after it, making the audit issue real POSTs to `/api/vouchers` and `/api/opening-balances`
-with every test green. Now the request helper builds its `init` object, **checks it at runtime** and throws
-on any non-GET, so a source edit fails before the socket opens; the test additionally requires the literal
-method and forbids a top-level spread, and uses `classifyRequest` for what it can honestly show — that
-these paths are `irreversible` under a write verb, which is why the runtime guard is there at all.
+**How that is enforced — and this took four rounds, because every text-level version was defeated.** The
+first version claimed the property was asserted "against `classifyRequest` rather than by grepping for method
+names", which was backwards: `classifyRequest("GET", …)` returns `read` for every path by an early return, so
+it could not fail. Each subsequent fix was a better pattern, and each was beaten:
+
+| bypass | result |
+|---|---|
+| `...EXTRA` spread over `method: "GET"` | real POSTs, all tests green |
+| `init.method = "POST"` *after* the check | real POSTs, all tests green |
+| `import http from "node:http"` | real PUT, all tests green |
+| `import * as x from 'node:http'` (single quotes) | real PUT, all tests green |
+| `nativeFetch(...)` — the counter used a case-sensitive `/fetch\(/` | real POST, all tests green |
+| `const raw = fetch;` placed **above** the guard IIFE | real POST, all tests green |
+| `const N = ["node","http"].join(":"); await import(N)` | real PUT, all tests green |
+
+The last two are the general form — name the unguarded function without writing `globalThis.fetch`, or build a
+forbidden specifier before the `import()` — and **no pattern over one line can see either**.
+
+So the check now **parses the file** with the TypeScript compiler (already a devDependency) and asks
+structural questions: is any binding initialised from the identifier `fetch`; is `globalThis` referenced
+outside the guard at all; is every dynamic `import()` argument a string literal or `pathToFileURL(...)`; is
+there more than one call to `fetch`. `const raw = fetch` is a VariableDeclaration with an Identifier
+initialiser, and `import(N)` is a CallExpression with an Identifier argument. Both are exact rather than
+heuristic. The guard is also installed as the **first executable statement**, so there is no window in which
+the native function is nameable. Two runtime layers remain: the `globalThis.fetch` wrapper rejects any non-GET
+wherever it is called from, and the `init` object is frozen between its check and the fetch.
+
+**What this does not do, stated because the prose here overclaimed twice.** It constrains the file *as
+committed*. It cannot stop a determined rewrite — `node:net` sockets, a hand-rolled `http.ClientRequest`.
+Monkey-patching the http module was tried and does not close that either: patching `.default.request` is
+invisible through the **named** export, and `const { request } = await import("node:http")` is exactly what
+the working bypass destructured. So the honest claim is narrower than "read-only is enforced": **no accidental
+or casual edit can make this file write, and CI proves the committed text has no second network path.**
+Defeating it now means deliberately writing an HTTP client to defeat a guard, which is not a mistake someone
+makes while adding a probe.
 
 **Probe the request the note describes, not a shorter one.** This is the lesson worth carrying to the next
 audit, because it produced a false DRIFT against a correct quirk while this script was being written.
