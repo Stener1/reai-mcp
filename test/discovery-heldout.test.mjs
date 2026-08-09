@@ -124,7 +124,7 @@ test("at least 38 of the 41 first-corpus queries rank their endpoint in the top 
 
 test("and at least 39 rank it in the top 10", () => {
   const hits = CASES.filter(([q, want]) => rankOf(q, want) >= 0);
-  assert.ok(hits.length >= 39, `only ${hits.length} of ${CASES.length} in the top 10`);
+  assert.ok(hits.length >= 40, `only ${hits.length} of ${CASES.length} in the top 10`);
 });
 
 // The Norwegian verbs. WRITE_INTENT_VERBS already held four of them while METHOD_INTENT held
@@ -320,7 +320,7 @@ test("the second corpus holds its measured score of 26 in the top 3", () => {
   });
   assert.ok(
     hits.length >= 26,
-    `${hits.length} of ${FRESH.length} in the top 3; the measured baseline is 26`,
+    `${hits.length} of ${FRESH.length} in the top 3; measured 27, floored one below`,
   );
 });
 
@@ -425,7 +425,7 @@ test("the third corpus holds its measured score of 19 in the top 3", () => {
   });
   assert.ok(
     hits.length >= 19,
-    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 19`,
+    `${hits.length} of ${EVERYDAY.length} in the top 3; measured 20, floored one below`,
   );
 });
 
@@ -437,5 +437,52 @@ test("the third corpus reaches 24 of 27 within the top ten", () => {
   );
   // 24 since the definite-form rules: `sett kunden som inaktiv` came into reach. Ratcheted so the
   // gain cannot quietly disappear.
-  assert.ok(hits.length >= 24, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
+  assert.ok(hits.length >= 25, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
+});
+
+/**
+ * The three pairs this corpus declared and could not reach.
+ *
+ * All 169 declared pairs across both discovery corpora were swept against the live index, and three were not in
+ * the top 20 at all — invisible because the corpora are scored against floors rather than per pair, so three
+ * misses sat inside a passing count.
+ *
+ * These three are pinned INDIVIDUALLY, and the floors above deliberately keep one pair of headroom rather than
+ * sitting on the measured value. Two reviews in a row have made the same point about ratchets pinned exactly at
+ * the actual: any unrelated single-pair movement then red-fails CI with a message that cannot say which pair
+ * moved. The pins carry the specific gains, so the floors do not have to.
+ *
+ * One correction on attribution: the CASES floors were 38 and 39 while that corpus already measured 39 and 41
+ * on `main`. Raising them locks in a figure this change did not produce — it came from an earlier
+ * re-measurement, which the file header records — so only the top-10 floor moves, and the gains that ARE this
+ * change's are FRESH 26 to 27 and EVERYDAY 19 to 20 in the top 3 and 24 to 26 in the top 10.
+ */
+test("the three pairs this corpus could not reach are reachable", () => {
+  const rankOf = (query, want) =>
+    searchOperations({ query, limit: 20 })
+      .map((h) => h.path)
+      .findIndex((p) => p.startsWith(want));
+
+  // `kvittering` reached NOTHING, so /api/attachments was absent from sixty results and the query landed on
+  // POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes — the upload method hint with no noun
+  // to anchor it. "last opp vedlegg" worked throughout, which is what hid the hole.
+  assert.equal(rankOf("last opp kvittering", "/api/attachments"), 0);
+
+  // "Incoming EHF" is the supplier-invoice INBOX, not an attachment's EHF payload. `innkommende` reached
+  // nothing and `ehf` reached GET /api/attachments/{id}/ehf, so the query landed on the wrong side of its own
+  // word. Scoped as a phrase, because bare `inngaende` was mapped in PR #119 and withdrawn for evicting the
+  // correct answers in two of the adjective's three senses.
+  assert.equal(rankOf("innkommende ehf", "/api/invoice-reception-documents"), 0);
+
+  // Reachable, NOT first: it sat at rank 34 because `lag` is deliberately not a write verb — it is also the
+  // everyday noun for a team — so the query reads as neutral. The neutral-query penalty still holds the reads
+  // above it, which is what this repository wants, so the assertion is a bound rather than a position.
+  const generateDue = rankOf("lag faktura for abonnementene", "/api/subscriptions/generate-due");
+  assert.ok(generateDue >= 0 && generateDue < 10, `generate-due at rank ${generateDue + 1}`);
+  // The exact operation, not just the method. Pinning `.method === "GET"` was satisfied by ANY subscriptions
+  // read at rank 1 — and the phrase replacement injects the literal token `subscriptions`, so the ranking could
+  // have degraded to the billing-history endpoint with generate-due at rank 9 and the test would have held.
+  // Found by the independent review of PR #125.
+  const first = searchOperations({ query: "lag faktura for abonnementene", limit: 1 })[0];
+  assert.equal(`${first.method} ${first.path}`, "GET /api/subscriptions");
 });

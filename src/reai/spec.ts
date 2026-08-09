@@ -1234,6 +1234,41 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],
   [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
   [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
+  // "innkommende ehf" is the supplier-invoice INBOX, not an attachment's EHF payload. `innkommende` reached
+  // nothing on its own and `ehf` reached GET /api/attachments/{id}/ehf, so the query landed on the wrong side
+  // of the same word — the corpus declares /api/invoice-reception-documents and it was missing the top 20.
+  //
+  // A phrase rather than a synonym, deliberately. Bare `inngaende` was mapped in PR #119 and WITHDRAWN,
+  // because the adjective pairs with utgående for faktura, MVA and balanse and mapping it alone evicted the
+  // correct answers for two of the three senses. Pairing it with the noun is the scoping that finding asked
+  // for: this says something about "incoming EHF", not about the word "incoming".
+  // EHF and Peppol only, NOT `faktura`. Including it made the rule swallow explicit work on an invoice that has
+  // already been registered: "endre inngående faktura" ranked PATCH /api/supplier-invoices/{id} first on main
+  // and, with the phrase consumed, returned the inbox GET with the PATCH absent from two hundred results.
+  // "mottatt faktura" lost /api/invoices the same way. Codex, PR #125 — and it is the same over-match this
+  // table has now made three times.
+  //
+  // `inngaaende` as well as `inngaende`: the repository folds å to a single a, but callers type the conventional
+  // double-a too, which is why `aarsregnskap` is a key of its own.
+  [/\b(innkommende|inngaende|inngaaende|inngående|mottatt|mottatte)\s+(ehf|peppol)\b/g, "invoice-reception-documents"],
+  // The upload sense of a receipt, and only that sense.
+  [/\b(last\s+opp|lastopp|upload|scan|skann)\s+(en\s+|ny\s+)?(kvittering\w*|bilagsbilde\w*)\b/g, "attachment attachments"],
+  // Invoicing the subscriptions is what POST /api/subscriptions/generate-due does, and the corpus declares it
+  // the answer for "lag faktura for abonnementene". It sat at rank 34: `lag` is deliberately not a write verb
+  // — it is also the everyday noun for a team — so the query reads as neutral and the invoice GETs win, while
+  // nothing connected the word pairing to the operation that actually does it.
+  //
+  // This makes it REACHABLE, not first. The query states no intent to write, so the neutral-query penalty
+  // still holds the GETs above it, which is the behaviour this repository wants and what the corpus floors
+  // measure.
+  // The GENERATION wording is required, not merely an invoice mentioned near a subscription. Without it the rule
+  // matched every such mention and, because a matched phrase is consumed, destroyed the `faktura` term: "vis
+  // faktura for abonnementet" ranked GET /api/invoices first on main and afterwards returned the subscriptions
+  // collection with /api/invoices absent from two hundred results. Codex, PR #125.
+  [
+    /\b(lag|lage|generer|generere|opprett|opprette|fakturer|fakturere|kjor|kjør)\s+(faktura\w*|fakturaene)\s+(for\s+|til\s+|pa\s+|på\s+)?abonnement\w*/g,
+    "subscriptions generate-due",
+  ],
   // "bank account" is the English for what Norwegian writes as one word, and the two spellings behaved
   // completely differently. `bankkonto` reached /api/company-banks through compound decomposition, but the
   // spaced form tokenised into `bank` + `account`, and `account` pulled the CHART OF ACCOUNTS: "bank
@@ -1566,6 +1601,19 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   timeforing: ["timesheet"],
   // Documents and attachments — both returned nothing, and both are real endpoints.
   vedlegg: ["attachment", "attachments"],
+  // `kvittering` is NOT mapped here, and the attempt is recorded because it over-reached in three directions.
+  // The hole is real: the word reached NOTHING, so "last opp kvittering" answered
+  // POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes with /api/attachments absent from
+  // sixty results. But mapping the bare noun to `attachment` broke queries that meant something else:
+  //
+  //     registrer kvittering   POST /api/receipt-reception-documents/{id}/registration (1)  ->  rank 17
+  //     utlegg kvittering      GET /api/expenses                                           ->  attachments
+  //
+  // The first is the one that settles it. Registering a receipt confirms a payment against the inbox; uploading
+  // an attachment does not, and the purpose-built operation fell to seventeenth. Found by Codex on PR #125,
+  // which also caught the CHANGELOG claiming that `registrer` still reached it — it did not.
+  //
+  // Scoped to the upload phrasing in PHRASE_SYNONYMS instead, which is the only sense the corpus declares.
   dokument: ["document", "documents"],
   dokumenter: ["document", "documents"],
   // Access control, added with the tools that read it.

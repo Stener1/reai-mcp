@@ -65,102 +65,51 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
-- **Four places told agents the agreement enums are undocumented. The spec declares all fourteen.** The source
-  file already carried the correction — "The enums ARE documented — an earlier version of this comment said
-  otherwise … there are 14 such fields across the five templates" — and it had been applied to that comment and
-  to nowhere a reader or an agent could see:
-
-  ```
-  src/reai/quirks.ts       "enums the document does not list"    <- served by reai_describe_endpoint
-  src/tools/agreements.ts  "enums that the spec does not list"   <- the tool description
-  docs/tools.md            "enums the spec never lists"
-  README.md                "the enums the spec types as plain strings"
-  ```
-
-  - **The quirk is the one that mattered.** An agent told the document does not list the members will not call
-    `reai_describe_endpoint` to get them, and will guess — which the file header records as exactly what
-    happened: "The rejected values were simply wrong guesses." All four now say the members are declared, that
-    they are lowercase snake_case, and that they can be read from the endpoint.
-  - Verified rather than asserted: **14 enum fields across the five POST templates**, every member named in the
-    document — `clientEntityType`, `pricingModel`, `billingFrequency`, `employmentType`, `salaryType`,
-    `rentObjectType`, `electricityTerms`, `waterTerms`, `leaseDurationType`, `shortFixedTermReasonType`,
-    `depositType` and `issuerRole`. That is **twelve distinct names in fourteen places** —
-    `clientEntityType` and `billingFrequency` each appear on two templates — and across **four** of the five,
-    because `purchase-agreement` declares none. An earlier draft of this entry said "and two more", which named
-    all twelve and then claimed two unnamed extras; the independent review counted. The total matches the figure
-    the file header states.
-  - Two tests guard it. One asserts the spec really does declare fourteen, with the two members the prose quotes
-    by hand, so a spec refresh that drops them makes the prose stale *there* rather than leaving four documents
-    quietly wrong again. The other scans the quirk notes as **served**, the tool descriptions, the README and the
-    docs for the claim in every form it has taken — while deliberately skipping lines that quote the old wording
-    in order to correct it, because forbidding the record of a mistake is the opposite of what this repo wants.
-    It fails against `main`.
-  - **The first version of that guard caught three of the four and its comment claimed all four.** The README's
-    wording carries the claim by IMPLICATION rather than denial — a field the document "types as plain strings"
-    is one whose members it does not give — so no pattern looking for "does not", "never" or "silent" could
-    match it. Found by Codex. Two patterns were added, and the check now also runs against the **rendered**
-    quirk notes and tool descriptions rather than only source lines: a description is concatenated from a dozen
-    literals, so a claim split across two of them matches no single line. Verified load-bearing — with only that
-    one wording restored, the guard still fails.
-  - **And the skip-list switched the guard off for a whole paragraph.** It skipped any line containing "an
-    earlier version", "for a while" and similar, so that recording the mistake stayed legal — but markdown puts
-    a paragraph on one line, and the new prose in `docs/tools.md` added "said the opposite for a while" to the
-    very paragraph being protected. The independent review proved it by appending a fresh false sentence there
-    and watching the test stay green. Quoted spans are now stripped instead of lines skipped, which keeps the
-    correction legal and leaves every other word checked. The four historical wordings are also asserted as a
-    fixture, so the pattern list is checked against the examples it exists for.
-
-- **An action the query never asked for could outrank the resource it did name** (#122). `/api/salary-payments` is the
-  collection and `/api/salary-payments/{id}/complete` is the action that **files payroll with Skatteetaten**.
-  Measured on `main`:
-
-  ```
-  opprett salary payments   POST /api/salary-payments/{id}/complete   63.8   <- files with Skatteetaten
-                            POST /api/salary-payments                 61.3   <- creates one, fifth
-  salary run                /api/salary-payments at rank 8
-  ```
-  - Found by auditing **804 resource-only queries** — each collection's own name, with and without a create or
-    read verb, nothing compound: **108 ranked a nested action first, 56 of them irreversible and 24
-    transmitting outside the tenant.**
-  - **The general rule over all of those was written, measured, and cut back**, because two independent reviews
-    found it doing more damage than the defect. Recorded because the failures are the useful part:
-    - It **inverted a request into its own undo.** "Apply a manual credit note to an invoice" — the endpoint's
-      own summary, verbatim — returned `DELETE .../manual-credit-note-applications/{creditNoteInvoiceId}` first,
-      because `applications` never appears in the query while the DELETE took a milder cut. Requiring every
-      hyphen part of a segment to be named makes a four-part segment effectively unexemptable.
-    - It **pushed legitimate requests down or out.** "signer avtalen" lost the signing operations from the top
-      three, and the rounding-adjustment endpoint lost its own summary as a query at **rank 29** — past the
-      default limit of 25, so out of reach altogether.
-  - What ships is **single-word action segments only**, and only when there is exactly one. That is what makes
-    exemption realistic: a one-word segment is a word a user can plausibly say. It excludes every harm above,
-    all of which are multi-part or multi-segment, and it keeps the measured defect fixed —
-    "opprett lonnskjoring" reaches `POST /api/salary-payments`, and `salary run` moved from rank 8 to 7.
-  - Exemption is checked against the **expanded** terms, which is what makes it usable: "godkjenn utlegg"
-    reaches `.../approve` because `godkjenn` expands to `approve`, and the a-melding filing survives because the
-    phrase replacement `salary-payments-complete` carries `complete` as one of its parts.
-  - The cut is hard (0.45) only where a same-method resource-level operation exists to replace it, and a
-    tie-breaker (0.9) where none does. "åpne avstemmingen på nytt" asks to reopen a reconciliation, never says
-    "reopen", and its family has no collection POST — 0.8 moved it from rank 9 to 10.
-  - **`familyOf` was taking the first two path segments**, so a parameter counted as one and ten nonsense
-    families appeared — `/salary/{id}`, `/amelding/{id}`, `/attachments/{id}`. The same action scored differently
-    depending on where it lived. It now stops at the first parameter. Found by the independent review.
-  - **Not a general safety property, and not claimed as one.** Actions with no path parameter are untouched.
-    Two were named here as uncovered dangers, and one of those was **wrong**: `POST /api/peppol/messages/sendsbdh`
-    is `internal: true`, so search never returns it unless a caller asks for internal operations — I repeated the
-    review's concern without checking the flag. `POST /api/invoices/reminders/bulk` is public and does transmit,
-    but no reminder query ranks it first: measured over 190 phrasings, the reminders GET wins every one.
-    `POST /api/subscriptions/generate-due` is the one that does: it transmits, it is param-less, and it ranks
-    **first** both for "generate due" and for its own summary "Generate due subscription billing" — only the
-    Norwegian "generer forfalte abonnement" puts the per-subscription generate above it. So the param-less hole
-    is real AND reachable at rank 1, which is the opposite of what a first draft of this paragraph said. Caught
-    by the independent review, in the paragraph whose whole purpose was admitting an unchecked claim. Nor is
-    `POST /api/invoices/{id}/reminders/forgive` ranking above the reminder-creation endpoint fixed — that is
-    rank 1 on `main` too, pre-existing rather than introduced.
-  - Measured over **12,193 queries**, this time including **every endpoint's own summary** as a query, which is
-    the dimension the review used to find the worst case: **205 rank-1 changes, no empty result sets, no write
-    newly at rank 1, one write demoted.** Six queries lost main's rank-1 answer from the default limit of 25 —
-    all of the shape "close/lukk/fullfor invoices" → `POST /api/invoices/{id}/payments`, where registering a
-    payment was a poor answer to closing an invoice in the first place. Named rather than averaged away.
+- **Three queries this repository's own corpora declared, and could not reach.** Sweeping all **168 declared
+  pairs** — three corpora across two files — found three that were not in the top 20 at all. They were
+  invisible because the corpora are scored against floors rather than per pair, so three misses sat inside a
+  passing count. The last surfaced when the independent review of #124 spotted one while checking an unrelated
+  claim of mine, which is what prompted sweeping the rest.
+  - **`kvittering` reached NOTHING**, so "last opp kvittering" answered
+    `POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes` — the upload method hint with no noun
+    to anchor it — and `/api/attachments` did not appear at all (main returns six hits for that query in total).
+    "last opp vedlegg" worked the whole time, which is what hid the hole.
+  - **"innkommende ehf" is the supplier-invoice inbox, not an attachment's EHF payload.** `innkommende` reached
+    nothing and `ehf` reached `GET /api/attachments/{id}/ehf`, so the query landed on the wrong side of its own
+    word. `inngaaende` is covered as well as `inngaende`: the index folds å to a single a, but callers type the
+    conventional double-a too, which is why `aarsregnskap` is a key of its own.
+  - **"lag faktura for abonnementene" sat at rank 34.** `lag` is deliberately not a write verb — it is also the
+    everyday noun for a team — so the query reads as neutral, and nothing connected the word pairing to
+    `POST /api/subscriptions/generate-due`, which is what the corpus declares. Now **reachable, not first**: rank
+    4 with `GET /api/subscriptions` above it, because the neutral-query penalty still holds.
+  - **All three rules were scoped down after review, and every one of them had over-matched.** Codex found each,
+    and the pattern is the third time this table has done it:
+    - `kvittering → attachment` as a bare synonym broke the word's other live senses. `registrer kvittering`
+      fell from `POST /api/receipt-reception-documents/{id}/registration` at rank 1 to **rank 17**, and
+      registering a receipt confirms a payment where uploading an attachment does not. `utlegg kvittering` left
+      `/api/expenses` too. It is a phrase scoped to upload wording now, which is the only sense the corpus
+      declares — and a claim in the first draft of this entry, that `registrer` still reached the registration,
+      was false.
+    - The inbox rule included `faktura*`, which swallowed explicit work on an already-registered invoice:
+      `endre inngående faktura` went from `PATCH /api/supplier-invoices/{id}` at rank 1 to the inbox GET with
+      the PATCH **absent from 200 results**. Narrowed to `ehf|peppol`.
+    - The subscription rule matched any invoice mentioned near a subscription and, because a matched phrase is
+      consumed, destroyed the `faktura` term: `vis faktura for abonnementet` lost `/api/invoices` from 200
+      results. It now requires generation wording, so read and destructive phrasings keep the invoice family —
+      `slett faktura for abonnementet` had been ranking `generate-due`, which `policy.ts` lists as transmitting.
+  - **Floors keep one pair of headroom rather than sitting on the measured value**, because two reviews in a row
+    have made the same point: a ratchet pinned exactly at the actual red-fails CI on any unrelated single-pair
+    movement, with a message that cannot say which pair moved. The three gains are pinned individually instead.
+    One correction on attribution: the CASES floors were 38 and 39 while that corpus **already measured 39 and
+    41 on `main`** — raising them locks in a figure this change did not produce, so only its top-10 floor moves.
+    The gains that are this change's are FRESH 26→27 and EVERYDAY 19→20 top-3, 24→26 top-10.
+  - Measured over **8704 queries**: 328 rank-1 changes, **no empty result sets**, 2 newly answered, and **314
+    queries where main's top result left the top 20** — stated rather than glossed, since a first draft of this
+    entry claimed no answer was lost and the review disproved it. **312 of the 314 contain `ehf` or `peppol`**,
+    where the phrase deliberately narrows to the reception family, and the other 2 are the wrong
+    oppdragskontroll answer being displaced by the fix itself. Zero unexplained. Of 24 writes newly at rank 1,
+    every one is `delete`/`slett` + an incoming-EHF phrasing reaching `DELETE /api/invoice-reception-documents/{id}`,
+    which is what a delete query about an inbox document should find.
 
 ### Investigated and deliberately not changed
 
