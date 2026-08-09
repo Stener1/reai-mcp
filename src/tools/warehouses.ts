@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  asScalar,
   confirmAgainstResponse,
   defineTool,
   describeConfirmation,
@@ -181,16 +182,34 @@ const createWarehouse = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request({
       method: "POST",
       path: "/api/warehouses",
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // The stored name, for the same reason as reai_rename_warehouse alongside it: `WarehouseRes` carries it,
+    // and this API is documented as storing a name title-cased. Found by driving every unexamined tool with a
+    // response that disagreed with the request — which is also why the name matters here specifically: the
+    // description immediately below says names are NOT unique, so telling a caller the wrong one leaves them
+    // unable to identify which of two warehouses they just made.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const storedName = asScalar(record?.name);
     return ok(res.data, {
-      note:
-        `Created warehouse ${res.data?.id ?? "?"} (${args.name}). It holds no stock yet; use ` +
-        `reai_adjust_inventory to put stock in it.`,
+      note: [
+        `Created warehouse ${record?.id ?? "?"} (` +
+          (storedName === undefined || storedName === null
+            ? `${JSON.stringify(args.name)} as SENT — ` +
+              (record === undefined
+                ? `the response came back as ${describeShape(res.data)}`
+                : `the response does not carry the name`)
+            : `${JSON.stringify(storedName)}, read back from the response`) +
+          `). It holds no stock yet; use reai_adjust_inventory to put stock in it.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, record, { wholeRecord: true }),
+          `warehouse ${record?.id ?? "?"}`,
+        ),
+      ].join("\n\n"),
     });
   },
 });
@@ -225,17 +244,18 @@ const renameWarehouse = defineTool({
     // is an array or a string is not a record at all, which is a different thing from a missing field: the
     // note used to deny a name the payload printed directly below it.
     const record = isRecord(res.data) ? res.data : undefined;
-    const stored = record?.name;
+    const stored = asScalar(record?.name);
     return ok(res.data, {
       note: [
-        stored === undefined || stored === null
+        stored === undefined
           ? `Warehouse ${args.warehouseId} was sent the name ${JSON.stringify(args.name)}, and ` +
             (record === undefined
               ? `the response is not a record (it came back as ${describeShape(res.data)}), so nothing ` +
                 `could be read from it`
-              : stored === null
-                ? `the response carries name: null`
-                : `the response does not carry the name`) +
+              : record.name === null || record.name === undefined
+                ? `the response carries name: ${JSON.stringify(record.name ?? null)}`
+                : `the response carries name as ${describeShape(record.name)}, which is not a value this ` +
+                  `can state`) +
             ` — that is what was SENT rather than what is stored.`
           : `Warehouse ${args.warehouseId} is now named ${JSON.stringify(stored)}, read back from the response.`,
         ...describeConfirmation(
@@ -526,6 +546,9 @@ const adjustInventory = defineTool({
       transactionId?: number;
       quantityOnHand?: number;
       variantId?: number | null;
+      productId?: number | null;
+      warehouseId?: number | null;
+      quantityChange?: number | null;
     }>({
       method: "POST",
       path: "/api/warehouses/inventory/adjust",
@@ -534,11 +557,40 @@ const adjustInventory = defineTool({
     });
 
     const after = res.data?.quantityOnHand;
+    // WHICH product, variant and warehouse the movement landed on, from the response. This tool stated all four
+    // figures from `args` — the identifiers AND the quantity — while it is declared irreversible and its own
+    // note two paragraphs down says the movement cannot be deleted. A stock movement attributed to the wrong
+    // variant is found by a stock count, not by re-reading this note.
+    //
+    // Found by driving every candidate against a contradicting response, but only after the sweep stopped
+    // sampling integers as a single digit: every integer field in the repo had been dropped as "too short to
+    // find in prose", which is exactly the set these four are in.
+    const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+    const shown = {
+      productId: num(res.data?.productId) ?? args.productId,
+      variantId: num(res.data?.variantId) ?? args.variantId,
+      warehouseId: num(res.data?.warehouseId) ?? args.warehouseId,
+      quantityChange: num(res.data?.quantityChange) ?? args.quantityChange,
+    };
+    const fromRecord =
+      num(res.data?.productId) !== undefined &&
+      num(res.data?.variantId) !== undefined &&
+      num(res.data?.warehouseId) !== undefined &&
+      num(res.data?.quantityChange) !== undefined;
     const parts = [
-      `Adjusted product ${args.productId} variant ${args.variantId} in warehouse ` +
-        `${args.warehouseId} by ${args.quantityChange > 0 ? "+" : ""}${args.quantityChange}` +
+      `Adjusted product ${shown.productId} variant ${shown.variantId} in warehouse ` +
+        `${shown.warehouseId} by ${shown.quantityChange > 0 ? "+" : ""}${shown.quantityChange}` +
         `${after === undefined ? "" : `; ${after} now on hand`}` +
-        `${res.data?.transactionId ? ` (transaction ${res.data.transactionId})` : ""}.`,
+        `${res.data?.transactionId ? ` (transaction ${res.data.transactionId})` : ""}` +
+        `${fromRecord ? `, read back from the response` : `, as SENT — the response does not identify the movement, so read the stock back with reai_get_warehouse_inventory`}.`,
+      ...describeConfirmation(
+        confirmAgainstResponse(
+          { productId: args.productId, variantId: args.variantId, warehouseId: args.warehouseId, quantityChange: args.quantityChange },
+          res.data,
+          { wholeRecord: true },
+        ),
+        `this movement`,
+      ),
     ];
 
     // The detector that needs nothing from the pre-read: the API echoes the variant it acted

@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { ReaiApiError } from "../reai/errors.js";
 import {
+  asArray,
+  confirmAgainstResponse,
   defineTool,
+  describeConfirmation,
+  isRecord,
   fail,
   fiscalYear,
   isoDate,
@@ -430,7 +434,7 @@ const matchBankTransactions = defineTool({
         }
       | undefined;
     const status = data?.status ?? (data?.success === false ? "not_matched" : undefined);
-    const errors = (data?.errors ?? []).map(String).filter(Boolean);
+    const errors = asArray(data?.errors).map(String).filter(Boolean);
 
     if (status === "not_matched" || data?.success === false) {
       return ok(res.data, {
@@ -453,7 +457,11 @@ const matchBankTransactions = defineTool({
       });
     }
 
-    const txCount = data?.reconciledTransactionIds?.length;
+    // asArray, not `?.length`: a string has a length too, so a field returned as "oops" reported FOUR
+    // transactions reconciled. This note exists specifically to stop a confident wrong count.
+    const txCount = Array.isArray(data?.reconciledTransactionIds)
+      ? data.reconciledTransactionIds.length
+      : undefined;
     const postCount = data?.reconciledPostingIds?.length;
     const parts = [
       txCount === undefined
@@ -475,7 +483,7 @@ const matchBankTransactions = defineTool({
     return ok(res.data, {
       note:
         `${parts.join(" ")}` +
-        `${data?.voucherIds?.length ? `, voucher(s) ${data.voucherIds.join(", ")}` : ""}` +
+        `${asArray(data?.voucherIds).length ? `, voucher(s) ${asArray(data?.voucherIds).join(", ")}` : ""}` +
         `${bookedDifference}. As reported by the API, not assumed from the request` +
         `${txCount !== undefined && txCount !== args.transactionIds.length ? ` — note you asked for ${args.transactionIds.length}` : ""}.`,
     });
@@ -534,8 +542,10 @@ const bookBankTransactions = defineTool({
     const data = res.data as
       | { voucherIds?: unknown[]; reconciledTransactionIds?: unknown[] }
       | undefined;
-    const booked = data?.reconciledTransactionIds?.length;
-    const vouchers = data?.voucherIds ?? [];
+    const booked = Array.isArray(data?.reconciledTransactionIds)
+      ? data.reconciledTransactionIds.length
+      : undefined;
+    const vouchers = asArray(data?.voucherIds);
     return ok(res.data, {
       note:
         (booked === undefined
@@ -1142,13 +1152,45 @@ const setStatementBalance = defineTool({
       throw err;
     }
     const state = res.data ?? {};
-    return ok(state, {
-      note:
-        `Statement balance recorded for ${args.month}. Nothing was posted — this is a comparison figure, ` +
-        `not a booking.\n\n${describeReconciliation(state)}`,
-    });
+    // The month from the RESPONSE. Found by driving every uncertified tool against a response that disagreed
+    // with the request, and it matters here more than the usual case: this very file documents the API
+    // answering 409 "Godkjenning er kun tilgjengelig for 2026-07." — it has opinions about which month is in
+    // play, and `ManualReconciliation` carries `month`. Telling a caller their balance landed on the month
+    // they named, when the record says another, is a figure they will reconcile against.
+    const storedMonth = storedMonthOf(state);
+    const notes = [
+      `Statement balance recorded for ` +
+        (storedMonth === undefined
+          ? `${args.month} as SENT — the response does not carry a month, so which period it landed on is ` +
+            `unconfirmed`
+          : `${storedMonth}, read back from the response`) +
+        `. Nothing was posted — this is a comparison figure, not a booking.`,
+      ...describeConfirmation(
+        confirmAgainstResponse({ month: args.month }, isRecord(state) ? state : undefined, {
+          wholeRecord: true,
+        }),
+        `bank account ${bankAccountId}`,
+      ),
+      describeReconciliation(state),
+    ];
+    return ok(state, { note: notes.join("\n\n") });
   },
 });
+
+/**
+ * The month the RECORD says is in play, for the three tools in this family that stated the month they were given.
+ *
+ * This is the endpoint family where echoing a month is least defensible, and this file already documents why:
+ * closing answers 409 `"Godkjenning er kun tilgjengelig for 2026-07."` — the API has its own opinion about which
+ * month is closable, and reconciliation runs in order. A note reading "2026-08 is closed for this account" when
+ * the record says otherwise is a lock an agent will believe it holds.
+ *
+ * Found by driving every uncertified write tool against a response that disagreed with the request. All three
+ * had been sitting on a list of tools nobody had checked.
+ */
+function storedMonthOf(state: unknown): string | undefined {
+  return isRecord(state) && typeof state.month === "string" ? state.month : undefined;
+}
 
 const closeManualReconciliation = defineTool({
   name: "reai_close_manual_reconciliation",
@@ -1188,11 +1230,23 @@ const closeManualReconciliation = defineTool({
       throw err;
     }
     const state = res.data ?? {};
+    const closedMonth = storedMonthOf(state);
     return ok(state, {
-      note:
-        `${args.month} is closed for this account. Nothing was posted — a reconciliation close is a lock ` +
-        `on the period, not a booking — and reai_reopen_manual_reconciliation can undo it.\n\n` +
+      note: [
+        (closedMonth === undefined
+          ? `${args.month} was sent as the month to close, and the response does not carry one back, so ` +
+            `WHICH month is now locked is unconfirmed`
+          : `${closedMonth} is closed for this account, read back from the response`) +
+          `. Nothing was posted — a reconciliation close is a lock on the period, not a booking — and ` +
+          `reai_reopen_manual_reconciliation can undo it.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ month: args.month }, isRecord(state) ? state : undefined, {
+            wholeRecord: true,
+          }),
+          `account ${args.bankAccountId}`,
+        ),
         describeReconciliation(state),
+      ].join("\n\n"),
     });
   },
 });
@@ -1227,8 +1281,21 @@ const reopenManualReconciliation = defineTool({
       throw err;
     }
     const state = res.data ?? {};
+    const openedMonth = storedMonthOf(state);
     return ok(state, {
-      note: `${args.month} is open again for this account. Nothing was posted.\n\n${describeReconciliation(state)}`,
+      note: [
+        openedMonth === undefined
+          ? `${args.month} was sent as the month to reopen, and the response does not carry one back, so ` +
+            `which month is unlocked is unconfirmed. Nothing was posted.`
+          : `${openedMonth} is open again for this account, read back from the response. Nothing was posted.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ month: args.month }, isRecord(state) ? state : undefined, {
+            wholeRecord: true,
+          }),
+          `account ${args.bankAccountId}`,
+        ),
+        describeReconciliation(state),
+      ].join("\n\n"),
     });
   },
 });

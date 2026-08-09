@@ -351,3 +351,156 @@ test("the tenant-disclosure boundary holds whichever tool is used", async () => 
   // With no binding there is no boundary, and the full list is the correct answer.
   assert.match(await text(request, { method: "GET", path: "/api/me" }, me, {}), others);
 });
+
+/**
+ * The same question one step further out: does any tool THROW on a 200 it did not expect?
+ *
+ * The sweep above covers read tools and what they SAY. This one covers every tool, including the writes, and
+ * what they DO — because for a write the failure mode is worse than a wrong sentence. A handler that throws
+ * after its POST returned 200 hands the caller something indistinguishable from the call never landing, so an
+ * agent's natural next move is to retry an irreversible write.
+ *
+ * Found four that way: `reai_create_expense` (`(expense.costs ?? []).filter` on a non-array),
+ * `reai_match_bank_transactions`, `reai_add_salary_line` and `reai_get_user`. Two declared irreversible. Every
+ * one type-checked, because the declared response types are this repo's reading of the API rather than a
+ * promise from it — which is the whole reason a `?? []` fallback is not enough and `asArray` exists.
+ */
+
+/** A minimal value satisfying a zod schema, so write tools can be driven past their own validation. */
+function sampleFor(schema, key, depth = 0) {
+  const def = schema?._def;
+  if (!def || depth > 4) return { skip: "undrivable" };
+  const kind = def.typeName;
+  if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") return { skip: "optional" };
+  if (kind === "ZodEffects") return sampleFor(def.schema, key, depth + 1);
+  if (kind === "ZodEnum") return { value: def.values[0] };
+  if (kind === "ZodNativeEnum") return { value: Object.values(def.values)[0] };
+  if (kind === "ZodLiteral") return { value: def.value };
+  if (kind === "ZodBoolean") return { value: false };
+  if (kind === "ZodNumber") return { value: (def.checks ?? []).some((c) => c.kind === "int") ? 7 : 7.5 };
+  if (kind === "ZodString") {
+    const checks = def.checks ?? [];
+    const pattern = checks.find((c) => c.kind === "regex")?.regex;
+    if (pattern) {
+      // Candidates rather than a generator: these are the shapes this API's regexes actually ask for.
+      for (const candidate of ["2026-08-09", "2026-08", "1500", "NO", "NOK", "12345678901", "930000000", "0150", "ZZ"])
+        if (pattern.test(candidate)) return { value: candidate };
+      return { skip: "undrivable" };
+    }
+    if (/date/i.test(key)) return { value: "2026-08-09" };
+    const max = checks.find((c) => c.kind === "max")?.value ?? 40;
+    return { value: "ZZ probe".slice(0, Math.max(2, Math.min(max, 40))) };
+  }
+  if (kind === "ZodArray") {
+    const inner = sampleFor(def.type, key, depth + 1);
+    if (inner.skip) return (def.minLength?.value ?? 1) > 0 ? { skip: "undrivable" } : { value: [] };
+    return { value: [inner.value] };
+  }
+  if (kind === "ZodObject") {
+    const out = {};
+    for (const [k, v] of Object.entries(def.shape())) {
+      const r = sampleFor(v, k, depth + 1);
+      if (r.skip === "optional") continue;
+      if (r.skip) return { skip: "undrivable" };
+      out[k] = r.value;
+    }
+    return { value: out };
+  }
+  if (kind === "ZodUnion") {
+    for (const option of def.options) {
+      const r = sampleFor(option, key, depth + 1);
+      if (!r.skip) return r;
+    }
+    return { skip: "undrivable" };
+  }
+  return { skip: "undrivable" };
+}
+
+test("no tool throws on a 200 whose shape is not what its declared type promises", async () => {
+  const { z } = await import("zod");
+  // A plausible record, then variants that keep the keys and break the shapes. The array-to-string case is the
+  // one that found all four; the others are here because a wrapper or a bare string is equally undeclared.
+  const base = {
+    id: 4242, number: "ZZ-1", name: "ZZ", status: "open", webUrl: "https://x", amounts: {},
+    lines: [{ id: 1 }], rows: [{ id: 1 }], costs: [{}], perDiems: [{}], mileageAllowances: [{}],
+    employees: [{ wageSpecs: [{ id: 1 }] }], errors: [], roles: ["a"], roleCodes: ["a"],
+    directPermissionCodes: [], effectivePermissionCodes: [], contactEvents: [{}], postings: [{}],
+    transactions: [{}], users: [{}], wageSpecs: [{ id: 1 }], data: [], content: [],
+    reconciledTransactionIds: [1], reconciledPostingIds: [1], voucherIds: [1],
+  };
+  const swap = (fn) => Object.fromEntries(Object.entries(base).map(([k, v]) => [k, Array.isArray(v) ? fn() : v]));
+  const bodies = [
+    ["a bare string", "unexpected"],
+    ["an array at the top level", [base]],
+    ["arrays returned as strings", swap(() => "oops")],
+    ["arrays returned as objects", swap(() => ({ a: 1 }))],
+    ["arrays returned as null", swap(() => null)],
+  ];
+
+  const failures = [];
+  const undrivable = [];
+  for (const tool of registeredTools) {
+    const args = { tenantId: 2783 };
+    let blocked = false;
+    for (const [name, schema] of Object.entries(tool.inputSchema ?? {})) {
+      if (name === "tenantId") continue;
+      const picked = sampleFor(schema, name);
+      if (picked.skip === "optional") continue;
+      if (picked.skip) { blocked = true; break; }
+      args[name] = picked.value;
+    }
+    const parsed = blocked ? undefined : z.object(tool.inputSchema ?? {}).safeParse(args);
+    if (!parsed?.success) { undrivable.push(tool.name); continue; }
+    for (const [label, data] of bodies) {
+      let reached = false;
+      let call = 0;
+      try {
+        await tool.handler(parsed.data, {
+          client: {
+            // The hostile body goes to the FIRST request; later requests get the plausible record.
+            //
+            // Returning it to every endpoint hid branches, which review found concretely: `reai_get_user` reads
+            // its user record and then `/api/users/roles`, and feeding the malformed body to BOTH made the roles
+            // lookup return nothing, so the guard exited before ever touching the malformed field. The sweep
+            // reported the tool safe for exactly the shape it was meant to test.
+            request: async () => {
+              reached = true;
+              call += 1;
+              return { data: call === 1 ? data : base, status: 200 };
+            },
+            deepLink: () => "link",
+          },
+          config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+          session: {},
+        });
+      } catch (err) {
+        // Only a throw AFTER the request matters. Before it means the stub arguments were wrong, which is this
+        // harness's problem and not the tool's — the same distinction the sweep above draws.
+        if (reached) failures.push(`${tool.name} [${tool.risk}] on ${label}: ${String(err.message).slice(0, 90)}`);
+      }
+    }
+  }
+
+  assert.deepEqual(
+    failures,
+    [],
+    `these tools threw on a 200 they did not expect, AFTER the request went out — for a write that reads as ` +
+      `the call never landing:\n  ${failures.join("\n  ")}`,
+  );
+
+  // The tools this harness cannot drive are named, not counted away. A silent skip is how a guard stops
+  // guarding: the count is asserted so a new undrivable tool has to be looked at rather than absorbed.
+  assert.deepEqual(
+    undrivable.sort(),
+    [
+      // Measured, not guessed: the first version of this list had `reai_request` in it, which this harness
+      // drives fine, and omitted `reai_update_agreement`, which it cannot.
+      "reai_create_agreement",
+      "reai_create_subscription",
+      "reai_create_voucher",
+      "reai_update_agreement",
+    ],
+    `the set of tools this sweep cannot generate arguments for has changed. It is not covered by this test — ` +
+      `either teach sampleFor the shape it needs, or accept the gap deliberately: ${undrivable.join(", ")}`,
+  );
+});

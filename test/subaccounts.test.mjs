@@ -710,7 +710,7 @@ test("creating a sub-account marks the name as SENT when the response omits it",
   const { text } = await run("reai_create_sub_account", { accountNumber: "1579", name: "Nytt" }, (req) =>
     req.method === "GET" ? [{ id: 1, accountNumber: "1579", name: "Default" }] : { id: 12 },
   );
-  assert.match(text, /"Nytt" \(as SENT — the response does not carry the name back\)/);
+  assert.match(text, /"Nytt" \(as SENT — the response carries name: null\)/);
 });
 
 test("creating a sub-account with the name it stores reports no discrepancy", async () => {

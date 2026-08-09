@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  asArray,
   defineTool,
   fail,
   isoDate,
@@ -336,7 +337,7 @@ const addSalaryLine = defineTool({
       tenantId: requireTenantId(tenantId, ctx),
     });
     const run = res.data;
-    const employee = run?.employees?.find((e) => e.employeeId === args.employeeId);
+    const employee = asArray(run?.employees).find((e) => e.employeeId === args.employeeId);
     // The LINE, from the response. This tool stated "Added 8 × 500 as HOURLY_WAGE" from `args` while already
     // reading `payableAmount` out of the same object — and its sibling reai_update_salary_line is certified for
     // walking exactly this path, in this file. Review found it by hand; the census now finds it too, because it
@@ -346,7 +347,7 @@ const addSalaryLine = defineTool({
     // an invented rule like "the highest id is the newest". A unique match on all three sent values is a
     // confirmation; several matches mean the figures are right but the row is ambiguous; none means the
     // response does not show what was sent, which is the case worth a warning.
-    const specs = employee?.wageSpecs ?? [];
+    const specs = asArray(employee?.wageSpecs);
     const sameNumber = (a: unknown, b: unknown) => Number(a) === Number(b);
     const matches = specs.filter(
       (l): l is NonNullable<typeof l> =>

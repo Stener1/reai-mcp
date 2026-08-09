@@ -9,6 +9,90 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The 40-tool "nobody has checked" list was replaced by a measurement, which found five tools echoing their
+  requests and six that crashed on an unexpected 200.** The previous PR left a ratchet: 40 names, meaning nobody
+  had examined whether each tool's note quotes the request or the record. A ratchet on a hand-kept list is only
+  as good as the hand, so every candidate is now DRIVEN — arguments built from its own zod schema, against a
+  response whose fields disagree with what was sent — and the note read.
+  - **Five echoes, all previously on that list, four declared irreversible.**
+    - `reai_create_asset` named the balance-sheet account the asset would sit on, from `args`.
+    - `reai_create_warehouse` named the warehouse it had just made — and its own description says names are not
+      unique, so the wrong name leaves a caller unable to tell which of two they created.
+    - `reai_set_bank_statement_balance`, `reai_close_manual_reconciliation` and
+      `reai_reopen_manual_reconciliation` each stated the month they were given. This is the family where that is
+      least defensible: this file already documents closing answering
+      409 `"Godkjenning er kun tilgjengelig for 2026-07."`, so the API has its own opinion about which month is
+      in play. *"2026-08 is closed for this account"* is a lock an agent will believe it holds.
+  - **The list is now 3, not 40** — the residue the sampler genuinely cannot construct arguments for, named
+    rather than counted. The first version of that shorter list had **seven** names, carried over from a weaker
+    sampler; four of the extras drive fine, and one of them was `reai_set_bank_statement_balance`, which the
+    sweep caught the moment the list stopped hiding it.
+  - **The sweep was weaker than its own docstring until a mutation battery said so.** Scanning the whole note
+    meant a tool could assert the sent value in its FIRST sentence while a `describeConfirmation` paragraph below
+    mentioned the stored one — and this counted as fine. Reverting `reai_create_asset` to echo its account number
+    survived. Scoped to the headline, it immediately found the two reconciliation tools above. This was caught by
+    the battery, not by a review.
+  - **And the verdict function had no positive control**, so setting its hedge branch to a constant `true`
+    disarmed the whole sweep with every other check green. It is extracted and tested directly now, on five
+    cases including the whole-note one that survived before.
+- **Review found the sweep's green result was an artifact of its own samples, and five more echoes behind it —
+  three irreversible.** Every one was found by fixing the sweep, not by running it, which is the finding that
+  matters more than the individual tools.
+  - **It read the whole note, not the headline.** A tool could assert the sent value in its first sentence while
+    a `describeConfirmation` paragraph below named the stored one, and this counted as a read-back. Reverting
+    `reai_create_asset` to an echo survived. (Caught by my own mutation battery.)
+  - **It sampled integers as `7`,** which the "too short to find in prose" guard then dropped — so **every
+    integer field in the repo was invisible**. That hid `reai_adjust_inventory` stating all four of product,
+    variant, warehouse and quantity from the request, on a movement its own note says cannot be deleted.
+  - **It sampled every field to the SAME value,** so one echoed integer flagged every integer field a tool
+    accepts. The first run after the integer fix reported 14 fields; 10 were that artifact.
+  - **It skipped optional fields,** so seven update tools were driven while being judged on **nothing**.
+  - **`reads` was judged on the whole note while `echo` was judged on the headline.** That asymmetry meant
+    reverting all three reconciliation fixes left the sweep green: the WARNING paragraph — which names the
+    stored value precisely BECAUSE the write disagreed — scored the field as a read-back.
+  - The five further echoes: `reai_adjust_inventory` (above), `reai_create_order` and `reai_create_offer` (the
+    payment terms, a money figure), `reai_create_invoice_from_order` (the invoice date, which decides the
+    accounting period — and this was a HALF-APPLIED fix: the comment said to report the date the API used, and
+    the fallback branch did, while the branch where the caller passed a date quoted it back) and
+    `reai_create_supplier_invoice` (invoice versus credit note — opposite signs in the ledger).
+  - **What the sweep still cannot see, now named rather than implied:** a value the note RENDERS rather than
+    prints (nine enum fields, listed by name in the test — only one has been looked at by hand), a value it
+    reformats, and five tools whose arguments it cannot construct. Two of those five became unreachable *because*
+    unwrapping optional fields made them refuse a mutually-exclusive combination — a trade recorded with its
+    cost, not a free win.
+  - `docs/tools.md` now says "**the sweep cannot drive**" rather than "not examined", because the narrower claim
+    is the true one.
+  - **The repo's own guard caught me inventing a tool name** in one of these notes: `reai_warehouse_inventory`
+    does not exist, the real one is `reai_get_warehouse_inventory`.
+- **Codex: `String(stored)` on a malformed field produced `[object Object]` inside an asserting headline** —
+  in the very commit that was hardening these handlers against unexpected 200 shapes. Measured on
+  `reai_create_asset` with `{accountNumber: {value: "1150"}}`: *"Registered asset 9 on account [object Object],
+  read back from the response"*, after an irreversible write. `asScalar` in `registry.ts` now gates all four
+  read-back sites, and the three-way wording distinguishes a stored `null` from a shape that cannot be stated
+  from a field the response omits.
+  - Codex also noted the hostile-shape sweep sends the same malformed body to EVERY endpoint, so a multi-request
+    tool's malformed branch may never run. Fixed — the first request gets the hostile body, later ones a
+    plausible record. Its specific example did not reproduce: `reai_get_user` with an object-valued
+    `effectivePermissionCodes` does not throw, it says *"no permission list was returned"*, which is the correct
+    hedge. The change stands on merit; the claim about that tool does not.
+  - Its other two findings (optional fields never sampled, required numerics skipped as too short) were already
+    fixed in the two commits above — it reviewed an earlier head. Verified against the current build with its own
+    examples rather than assumed.
+- **Six tools threw on a 200 whose shape their declared type did not predict — four irreversible.** Driving all
+  172 tools against bodies that keep the keys and break the shapes found `reai_create_expense`
+  (`(expense.costs ?? []).filter` on a non-array), `reai_match_bank_transactions`, `reai_book_bank_transactions`,
+  `reai_add_salary_line` and `reai_get_user`. Every one type-checked, because the declared response types are
+  this repo's reading of the API rather than a promise from it.
+  - The failure shape is what makes it worth a sweep: **the throw happens after the write succeeded**, so the
+    caller is handed something indistinguishable from the call never landing — and an agent's natural next move
+    is to retry an irreversible write.
+  - `?? []` does not help and `?.length` is worse: a string has a length, so a reconciliation field returned as
+    `"oops"` reported **four** transactions booked. Two notes written specifically to avoid a confident wrong
+    count were producing one. `asArray` in `registry.ts` is the single check now.
+  - Kept as a test in `test/list-shape.test.mjs`, whose subject already was "the API returned something I did not
+    expect". The four tools it cannot generate arguments for are asserted by name, because a silent skip is how
+    a sweep stops sweeping.
+
 - **The four tools that still stated an outcome from the request, and the reason the tripwire could not see
   them.** #143 fixed thirteen read-merge-write tools and recorded four more it could not reach. All four now
   report from the record, and the guard that missed them has been rebuilt around a population it derives rather

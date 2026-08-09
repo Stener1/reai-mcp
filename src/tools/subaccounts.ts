@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  asScalar,
   confirmAgainstResponse,
   defineTool,
   describeConfirmation,
@@ -200,17 +201,17 @@ const createSubAccount = defineTool({
     // fixed alongside: the same GeneralSubAccountRes carries `name`, and this tool is declared IRREVERSIBLE
     // with no DELETE, so the name it reports is the name that is permanent.
     const createdRecord = isRecord(res.data) ? res.data : undefined;
-    const storedName = createdRecord?.name;
+    const storedName = asScalar(createdRecord?.name);
     return ok(res.data, {
       note:
         `Sub-account ${createdRecord?.id ?? "?"} ${
-          storedName === undefined || storedName === null
+          storedName === undefined
             ? `"${args.name}" (as SENT — ${
                 createdRecord === undefined
                   ? `the response came back as ${describeShape(res.data)}`
-                  : storedName === null
-                    ? `the response carries name: null`
-                    : `the response does not carry the name back`
+                  : createdRecord.name === null || createdRecord.name === undefined
+                    ? `the response carries name: ${JSON.stringify(createdRecord.name ?? null)}`
+                    : `the response carries name as ${describeShape(createdRecord.name)}`
               })`
             : JSON.stringify(storedName)
         } created on account ${args.accountNumber}. ` +
@@ -268,17 +269,18 @@ const renameSubAccount = defineTool({
     // the response", stating a value this API is documented as substituting. An unreadable shape is a third
     // case, distinct from a missing field.
     const record = isRecord(res.data) ? res.data : undefined;
-    const stored = record?.name;
+    const stored = asScalar(record?.name);
     const confirmation = confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true });
     return ok(res.data, {
       note: [
-        (stored === undefined || stored === null
+        (stored === undefined
           ? `Sub-account ${args.id} was sent the name "${args.name}", and ` +
             (record === undefined
               ? `the response is not a record (it came back as ${describeShape(res.data)})`
-              : stored === null
-                ? `the response carries name: null`
-                : `the response does not carry the name`) +
+              : record.name === null || record.name === undefined
+                ? `the response carries name: ${JSON.stringify(record.name ?? null)}`
+                : `the response carries name as ${describeShape(record.name)}, which is not a value this ` +
+                  `can state`) +
             ` — so that is what was SENT rather than what is stored.`
           : `Sub-account ${args.id} is now named ${JSON.stringify(stored)}, read back from the response.`) +
           ` Only the name changed — the ledger account it belongs to cannot be changed through this endpoint.`,

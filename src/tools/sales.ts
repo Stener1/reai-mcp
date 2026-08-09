@@ -919,7 +919,7 @@ const createOrder = defineTool({
     const { tenantId, ...rest } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const terms = await resolveDaysUntilDue(args.daysUntilDue, args.customerId, resolved, ctx);
-    const res = await ctx.client.request<{ id?: number; number?: string; webUrl?: string }>({
+    const res = await ctx.client.request<{ id?: number; number?: string; webUrl?: string; daysUntilDue?: number }>({
       method: "POST",
       path: "/api/orders",
       body: {
@@ -936,7 +936,15 @@ const createOrder = defineTool({
         // The API returns `number`, not `orderNumber`, so this read undefined every
         // time and the document number — the one thing a user wants back — was dropped.
         `Order created${res.data?.number ? ` (${res.data.number})` : ""}. ` +
-        `Payment terms ${terms.days} days (${describeTermsSource(terms.source)}). ` +
+        // Same as the offer tool: `terms.days` is what this call resolved and SENT, and `OrderRes` carries
+        // `daysUntilDue`.
+        (typeof res.data?.daysUntilDue === "number"
+          ? `Payment terms ${res.data.daysUntilDue} days, read back from the response` +
+            (res.data.daysUntilDue === terms.days
+              ? ` (${describeTermsSource(terms.source)}). `
+              : `, NOT the ${terms.days} this call sent (${describeTermsSource(terms.source)}). `)
+          : `Payment terms ${terms.days} days as SENT (${describeTermsSource(terms.source)}) — the response ` +
+            `does not carry them back. `) +
         `Nothing has been sent to the customer yet — invoice it with reai_create_invoice_from_order.`,
       // Prefer the URL the API itself returns over a guessed one.
       ...(res.data?.webUrl
@@ -1638,7 +1646,7 @@ const createOffer = defineTool({
     const { tenantId, ...rest } = args;
     const resolved = requireTenantId(tenantId, ctx);
     const terms = await resolveDaysUntilDue(args.daysUntilDue, args.customerId, resolved, ctx);
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request<{ id?: number; daysUntilDue?: number }>({
       method: "POST",
       path: "/api/offers",
       body: {
@@ -1650,10 +1658,21 @@ const createOffer = defineTool({
       tenantId: resolved,
     });
     const id = res.data?.id;
+    // The stored terms. `terms.days` is what this tool RESOLVED and sent — from the caller, the customer, or a
+    // fallback of 14 — and `OfferRes` carries `daysUntilDue`, so quoting the request was a choice. Payment
+    // terms are a money figure a caller acts on without re-reading.
+    const storedTerms = typeof res.data?.daysUntilDue === "number" ? res.data.daysUntilDue : undefined;
     return ok(res.data, {
       note:
-        `Offer created with payment terms ${terms.days} days ` +
-        `(${describeTermsSource(terms.source)}). It has not been sent to the customer.`,
+        `Offer created with payment terms ` +
+        (storedTerms === undefined
+          ? `${terms.days} days as SENT (${describeTermsSource(terms.source)}) — the response does not carry ` +
+            `them back`
+          : `${storedTerms} days, read back from the response` +
+            (storedTerms === terms.days
+              ? ` (${describeTermsSource(terms.source)})`
+              : `, NOT the ${terms.days} this call sent (${describeTermsSource(terms.source)})`)) +
+        `. It has not been sent to the customer.`,
       ...(id ? { link: ctx.client.deepLink(`/offers/${id}`, resolved) } : {}),
     });
   },
@@ -2126,10 +2145,21 @@ const createInvoiceFromOrder = defineTool({
     // be a false assurance whenever the order had no invoice date and the API
     // fell back to today -- and the accounting period is the whole reason to care.
     const actualDate = res.data?.issueDate;
-    const dateNote = args.issueDate
-      ? ` dated ${args.issueDate}`
-      : actualDate
-        ? ` dated ${actualDate} (chosen by the API from the order, or today if it had no date)`
+    // The stored date in BOTH branches. This was a half-applied fix: the comment above says to report the date
+    // the API actually used, and the fallback branch did — while the branch where the caller passed a date
+    // quoted `args.issueDate` back. That is the branch where being wrong costs most, because a caller who
+    // names a date is doing it to control the accounting period, and this API is documented three lines up as
+    // substituting its own.
+    const dateNote = actualDate
+      ? ` dated ${actualDate}` +
+        (args.issueDate === undefined
+          ? ` (chosen by the API from the order, or today if it had no date)`
+          : args.issueDate === actualDate
+            ? ` as asked`
+            : ` — NOT the ${args.issueDate} you asked for, so the accounting period is not the one you chose`)
+      : args.issueDate
+        ? ` dated ${args.issueDate} as SENT — the response does not carry a date back, so which period it ` +
+          `posted to is unconfirmed`
         : " (the API chose the date; check it if the accounting period matters)";
     return ok(res.data, {
       note:

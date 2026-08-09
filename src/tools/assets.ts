@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   CURRENCY_CODE,
+  asScalar,
   confirmAgainstResponse,
   defineTool,
   describeConfirmation,
@@ -157,16 +158,40 @@ const createAsset = defineTool({
   },
   handler: async (args, ctx) => {
     const { tenantId, ...body } = args;
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request({
       method: "POST",
       path: "/api/assets",
       body,
       tenantId: requireTenantId(tenantId, ctx),
     });
+    // The ACCOUNT from the response. Found by driving every unexamined tool with a response whose fields
+    // disagreed with the request: this one quoted `args.accountNumber`, and it is the field that decides which
+    // balance-sheet account carries the asset. `AssetRes` returns it, this tool is declared irreversible, and
+    // the account cannot be changed afterwards through any endpoint this server exposes.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const storedAccount = asScalar(record?.accountNumber);
     return ok(res.data, {
-      note:
-        `Registered asset ${res.data?.id ?? "?"} on account ${args.accountNumber}. No voucher was ` +
-        `posted by this call — book the acquisition separately if it is not already in the ledger.`,
+      note: [
+        `Registered asset ${record?.id ?? "?"} on account ` +
+          (storedAccount === undefined
+            ? `${JSON.stringify(args.accountNumber)} as SENT — ` +
+              (record === undefined
+                ? `the response came back as ${describeShape(res.data)}`
+                : record.accountNumber === null || record.accountNumber === undefined
+                  ? `the response carries accountNumber: ${JSON.stringify(record.accountNumber ?? null)}`
+                  : `the response carries accountNumber as ${describeShape(record.accountNumber)}, which is ` +
+                    `not a value this can state`) +
+              `, so which account carries it is unconfirmed`
+            : `${storedAccount}, read back from the response`) +
+          `. No voucher was posted by this call — book the acquisition separately if it is not already in ` +
+          `the ledger.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ accountNumber: args.accountNumber, name: args.name }, record, {
+            wholeRecord: true,
+          }),
+          `asset ${record?.id ?? "?"}`,
+        ),
+      ].join("\n\n"),
     });
   },
 });
@@ -220,7 +245,7 @@ const setAssetDepreciation = defineTool({
     // A stored `null` counts as unanswered here rather than as an answer, because "now depreciates null over
     // null month(s), read back from the response" is a confident sentence stating a value this API is
     // documented as substituting. The contradiction still gets its warning from `confirmAgainstResponse`.
-    const usable = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
+    const usable = (v: unknown) => asScalar(v);
     const method = usable(record?.depreciationMethod);
     const life = usable(record?.usefulLifeInMonths);
     // The label belongs on BOTH branches: the first version appended it only to the read-back one, so an

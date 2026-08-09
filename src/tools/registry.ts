@@ -787,12 +787,45 @@ export function mergeForReplacement(opts: {
 export const isRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * A response field this repo is willing to state as a scalar, or nothing.
+ *
+ * `String(stored)` on a field the API returned as an object produces **`[object Object]`** inside a sentence
+ * that asserts a read-back — measured on `reai_create_asset` with `{accountNumber: {value: "1150"}}`:
+ * *"Registered asset 9 on account [object Object], read back from the response"*, after an irreversible write.
+ * Review found it in the very commit that was hardening handlers against unexpected 200 shapes.
+ *
+ * Booleans are included because some of these fields are flags; arrays and objects are not, because there is no
+ * honest one-line rendering of them and the caller is better told the shape was unexpected.
+ */
+export function asScalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+/**
+ * The array a response field is DECLARED to be, or none.
+ *
+ * The declared types in this repo are its reading of the API, not a promise from it — so
+ * `(res.data.costs ?? []).filter(...)` type-checks and still throws when the field comes back as anything else.
+ * Driving all 172 tools against a 200 whose array fields were strings found six that threw, four of them
+ * declared irreversible. The shape of the bug is what makes it worth a helper: the throw happens AFTER the
+ * write succeeded, so the agent is handed something indistinguishable from the call never landing.
+ *
+ * `?? []` is not enough and `?.length` is worse — a string has a length, so a field returned as "oops" reported
+ * FOUR transactions reconciled.
+ */
+export const asArray = <T>(value: T[] | readonly T[] | undefined | null): T[] =>
+  Array.isArray(value) ? (value as T[]) : [];
+
 /** What a response came back as, for a note that has to say why nothing could be read from it. */
 export function describeShape(v: unknown): string {
   if (v === undefined) return "no body";
   if (v === null) return "null";
   if (Array.isArray(v)) return `an array of ${v.length}`;
-  return `a ${typeof v}`;
+  return `${/^[aeiou]/.test(typeof v) ? "an" : "a"} ${typeof v}`;
 }
 
 /** Shared by `confirmAgainstResponse` and by callers that need to explain a difference it found. */

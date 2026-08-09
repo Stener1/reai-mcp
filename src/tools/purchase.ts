@@ -463,17 +463,30 @@ const createSupplierInvoice = defineTool({
       );
     }
 
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request<{ id?: number; documentType?: string }>({
       method: "POST",
       path: "/api/supplier-invoices",
       body,
       tenantId: resolved,
     });
     const id = res.data?.id;
+    // WHICH KIND of document, from the response. The note named it from `args.documentType`, and the two kinds
+    // are opposite signs in the ledger: calling a stored credit note an "invoice" describes a debit where the
+    // books hold a credit. `SupplierInvoiceRes` carries the field, and this tool is declared irreversible —
+    // its own next sentence says the document cannot be deleted outright.
+    const storedType = typeof res.data?.documentType === "string" ? res.data.documentType : undefined;
+    const label = (kind: string | undefined) => (kind === "credit_note" ? "credit note" : "invoice");
     return ok(res.data, {
       note:
-        `Supplier ${args.documentType === "credit_note" ? "credit note" : "invoice"} registered and ` +
-        `posted to the ledger. Reverse it with DELETE if it was wrong — it cannot be deleted outright.`,
+        (storedType === undefined
+          ? `Supplier ${label(args.documentType)} registered as SENT — the response does not say which kind ` +
+            `it stored`
+          : `Supplier ${label(storedType)} registered, read back from the response` +
+            (storedType === args.documentType
+              ? ``
+              : ` — NOT the ${label(args.documentType)} this call sent, which is the opposite sign in the ` +
+                `ledger`)) +
+        ` and posted to the ledger. Reverse it with DELETE if it was wrong — it cannot be deleted outright.`,
       ...(id ? { link: ctx.client.deepLink(`/supplier-invoices/${id}`, resolved) } : {}),
     });
   },

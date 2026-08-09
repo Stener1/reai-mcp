@@ -111,15 +111,26 @@ type ExpenseRecord = {
  *
  * Returns undefined when no date can be found at all, so the caller can decline to guess.
  */
+/**
+ * The rows of one of an expense's line collections, or none.
+ *
+ * `ExpenseRecord` DECLARES these as arrays, so TypeScript never questioned `(expense.costs ?? []).filter(…)` —
+ * but the declaration is this repo's reading of the API, not a guarantee from it. Driving the create tool with
+ * a response whose `costs` came back as a string threw `.filter is not a function` **after the POST had
+ * succeeded**, so the expense existed and the agent was handed what reads as a failed write. That is the worst
+ * shape of this bug: a thrown error is indistinguishable from the call not happening.
+ */
+const rowsOf = <T>(value: T[] | undefined): T[] => (Array.isArray(value) ? value : []);
+
 function expenseWindow(expense: ExpenseRecord): { startDate: string; endDate: string } | undefined {
   const isDate = (value: unknown): value is string =>
     typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value);
   const dates = [
     expense.startDate,
     expense.endDate,
-    ...(expense.costs ?? []).map((row) => row.date),
-    ...(expense.perDiems ?? []).flatMap((row) => [row.dateFrom, row.dateTo]),
-    ...(expense.mileageAllowances ?? []).map((row) => row.date),
+    ...rowsOf(expense.costs).map((row) => row.date),
+    ...rowsOf(expense.perDiems).flatMap((row) => [row.dateFrom, row.dateTo]),
+    ...rowsOf(expense.mileageAllowances).map((row) => row.date),
   ]
     .filter(isDate)
     .map((value) => value.slice(0, 10))
@@ -423,7 +434,7 @@ const createExpense = defineTool({
       tenantId: resolved,
     });
     const expense = res.data ?? {};
-    const missingCategory = (expense.costs ?? []).filter((row) => row.category == null).length;
+    const missingCategory = rowsOf(expense.costs).filter((row) => row.category == null).length;
     const notes = [
       `Expense ${expense.id ?? "?"} created: ${String(expense.title ?? args.title)}, total ` +
         `${expense.totalAmount ?? "?"}. Nothing is posted — a draft expense has no voucher.`,
@@ -530,7 +541,7 @@ const updateExpense = defineTool({
           `missing, send the whole set again.`,
       );
     }
-    const missingCategory = (expense.costs ?? []).filter((row) => row.category == null).length;
+    const missingCategory = rowsOf(expense.costs).filter((row) => row.category == null).length;
     if (missingCategory > 0) {
       notes.push(
         `${missingCategory} cost row(s) still have no category, so delivering will fail with ` +
