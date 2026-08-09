@@ -677,7 +677,13 @@ const activateSubscription = defineTool({
     "Check reai_get_subscription first: activating one whose outputMode is 'create_invoice' " +
     "with automaticBillingGeneration set means numbered invoices start reaching the customer.",
   risk: "irreversible",
-  apiPaths: [["POST", "/api/subscriptions/{id}/activate"]],
+  apiPaths: [
+    // The pre-read this handler makes before activating. Declared for the same reason the voucher
+    // tool now declares its dimension lookup: apiPaths is what coverage audits read, and an
+    // undeclared pre-read is invisible to them.
+    ["GET", "/api/subscriptions/{id}"],
+    ["POST", "/api/subscriptions/{id}/activate"],
+  ],
   inputSchema: {
     id: z.number().int().positive().describe("Subscription id."),
     tenantId: tenantIdArg,

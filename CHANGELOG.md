@@ -41,6 +41,18 @@ All notable changes to `reai-mcp`. Format loosely follows
     issuing a burst before the API has been asked at all.
   - Four mutations verified failing: the refusal removed, the exact-match dropped so a neighbouring
     account's bank bleeds in, a failed lookup made to block, and the budget removed.
+- **Two undeclared pre-reads, one of them the new pre-check's own.** `apiPaths` is what tells a consumer —
+  and this repository's own coverage audits — which endpoints a curated tool touches, so a pre-read missing
+  from it understates the tool and hides it from those checks. Codex found the new one;
+  `reai_create_voucher` now declares `GET /api/chart-of-accounts/accounts`.
+  - Sweeping for the same class found one more, pre-existing: `reai_activate_subscription` reads
+    `GET /api/subscriptions/{id}` before activating and declared only the POST. Also fixed.
+  - **The sweep is not shipped as a test**, because it has three known false-positive classes and I would be
+    adding a noisy guard. Comparing declared against called paths needs to be insensitive to parameter NAMES
+    (`{bankAccountId}` vs a `${bankAccountId}` template — same endpoint, 10 false hits) and to path segments
+    built at runtime (`/api/agreements/${type}/${id}` against five declared concrete forms;
+    `reai_set_customer_address` choosing `address` or `delivery-address`). Of 29 initial hits, 2 were real.
+    A correct version would resolve dynamic segments against the enum that produces them.
 - **Fixed a false claim shipped in #132: which of the two account fields a voucher actually takes.** The
   `reai_list_accounts` description said the composed `number` ("1920/1337") is *"the subledger syntax
   vouchers accept"*. It is not. The spec's own `AccountNumber` schema — the one `POST /api/vouchers` uses —

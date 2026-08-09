@@ -449,8 +449,12 @@ const createVoucher = defineTool({
     "This posts to the general ledger and is NOT freely reversible — under Norwegian bookkeeping " +
     "rules a voucher in a closed period cannot be deleted. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
-  apiPaths: [
+apiPaths: [
     ["GET", "/api/general-sub-accounts"],
+    // The bank-dimension pre-read. Declared because `apiPaths` is what tells a consumer, and this
+    // repository's own coverage audits, which endpoints a curated tool touches — an undeclared pre-read
+    // understates the tool and hides it from those checks. Codex found it missing here.
+    ["GET", "/api/chart-of-accounts/accounts"],
     ["POST", "/api/vouchers"],
   ],
   inputSchema: {
