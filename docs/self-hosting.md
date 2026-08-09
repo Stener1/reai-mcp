@@ -73,6 +73,13 @@ Unknown callback hosts are then refused at registration and never reach the cons
 
 ## One tenant per authorization
 
+A user-scoped ReAI token is what makes this server worth running for an accountant — one connection
+reaching every client company. The safety consequence cuts the other way, which is why an
+authorization binds one company: a token that reaches thirty client companies should not hand an agent
+all thirty because it was asked about one. That applies to what is *disclosed* as well as what can be
+addressed — on a bound connection `reai_whoami` lists only the bound company, and says the others
+exist without naming them.
+
 The company selected during authorization is a **boundary, not a default**. A grant bound to tenant 4711 cannot address any other tenant, even though the underlying ReAI token may unlock dozens — relevant for an accountant whose token reaches every client company. Tools that pass a different `tenantId`, and `reai_use_tenant`, are both refused with an explanation. To work in another company, re-authorize and pick it.
 
 An authorization with **no** bound company is refused outright, at every point it could be used — issuing, redeeming and refreshing. Early builds could mint one when `GET /api/me` returned no companies, and such a grant had no tenant boundary at all. If you authorized before this and see `invalid_token` with "not bound to a company", remove and re-add the connector.

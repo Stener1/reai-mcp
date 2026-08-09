@@ -22,11 +22,12 @@ const README = readFileSync(join(repo, "README.md"), "utf8");
 /**
  * The README plus everything under `docs/`, as one haystack.
  *
- * These assertions exist to guarantee that something is DOCUMENTED — that 146 tools are listed
+ * These assertions exist to guarantee that something is DOCUMENTED — that all 172 tools are listed
  * somewhere a reader will find them, that an enforced transport limit is written down. They were
  * pinned to README.md, which quietly made them assertions about documentation ARCHITECTURE too: when
  * the README was split into a front door plus `docs/`, the three sections these tests name could not
- * move, and the split had to leave them behind on the front page.
+ * move, and the split had to leave them behind on the front page. Corpus-wide now, which is what let
+ * the tool tables move to `docs/tools.md` — the guarantee is that a reader can find the tool.
  *
  * A file list rather than a glob, so a new page has to be added deliberately and an unlinked stray
  * markdown file cannot start satisfying a guarantee by accident. Every entry is checked to exist, so
@@ -41,6 +42,7 @@ const DOC_FILES = [
   "docs/discovery.md",
   "docs/self-hosting.md",
   "docs/development.md",
+  "docs/audits.md",
 ];
 const DOCS = DOC_FILES.map((f) => {
   const text = readFileSync(join(repo, f), "utf8");

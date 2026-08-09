@@ -26,3 +26,66 @@ All three live in `test/discovery-heldout.test.mjs` (`CASES`, `FRESH`, `EVERYDAY
 What the action vocabulary generalises to is **+2 of 28 on the corpus it was not fitted to** — the same +2 it bought on the one whose failures I had read, which is the comparison worth quoting. What moved all three further was routing the words through the tables that decide **method**: the vocabulary expanded to the right path segment and then lost to three `GET`s, because nothing in the query said a write was wanted. *"aktiver abonnement"* ranked `/activate` fifth; it ranks first now. A change that lifts the corpus you tuned against **and** the two you did not is the shape a general improvement has.
 
 The rule held across all three: a query that returns **nothing** strands an agent and is worth fixing; a query that returns the right endpoint at rank five is not worth tuning for. Five of the third corpus's thirty targets named endpoints that do not exist — the fourth time in this work that a "ranking failure" was really a wrong assumption about the API.
+
+## What did a ranking change do to every other query?
+
+```bash
+npm run sweep:discovery -- --against main
+npm run sweep:discovery -- --baseline /tmp/some-built-checkout   # faster for several variants
+```
+
+It extracts the revision with `git archive`, builds it, rebuilds HEAD, and compares ~69,000 generated queries
+against what HEAD answers. The npm script runs `npm run build` first because it imports HEAD's `dist/`: without
+that, editing `src/reai/spec.ts` and forgetting to build compares a fresh baseline against stale output and
+prints zero changes in every category — a false clean, which is the worst thing this tool could do. This exists because of a repeated failure rather than a hypothetical: **three PRs in a row added
+a synonym or a phrase rule, swept it, reported the sweep, and had an independent review find an over-match the
+sweep had not covered.**
+
+| PR | what over-matched | the dimension that found it |
+|---|---|---|
+| #120 | `krediter → credit-note` moved "krediter faktura" off the operation that *creates* a credit note onto the one that applies an existing one | the synonym table's own keys, crossed with nouns |
+| #122 | a demotion made "Apply a manual credit note to an invoice" return the DELETE that *unapplies* it | each endpoint's own **summary** as a query |
+| #125 | `inngående + faktura` swallowed "endre inngående faktura"; `faktura + abonnement` erased the invoice family from "vis faktura for abonnementet" | adjective × noun, and noun × noun in both orders |
+
+Each time the harness was rebuilt by hand in a scratch directory, differently and covering less. The
+dimensions are not clever — they are simply the ones that have caught something — so they are committed and
+`test/discovery-sweep.test.mjs` asserts that none of them silently disappears.
+
+Four numbers come back. **Rank-1 changes** is the headline and the least informative alone. **Answer no longer
+reachable** is the baseline's top result absent from the new window — the measure two CHANGELOG entries got
+wrong by counting *empty result sets* instead, which with no score floor in `searchOperations` can never happen
+and so was always zero. **Newly answered** was nothing and is now something. **Writes newly at rank 1** is
+split out by risk, because a query stating no intent to write and handed an irreversible or
+externally-transmitting operation is the failure this repository treats as most serious.
+
+Verified by reconstructing each defect and reading what the output actually names — the first version of this
+section claimed the dimensions "would have caught" all three, and an independent review refuted that for two of
+them, because `rankOneChanged` printed a count and no query:
+
+| reconstruction | what the sweep names |
+|---|---|
+| #125's unscoped `faktura + abonnement` | 24 rank-1 changes, **24 lost answers**, naming `fakturagebyr abonnement` and `fakturalinjer for abonnement` |
+| #122's general demotion | the inversion itself: `POST …/manual-credit-note-applications → DELETE …/{creditNoteInvoiceId} [irreversible]` |
+| #120's global exact-compound | the `krediter` over-match, on 9 lines. **`diett` is not named** — generated, but its ranking change is not one the report surfaces |
+
+The #122 case is why there is a **risky new answers** category at all: that inversion is write-to-write, which
+`writesPromoted` deliberately excludes, so the defect appeared only inside an unnamed count of 346. A rank-1
+target that is irreversible or transmitting is now named whatever the previous method was.
+
+
+### What it does not cover, stated rather than discovered later
+
+- **Only 146 of 430 operations have a `summary`**, so the endpoint-summary dimension covers about a third of the
+  surface.
+- **109 operations are internal** and `searchOperations` excludes them, so a ranking change confined to those is
+  invisible; their path segments still generate queries, which is part of why 489 of the corpus return nothing.
+- The four categories **overlap by design** — one query can appear in three — so they must not be summed. The
+  "24 rank-1 changes and 24 lost answers" above is the same 24 queries counted twice.
+- `NOUNS` is curated and thin in some domains; the synonym-key dimension is what covers the rest, and it is
+  derived from the table rather than hand-copied for exactly that reason.
+- Both spellings of `å` are kept deliberately. They fold to the same tokens, so for TERM matching they are
+  redundant — but `PHRASE_SYNONYMS` matches raw text **before** folding, and #125 needed `inngaaende` added to a
+  phrase rule for precisely that reason. Dropping them would stop the sweep noticing the next missing spelling.
+
+Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
+as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
