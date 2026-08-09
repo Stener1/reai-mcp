@@ -269,10 +269,13 @@ const updateAgreement = defineTool({
     "the whole thing back. The round-trip was verified lossless against the live API: the " +
     "sub-object a GET returns can be written back verbatim with no field changing value.\n\n" +
     "Field names are the template's own — read them with reai_get_agreement, or from " +
-    "reai_describe_endpoint on the matching POST /api/agreements/{template}. Some values the " +
-    "schema types as plain strings are validated as enums that the spec does not list; the API " +
-    "names the allowed set in its 400, e.g. leaseDurationType is " +
-    "indefinite | fixed_standard | fixed_special_reason and depositType is deposit | guarantee.\n\n" +
+    "reai_describe_endpoint on the matching POST /api/agreements/{template}, which also DECLARES " +
+    "the enums — 14 fields across four of the five templates carry one, purchase-agreement none, " +
+    "and the document names every " +
+    "member, so they can be read rather than guessed. The members are lowercase snake_case, " +
+    "which is not what a Norwegian contract form suggests: leaseDurationType is indefinite | " +
+    "fixed_standard | fixed_special_reason, depositType is deposit | guarantee. This tool checks " +
+    "values against those declarations before writing anything.\n\n" +
     "Setting `rentAccountNumber` or `depositAccountNumber` on a lease changes where a tenant's " +
     "money goes, which is a payment destination like any other.\n\n" +
     "Needs REAI_WRITE_MODE=full, and the reason is worth stating: not because THIS tool is " +

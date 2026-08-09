@@ -500,3 +500,131 @@ test("a lease's payment destinations escalate from INSIDE the changes object", a
   assert.equal(curatedArgsEscalate(paths, { id: 7, changes: { monthlyRent: 12000 } }), undefined);
   assert.equal(inPaymentRoutingScope("/api/agreements/rent-agreement/7", "PUT"), true);
 });
+
+/**
+ * The agreement enums ARE declared, and four places said they were not.
+ *
+ * `src/tools/agreements.ts` already carried the correction in its file header — "The enums ARE
+ * documented — an earlier version of this comment said otherwise … there are 14 such fields across
+ * the five templates". The correction had been applied to that comment and to nowhere a reader or an
+ * agent could see it:
+ *
+ *   src/reai/quirks.ts       "enums the document does not list"     <- served by reai_describe_endpoint
+ *   src/tools/agreements.ts  "enums that the spec does not list"    <- the tool description
+ *   docs/tools.md            "enums the spec never lists"
+ *   README.md                "the enums the spec types as plain strings"
+ *
+ * The quirk is the one that mattered: an agent told the document does not list the members will not
+ * call reai_describe_endpoint to get them, and will guess — which the header records as having
+ * produced 400s ("The rejected values were simply wrong guesses").
+ *
+ * The first version of the guard below caught three of those four and its comment claimed all four.
+ * The README's wording carries the claim by IMPLICATION rather than by denial — a field the document
+ * "types as plain strings" is one whose members it does not give — so no pattern looking for "does
+ * not", "never" or "silent" could match it. Found by Codex on PR #123, and the reason the check now
+ * also runs against the rendered quirk notes and tool descriptions rather than only source lines.
+ */
+test("the spec declares every agreement enum, and nothing says otherwise", async () => {
+  const { findOperation } = await import("../dist/reai/spec.js");
+  const segments = [
+    "accounting-services",
+    "employee-contract",
+    "rent-agreement",
+    "service-agreement",
+    "purchase-agreement",
+  ];
+  const declared = [];
+  for (const segment of segments) {
+    const fields = findOperation("POST", `/api/agreements/${segment}`)?.body?.fields ?? {};
+    for (const [name, type] of Object.entries(fields)) {
+      if (typeof type === "string" && type.startsWith("enum(")) declared.push(`${segment}.${name}`);
+    }
+  }
+  // The figure the docs now state. Asserted so a spec refresh that drops the declarations makes the
+  // prose stale HERE, rather than leaving four documents quietly wrong again.
+  assert.equal(declared.length, 14, `enum fields declared: ${declared.join(", ")}`);
+  // FOUR of the five templates, not five: purchase-agreement declares none. And 14 occurrences are only 12
+  // distinct names, because clientEntityType and billingFrequency appear on two templates each. Both were
+  // stated wrongly in the first version of this work and are asserted here so the prose cannot drift again.
+  const withEnums = new Set(declared.map((d) => d.split(".")[0]));
+  assert.equal(withEnums.size, 4, `templates declaring an enum: ${[...withEnums].join(", ")}`);
+  assert.ok(!withEnums.has("purchase-agreement"), "purchase-agreement declares no enum");
+  assert.equal(new Set(declared.map((d) => d.split(".")[1])).size, 12, "distinct enum field names");
+  // And the two the prose names by hand have to be among them, with the members it quotes.
+  const lease = findOperation("POST", "/api/agreements/rent-agreement")?.body?.fields ?? {};
+  assert.match(String(lease.leaseDurationType), /^enum\(indefinite\|fixed_standard\|fixed_special_reason\)/);
+  assert.match(String(lease.depositType), /^enum\(deposit\|guarantee\)/);
+});
+
+test("no agent-facing text claims the agreement enums are undocumented", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { QUIRKS } = await import("../dist/reai/quirks.js");
+  // The claim in every form it has taken, plus the shape a future rewrite would most likely use.
+  const false_claims = [
+    /enums?[^.]{0,40}(the )?(document|spec|schema)[^.]{0,20}(does not|never|doesn't)\s+(list|document|declare)/i,
+    /(document|spec)[^.]{0,30}(is )?silent[^.]{0,20}enum/i,
+    // The README's own wording, which the FIRST version of this guard missed while its comment claimed to
+    // cover all four. "Types as plain strings" is the same claim by implication — a field the document types
+    // as a plain string is one whose members it does not give — and it contains no "does not", "never" or
+    // "silent" for the patterns above to catch. Found by Codex on PR #123.
+    /(spec|document|schema)\s+types[^.]{0,25}as\s+plain\s+strings/i,
+    /types?\s+as\s+plain\s+strings[^.]{0,30}(enum|validated)/i,
+  ];
+  const sources = [
+    ["src/reai/quirks.ts", readFileSync("src/reai/quirks.ts", "utf8")],
+    ["src/tools/agreements.ts", readFileSync("src/tools/agreements.ts", "utf8")],
+    ["docs/tools.md", readFileSync("docs/tools.md", "utf8")],
+    ["README.md", readFileSync("README.md", "utf8")],
+  ];
+  // QUOTED spans are stripped rather than whole lines skipped, and that distinction is the finding.
+  // The first version skipped any line containing "an earlier version", "for a while" and so on, so that
+  // recording the mistake stayed legal. But markdown puts a whole paragraph on one line: adding "This
+  // paragraph said the opposite for a while" to docs/tools.md switched the guard OFF for the entire
+  // agreements paragraph, and the independent review of PR #123 proved it by appending a fresh false sentence
+  // there and watching the test stay green. Removing the quotes instead keeps the correction legal and leaves
+  // every other word on the line checked.
+  const stripQuotes = (line) =>
+    line.replace(/"[^"]*"/g, " ").replace(/\u201c[^\u201d]*\u201d/g, " ").replace(/`[^`]*`/g, " ");
+  const offenders = [];
+  for (const [file, text] of sources) {
+    for (const line of text.split("\n")) {
+      const naked = stripQuotes(line);
+      if (false_claims.some((re) => re.test(naked))) offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `these still say the enums are undocumented:\n  ${offenders.join("\n  ")}`);
+
+  // The four wordings this guard exists for, as they actually stood, asserted to be caught. Written as a
+  // fixture rather than trusted: the first version matched three of them while its comment claimed four, and
+  // the one it missed — the README's — was the most-read surface of the four. A pattern list is only as good
+  // as the examples it is checked against.
+  const historical = {
+    "quirks.ts": "schema types as plain strings are validated as enums the document does not list, and the",
+    "agreements.ts": "schema types as plain strings are validated as enums that the spec does not list; the API",
+    "docs/tools.md": "some fields the schema types as plain strings are validated as enums the spec never lists",
+    "README.md": "That, the enums the spec types as plain strings, and why the five create endpoints",
+  };
+  const uncaught = Object.entries(historical)
+    .filter(([, wording]) => !false_claims.some((re) => re.test(wording)))
+    .map(([where]) => where);
+  assert.deepEqual(uncaught, [], `the guard would not catch these historical wordings: ${uncaught.join(", ")}`);
+
+  // Then the same check on the strings as SERVED rather than as written, which is the version that matters and
+  // the one a line-by-line scan cannot see: a description is concatenated from a dozen literals, so a claim
+  // split across two of them matches no single line. Codex made this point on PR #123 and it is the better
+  // instrument.
+  const served = QUIRKS.filter((q) => (q.paths ?? []).some((p) => /agreement/.test(p)))
+    .map((q) => q.note ?? "")
+    .join("\n");
+  assert.ok(served.length > 0, "there should be agreement quirks to check");
+  const { registeredTools } = await import("../dist/server.js");
+  const descriptions = registeredTools
+    .filter((t) => (t.apiPaths ?? []).some(([, path]) => /agreement/.test(path)))
+    .map((t) => `${t.name}: ${t.description ?? ""}`)
+    .join("\n");
+  assert.ok(descriptions.includes("reai_update_agreement"), "the agreement tool descriptions should be readable");
+  for (const re of false_claims) {
+    assert.doesNotMatch(served, re, "a quirk served to agents says the enums are undocumented");
+    assert.doesNotMatch(descriptions, re, "a tool description says the enums are undocumented");
+  }
+});
