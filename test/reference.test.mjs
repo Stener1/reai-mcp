@@ -389,3 +389,81 @@ test("the documented phrase is found in the raw body too, not only in the messag
   assert.match(r.text, /NO annual-accounts submission exists for 2025/);
   assert.notEqual(r.result.isError, true);
 });
+
+/**
+ * `reai_list_accounts` is a SEARCH that reads like a listing, and its description used to say so.
+ *
+ * Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on tenant 2783:
+ *
+ *   no parameters        -> 20 rows
+ *   ?limit=5             ->  5 rows
+ *   ?limit=500           -> 100 rows   (silently capped; the `limit` argument documents that)
+ *   ?query=1320          ->  1 row
+ *
+ * against a chart of **399** accounts. The old description ended "every posting must reference an
+ * account that exists in this list", which invites an agent that searched, saw 20 rows and missed 1320
+ * to conclude the account does not exist. Same shape as the `includeArchived` defect the quirk audits
+ * found: a result that looks unfiltered and is not.
+ *
+ * Pinned here because the fix is prose, and prose is what rots.
+ */
+test("the accounts search says it is a search, and that absence is not evidence", async () => {
+  const { registeredTools } = await import("../dist/server.js");
+  const t = registeredTools.find((x) => x.name === "reai_list_accounts");
+  assert.ok(t, "reai_list_accounts must exist — five places in src/ tell agents to call it");
+
+  // The default is the part nothing documented. 20 of 399 is the number that matters.
+  assert.match(t.description, /returns 20 accounts/, "the default page size must be stated");
+  assert.match(t.description, /capped at 100/, "and the cap, so no call can return the whole chart");
+  assert.match(
+    t.description,
+    /ABSENT from a result is therefore not evidence/,
+    "the wrong inference must be closed off explicitly",
+  );
+  // Specific to the CLAIM, not the quotation. The description quotes what it retracted — which is
+  // useful for anyone diffing it — so a bare substring check fires on the retraction itself. The old
+  // text was the closing sentence "…before booking a voucher — every posting must reference an account
+  // that exists in this list", so the sentence shape is what must not return. Same trick as the
+  // `returns nothing —` pin in test/archive.test.mjs.
+  assert.doesNotMatch(
+    t.description,
+    /voucher\s*—\s*every posting must reference/,
+    "the retracted framing must not come back as a claim",
+  );
+  assert.match(
+    t.description,
+    /An earlier version of this text said/,
+    "and the retraction itself should stay, so the change is legible",
+  );
+
+  // The two conditionally-mandatory dimensions this endpoint cannot reveal, and where to get them.
+  assert.match(t.description, /subAccountId/);
+  assert.match(t.description, /companyBankId/);
+  assert.match(t.description, /reai_sub_accounts_for_account/);
+  assert.match(t.description, /reai_list_company_banks/);
+
+  // And the tool it points at has to exist, or the advice is a dead end.
+  for (const name of ["reai_sub_accounts_for_account", "reai_list_company_banks"]) {
+    assert.ok(
+      registeredTools.some((x) => x.name === name),
+      `${name} is named in the description but is not registered`,
+    );
+  }
+});
+
+test("every tool named in another tool's description is actually registered", async () => {
+  // The check that would have caught this class earlier. Descriptions point agents at other tools by
+  // name, and a name that does not resolve is a dead end an agent cannot recover from — it reads as a
+  // capability the server has and then does not.
+  const { registeredTools } = await import("../dist/server.js");
+  const names = new Set(registeredTools.map((t) => t.name));
+  const dangling = [];
+  for (const t of registeredTools) {
+    const text = `${t.description ?? ""} ${JSON.stringify(t.inputSchema ?? {})}`;
+    for (const [, referenced] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
+      if (referenced === t.name) continue;
+      if (!names.has(referenced)) dangling.push(`${t.name} -> ${referenced}`);
+    }
+  }
+  assert.deepEqual(dangling, [], "these descriptions name tools that do not exist");
+});

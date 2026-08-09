@@ -9,6 +9,37 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_list_accounts` is a search that read like a listing, and told agents to conclude the opposite.**
+  - Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on a 399-account chart: **no
+    parameters returns 20 rows**, `limit=5` returns 5, `limit=500` returns **100** (silently capped — the
+    `limit` argument already documented that cap), `query=1320` returns 1. The tool's description ended
+    *"every posting must reference an account that exists in this list"*, which invites an agent that
+    searched, saw 20 rows and missed 1320 to conclude the account does not exist. Same shape as the
+    `includeArchived` defect the quirk audits found: a result that looks unfiltered and is not.
+  - The description now states the default, the cap, that absence from a result is **not** evidence of
+    absence from the chart, and that the chart is per tenant in membership as well as size — measured, 349
+    accounts on one tenant and 399 on another, with account 1320 present on the second and absent from the
+    first.
+  - It also names the two conditionally-mandatory dimensions **this endpoint cannot reveal**: an account
+    carrying any general sub-account needs a `subAccountId`, and a bank account needs a `companyBankId`.
+    Measured: `/api/chart-of-accounts/accounts` carries no sub-account field at all while
+    `/api/chart-of-accounts` does, so the search cannot warn about the 400 that follows. It points at
+    `reai_sub_accounts_for_account` and `reai_list_company_banks` instead.
+  - **A new invariant: every tool named in another tool's description must be registered.** A name that
+    does not resolve is a dead end an agent cannot recover from — it reads as a capability the server has
+    and then does not. Verified by pointing the description at a plausible non-existent tool; the sweep
+    fails.
+- **Retracted before shipping: a duplicate chart-of-accounts tool.** I set out to close a coverage gap and
+  built `reai_list_chart_of_accounts` on `GET /api/chart-of-accounts`, with local filtering and
+  sub-account annotation. It was a near-duplicate of the existing `reai_list_accounts`, which uses the
+  sibling endpoint `/api/chart-of-accounts/accounts`. The coverage sweep that suggested the gap matched
+  exact `method path` pairs, so a tool on a sibling endpoint read as "uncovered" — the metric was wrong,
+  not the coverage. Removed; what survives is the description fix above, which is the part that was
+  actually broken. Recording it because the failure mode is worth remembering: a coverage number computed
+  by exact-path matching over-reports gaps, and the repo's own guards (README counts, the
+  no-input-it-never-sends sweep, the empty-vs-surprise sweep) all fired on the duplicate before review
+  did.
+
 - **`npm run audit:quirks:write` — the refusal claims a GET cannot reach.** Six cases against 2783, and it found
   a note half false on its first run.
   - `offer-lines-stricter` said `itemName` and `vatCode` are both required on an offer line "but **optional on an

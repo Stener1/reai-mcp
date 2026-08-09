@@ -39,9 +39,25 @@ const listAccounts = defineTool({
   name: "reai_list_accounts",
   title: "List chart of accounts",
   description:
-    "Search the tenant's chart of accounts (kontoplan). Returns account numbers, names and types. " +
-    "Use this to find the right account number before booking a voucher — every posting must " +
-    "reference an account that exists in this list.",
+    "SEARCH the tenant's chart of accounts (kontoplan) — a search, not a listing. Returns account " +
+    "numbers, names and types. Use it to find the right account number before booking a voucher.\n\n" +
+    "**Called with no arguments it returns 20 accounts, and the chart has hundreds.** Measured " +
+    "2026-08-09: 20 rows from a 399-account chart, and `limit` is capped at 100, so no single call can " +
+    "return the whole thing. An account being ABSENT from a result is therefore not evidence that it " +
+    "is absent from the chart — narrow with `query` or `accountNumberPrefix` and ask again before " +
+    "concluding an account does not exist. An earlier version of this text said \"every posting must " +
+    "reference an account that exists in this list\", which invited exactly that wrong inference.\n\n" +
+    "The chart is also per TENANT in membership as well as size: measured, 349 accounts on one tenant " +
+    "and 399 on another, with account 1320 present on the second and absent from the first. An account " +
+    "number that worked for one company is not evidence about another.\n\n" +
+    "**This search does not tell you what a posting to an account will DEMAND.** Two dimensions are " +
+    "conditionally mandatory and neither is visible here: an account carrying any general sub-account " +
+    'requires a `subAccountId` (400 "Linje 1: Konto NNNN må posteres med underkonto.") and a bank ' +
+    'account requires a `companyBankId` (400 "Linje 1: Konto 1920 må posteres med bankkonto."). ' +
+    "Measured: `GET /api/chart-of-accounts/accounts` carries no sub-account field at all, while " +
+    "`GET /api/chart-of-accounts` does. Ask reai_sub_accounts_for_account for the ids, and " +
+    "reai_list_company_banks for the bank one. See reai_api_notes for " +
+    "some-accounts-demand-a-dimension.",
   risk: "read",
   apiPaths: [["GET", "/api/chart-of-accounts/accounts"]],
   inputSchema: {
