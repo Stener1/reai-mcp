@@ -51,6 +51,7 @@
     "audit:messages": "node scripts/audit-messages.mjs",
     "audit:storage": "node scripts/audit-storage.mjs",
     "audit:quirks": "npm run build && node scripts/audit-quirks.mjs",
+    "audit:quirks:write": "npm run build && node scripts/audit-quirks-write.mjs",
     "audit:census": "node scripts/storage-census.mjs",
     "check:deployed": "node scripts/check-deployed.mjs",
     "sweep:discovery": "npm run build && node scripts/discovery-sweep.mjs"

@@ -9,6 +9,96 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`npm run audit:quirks:write` — the refusal claims a GET cannot reach.** Six cases against 2783, and it found
+  a note half false on its first run.
+  - `offer-lines-stricter` said `itemName` and `vatCode` are both required on an offer line "but **optional on an
+    order line**". Measured: `vatCode` is optional on an order line, `itemName` is **not** — an order line
+    without it is refused with 400 `"Produkt er obligatorisk for alle ordrelinjer."`, a plain Norwegian detail
+    with no `fieldErrors` at all. An agent following the old note would build an order line with neither and get
+    a refusal it was told not to expect. Corrected, and the audit now pins both halves plus the asymmetry in how
+    the two endpoints report it.
+  - Five more verified exactly as written: `stock-product-needs-a-variant` (400 naming the synthetic
+    `stockProductVariantSelectionValid` field), `brreg-lookup-requires-and-overwrites-name` (a blank name refused
+    beside a valid org number, whatever `minLength 0` suggests), `lead-convert-is-addressable-by-id-only`
+    (404 `"No static resource"` for the `/org/` form), `days-until-due-mandatory` (declared required on offers
+    *and* orders in the spec; omitting it gives a bare `"Failed to read request"` that names no field, which the
+    note now says), and `line-vat-code-subset` (`"Mva-kode 999 er ikke tillatt. Tillatte koder: 0."`).
+  - **Safety is the design, not a hope.** Every probe is built to fail, so nothing is created. Nothing
+    irreversible or transmitting is probed at all — enforced by asking `classifyRequest`/`classifyTransmission`
+    rather than by a hand-kept list, because a refusal that stops working means the request goes through. An
+    unexpected 2xx is a **SAFETY** outcome distinct from drift. And record counts are snapshotted before and
+    after across six collections, with any change failing the run.
+  - That last rule exists because of a real slip while scoping this: an order-line probe unexpectedly returned
+    201, and the ad-hoc cleanup filtered the list response for a field the list does not return — so it reported
+    "cleaning up 0 orders" while **order 4109** sat in 2783. Deleted by hand a minute later, verified 404, count
+    back to 8 with the original ids. A count check catches that; a filter that has to be correct does not.
+  - **The valid-except-for-the-field-under-test trap, for the fourth time in these audits.** The offer probe took
+    three rounds: `lines` tripped `currencyCode is required`, then `offerLines is required` (wrong field name),
+    then finally the claim. Required-field sets now come from the pinned spec and a test asserts it.
+  - Goes through the same tenant guard as every other writing script — verified refusing 2634 — plus the runtime
+    protected-tenant refusal, since sending writes is this file's whole method.
+  - **Codex found eight defects, two P1, and the first was the same hazard PR #130 existed to fix, reintroduced
+    one file later by forgetting a line.** `requireTokenReachesTenant` was imported and never called. A token
+    scoped to a single tenant ignores `X-Tenant-Id`, so `--tenant 2783` on a token reaching only 2634 satisfies
+    both number-based guards while every write lands in 2634. `write-guard.test.mjs`'s coverage check only
+    required the top-level *allowlist* call, so nothing caught it; this file's own test now requires the
+    reachability call, and requires it before the first write.
+  - The other P1: three cases returned **drift** when a probe was ACCEPTED. Drift tells the operator to correct a
+    note; an accepted probe means a record now exists, and the run's `0 SAFETY` line would have been false. All
+    three say `safety` now, and a test walks each case's success branch to require it.
+  - Six more, each real: the `daysUntilDue` case re-issued its request purely to quote the detail, giving one
+    more chance to create an order and no check on the result — it now validates the response the loop already
+    saw, and reports drift if field errors appear or the wording changes. The probe date was pinned to
+    `2026-01-02`, which would fall outside `/api/orders`' default window once the year rolled over and hide a
+    stray record from the very count check meant to catch it — derived now, and the order snapshot asks for an
+    explicit wide range. The offer probe hard-coded its required-field set while the docs claimed the spec
+    supplied it — it now compares against `requiredFor("/api/offers")` and reports inconclusive if the spec gains
+    a field it does not send, rather than false drift in the line validation. The VAT case accepted any text
+    containing two Norwegian phrases, so a hard-coded list would have passed — it now fetches
+    `/api/vat-codes?usage=customer-invoice` and compares (`listed codes match the tenant's own [0]`). The
+    remaining half of `offer-lines-stricter` — that `vatCode` is optional on an order line — cannot be shown
+    without a write that SUCCEEDS, so it is declared unverified in the case's own output rather than folded into
+    an OK, and a test requires that. And the CHANGELOG credited the `days-until-due-mandatory` note with
+    documenting the bare `"Failed to read request"` when the note never mentioned it; the note now does.
+  - **An independent review then delivered a transmitting write to tenant 2634 with all 996 tests green**, and
+    its verdict is the one worth recording: *"the file is safe today because its author wrote it carefully, which
+    is the property the tests were supposed to replace."* Both safety rules were implemented as regexes over
+    literal call sites, so a template-literal path (`` `/api/salary-payments/${id}/complete` ``) and a path held
+    in a variable walked past both the transmitting exclusion and the count-completeness check. Same failure as
+    PR #129, one file later.
+    - **The exclusion moved into `call()`**, where it classifies the path actually being sent and throws before
+      the request is made. Verified: the exploit now dies with *"Refusing to probe POST
+      /api/salary-payments/12/complete: classified irreversible/external"*.
+    - **Count completeness is derived from what was SENT**, not from the source. The uncounted
+      `POST /api/suppliers` now fails the run: *"A probe wrote to /api/suppliers, which the snapshot does not
+      count."*
+    - **`installProtectedTenantFetchGuard` was header-spelling-blind** — a real bug in #130's merged code. It
+      tried `headers[k]` then `headers[k.toLowerCase()]`, so `X-Tenant-Id` and `x-tenant-id` were refused while
+      **`X-TENANT-ID` reached the socket**; HTTP header names are case-insensitive. Now normalised, and a
+      `Headers` object is handled too. All four spellings verified refused.
+    - **Both tenant guards were checked by callee NAME, not argument**, so passing a literal while `call()` used
+      `tenantId` satisfied them while every request went elsewhere. The test now requires the argument to be
+      `tenantId`, the same binding the `X-Tenant-Id` header is built from.
+    - **The count check was filterable and saturable.** `?status=closed` returns 0 on this tenant permanently, and
+      the date-window test only asserted a string appeared *somewhere in the file* — review kept it in a comment.
+      WATCHED entries are now validated at runtime: only date bounds, page size, `leadFilter` and `archived` may
+      appear, and a `pageSize` under 50 is refused. Both verified firing live. The leads entry was itself
+      saturating at `pageSize=1`.
+    - **A non-200 snapshot was recorded as the string `HTTP 403` and compared with itself**, so a collection whose
+      GET started failing was silently unwatched while the run still said "nothing was created". It throws now,
+      as does an unrecognised body shape.
+    - **"Five verified exactly as written" overstated it**, and the unprobed sentences are the actionable ones —
+      that `daysUntilDue` OVERRIDES the customer's terms, that the brreg name is discarded, that convert is
+      idempotent, that subscription lines share the VAT list while offer lines do not. Each case now declares
+      `probes` and `unprobedClaims`, and the run **prints what it does not cover** before any result. A test
+      requires the disclosure whenever a case does not reach every path its quirk is served on.
+    - Numbers: **100** quirks without a live case, not 104 — and not the 97 I first corrected it to, which
+      over-counted by substring-matching ids merely mentioned in comments. **998** tests, not 992. The "~23"
+      figure is withdrawn: review could not reproduce it under any definition and neither can I. And this is the
+      **second** documented appearance of the valid-except-for-the-field-under-test trap, not the fourth — three
+      rounds inside one PR is one appearance.
+
+
 - **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
   guard instead of trusting it, before starting work that writes.
   - Four scripts each carried their own copy of one check: refuse unless `--tenant` appears in

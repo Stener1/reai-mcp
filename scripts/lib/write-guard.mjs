@@ -229,9 +229,18 @@ export function installProtectedTenantFetchGuard() {
     const method = String(init?.method ?? "GET").toUpperCase();
     if (method !== "GET") {
       const headers = init?.headers ?? {};
-      const get = (k) =>
-        typeof headers.get === "function" ? headers.get(k) : (headers[k] ?? headers[k.toLowerCase()]);
-      const tenant = Number(get("X-Tenant-Id"));
+      // Case-INSENSITIVE, because HTTP header names are. A first version tried `headers[k]` then
+      // `headers[k.toLowerCase()]`, which covered `X-Tenant-Id` and `x-tenant-id` and missed `X-TENANT-ID` —
+      // `Number(undefined)` is NaN, NaN is not in the protected set, and the request went out. Review delivered
+      // a POST to tenant 2634 through exactly that spelling with every test passing.
+      const tenantHeader = (() => {
+        if (typeof headers.get === "function") return headers.get("x-tenant-id");
+        for (const [k, v] of Object.entries(headers)) {
+          if (k.toLowerCase() === "x-tenant-id") return v;
+        }
+        return undefined;
+      })();
+      const tenant = Number(tenantHeader);
       if (isProtectedTenant(tenant)) {
         throw new Error(
           `Refusing to send ${method} to tenant ${tenant}: it is PROTECTED. This fired at the request itself, ` +
