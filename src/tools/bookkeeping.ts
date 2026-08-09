@@ -58,14 +58,26 @@ const listAccounts = defineTool({
     "The chart is also per TENANT in membership as well as size: measured, 349 accounts on one tenant " +
     "and 399 on another, with account 1320 present on the second and absent from the first. An account " +
     "number that worked for one company is not evidence about another.\n\n" +
-    "**This search does not tell you what a posting to an account will DEMAND.** Two dimensions are " +
-    "conditionally mandatory and neither is visible here: an account carrying any general sub-account " +
-    'requires a `subAccountId` (400 "Linje 1: Konto NNNN må posteres med underkonto.") and a bank ' +
-    'account requires a `companyBankId` (400 "Linje 1: Konto 1920 må posteres med bankkonto."). ' +
-    "Measured: `GET /api/chart-of-accounts/accounts` carries no sub-account field at all, while " +
-    "`GET /api/chart-of-accounts` does. Ask reai_sub_accounts_for_account for the ids, and " +
-    "reai_list_company_banks for the bank one. See reai_api_notes for " +
-    "some-accounts-demand-a-dimension.",
+    "**Each row is an account-plus-dimension, and it carries the id a posting needs.** This is the part " +
+    "worth knowing, and an earlier version of this description got it backwards by claiming the " +
+    "dimensions were invisible here. They are not — they are the whole shape of the response:\n\n" +
+    "  1900        subsidiaryLedger: null                                  -> post to \"1900\"\n" +
+    '  1920/1337   {type: "bank",    id: 1337, name: "mva"}                -> companyBankId 1337\n' +
+    '  1320/6230   {type: "general", id: 6230, name: "Default"}            -> subAccountId 6230\n\n' +
+    "Measured 2026-08-09. An account that demands a dimension does NOT appear bare: `1920` came back " +
+    "three times, once per company bank, with `number` already composed as \"1920/1337\" in the subledger " +
+    "syntax vouchers accept, and `subsidiaryLedger.id` equal to the companyBankId. An account that needs " +
+    "nothing appears once with `subsidiaryLedger: null`. So this search answers the dimension question " +
+    "directly, and `reai_sub_accounts_for_account` / `reai_list_company_banks` are for when you need the " +
+    "full sub-account or bank record rather than just the id to post with — and note that " +
+    "reai_list_company_banks lives in the `bank` toolset, so a server started with " +
+    "REAI_TOOLSETS=bookkeeping will not have it; the always-on reai_request reaches " +
+    "GET /api/company-banks directly. `subsidiaryLedger.type` is one of asset, bank, supplier, customer, " +
+    "employee, general.\n\n" +
+    "It also means the row COUNT is not an account count: a chart of 399 base accounts yields more rows " +
+    "than that once each dimension is enumerated, which is another reason the 100 cap bites sooner than " +
+    "it looks. See reai_api_notes for some-accounts-demand-a-dimension, which documents the 400s you get " +
+    "when the dimension is omitted anyway.",
   risk: "read",
   apiPaths: [["GET", "/api/chart-of-accounts/accounts"]],
   inputSchema: {

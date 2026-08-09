@@ -447,9 +447,21 @@ test("the accounts search says it is a search, and that absence is not evidence"
   );
   assert.match(t.description, /reai_request/, "with the honest fallback for reaching it");
 
-  // The two conditionally-mandatory dimensions this endpoint cannot reveal, and where to get them.
-  assert.match(t.description, /subAccountId/);
+  // The dimensions ARE here, and an earlier version of this description claimed the opposite. Measured:
+  // `accountNumberPrefix=19` on a tenant with three company banks returns 1900 with
+  // `subsidiaryLedger: null` and three 1920 rows — "1920/1337" etc — each carrying
+  // `{type:"bank", id:<companyBankId>}`. So the row is an account-plus-dimension and the id to post with
+  // is in it. Checking for the field name `generalSubAccounts` (which this endpoint does NOT use) is how
+  // that got missed.
+  assert.match(t.description, /subsidiaryLedger/, "the field that carries the dimension must be named");
+  assert.match(t.description, /1920\/1337/, "with the measured example of a composed account number");
   assert.match(t.description, /companyBankId/);
+  assert.match(t.description, /subAccountId/);
+  assert.doesNotMatch(
+    t.description,
+    /does not tell you what a posting to an account will DEMAND/,
+    "the retracted claim that the dimensions are invisible must not come back",
+  );
   assert.match(t.description, /reai_sub_accounts_for_account/);
   assert.match(t.description, /reai_list_company_banks/);
 
@@ -460,6 +472,75 @@ test("the accounts search says it is a search, and that absence is not evidence"
       `${name} is named in the description but is not registered`,
     );
   }
+});
+
+/**
+ * Cross-toolset references, recorded rather than banned.
+ *
+ * `REAI_TOOLSETS=bookkeeping` gives 19 tools plus the seven always-on ones. `reai_list_accounts` is in
+ * that selection and `reai_list_company_banks` is not — it is in `bank` — so a description pointing at
+ * it names a tool the agent cannot see. Codex found that on this PR, and the union check below could not
+ * see it because `registeredTools` is every group at once.
+ *
+ * The fix is NOT to delete the references. "Take the VAT code from reai_list_vat_codes" is good advice
+ * that happens to cross a group boundary, and 19 of them already existed before this PR. What matters is
+ * that each is a deliberate, visible choice — so they are enumerated here, and a new one fails until it
+ * is added with the group it lives in. The always-on `reai_request` and `reai_search_endpoints` are the
+ * escape hatch in every narrowed configuration, which is what makes a cross-group reference survivable.
+ */
+const CROSS_GROUP_REFERENCES = new Set([
+  "bookkeeping: reai_list_accounts -> reai_list_company_banks",
+  "bookkeeping: reai_list_sub_accounts -> reai_create_reconciliation_rule",
+  "sales: reai_create_product -> reai_list_vat_codes",
+  "purchase: reai_unarchive_supplier -> reai_unarchive_customer",
+  "purchase: reai_register_supplier_invoice_payment -> reai_list_company_banks",
+  "bank: reai_create_reconciliation_rule -> reai_list_accounts",
+  "bank: reai_create_reconciliation_rule -> reai_list_vat_codes",
+  "bank: reai_book_bank_transactions -> reai_list_accounts",
+  "bank: reai_book_bank_transactions -> reai_list_vat_codes",
+  "bank: reai_create_vat_return -> reai_general_ledger",
+  "organisation: reai_list_employees -> reai_list_postings",
+  "organisation: reai_list_employees -> reai_general_ledger",
+  "organisation: reai_list_employees -> reai_list_expenses",
+  "assets: reai_create_asset -> reai_list_accounts",
+  "subscriptions: reai_create_subscription -> reai_list_customers",
+  "subscriptions: reai_update_subscription -> reai_list_customers",
+  "warehouses: reai_adjust_inventory -> reai_list_products",
+  "investments: reai_add_share_investment_event -> reai_list_vouchers",
+  "investments: reai_add_share_investment_event -> reai_list_company_banks",
+]);
+
+test("a description that points across toolsets is recorded, not accidental", async () => {
+  const { TOOL_GROUPS, selectTools, alwaysOnTools } = await import("../dist/server.js");
+  const always = new Set((alwaysOnTools ?? []).map((t) => t.name));
+  // The escape hatch that makes any of this survivable — if these ever stop being always-on, every
+  // cross-group reference becomes a dead end and this whole allowance has to be revisited.
+  for (const escape of ["reai_request", "reai_search_endpoints", "reai_describe_endpoint"]) {
+    assert.ok(always.has(escape), `${escape} must be always-on for a narrowed toolset to recover`);
+  }
+
+  const found = new Set();
+  for (const group of Object.keys(TOOL_GROUPS)) {
+    const selection = selectTools([group]);
+    const present = new Set([...selection.map((t) => t.name), ...always]);
+    for (const t of selection) {
+      const text = `${t.description ?? ""} ${JSON.stringify(t.inputSchema ?? {})}`;
+      for (const [, ref] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
+        if (ref === t.name || present.has(ref)) continue;
+        found.add(`${group}: ${t.name} -> ${ref}`);
+      }
+    }
+  }
+
+  const added = [...found].filter((f) => !CROSS_GROUP_REFERENCES.has(f));
+  assert.deepEqual(
+    added,
+    [],
+    "these descriptions point at a tool a narrowed REAI_TOOLSETS would not include. That can be fine — " +
+      "the always-on discovery tools reach any endpoint — but say so in the description and add it here.",
+  );
+  const gone = [...CROSS_GROUP_REFERENCES].filter((f) => !found.has(f));
+  assert.deepEqual(gone, [], "these recorded references no longer exist; drop them from the list");
 });
 
 test("every tool named in another tool's description is actually registered", async () => {
