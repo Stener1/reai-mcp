@@ -79,83 +79,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **An exact compound was matching prose that merely contained its parts, and buying the coverage multiplier
   with it.** The all-or-nothing rule from #120 required only that every part of a hyphenated term appear
-  *somewhere* in the haystack. In a path or an operation id the segments are adjacent by construction, so that
-  was the same thing; in prose the words scatter, and boilerplate scored a full 1:
+  *somewhere*. On a path the segments are adjacent by construction, so that was the same thing; in prose the
+  words scatter, and boilerplate scored a full 1 — which, at strength 1 with weight ≥ 1, entered
+  `matchedResourceTerms` and bought the **uncapped coverage multiplier**, precisely what the "a 0.2
+  bare-substring hit is noise" guard three lines below it exists to stop.
+  - **Counted properly, after the first attempt got it wrong in both directions.** Over all 430 operations
+    against every hyphenated phrase replacement: **18 prose matches, 14 with the words adjacent and correct**
+    ("list chart of accounts", "match bank transactions and postings"), and **2 genuinely wrong**:
 
-  ```
-  "vat-returns"        vs  GET /api/vat-codes    "returns every vat code supported by reai…"
-  "tax-returns"        vs  POST …/wage-specs     "…returns the updated salary payment"
-  "chart-of-accounts"  vs  GET /api/general-sub-accounts
-  ```
+    ```
+    "vat-returns"        vs  GET /api/vat-codes             "returns every vat code supported by reai…"
+    "chart-of-accounts"  vs  GET /api/general-sub-accounts  "…subsidiary ledger sub-accounts…"
+    ```
 
-  A strength of 1 with weight ≥ 1 enters `matchedResourceTerms`, so each of those bought the **uncapped
-  coverage multiplier** — precisely what the "a 0.2 bare-substring hit is noise and must not buy the coverage
-  multiplier" guard was written to stop. **35 such matches, every one in a summary or a description.**
-  - Observable rather than theoretical: on `main`, "mva-melding" surfaced `GET /api/vat-codes` at **rank 5**, an
-    unrelated resource reached through the phrase "returns every vat code".
-  - Found by the independent review of PR #120, which reported it against that PR's first commit and said the
-    later scoping would not address it. It did not: `vat-returns` and `tax-returns` *are* phrase replacements, so
-    the opt-in narrowed the blast radius without touching this. The report arrived after #120 had merged and five
-    PRs had shipped on top, so most of it was obsolete — this finding was not.
-  - **Requiring adjacency was the obvious fix and it does not work.** Two terms deliberately name a nested path,
-    where the parameter sits between the segments (`salary-payments-complete` for
-    `/api/salary-payments/{id}/complete`), and the operation-id form writes that as `_id_`; the singular/plural
-    folding also means a term's last part is often not at a word boundary, so `salary-payment` would stop
-    matching `/api/salary-payments`. Both are asserted, so the adjacency attempt cannot return quietly.
-  - The rule is now scoped to the **structural** fields — path, tag, operation id, field names — and prose keeps
-    the ordinary branches. Prose is where every one of the 35 false matches was, and the scorer already flags it.
-  - **Swept with `npm run sweep:discovery`, the tool #126 committed for exactly this.** Across **69,143 queries**:
-    **one** rank-1 change, no answer lost, nothing newly empty. The sweep named it and flagged it as landing on
-    an irreversible, externally-transmitting operation — `generer amelding` moves from
-    `POST /api/subscriptions/{id}/generate` to `POST /api/salary-payments/{id}/complete`, which is right: the
-    a-melding is filed by completing the salary payment, and `main` was answering with subscription invoicing.
-    A line to read rather than a number to accept, which is what that category is for.
+    A first draft claimed **35** and "every one false". That number came from scanning every hyphenated string
+    in the source — including term-table values like `tax-returns` that never reach this branch — across every
+    field. It also offered a third example, `tax-returns` against the wage-specs description, which was
+    **fabricated**: `tax-returns` comes only from `TERM_SYNONYMS` (`skattemelding`), never from a phrase. That
+    example had been written into the source comment as well as the entry, and both are corrected.
+  - **So the rule is adjacency in prose, not exclusion of prose.** Excluding it outright was the first fix, and
+    it removed the same 2 while demoting all 14: measurably, `mva-koder` fell from 43.40 to 40.40 and two ranks
+    swapped under "mva-melding". Worse, it only worked for short-leading terms — for a term whose first segment
+    is four characters or more, disabling the rule falls through to the prefix branch at 0.6, which still clears
+    the `matchedResourceTerms` threshold, so `chart-of-accounts` kept its 0.6 and `GET /api/general-sub-accounts`
+    stayed at rank 3. Codex caught that; the independent review then confirmed adjacency keeps all 14 and kills
+    the same 2.
+  - **"Adjacent by construction" was false for two of the four structural fields.** There are 26 multiword tags,
+    and `fieldNamesOf` joins unrelated parameter names with spaces, so a term's parts can arrive from two
+    different parameters — the same non-adjacency, at weight 3, on the side the rule was leaving alone. The mode
+    is now per haystack: **structural** for the path and the operation id, where a parameter may sit between the
+    segments; **prose** for the tag, the summary, the description and the joined field names.
+  - Swept with `npm run sweep:discovery` across **69,143 queries**: **2 rank-1 changes, no answer lost, nothing
+    newly empty.** Both are nonsense verb×tag combinations from the sweep's own generation — "generer manual
+    bank reconciliations" was answering *close a reconciliation* on `main` and now follows the verb instead —
+    and both were flagged as landing on an irreversible, transmitting operation, which is the category doing its
+    job. Junk to junk on queries nobody types.
 
-- **Three queries this repository's own corpora declared, and could not reach.** Sweeping all **168 declared
-  pairs** — three corpora across two files — found three that were not in the top 20 at all. They were
-  invisible because the corpora are scored against floors rather than per pair, so three misses sat inside a
-  passing count. The last surfaced when the independent review of #124 spotted one while checking an unrelated
-  claim of mine, which is what prompted sweeping the rest.
-  - **`kvittering` reached NOTHING**, so "last opp kvittering" answered
-    `POST /api/accountant-clients/{clientTenantId}/oppdragskontroll-notes` — the upload method hint with no noun
-    to anchor it — and `/api/attachments` did not appear at all (main returns six hits for that query in total).
-    "last opp vedlegg" worked the whole time, which is what hid the hole.
-  - **"innkommende ehf" is the supplier-invoice inbox, not an attachment's EHF payload.** `innkommende` reached
-    nothing and `ehf` reached `GET /api/attachments/{id}/ehf`, so the query landed on the wrong side of its own
-    word. `inngaaende` is covered as well as `inngaende`: the index folds å to a single a, but callers type the
-    conventional double-a too, which is why `aarsregnskap` is a key of its own.
-  - **"lag faktura for abonnementene" sat at rank 34.** `lag` is deliberately not a write verb — it is also the
-    everyday noun for a team — so the query reads as neutral, and nothing connected the word pairing to
-    `POST /api/subscriptions/generate-due`, which is what the corpus declares. Now **reachable, not first**: rank
-    4 with `GET /api/subscriptions` above it, because the neutral-query penalty still holds.
-  - **All three rules were scoped down after review, and every one of them had over-matched.** Codex found each,
-    and the pattern is the third time this table has done it:
-    - `kvittering → attachment` as a bare synonym broke the word's other live senses. `registrer kvittering`
-      fell from `POST /api/receipt-reception-documents/{id}/registration` at rank 1 to **rank 17**, and
-      registering a receipt confirms a payment where uploading an attachment does not. `utlegg kvittering` left
-      `/api/expenses` too. It is a phrase scoped to upload wording now, which is the only sense the corpus
-      declares — and a claim in the first draft of this entry, that `registrer` still reached the registration,
-      was false.
-    - The inbox rule included `faktura*`, which swallowed explicit work on an already-registered invoice:
-      `endre inngående faktura` went from `PATCH /api/supplier-invoices/{id}` at rank 1 to the inbox GET with
-      the PATCH **absent from 200 results**. Narrowed to `ehf|peppol`.
-    - The subscription rule matched any invoice mentioned near a subscription and, because a matched phrase is
-      consumed, destroyed the `faktura` term: `vis faktura for abonnementet` lost `/api/invoices` from 200
-      results. It now requires generation wording, so read and destructive phrasings keep the invoice family —
-      `slett faktura for abonnementet` had been ranking `generate-due`, which `policy.ts` lists as transmitting.
-  - **Floors keep one pair of headroom rather than sitting on the measured value**, because two reviews in a row
-    have made the same point: a ratchet pinned exactly at the actual red-fails CI on any unrelated single-pair
-    movement, with a message that cannot say which pair moved. The three gains are pinned individually instead.
-    One correction on attribution: the CASES floors were 38 and 39 while that corpus **already measured 39 and
-    41 on `main`** — raising them locks in a figure this change did not produce, so only its top-10 floor moves.
-    The gains that are this change's are FRESH 26→27 and EVERYDAY 19→20 top-3, 24→26 top-10.
-  - Measured over **8704 queries**: 328 rank-1 changes, **no empty result sets**, 2 newly answered, and **314
-    queries where main's top result left the top 20** — stated rather than glossed, since a first draft of this
-    entry claimed no answer was lost and the review disproved it. **312 of the 314 contain `ehf` or `peppol`**,
-    where the phrase deliberately narrows to the reception family, and the other 2 are the wrong
-    oppdragskontroll answer being displaced by the fix itself. Zero unexplained. Of 24 writes newly at rank 1,
-    every one is `delete`/`slett` + an incoming-EHF phrasing reaching `DELETE /api/invoice-reception-documents/{id}`,
-    which is what a delete query about an inbox document should find.
 
 ### Investigated and deliberately not changed
 

@@ -783,11 +783,42 @@ test("requiring adjacency instead was rejected, and these are the cases that rej
   assert.equal(top("vis amelding").path, "/api/salary-payments");
 });
 
-test("the one query the change moves, moves to the right answer", () => {
-  // A 69,143-query sweep against main reported exactly one rank-1 change, and flagged it as landing on an
-  // irreversible, externally-transmitting operation — which is the sweep doing its job, since that is a line to
-  // read rather than a number to accept. "Generer amelding" means produce the payroll report, and the a-melding
-  // IS filed by completing the salary payment; main answered with subscription invoicing.
-  const top = searchOperations({ query: "generer amelding", limit: 1 })[0];
-  assert.equal(`${top.method} ${top.path}`, "POST /api/salary-payments/{id}/complete");
+test("the correct prose matches survive, and only the two wrong ones go", () => {
+  // The population matters, and a first version of this work got it wrong in both directions. Measured over all
+  // 430 operations against every hyphenated phrase replacement: 18 prose matches, 14 with the words ADJACENT and
+  // correct, 2 genuinely wrong. The CHANGELOG had claimed 35 and "every one false" — a number built by scanning
+  // every hyphenated string in the source, including term-table values that never reach this branch. The review
+  // of PR #127 counted properly.
+  //
+  // So the rule is adjacency in prose, not exclusion of prose: excluding it outright removed the same 2 and
+  // demoted all 14, which measurably cost `mva-koder` 43.40 -> 40.40 and swapped two ranks under "mva-melding".
+  const top = (q, n = 1) => searchOperations({ query: q, limit: n });
+
+  // The 14, spot-checked at their scores: these are phrases, adjacent in a summary, and must not be demoted.
+  assert.equal(`${top("chart of accounts")[0].method} ${top("chart of accounts")[0].path}`, "GET /api/chart-of-accounts");
+  assert.equal(top("mva-koder")[0].path, "/api/vat-codes");
+  assert.equal(top("mva-koder")[0].score, 43.4, "the blunt prose exclusion cost this 3 points");
+  assert.match(top("bank transactions")[0].path, /bank-transactions/);
+  assert.match(top("annual accounts")[0].path, /annual-accounts/);
+
+  // And the two that were wrong: an unrelated resource reached through scattered words in a description.
+  const chart = top("chart of accounts", 20).map((h) => `${h.method} ${h.path}`);
+  assert.ok(!chart.includes("GET /api/general-sub-accounts"), `general-sub-accounts still present: ${chart.slice(0, 5)}`);
+  const vat = top("mva-melding", 20).map((h) => `${h.method} ${h.path}`);
+  assert.ok(!vat.includes("GET /api/vat-codes"), `vat-codes still present: ${vat.slice(0, 5)}`);
+});
+
+test("a multiword tag and a joined field-name list take the prose rule, not the structural one", () => {
+  // The first version called all four non-prose fields "adjacent by construction". False for two of them, as the
+  // review of PR #127 measured: there are 26 multiword tags, and fieldNamesOf joins unrelated parameter names
+  // with spaces, so a term's parts can arrive from two different parameters — the same non-adjacency, at weight
+  // 3, on the side the rule was leaving alone. Both are on the prose rule now.
+  // A tag whose words ARE adjacent still matches at full strength.
+  assert.equal(matchStrength("bank transactions", fieldTokens("bank transactions"), "bank-transactions", "prose"), 1);
+  // Scattered across a joined field-name list, it does not.
+  const joined = "transactionid bankaccountid postingdate";
+  assert.equal(matchStrength(joined, fieldTokens(joined), "bank-transactions", "prose"), 0);
+  // While the path keeps the structural rule, where a parameter may sit between the segments.
+  const nested = "/api/salary-payments/{id}/complete";
+  assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", "structural"), 1);
 });
