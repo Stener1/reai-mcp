@@ -9,7 +9,7 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
-- **An action the query never asked for could outrank the resource it did name.** `/api/salary-payments` is the
+- **An action the query never asked for could outrank the resource it did name** (#122). `/api/salary-payments` is the
   collection and `/api/salary-payments/{id}/complete` is the action that **files payroll with Skatteetaten**.
   Measured on `main`:
 
