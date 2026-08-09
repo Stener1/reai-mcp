@@ -510,6 +510,10 @@ const CROSS_GROUP_REFERENCES = new Set([
   "warehouses: reai_adjust_inventory -> reai_list_products",
   "investments: reai_add_share_investment_event -> reai_list_vouchers",
   "investments: reai_add_share_investment_event -> reai_list_company_banks",
+  // Why this one exists: reai_update_order sits at REAI_WRITE_MODE=full for the same reason the agreement
+  // update does, and naming the precedent is the clearest way to say the tier is about the operation rather
+  // than the care taken over it.
+  "sales: reai_update_order -> reai_update_agreement",
 ]);
 
 test("a description that points across toolsets is recorded, not accidental", async () => {

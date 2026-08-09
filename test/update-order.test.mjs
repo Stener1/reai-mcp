@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { salesTools } from "../dist/tools/sales.js";
 import { classifyRequest, classifyTransmission } from "../dist/policy.js";
+import { z } from "zod";
 
 /**
  * `reai_update_order`.
@@ -157,11 +158,21 @@ test("a value the API did not store is reported against what was sent", async ()
   assert.match(text, /daysUntilDue: sent 30, stored 14/);
 });
 
-test("updating an order is reversible and transmits nothing", () => {
-  assert.equal(tool().risk, "reversible");
+test("updating an order sits at the tier the omission gate already imposes, and transmits nothing", async () => {
+  // NOT reversible, though `classifyRequest` says the path is. The body this tool sends omits `invoiceEmail`
+  // — it cannot read it — and `omittedReplacementFields` refuses exactly that omission for a raw PUT in the
+  // default mode. A reversible curated tool would therefore have been the soft route around a gate the
+  // escape hatch is subject to, which is the one thing a curated tool must never be.
+  assert.equal(tool().risk, "irreversible");
   assert.ok(!tool().transmits);
-  // In step with the raw call, so the curated tool is not a harder route than reai_request.
+  // The path itself is reversible; the omission is what escalates it. Both asserted, since the gap between
+  // them is the whole reason for the tier.
   assert.equal(classifyRequest("PUT", "/api/orders/7"), "reversible");
+  const { omittedReplacementFields, findOperation } = await import("../dist/reai/spec.js");
+  const omitted = omittedReplacementFields(findOperation("PUT", "/api/orders/{id}"), {
+    currencyCode: "NOK", customerId: 1, daysUntilDue: 14, issueDate: "2026-08-09", orderLines: [{ quantity: 1, unitPrice: 1 }],
+  });
+  assert.ok(omitted.fields.includes("invoiceEmail"), "the gate this tier answers to must still name invoiceEmail");
   assert.equal(classifyTransmission("PUT", "/api/orders/7"), "none");
   // And it does not offer the one field that would change that.
   assert.equal(tool().inputSchema.sendEhf, undefined, "sendEhf must not be an argument");
@@ -203,8 +214,16 @@ test("invoiceEmail is an argument because it can never be read back", async () =
 });
 
 test("a nullable field can actually be cleared", async () => {
-  // `asked` filters undefined, not null, and the schemas accept null — otherwise there is no way to unlink
-  // a project or clear a reference through a tool whose whole purpose is field-level edits.
+  // TWO halves, because the first version only exercised the handler. `run()` calls tool().handler directly,
+  // so zod never runs there — the test passed with `.nullable()` removed, which is precisely the bug it was
+  // written to pin. The schema is asserted separately, the way test/reference.test.mjs does it.
+  const schema = z.object(tool().inputSchema);
+  for (const field of ["comment", "internalComment", "buyerReference", "externalReference", "projectId", "invoiceEmail"]) {
+    const parsed = schema.safeParse({ id: 4105, [field]: null });
+    assert.equal(parsed.success, true, `${field} must accept null, or there is no way to clear it`);
+    assert.equal(parsed.data[field], null, `${field}: null must survive parsing, not be stripped`);
+  }
+  // And null must reach the body rather than being filtered out with undefined.
   const { calls } = await run(
     { id: 4105, projectId: null, buyerReference: null },
     (req, n) => (n === 1 ? order({ projectId: 77, buyerReference: "ZZ-REF" }) : order()),
@@ -214,12 +233,19 @@ test("a nullable field can actually be cleared", async () => {
 });
 
 test("replacement lines can carry accrual settings", async () => {
-  // reai_create_order's line schema declares no accrual fields and zod strips what it does not declare, so
-  // replacing a line through it silently dropped the periodisation the stored-line mapper carries.
-  const lines = [{ itemName: "ZZ", quantity: 1, unitPrice: 100, vatCode: "0", accrualEnabled: true, accrualPeriod: "2026-08", accrualPeriodCount: 3 }];
-  const { calls } = await run({ id: 4105, orderLines: lines }, () => order());
+  // Same trap: without a safeParse this passed with `orderLine` restored in place of `orderLineReplacement`,
+  // because the handler never strips anything.
+  const line = { itemName: "ZZ", quantity: 1, unitPrice: 100, vatCode: "0", accrualEnabled: true, accrualPeriod: "2026-08", accrualPeriodCount: 3 };
+  const parsed = z.object(tool().inputSchema).safeParse({ id: 4105, orderLines: [line] });
+  assert.equal(parsed.success, true);
+  assert.deepEqual(
+    parsed.data.orderLines[0],
+    line,
+    "zod strips what it does not declare, so an undeclared accrual field would vanish here",
+  );
+
+  const { calls } = await run({ id: 4105, orderLines: [line] }, () => order());
   assert.equal(calls[1].body.orderLines[0].accrualEnabled, true);
-  assert.equal(calls[1].body.orderLines[0].accrualPeriod, "2026-08");
   assert.equal(calls[1].body.orderLines[0].accrualPeriodCount, 3);
 });
 
@@ -235,4 +261,32 @@ test("a response that is not an order is not accepted as a base to merge into", 
 test("the lost-update window is disclosed rather than papered over", () => {
   assert.match(tool().description, /lost-update|between the read and the write/i);
   assert.match(tool().description, /ETag|If-Match|version field/);
+});
+
+test("moving an order to another customer says whose payment terms it kept", async () => {
+  // daysUntilDue is required and non-nullable, so the replacement carries the number the order already had —
+  // which belonged to the previous customer. Changing it silently would be a money decision the caller did
+  // not ask for, so the tool names the discrepancy instead.
+  const { calls, text } = await run({ id: 4105, customerId: 6000 }, (req, n) => {
+    if (n === 1) return order();
+    if (req.method === "PUT") return order({ customerId: 6000 });
+    return { daysUntilDue: 30 };
+  });
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [
+    "GET /api/orders/4105",
+    "PUT /api/orders/4105",
+    "GET /api/customers/6000",
+  ]);
+  assert.match(text, /KEPT payment terms of 14 days/);
+  assert.match(text, /new customer's own terms are 30 days/);
+});
+
+test("a failed customer read does not undo a write that already succeeded", async () => {
+  const { result, text } = await run({ id: 4105, customerId: 6000 }, (req, n) => {
+    if (n === 1) return order();
+    if (req.method === "PUT") return order({ customerId: 6000 });
+    throw new Error("customer read failed");
+  });
+  assert.notEqual(result.isError, true, "the PUT succeeded; a failed follow-up read must not report failure");
+  assert.match(text, /could not be read/);
 });

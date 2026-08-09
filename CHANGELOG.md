@@ -10,27 +10,49 @@ All notable changes to `reai-mcp`. Format loosely follows
 ### Added
 
 - **`reai_update_order`: the sales toolset could create and delete an order but not change one.** Found by
-  auditing every family that has curated tools for writes it still leaves to the escape hatch. `PUT
-  /api/orders/{id}` is a full replacement whose **response does not match its request**, so a hand-rolled
-  read-modify-write goes wrong three ways. Measured against order 4105 on 2783:
-  - the lines come back under **`lines`** and must be sent as **`orderLines`**;
-  - each line the GET returns carries `id`, `vatTitle`, `vatRate` and `amounts` — none declared by the PUT,
-    three of them computed by the API;
-  - `comment`, `internalComment`, `buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are
-    optional, so a PUT that omits them keeps the order and empties those fields.
-- What the API *does* protect is the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and
-  `issueDate` are required, so a partial PUT is refused with a `400` rather than silently dropping the lines.
-  That is the difference from `reai_update_agreement`, where nothing is required and a partial write erases
-  the contract — and it is why this tool is `reversible` and that one is `irreversible`.
-- Two refusals, both deliberate. An order with **`sendEhf` already set** is refused: a replacement must
-  either send the flag again — which the policy classifies as an external transmission, verified by calling
-  `classifyTransmission` with that body — or omit it, which silently disarms EHF at invoicing time. Both are
-  decisions about whether something leaves the tenant, so the tool makes neither. An **already-invoiced**
-  order is refused too; what the API does in that case was **not established**, because no invoiced order
-  was available to measure, and all eight orders on 2783 were `open` with `invoiceId: null`.
-- `PUT /api/offers/{id}` has the same shape and the same gap, but the test tenant had no offers to measure,
-  so it is left uncurated rather than curated on an assumption.
-- **174 tools**: 167 across thirteen accounting domains, plus 7 always-on.
+  auditing every family that has curated tools for the writes it still leaves to the escape hatch. That sweep
+  found no safe-uncovered/risky-covered inversions left — the agreements case was the one, closed by #136 —
+  and turned up this.
+  - `PUT /api/orders/{id}` is a full replacement whose **response does not match its request**. Measured
+    against order 4105 on 2783: the lines come back under **`lines`** and must be sent as **`orderLines`**;
+    each line carries `id`, `vatTitle`, `vatRate` and `amounts`, none declared by the PUT and three computed;
+    and six optional top-level fields are emptied by a replacement that omits them.
+  - What the API *does* protect is the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and
+    `issueDate` are required, so a partial PUT is refused with a `400` rather than dropping the lines.
+  - **`REAI_WRITE_MODE=full`**, for the reason `reai_update_agreement` gives: the ladder classifies the
+    operation, not the care taken over it. A raw PUT omitting any of `projectId`, `internalComment`,
+    `buyerReference`, `externalReference`, `invoiceEmail` or `sendEhf` is already refused in the default mode
+    by the replacement-omission gate, and this tool omits `invoiceEmail` unless you pass it — so a
+    `reversible` curated tool would have been the soft route around a gate the escape hatch is subject to.
+    A first version of this entry justified `reversible` by "nothing is required on the agreement PUT". That
+    was a post-hoc story the repo falsifies: `reai_update_subscription` is `reversible` and its partial PUT
+    erases fields too.
+  - **`invoiceEmail` cannot be preserved.** `UpdateOrderReq` declares it; no order response returns it. So
+    the tool cannot tell whether an order has an order-specific invoice address, and **every** successful
+    update says so — not only the ones that passed it, which is what an earlier version claimed while the
+    word appeared solely when the caller supplied it, making the test for it pass vacuously.
+  - Two refusals. An order with **`sendEhf` already set**, read with `bindsToTrue` rather than `=== true`
+    because the backend coerces `"true"` and `1`. And an **already-invoiced** order — what the API does there
+    was not established, since all eight orders on 2783 were `open` with `invoiceId: null`.
+  - Also, each because a review found the version without it: nullable `comment`, `internalComment`,
+    `buyerReference`, `externalReference`, `projectId` and `invoiceEmail`, so a field can be edited to
+    *nothing*; accrual fields on replacement lines, which the create tool's line schema does not declare and
+    zod would otherwise strip; `readableRecord` on the base, so `{}` or an envelope cannot be merged into;
+    a pre-check of the fields the PUT requires instead of sending `undefined` into a bare `400`; a note when
+    an order moves to another customer but **keeps the old customer's payment terms**; and a null element in
+    `lines` refused rather than thrown.
+  - Verified live on 2783 through the real handler, created and deleted (order 4116), and now reproducible:
+    `scripts/smoke-full-write.mjs` creates an order through `reai_create_order`, edits it through
+    `reai_update_order`, asserts the lines and the three optional fields survived, and includes the control —
+    the same partial replacement through `reai_request` is refused.
+  - New quirk `order-and-offer-put-rename-the-lines`, so the escape hatch is not blind to the trap the
+    tool's own refusals send callers to; and `days-until-due-mandatory` and `line-vat-code-subset` now list
+    `/api/orders/{id}`, which they held for but did not name.
+  - `PUT /api/offers/{id}` stays uncurated, and the parity is now measured on offer 81 rather than assumed:
+    same rename, but `issueDate` is not required, per-line `itemName` and `vatCode` ARE, **seven** returned
+    fields are unaccepted rather than four, and every field `OfferReq` accepts `OfferRes` returns — so an
+    offer merge would be losslessly carryable, the opposite of the order case.
+  - **174 tools**: 167 across thirteen accounting domains, plus 7 always-on. **123 quirks.**
 
 ### Fixed
 

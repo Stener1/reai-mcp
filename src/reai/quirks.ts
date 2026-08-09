@@ -525,7 +525,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "line-vat-code-subset",
-    paths: ["/api/orders", "/api/offers", "/api/offers/{id}", "/api/subscriptions", "/api/subscriptions/{id}"],
+    paths: ["/api/orders", "/api/orders/{id}", "/api/offers", "/api/offers/{id}", "/api/subscriptions", "/api/subscriptions/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -539,8 +539,29 @@ export const QUIRKS: readonly Quirk[] = [
       '?usage=customer-invoice yourself rather than trusting acceptance.',
   },
   {
+    id: "order-and-offer-put-rename-the-lines",
+    paths: ["/api/orders/{id}", "/api/offers/{id}"],
+    methods: ["PUT"],
+    kind: "gotcha",
+    note:
+      "The RESPONSE does not have the shape the REQUEST wants, so a read-modify-write built by hand fails " +
+      "or mangles the document. GET returns the line items under `lines`; the PUT requires them under " +
+      "`orderLines` (orders) or `offerLines` (offers) — and both are REQUIRED, so a body echoing `lines` " +
+      "back is a body with no lines at all.\n\n" +
+      "Each line the GET returns also carries fields the PUT does not declare, most of them computed: on an " +
+      "order `id`, `vatTitle`, `vatRate`, `amounts`; on an offer `id`, `rowNumber`, `vatRate`, `lineTotal`, " +
+      "`lineTotalExclVat`, `lineVat`, `lineDiscount`. Strip them.\n\n" +
+      "And the optional top-level fields are dropped by any replacement that omits them: on an order " +
+      "`comment`, `internalComment`, `buyerReference`, `externalReference`, `projectId`, `invoiceEmail`. " +
+      "`invoiceEmail` is the one that cannot be recovered — the PUT accepts it and no order response returns " +
+      "it, so a replacement silently clears an order-specific invoice address and nothing reads back to " +
+      "prove it. Offers are luckier: everything OfferReq accepts, OfferRes returns.\n\n" +
+      "reai_update_order does all of this. Measured on order 4105 and offer 81 on a test tenant.",
+  },
+  {
     id: "days-until-due-mandatory",
-    paths: ["/api/orders", "/api/offers", "/api/offers/{id}"],
+
+    paths: ["/api/orders", "/api/orders/{id}", "/api/offers", "/api/offers/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:

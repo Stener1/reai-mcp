@@ -865,8 +865,8 @@ const createOrder = defineTool({
           "customer's default terms.",
       ),
     issueDate: isoDate.optional().describe("Order date. Defaults to today."),
-    comment: z.string().nullable().optional().describe("Comment visible to the customer."),
-    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer."),
+    comment: z.string().optional().describe("Comment visible to the customer."),
+    internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
@@ -964,6 +964,16 @@ const ORDER_EXPECTED_KEYS = ["id", "customerId", "currencyCode", "daysUntilDue",
  * stored-line mapper carries all three, so the two halves of this tool disagreed about what a line is.
  */
 const orderLineReplacement = orderLine.extend({
+  // The caveat is required of any irreversible tool that books with a VAT code, and it is not theoretical:
+  // measured on 2783, `POST /api/orders` answered 400 "Mva-kode 3 er ikke tillatt. Tillatte koder: 0." —
+  // the allowed set is THIS tenant's, and a company that is not VAT-registered accepts only 0. Sending a
+  // rate a tenant cannot use would invent VAT on a document.
+  vatCode: ORDER_VAT_CODE.optional().describe(
+    'VAT code. Order lines accept ONLY the codes reai_list_vat_codes returns for THIS tenant with ' +
+      'usage="customer-invoice"; anything else is rejected outright with "Mva-kode N er ikke tillatt. ' +
+      'Tillatte koder: …". A tenant that is not VAT-registered accepts only 0 — measured — so do not carry ' +
+      'a rate across from another company.',
+  ),
   accrualEnabled: z.boolean().optional().describe("Periodise this line over several months."),
   accrualPeriod: z.string().optional().describe("First period to accrue from, as the API expects it."),
   accrualPeriodCount: z.number().int().positive().optional().describe("How many periods to spread across."),
@@ -995,6 +1005,15 @@ const updateOrder = defineTool({
     "lines. That is the one thing you cannot break here by accident — everything else in the list above " +
     "you can. This tool reads the order, maps the lines back into the shape the request wants, carries the " +
     "optional fields, and applies your changes on top.\n\n" +
+    "Needs REAI_WRITE_MODE=full, for the same reason reai_update_agreement does (a tool in the agreements " +
+    "toolset, so a narrowed REAI_TOOLSETS may not include it — reai_search_endpoints and reai_describe_endpoint " +
+    "are always on and reach it either way): not because this tool is " +
+    "dangerous — it is the safe way to do the job — but because the write ladder classifies the operation " +
+    "rather than the care taken over it. A raw PUT that omits any of `projectId`, `internalComment`, " +
+    "`buyerReference`, `externalReference`, `invoiceEmail` or `sendEhf` is already refused in the default " +
+    "mode by the replacement-omission gate. This tool omits `invoiceEmail` unless you pass it, because it " +
+    "cannot read it — so leaving the tool a tier below would have made it the soft route around a gate the " +
+    "escape hatch is subject to.\n\n" +
     "`sendEhf` is not offered, matching reai_create_order, and an order that ALREADY has it set is " +
     "refused rather than updated. Carrying the flag forward would re-arm EHF/Peppol on an edit that had " +
     "nothing to do with sending — the policy classifies a body carrying sendEhf as an external " +
@@ -1010,10 +1029,12 @@ const updateOrder = defineTool({
     "An order that has already been invoiced is refused too. The invoice is the legal document and " +
     "editing the order behind it does not change it; what the API actually does in that case was NOT " +
     "established, because no invoiced order was available to measure. Stated rather than guessed.",
-  risk: "reversible",
+  risk: "irreversible",
   apiPaths: [
     ["GET", "/api/orders/{id}"],
     ["PUT", "/api/orders/{id}"],
+    // Read only when the order is being MOVED to another customer, to say whose payment terms it now carries.
+    ["GET", "/api/customers/{id}"],
   ],
   inputSchema: {
     id: z.number().int().positive().describe("Order id, as returned by reai_list_orders."),
@@ -1029,8 +1050,8 @@ const updateOrder = defineTool({
     currencyCode: CURRENCY.optional(),
     daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
     issueDate: isoDate.optional().describe("Order date."),
-    comment: z.string().optional().describe("Comment visible to the customer."),
-    internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
+    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass null to clear it."),
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
@@ -1124,12 +1145,41 @@ const updateOrder = defineTool({
           `explicitly if you mean to set them.`,
       );
     }
+    // Elements, not just the array: `lines: [null]` threw a TypeError out of the handler and surfaced as an
+    // internal error rather than this tool's own refusal.
+    if (!changes.orderLines && (existingLines ?? []).some((line) => !line || typeof line !== "object")) {
+      return fail(
+        `Order ${id} has a line this tool cannot read, so nothing was written. \`orderLines\` is required by ` +
+          `the PUT and guessing at a line would replace the order's contents.`,
+      );
+    }
     const mappedLines = (existingLines ?? []).map((line) =>
       Object.fromEntries(
         ORDER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
       ),
     );
 
+    // The PUT requires these and readableRecord only proves the response LOOKS like an order — it passes on
+    // any one recognised key. Sending undefined drops them via JSON.stringify and the API answers a bare 400
+    // ("Failed to read request", no fieldErrors, nothing naming the field — this repo records that as
+    // days-until-due-mandatory). Same precheck-and-name pattern as companyBankId and subAccountId.
+    const REQUIRED_FROM_RECORD = ["currencyCode", "customerId", "daysUntilDue", "issueDate"] as const;
+    const missingFromRecord = REQUIRED_FROM_RECORD.filter(
+      (f) => (changes as Record<string, unknown>)[f] === undefined && (order[f] === undefined || order[f] === null),
+    );
+    if (missingFromRecord.length > 0) {
+      return fail(
+        `Order ${id} came back without ${missingFromRecord.join(", ")}, which the PUT requires, so nothing ` +
+          `was written. Sending the replacement anyway would have produced a bare 400 naming no field. ` +
+          `Pass ${missingFromRecord.length === 1 ? "it" : "them"} explicitly, or read the order with ` +
+          `reai_get_order to see what it actually carries.`,
+      );
+    }
+
+    // Nulls dropped, and that is a no-op rather than a decision: every field here is nullable in
+    // UpdateOrderReq, and on a FULL REPLACEMENT an omitted nullable field and an explicit null land the same
+    // way. Worth saying, because the alternative reading — that omitting a null changes something — is
+    // exactly what a reader worries about here.
     const carried = Object.fromEntries(
       ORDER_CARRIED_FIELDS.filter((f) => order[f] !== undefined && order[f] !== null).map((f) => [f, order[f]]),
     );
@@ -1154,12 +1204,56 @@ const updateOrder = defineTool({
     });
 
     const changedKeys = asked.map(([k]) => k);
+    // Only the fields carried that the caller did NOT also change — otherwise a comment-only edit read
+    // "Changed comment … and comment carried over", which is both wrong and confusing.
+    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
     const notes = [
       `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
         `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
-        `${Object.keys(carried).length > 0 ? `, and ${Object.keys(carried).join(", ")} carried over` : ""} — ` +
+        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    // EVERY update, not only the ones that passed it. The claim "every successful update says so" was in
+    // the source comment and false: the word appeared only when the caller supplied the field, which also
+    // made the test asserting it pass vacuously.
+    notes.push(
+      changedKeys.includes("invoiceEmail")
+        ? `invoiceEmail was set to ${JSON.stringify((changes as Record<string, unknown>).invoiceEmail)}. It is ` +
+          `the one field this tool cannot verify: the API accepts it but never returns it, so the value above ` +
+          `is what was sent, not what is stored.`
+        : `NOTE: if this order had an order-specific \`invoiceEmail\`, it is now cleared. The API accepts that ` +
+          `field on an update but does not return it on a read, so this tool cannot tell whether the order ` +
+          `had one and cannot carry it. Pass \`invoiceEmail\` to set it back.`,
+    );
+
+    // Moving an order does NOT move the payment terms: daysUntilDue is required and non-nullable, so the
+    // replacement carries the number the order already had — which belonged to the previous customer.
+    // reai_create_order resolves it from the customer and says which source it used; this one cannot change
+    // it silently (that is a money decision the caller did not ask for), so it names the discrepancy.
+    if (changedKeys.includes("customerId") && changes.daysUntilDue === undefined) {
+      let theirTerms: number | undefined;
+      try {
+        const customer = await ctx.client.request<{ daysUntilDue?: number | null }>({
+          method: "GET",
+          path: `/api/customers/${changes.customerId}`,
+          tenantId: resolved,
+        });
+        theirTerms = customer.data?.daysUntilDue ?? undefined;
+      } catch {
+        // A failed read here must not undo a write that already succeeded.
+        theirTerms = undefined;
+      }
+      notes.push(
+        `The order moved to customer ${changes.customerId} but KEPT payment terms of ${body.daysUntilDue} ` +
+          `days, which came from the order as it was. ` +
+          (theirTerms === undefined
+            ? `The new customer's own terms could not be read.`
+            : theirTerms === body.daysUntilDue
+              ? `That happens to match the new customer's own terms.`
+              : `The new customer's own terms are ${theirTerms} days — pass daysUntilDue if you want those.`),
+      );
+    }
+
     const after = res.data;
     const notApplied = changedKeys.filter(
       (k) => k !== "orderLines" && after?.[k] !== undefined && JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),

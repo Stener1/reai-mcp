@@ -212,6 +212,7 @@ async function main() {
 
   const created = {
     agreementId: undefined,
+    orderId: undefined,
     creditorId: undefined,
     doomedBankId: undefined,
     warehouseId: undefined,
@@ -540,6 +541,80 @@ async function main() {
     // not from here. The refusal is covered in test/subscriptions.test.mjs, driven through the
     // handler with allowExternalSend false, including the scoping (a comment edit still works) and
     // the three ways to disarm.
+
+    // --- 4y. Order terms, on real data ---------------------------------------
+    //
+    // The PUT behind this is a full replacement whose RESPONSE does not match its REQUEST: lines come back
+    // under `lines` and go in as `orderLines`, and four of the fields the GET returns are not declared by
+    // the PUT. Verified here on live data rather than only against a fake client, because "the lines
+    // survive" is the entire claim and it was previously resting on an uncommitted scratch script.
+    console.log("\n  Order terms (the underlying PUT replaces the record):");
+    const orderMade = await client.callTool({
+      name: "reai_create_order",
+      arguments: {
+        customerId: created.customerId,
+        comment: `${STAMP} customer-visible`,
+        internalComment: `${STAMP} internal`,
+        buyerReference: `${STAMP}-REF`,
+        // vatCode 0 deliberately: the allowed set is tenant-specific, and a tenant that is not
+        // VAT-registered accepts ONLY 0 — measured, 400 "Mva-kode 3 er ikke tillatt. Tillatte koder: 0."
+        orderLines: [{ itemName: `${STAMP} line`, quantity: 3, unitPrice: 400, vatCode: "0" }],
+      },
+    });
+    const orderRec = orderMade.isError ? undefined : jsonOf(orderMade);
+    if (Number.isInteger(orderRec?.id)) created.orderId = orderRec.id;
+    report(
+      "an order exists to edit",
+      Number.isInteger(created.orderId),
+      created.orderId ? `orderId=${created.orderId}` : textOf(orderMade).slice(0, 180),
+    );
+
+    if (created.orderId) {
+      const edited = await client.callTool({
+        name: "reai_update_order",
+        arguments: { id: created.orderId, daysUntilDue: 30 },
+      });
+      const after = edited.isError ? undefined : jsonOf(edited);
+      const lines = after?.lines ?? [];
+      report(
+        "changing one field leaves the lines intact",
+        lines.length === 1 && lines[0]?.quantity === 3 && lines[0]?.unitPrice === 400,
+        edited.isError ? textOf(edited).slice(0, 200) : `${lines.length} line(s), quantity=${lines[0]?.quantity}, unitPrice=${lines[0]?.unitPrice}`,
+      );
+      report(
+        "and does not empty the optional fields a partial PUT would drop",
+        after?.comment === `${STAMP} customer-visible` &&
+          after?.internalComment === `${STAMP} internal` &&
+          after?.buyerReference === `${STAMP}-REF`,
+        `comment=${JSON.stringify(after?.comment)} internal=${JSON.stringify(after?.internalComment)} ref=${JSON.stringify(after?.buyerReference)}`,
+      );
+      report(
+        "the change itself took effect",
+        after?.daysUntilDue === 30,
+        `daysUntilDue=${JSON.stringify(after?.daysUntilDue)}`,
+      );
+      // The unpreservable field, stated on every update whether or not it was passed.
+      report(
+        "every update discloses that invoiceEmail cannot be preserved",
+        /invoiceEmail/.test(textOf(edited)),
+        textOf(edited).slice(0, 200),
+      );
+      // The control: the same replacement through the escape hatch is refused for omitting exactly the
+      // fields this tool exists to carry, which is why the curated tool sits at `full` rather than below it.
+      const rawAttempt = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/orders/${created.orderId}`,
+          body: { daysUntilDue: 45 },
+        },
+      });
+      report(
+        "reai_request PUT with a partial body is refused, not silently applied",
+        rawAttempt.isError === true,
+        textOf(rawAttempt).slice(0, 200),
+      );
+    }
 
     // --- 4z. Agreement terms, on real data -----------------------------------
     //
@@ -1884,6 +1959,15 @@ async function main() {
       await attempt(
         `test employee ${employeeId} deleted`,
         () => client.callTool({ name: "reai_delete_employee", arguments: { id: employeeId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
+    // Before the product and the customer it references: deleting a referenced record answers
+    // 500 "Referenced record is not accessible", which is how a previous run stranded four orders.
+    if (created.orderId) {
+      await attempt(
+        "test order deleted",
+        () => client.callTool({ name: "reai_delete_order", arguments: { id: created.orderId } }),
         (r) => firstLineOf(textOf(r)),
       );
     }
