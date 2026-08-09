@@ -8,6 +8,7 @@ import {
   okList,
   readableRecord,
   confirmAgainstResponse,
+  valuesAgree,
   describeConfirmation,
   requireTenantId,
   startOfYear,
@@ -969,7 +970,7 @@ function appliedChanges(
   asked: ReadonlyArray<readonly [string, unknown]>,
   after: Record<string, unknown> | undefined,
   skip: readonly string[],
-): { took: string[]; ignored: string[] } {
+): { took: string[]; ignored: string[]; unconfirmed: string[] } {
   // A thin adapter over confirmAgainstResponse, which is the point: this was a near-duplicate with the
   // OPPOSITE semantics sitting in the same file as the migrated sites, while the order and offer tools were
   // certified as verifying against the response. Measured before this change: a PUT answering with NO BODY
@@ -983,9 +984,14 @@ function appliedChanges(
   const { confirmed, contradicted, unanswered } = confirmAgainstResponse(sent, after, { skip, wholeRecord: true });
   return {
     took: [...confirmed, ...skip.filter((k) => Object.hasOwn(sent, k))],
-    // Unanswered counts as not-applied here: these tools' notes say "IGNORED by the API", and a response that
-    // cannot confirm a change is not grounds for claiming it. The previous version counted it as applied.
-    ignored: [...contradicted.map((c) => c.field), ...unanswered],
+    // Unanswered is not applied — a response that cannot confirm a change is not grounds for claiming it, and
+    // the previous version counted it as applied. But it is not IGNORED either, and merging the two buckets
+    // made the note contradict itself: on a bodyless PUT it said "the response does not mention them, so this
+    // tool cannot say" and then, one paragraph later, "IGNORED by the API, with a 200 and no error: comment
+    // (sent "new text", still undefined)" — asserting the API's behaviour on the same zero evidence, and
+    // offering clearing advice off it. Kept apart so each sentence says only what is known.
+    ignored: contradicted.map((c) => c.field),
+    unconfirmed: unanswered,
   };
 }
 
@@ -1033,7 +1039,11 @@ function carriedSurvival(carried: Readonly<Record<string, unknown>>, after: unkn
     confirmed,
     emptied: contradicted.filter((x) => isBlank(x.stored)).map((x) => ({ field: x.field, sent: x.sent })),
     altered: contradicted.filter((x) => !isBlank(x.stored)),
-    unanswered,
+    // A carried field that was ALREADY blank and that the response does not mention had nothing at stake, so
+    // naming it as unconfirmed is pure noise — and there are six such fields on an offer. It stays in the
+    // comparison, because a blank carried against a RETURNED value is a real contradiction and the version
+    // that filtered nulls out of the comparison hid exactly that.
+    unanswered: unanswered.filter((k) => !isBlank(carried[k])),
   };
 }
 
@@ -1074,12 +1084,23 @@ function describeDifference(sent: unknown, stored: unknown): string {
   const isPlain = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === "object" && !Array.isArray(v);
   if (isPlain(sent) && isPlain(stored)) {
+    // `valuesAgree`, not JSON.stringify: comparing spellings here disagreed with the classifier that decided
+    // this was a difference at all, so a nested key was named as differing purely on key order or on a blank
+    // normalisation the classifier calls equal. Review caught both. Using the same predicate means this can
+    // only ever name keys that genuinely differ by the rule the warning is based on.
     const keys = [...new Set([...Object.keys(sent), ...Object.keys(stored)])].filter(
-      (k) => JSON.stringify(sent[k]) !== JSON.stringify(stored[k]),
+      (k) => !valuesAgree(sent[k], stored[k]),
     );
     if (keys.length > 0) {
       return `differs in ${keys
-        .map((k) => `${k}: carried ${JSON.stringify(sent[k])}, stored ${JSON.stringify(stored[k])}`)
+        .map(
+          (k) =>
+            // "absent" rather than `undefined`, which is not JSON and reads as a value. A key one side omits
+            // is only reachable here when the other side holds something non-blank.
+            `${k}: carried ${k in sent ? JSON.stringify(sent[k]) : "absent"}, stored ${
+              k in stored ? JSON.stringify(stored[k]) : "absent"
+            }`,
+        )
         .join(", ")}`;
     }
   }
@@ -1495,8 +1516,8 @@ const updateOrder = defineTool({
     }
 
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
-    const { took, ignored } = appliedChanges(asked, after, ["orderLines"]);
-    if (ignored.length > 0) {
+    const { took, ignored, unconfirmed } = appliedChanges(asked, after, ["orderLines"]);
+    if (ignored.length > 0 || unconfirmed.length > 0) {
       notes[0] = (notes[0] ?? "").replace(
         `Changed ${changedKeys.join(", ")}`,
         // "NOTHING you asked for", not "NOTHING": review constructed the case where a caller's field was
@@ -1504,6 +1525,8 @@ const updateOrder = defineTool({
         // nothing while the warning below said a customer-visible comment was gone. The record DID change.
         took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING you asked for`,
       );
+    }
+    if (ignored.length > 0) {
       const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
         `IGNORED by the API, with a 200 and no error: ${ignored
@@ -1512,6 +1535,13 @@ const updateOrder = defineTool({
           (clearable.length > 0
             ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
             : ` Check the value is one the API accepts for that field.`),
+      );
+    }
+    if (unconfirmed.length > 0) {
+      notes.push(
+        `NOT CONFIRMED: the response does not mention ${unconfirmed.join(", ")}, so this tool cannot say ` +
+          `whether the change took. It is not reported as ignored, because nothing here shows that either — ` +
+          `read the record back with the get tool.`,
       );
     }
     return ok(res.data, {
@@ -1859,18 +1889,25 @@ const updateOffer = defineTool({
     const after = res.data;
     const changedKeys = asked.map(([k]) => k);
     // Everything the body carried, including the fields the PUT requires — same reasoning as the order tool.
-    // A carried field that was ALREADY null is excluded: every carryable field is sent, nulls included, to
-    // satisfy the replacement-omission gate, and comparing them would only ever confirm null against null.
+    //
+    // Nulls included. The first version filtered them out, on the stated grounds that "comparing them would
+    // only ever confirm null against null" — which review measured false: a carried null against a RETURNED
+    // value is a contradiction, and the filter suppressed the only report of it. An offer whose stored
+    // `projectId` was null and whose response came back `4242` said nothing at all, meaning the write joined a
+    // project the caller never mentioned, silently. That is the same path the merge docstring above calls the
+    // least-tested one on live data, so it is the last one to hide.
     const carriedAll = Object.fromEntries(
-      Object.entries(body).filter(
-        ([k, v]) => k !== "offerLines" && !changedKeys.includes(k) && v !== null && v !== undefined,
-      ),
+      Object.entries(body).filter(([k]) => k !== "offerLines" && !changedKeys.includes(k)),
     );
     const carryOutcome = carriedSurvival(carriedAll, after);
     // What was PRESERVED, which is not the same as what the body states, and not the same as what was sent:
     // naming every carryable field told a caller that six fields were carried over when all six were null and
-    // stayed null, and naming the unconfirmed ones claims preservation the response does not support.
-    const carriedNamed = carryOutcome.confirmed.filter((k) => Object.hasOwn(carried, k));
+    // stayed null, and naming the unconfirmed ones claims preservation the response does not support. The
+    // already-null ones are dropped HERE, from the naming, rather than from the comparison above — that split
+    // is the fix for a filter that had been doing both jobs with one condition.
+    const carriedNamed = carryOutcome.confirmed.filter(
+      (k) => Object.hasOwn(carried, k) && carried[k] !== null && carried[k] !== undefined,
+    );
     const notes = [
       `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
         `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
@@ -1916,8 +1953,8 @@ const updateOffer = defineTool({
     }
 
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
-    const { took, ignored } = appliedChanges(asked, after, ["offerLines"]);
-    if (ignored.length > 0) {
+    const { took, ignored, unconfirmed } = appliedChanges(asked, after, ["offerLines"]);
+    if (ignored.length > 0 || unconfirmed.length > 0) {
       notes[0] = (notes[0] ?? "").replace(
         `Changed ${changedKeys.join(", ")}`,
         // "NOTHING you asked for", not "NOTHING": review constructed the case where a caller's field was
@@ -1925,6 +1962,8 @@ const updateOffer = defineTool({
         // nothing while the warning below said a customer-visible comment was gone. The record DID change.
         took.length > 0 ? `Changed ${took.join(", ")}` : `Changed NOTHING you asked for`,
       );
+    }
+    if (ignored.length > 0) {
       const clearable = ignored.filter((k) => k === "comment" || k === "internalComment");
       notes.push(
         `IGNORED by the API, with a 200 and no error: ${ignored
@@ -1933,6 +1972,13 @@ const updateOffer = defineTool({
           (clearable.length > 0
             ? ` To empty ${clearable.join(" or ")}, send an EMPTY STRING — measured, a null is discarded and "" clears the field.`
             : ` Check the value is one the API accepts for that field.`),
+      );
+    }
+    if (unconfirmed.length > 0) {
+      notes.push(
+        `NOT CONFIRMED: the response does not mention ${unconfirmed.join(", ")}, so this tool cannot say ` +
+          `whether the change took. It is not reported as ignored, because nothing here shows that either — ` +
+          `read the record back with the get tool.`,
       );
     }
     return ok(res.data, {

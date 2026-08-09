@@ -178,20 +178,54 @@ All notable changes to `reai-mcp`. Format loosely follows
     - **The lines were excluded on a false premise.** Two comments — `src/tools/sales.ts` and
       `src/tools/registry.ts` — licensed skipping them because "each tool checks separately by count"; only the
       subscription tool did. `lineCountNote` now checks the count in both, so the largest payload these PUTs
-      carry can no longer be dropped silently. An absent `lines` is not treated as evidence.
+      carry can no longer be dropped silently **when the response carries the lines**. A response that omits
+      `lines` is not evidence either way and produces no note, so that case is still silent — which the first
+      version of this sentence claimed it was not, in the same breath as saying an absent `lines` is not
+      treated as evidence.
     - **`Changed NOTHING` → `Changed NOTHING you asked for`.** The review constructed the case where a caller's
       field was ignored *and* a carried comment destroyed in the same call: the headline said the write changed
       nothing while the warning below said a customer-visible comment was gone. The record did change.
-    - Fifteen tests across the two tools, one per outcome class plus positive controls. Mutation-verified by
-      failing test **name**, six mutations: treating only a null echo as a loss (the review's own defeat of the
-      first version) fails three; counting `unanswered` as preserved fails two; restoring the optional-only
-      carry list fails one; removing the line count fails two; calling every contradiction LOST fails two. The
-      `Changed NOTHING` rewording survived until the three existing assertions were tightened — they matched
-      the new wording as a substring.
-    - The `ALTERED` note names the **differing key** for a nested record — `deliveryAddress (differs in id:
-      carried 9, stored 12)` — rather than printing two near-identical objects and leaving the agent to diff
-      seven keys. Deliberately not special-cased to ignore `id`: that ReAI renumbers a nested record on write
-      is a hypothesis nothing has measured, and suppressing the note on that guess would hide a real swap.
+    - **Nineteen tests** across the two files (42 before this work, 61 after), one per outcome class plus
+      positive controls, each **pinned by a named mutation**: naming attempts instead of survivors; counting
+      `unanswered` as preserved; treating only a null echo as a loss (the review's own defeat of the first
+      version); calling every contradiction LOST; restoring the optional-only carry list at either site;
+      restoring the offer null filter; folding `unanswered` back into `ignored`; stopping the blank class from
+      recursing; naming only the first differing key; removing the line count; and reporting a blank carry as
+      unconfirmed. Twelve mutations, twelve named failures.
+      - An earlier version of this bullet counted *how many* tests each mutation failed. Two of those counts
+        went stale within one commit, because adding a test changes them — so what is recorded now is that each
+        mutation is caught and by which behaviour, which does not rot.
+    - **A third round of review on the same change found six more, five of them introduced by the fixes.** Worth
+      recording as a pattern: each round's fix was correct about the defect it named and wrong about something
+      adjacent.
+      - **The offer site's copy of the required-field fix had no test at all** — reverting it passed all 54
+        tests, silently reproducing the exact failure the fix was for. That is the same one-site-unchecked
+        pattern as the salary omission one commit earlier, twice in a row, so the mutation battery now runs
+        every mutation against **both** sites rather than assuming a shared helper makes them equivalent.
+      - **The offer null filter hid the case it claimed was impossible.** Its comment said comparing carried
+        nulls "would only ever confirm null against null"; a carried null against a *returned* value is a
+        contradiction. An offer whose stored `projectId` was null and whose response came back `4242` — the
+        write joining a project the caller never mentioned — produced no note at all. Nulls are compared now,
+        and dropped only from the *naming*, which is the job that filter was conflating with comparison.
+      - **`ignored` folded `unanswered` into itself**, so a bodyless PUT printed *"the response does not mention
+        them, so this tool cannot say"* and then, one paragraph later, *"IGNORED by the API, with a 200 and no
+        error: comment (sent "new text", still undefined)"* with clearing advice — asserting the API's behaviour
+        off the same zero evidence the paragraph above had just refused to read anything into. Split.
+      - **The blank class applied at the top level only.** An offer's nested `deliveryAddress` echoed with
+        `province: ""` where the record held `null` fell through to exact comparison and contradicted — and this
+        API is documented, in this file, as normalising whitespace to null on address parts. That would have
+        printed a warning on a great many ordinary updates, which is worse than the silence it replaced. The
+        comparison recurses now, and is exported as `valuesAgree` so the code that *explains* a difference uses
+        the same rule as the code that *finds* one; comparing spellings there had named keys as differing purely
+        on key order.
+      - A carried `null` the response never mentions is no longer named as unconfirmed: six such fields on an
+        offer would bury the notes that matter, and nothing was at stake for them.
+      - **One of these tests was vacuous when written, and the mutation battery is what caught it.** It echoed
+        the null fields in the response, so they came back CONFIRMED and it never reached the unanswered branch
+        it existed to pin — it survived the mutation that reintroduced the noise. Fixed to omit them.
+    - **The whole-text regex trap, four times on this branch.** Every response appends the record as JSON, so
+      `/province/`, `/addressLine1/` and `/comment carried over/` all matched the payload rather than the note —
+      twice failing a correct note, twice passing vacuously. Assertions are scoped to the sentence now.
     - **The first version of these tests asserted `/comment carried over/`**, which matched a one-item list by
       luck for orders and matched *neither* case for offers, where the note names five fields and `comment`
       falls mid-list — so the offer negative assertion was vacuous. They parse the list now.
