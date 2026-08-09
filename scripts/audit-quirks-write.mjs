@@ -1,0 +1,394 @@
+#!/usr/bin/env node
+/**
+ * Are the quirks about REFUSALS still true — the ones a GET cannot reach?
+ *
+ * `audit-quirks.mjs` covers the 16 claims a GET can answer and is read-only by construction. This covers a
+ * slice of what it cannot: quirks whose claim is that a WRITE is refused, and what the refusal says.
+ *
+ * ## Why this is safe, and where the line is
+ *
+ * Every probe here is a request built to FAIL. A refused write creates nothing, which is what makes it safe to
+ * run against a tenant that holds books — the same reasoning `audit-messages.mjs` documents. Three rules keep
+ * that true rather than merely intended:
+ *
+ *   1. Nothing irreversible or transmitting is probed at all. If a refusal ever stops working, the request goes
+ *      through — so a probe is only safe if success would be harmless. `POST /api/orders` with a bad line is;
+ *      anything that sends an EHF invoice, completes a salary run or files with Skatteetaten is not, and those
+ *      are excluded by classification rather than by judgement.
+ *   2. An unexpected 2xx is a SAFETY failure, not drift. It means the rule changed AND this script has written
+ *      to real books.
+ *   3. Record counts are snapshotted before and after. A refusal-only audit must leave the tenant byte-identical,
+ *      so any change at all fails the run — and the run says which collection moved.
+ *
+ * Rule 3 is not theoretical. Scoping this file by hand, an order-line probe unexpectedly returned 201 and my
+ * cleanup filtered the list response for a field the list does not return, so it reported "cleaning up 0
+ * orders" while order 4109 sat there. It was deleted by hand a minute later. A count check would have caught it
+ * immediately; a filter that has to be right would not.
+ *
+ * ## Probe the request that is valid EXCEPT for the thing under test
+ *
+ * Fourth appearance of this trap in these audits, and it cost three rounds of measurement here:
+ *
+ *   POST /api/offers {lines: [...]}          → 400 "currencyCode is required"      (never reached the lines)
+ *   POST /api/offers {currencyCode, lines}   → 400 "offerLines is required"        (wrong field name)
+ *   POST /api/offers {…, offerLines: [...]}  → 400 "offerLines[0].itemName is required"   ← the actual claim
+ *
+ * A probe missing anything else tests the first validator that trips. The required-field sets come from the
+ * pinned spec, not from memory.
+ *
+ * Usage:
+ *   REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=… node scripts/audit-quirks-write.mjs --tenant 2783
+ */
+
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import {
+  installProtectedTenantFetchGuard,
+  requireTokenReachesTenant,
+  requireWritableTenant,
+} from "./lib/write-guard.mjs";
+
+const args = process.argv.slice(2);
+const at = (flag) => {
+  const i = args.indexOf(flag);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const tenantId = Number(at("--tenant"));
+const token = process.env.REAI_USER_API_TOKEN;
+const baseUrl = process.env.REAI_BASE_URL ?? "https://app.reai.no";
+const TIMEOUT_MS = 30_000;
+
+if (!token) {
+  console.error("REAI_USER_API_TOKEN is not set.");
+  process.exit(2);
+}
+if (!Number.isInteger(tenantId)) {
+  console.error("Pass --tenant <id>. This script sends write requests, so the tenant is never implicit.");
+  process.exit(2);
+}
+
+// The allowlist, the protected-tenant denylist, and a runtime refusal at the socket. Every probe below is
+// designed to fail, but "designed to" is not a guarantee, and this is the file that would find out.
+requireWritableTenant(tenantId, { scriptName: "scripts/audit-quirks-write.mjs" });
+installProtectedTenantFetchGuard();
+
+const call = async (method, path, body) => {
+  const res = await fetch(baseUrl + path, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Tenant-Id": String(tenantId),
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  let parsed = null;
+  try {
+    parsed = await res.json();
+  } catch {}
+  return { status: res.status, body: parsed };
+};
+
+/** Field errors as `field: message`, which is where ReAI puts the useful part of a 400. */
+const fieldErrorsOf = (r) =>
+  (r.body?.fieldErrors ?? []).map((e) => `${e.field}: ${e.message}`).join("; ");
+
+const detailOf = (r) => String(r.body?.detail ?? r.body?.message ?? r.body?.title ?? "");
+
+/** Everything the API said, for a claim that could be in either place. */
+const errorTextOf = (r) => [detailOf(r), fieldErrorsOf(r)].filter(Boolean).join(" | ");
+
+const rowsOf = (r) => (Array.isArray(r.body) ? r.body : (r.body?.items ?? []));
+
+/**
+ * The collections a probe here could possibly add to. Snapshotted before and after; any change fails the run.
+ *
+ * Counted rather than diffed by id because the invariant is "nothing was created", and a count is the one check
+ * that cannot be defeated by a filter that does not match the list's shape — which is exactly how a stray order
+ * survived a cleanup pass while scoping this file.
+ */
+const WATCHED = [
+  "/api/products",
+  "/api/offers",
+  "/api/orders",
+  "/api/customers",
+  "/api/employees",
+  "/api/leads?leadFilter=saved&pageSize=1",
+];
+
+async function snapshot() {
+  const counts = {};
+  for (const path of WATCHED) {
+    const r = await call("GET", path);
+    counts[path] = r.status === 200 ? rowsOf(r).length : `HTTP ${r.status}`;
+  }
+  return counts;
+}
+
+const SPEC = await import(pathToFileURL(join(process.cwd(), "dist/reai/spec.js")).href);
+
+/** The declared required fields for a POST body, so a probe is valid except for the field under test. */
+function requiredFor(path) {
+  const op = SPEC.getSpecIndex().operations.find((o) => o.method === "POST" && o.path === path);
+  return op?.body?.required ?? [];
+}
+
+/**
+ * Each case: the quirk it checks, a marker from that quirk's note, and a probe whose expected outcome is a
+ * refusal. `check` returns ["ok" | "drift" | "inconclusive" | "conditional", sentence].
+ */
+const CASES = [
+  {
+    quirk: "stock-product-needs-a-variant",
+    claim: "a stock product with no variants is refused, naming the synthetic validation field",
+    marker: "Stock products must contain at least one variant",
+    async check() {
+      const r = await call("POST", "/api/products", { title: "audit-refusal-probe", stockItem: true });
+      if (r.status < 300) return ["safety", `a stock product with no variants was CREATED (id ${r.body?.id})`];
+      if (r.status !== 400) return ["inconclusive", `answered ${r.status}, not the documented 400`];
+      const errs = fieldErrorsOf(r);
+      if (!/stockProductVariantSelectionValid/.test(errs)) {
+        return ["drift", `the 400 no longer names the synthetic field: ${errs || detailOf(r)}`];
+      }
+      return /at least one variant/i.test(errs)
+        ? ["ok", `400 ${errs}`]
+        : ["drift", `the field is named but the message changed: ${errs}`];
+    },
+  },
+  {
+    quirk: "offer-lines-stricter",
+    claim: "an offer line requires itemName AND vatCode; an order line requires itemName but not vatCode",
+    marker: "itemName is NOT: an order line without it is refused",
+    async check() {
+      // Valid except for the line fields. `offerLines`, not `lines` — and every other required field present,
+      // or the first validator to trip is currencyCode and the claim is never reached.
+      const customerId = await anyCustomerId();
+      if (customerId === undefined) return ["conditional", "no customer on this tenant to attach a line to"];
+
+      const offerBase = { customerId, currencyCode: "NOK", daysUntilDue: 14 };
+      const missing = { quantity: 1, unitPrice: 100 };
+
+      const noItem = await call("POST", "/api/offers", { ...offerBase, offerLines: [{ ...missing, vatCode: "0" }] });
+      if (noItem.status < 300) return ["safety", `an offer line with no itemName was ACCEPTED (id ${noItem.body?.id})`];
+      if (!/offerLines\[0\]\.itemName/.test(fieldErrorsOf(noItem))) {
+        return ["drift", `an offer line without itemName is no longer refused for it: ${errorTextOf(noItem)}`];
+      }
+      const noVat = await call("POST", "/api/offers", { ...offerBase, offerLines: [{ ...missing, itemName: "x" }] });
+      if (noVat.status < 300) return ["safety", `an offer line with no vatCode was ACCEPTED (id ${noVat.body?.id})`];
+      if (!/offerLines\[0\]\.vatCode/.test(fieldErrorsOf(noVat))) {
+        return ["drift", `an offer line without vatCode is no longer refused for it: ${errorTextOf(noVat)}`];
+      }
+
+      // The comparison half, which is where the note is wrong. It says both fields are "optional on an order
+      // line"; an order line with neither is refused with "Produkt er obligatorisk for alle ordrelinjer."
+      const orderBase = { customerId, currencyCode: "NOK", daysUntilDue: 14, issueDate: today() };
+      const orderNoItem = await call("POST", "/api/orders", { ...orderBase, orderLines: [missing] });
+      if (orderNoItem.status < 300) {
+        return [
+          "drift",
+          `an order line with no itemName was accepted (id ${orderNoItem.body?.id}) — the note's "optional on ` +
+            `an order line" would be true again, and this probe has created an order that needs deleting`,
+        ];
+      }
+      if (!/produkt er obligatorisk/i.test(errorTextOf(orderNoItem))) {
+        return ["drift", `an order line without itemName is refused differently now: ${errorTextOf(orderNoItem)}`];
+      }
+      return [
+        "ok",
+        `offer line refused for itemName and for vatCode; order line without itemName refused with ` +
+          `"${detailOf(orderNoItem)}" — so itemName is required on BOTH, as the corrected note says`,
+      ];
+    },
+  },
+  {
+    quirk: "brreg-lookup-requires-and-overwrites-name",
+    claim: "a blank name is refused even alongside a valid organizationNumber",
+    marker: 'A blank name is refused with "name is required"',
+    async check() {
+      const r = await call("POST", "/api/customers", { name: "", organizationNumber: "974761076" });
+      if (r.status < 300) {
+        return ["safety", `a blank name was ACCEPTED alongside an org number (id ${r.body?.id})`];
+      }
+      if (r.status !== 400) return ["inconclusive", `answered ${r.status}, not the documented 400`];
+      const errs = fieldErrorsOf(r);
+      return /name.*is required/i.test(errs)
+        ? ["ok", `400 ${errs} — the org number alone is not enough, whatever minLength 0 suggests`]
+        : ["drift", `a blank name is refused, but not for the name: ${errs || detailOf(r)}`];
+    },
+  },
+  {
+    quirk: "lead-convert-is-addressable-by-id-only",
+    claim: "the /org/{orgNumber} form of convert does not exist and answers 404 No static resource",
+    marker: "the org form answers 404",
+    async check() {
+      // A 404 for a route that does not exist creates nothing, which is what makes probing a POST here safe.
+      const r = await call("POST", "/api/leads/org/974761076/convert", {});
+      if (r.status < 300) {
+        return ["safety", "the /org/ form of convert EXISTS now and this probe just converted a lead"];
+      }
+      if (r.status !== 404) return ["inconclusive", `answered ${r.status}, not the documented 404`];
+      return /no static resource/i.test(detailOf(r))
+        ? ["ok", `404 "${detailOf(r)}"`]
+        : ["drift", `404 but with a different body: "${detailOf(r).slice(0, 80)}"`];
+    },
+  },
+  {
+    quirk: "days-until-due-mandatory",
+    claim: "daysUntilDue is declared required on both offers and orders, and omitting it is refused",
+    marker: "daysUntilDue is required and non-nullable",
+    async check() {
+      // The schema half first, from the pinned spec — the claim is about the CONTRACT, and a runtime 400 alone
+      // cannot distinguish "required" from "rejected for another reason".
+      const notRequired = ["/api/offers", "/api/orders"].filter((p) => !requiredFor(p).includes("daysUntilDue"));
+      if (notRequired.length > 0) {
+        return ["drift", `the spec no longer marks daysUntilDue required on ${notRequired.join(", ")}`];
+      }
+      const customerId = await anyCustomerId();
+      if (customerId === undefined) return ["conditional", "no customer on this tenant to build a valid order from"];
+
+      // Valid except for daysUntilDue, both omitted and explicitly null, since the claim is "non-nullable".
+      const base = {
+        customerId,
+        currencyCode: "NOK",
+        issueDate: today(),
+        orderLines: [{ quantity: 1, unitPrice: 100, itemName: "audit-refusal-probe" }],
+      };
+      for (const [label, body] of [["omitted", base], ["null", { ...base, daysUntilDue: null }]]) {
+        const r = await call("POST", "/api/orders", body);
+        if (r.status < 300) {
+          return [
+            "drift",
+            `an order with daysUntilDue ${label} was accepted (id ${r.body?.id}) — it is no longer mandatory, ` +
+              `and this probe created an order that needs deleting`,
+          ];
+        }
+        if (r.status !== 400) return ["inconclusive", `daysUntilDue ${label} answered ${r.status}`];
+      }
+      // Worth stating: the refusal is a deserialization failure, not a field error, so an agent gets no clue
+      // which field it was. That is the practical consequence of "non-nullable" and the note now says it.
+      const r = await call("POST", "/api/orders", base);
+      return ["ok", `declared required on offers and orders; omitting it gives 400 "${detailOf(r)}" with no field named`];
+    },
+  },
+  {
+    quirk: "line-vat-code-subset",
+    claim: "an order line's vatCode must be one of the tenant's own codes, and the refusal lists them",
+    marker: 'a purchase-side code is rejected with "Mva-kode N er ikke tillatt',
+    async check() {
+      const customerId = await anyCustomerId();
+      if (customerId === undefined) return ["conditional", "no customer on this tenant to build an order from"];
+      const r = await call("POST", "/api/orders", {
+        customerId,
+        currencyCode: "NOK",
+        daysUntilDue: 14,
+        issueDate: today(),
+        // A code deliberately outside any plausible set. If the subset check has gone, this is accepted.
+        orderLines: [{ quantity: 1, unitPrice: 100, itemName: "audit-refusal-probe", vatCode: "999" }],
+      });
+      if (r.status < 300) {
+        return [
+          "drift",
+          `vatCode 999 was accepted (order id ${r.body?.id}) — the subset is no longer enforced, and this ` +
+            `probe created an order that needs deleting`,
+        ];
+      }
+      if (r.status !== 400) return ["inconclusive", `answered ${r.status}`];
+      const text = errorTextOf(r);
+      return /ikke tillatt/i.test(text) && /tillatte koder/i.test(text)
+        ? ["ok", `400 "${detailOf(r)}" — the refusal lists the tenant's own codes`]
+        : ["drift", `refused, but without listing the allowed codes: ${text.slice(0, 90)}`];
+    },
+  },
+];
+
+/** An existing customer id, archived ones included — a line needs one and this tenant may have no active ones. */
+let cachedCustomerId;
+async function anyCustomerId() {
+  if (cachedCustomerId !== undefined) return cachedCustomerId || undefined;
+  for (const path of ["/api/customers", "/api/customers?archived=true"]) {
+    const r = await call("GET", path);
+    const id = rowsOf(r)[0]?.id;
+    if (id !== undefined) return (cachedCustomerId = id);
+  }
+  cachedCustomerId = 0;
+  return undefined;
+}
+
+function today() {
+  // The spec wants YYYY-MM-DD; derived from the API's own clock would be better, but issueDate is not the
+  // claim under test in any case and a fixed valid date keeps the probe deterministic.
+  return "2026-01-02";
+}
+
+async function main() {
+  const { QUIRKS } = await import(pathToFileURL(join(process.cwd(), "dist/reai/quirks.js")).href);
+  const known = new Set(QUIRKS.map((q) => q.id));
+  const unknown = CASES.map((c) => c.quirk).filter((id) => !known.has(id));
+  if (unknown.length > 0) {
+    console.error(`These cases name quirks that no longer exist: ${unknown.join(", ")}`);
+    process.exit(2);
+  }
+
+  console.log(`Checking ${CASES.length} refusal claims against tenant ${tenantId}.`);
+  console.log("Every probe is built to FAIL: a refused write creates nothing.\n");
+
+  const before = await snapshot();
+  const tally = { ok: 0, drift: 0, inconclusive: 0, conditional: 0, safety: 0 };
+
+  for (const c of CASES) {
+    let outcome;
+    let note;
+    try {
+      [outcome, note] = await c.check();
+    } catch (err) {
+      outcome = "inconclusive";
+      note = `the probe threw: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    tally[outcome] = (tally[outcome] ?? 0) + 1;
+    const label =
+      outcome === "ok"
+        ? "OK    "
+        : outcome === "drift"
+          ? "DRIFT "
+          : outcome === "safety"
+            ? "SAFETY"
+            : outcome === "conditional"
+              ? "N/A   "
+              : "??????";
+    console.log(`${label} ${c.quirk}`);
+    console.log(`       ${c.claim}`);
+    console.log(`       ${note}`);
+  }
+
+  // The invariant that makes this file safe. Not "I believe the probes were refused" — check.
+  const after = await snapshot();
+  const moved = Object.keys(before).filter((k) => before[k] !== after[k]);
+  console.log(
+    `\n${tally.ok} unchanged, ${tally.drift} drifted, ${tally.safety} SAFETY, ` +
+      `${tally.inconclusive} inconclusive, ${tally.conditional} not answerable (of ${CASES.length})`,
+  );
+  if (moved.length > 0) {
+    console.log(
+      `\nRECORD COUNTS CHANGED, so a probe was not refused after all:\n` +
+        moved.map((k) => `  ${k}: ${before[k]} -> ${after[k]}`).join("\n") +
+        `\n\nFind what was created and delete it. A refusal-only audit must leave the tenant as it found it.`,
+    );
+    process.exit(1);
+  }
+  console.log(`Record counts unchanged across ${WATCHED.length} collections, so nothing was created.`);
+
+  if (tally.safety > 0) {
+    console.log(`\n${tally.safety} probe(s) SUCCEEDED that should have been refused. Treat as an incident.`);
+    process.exit(1);
+  }
+  if (tally.drift > 0) {
+    console.log(`\nCorrect the note in src/reai/quirks.ts — and check the probe was valid except for the field under test.`);
+    process.exit(1);
+  }
+  if (tally.inconclusive > 0) process.exit(3);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

@@ -514,8 +514,14 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "validation",
     statuses: [400, 422],
     note:
-      "Offer lines are STRICTER than order lines: itemName and vatCode are both required on an " +
-      "offer line, but optional on an order line. Reusing an order-shaped line here returns 400.",
+      "Offer lines are STRICTER than order lines, but only in ONE field. Both itemName and vatCode are " +
+      "required on an OFFER line, and each is refused with a fieldError naming it exactly " +
+      '("offerLines[0].itemName is required"). On an ORDER line vatCode is genuinely optional — but ' +
+      "itemName is NOT: an order line without it is refused with 400 \"Produkt er obligatorisk for alle " +
+      "ordrelinjer.\", as a plain Norwegian detail with no fieldErrors at all. Re-measured 2026-08-09; an " +
+      "earlier version of this note said both fields are \"optional on an order line\", which would send an " +
+      "agent to build an order line with neither and get a refusal it was told not to expect. So: a line " +
+      "carrying itemName works on both, and adding vatCode is what an offer additionally needs."
   },
   {
     id: "line-vat-code-subset",

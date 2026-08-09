@@ -9,6 +9,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`npm run audit:quirks:write` — the refusal claims a GET cannot reach.** Six cases against 2783, and it found
+  a note half false on its first run.
+  - `offer-lines-stricter` said `itemName` and `vatCode` are both required on an offer line "but **optional on an
+    order line**". Measured: `vatCode` is optional on an order line, `itemName` is **not** — an order line
+    without it is refused with 400 `"Produkt er obligatorisk for alle ordrelinjer."`, a plain Norwegian detail
+    with no `fieldErrors` at all. An agent following the old note would build an order line with neither and get
+    a refusal it was told not to expect. Corrected, and the audit now pins both halves plus the asymmetry in how
+    the two endpoints report it.
+  - Five more verified exactly as written: `stock-product-needs-a-variant` (400 naming the synthetic
+    `stockProductVariantSelectionValid` field), `brreg-lookup-requires-and-overwrites-name` (a blank name refused
+    beside a valid org number, whatever `minLength 0` suggests), `lead-convert-is-addressable-by-id-only`
+    (404 `"No static resource"` for the `/org/` form), `days-until-due-mandatory` (declared required on offers
+    *and* orders in the spec; omitting it gives a bare `"Failed to read request"` that names no field, which the
+    note now says), and `line-vat-code-subset` (`"Mva-kode 999 er ikke tillatt. Tillatte koder: 0."`).
+  - **Safety is the design, not a hope.** Every probe is built to fail, so nothing is created. Nothing
+    irreversible or transmitting is probed at all — enforced by asking `classifyRequest`/`classifyTransmission`
+    rather than by a hand-kept list, because a refusal that stops working means the request goes through. An
+    unexpected 2xx is a **SAFETY** outcome distinct from drift. And record counts are snapshotted before and
+    after across six collections, with any change failing the run.
+  - That last rule exists because of a real slip while scoping this: an order-line probe unexpectedly returned
+    201, and the ad-hoc cleanup filtered the list response for a field the list does not return — so it reported
+    "cleaning up 0 orders" while **order 4109** sat in 2783. Deleted by hand a minute later, verified 404, count
+    back to 8 with the original ids. A count check catches that; a filter that has to be correct does not.
+  - **The valid-except-for-the-field-under-test trap, for the fourth time in these audits.** The offer probe took
+    three rounds: `lines` tripped `currencyCode is required`, then `offerLines is required` (wrong field name),
+    then finally the claim. Required-field sets now come from the pinned spec and a test asserts it.
+  - Goes through the same tenant guard as every other writing script — verified refusing 2634 — plus the runtime
+    protected-tenant refusal, since sending writes is this file's whole method.
+
 - **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
   guard instead of trusting it, before starting work that writes.
   - Four scripts each carried their own copy of one check: refuse unless `--tenant` appears in

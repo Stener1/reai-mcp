@@ -48,6 +48,48 @@ It was written during a multi-hour GitHub Actions outage, when no workflow could
 
 ## Live harnesses
 
+### `audit-quirks-write.mjs`: the refusal claims a GET cannot reach
+
+`audit-quirks.mjs` covers the 16 claims a GET can answer and is read-only by construction. This covers a slice
+of what it cannot: quirks whose claim is that a **write is refused**, and what the refusal says.
+
+**Why it is safe, and where the line is.** Every probe is a request built to FAIL, and a refused write creates
+nothing — the same reasoning `audit-messages.mjs` documents. Three rules keep that true rather than merely
+intended:
+
+1. **Nothing irreversible or transmitting is probed.** A probe is only safe if accidental success would be
+   harmless, because a refusal that stops working means the request goes through. Enforced by asking
+   `classifyRequest` and `classifyTransmission`, not by a hand-kept list.
+2. **An unexpected 2xx is a SAFETY outcome**, distinct from drift, and exits non-zero. It means the rule changed
+   *and* this script has written to real books.
+3. **Record counts are snapshotted before and after**, across every collection a probe could add to, and any
+   change fails the run.
+
+Rule 3 is not theoretical. Scoping this file by hand, an order-line probe unexpectedly returned 201 and the
+ad-hoc cleanup filtered the list response for a field the list does not return — so it printed "cleaning up 0
+orders" while order 4109 sat in the tenant. Deleted by hand a minute later. A count check catches that; a
+filter that has to be correct does not.
+
+**Probe the request that is valid EXCEPT for the thing under test.** Fourth appearance of this trap in these
+audits, and it cost three rounds of measurement here:
+
+```
+POST /api/offers {lines: […]}              → 400 "currencyCode is required"           (never reached the lines)
+POST /api/offers {currencyCode, lines}     → 400 "offerLines is required"             (wrong field name)
+POST /api/offers {…, offerLines: […]}      → 400 "offerLines[0].itemName is required" ← the actual claim
+```
+
+The required-field sets come from the pinned spec, and a test asserts that rather than trusting memory.
+
+**It found `offer-lines-stricter` half false.** The note said `itemName` and `vatCode` are both required on an
+offer line "but optional on an order line". `vatCode` is optional on an order line; `itemName` is **not** — an
+order line without it is refused with 400 `"Produkt er obligatorisk for alle ordrelinjer."`, as a plain
+Norwegian detail with no `fieldErrors`. An agent following the old note would build an order line with neither
+and get a refusal it was told not to expect.
+
+Currently **6 unchanged, 0 drifted, 0 SAFETY** against 2783, with record counts unchanged across six
+collections. It refuses 2634 through the same guard as every other writing script.
+
 ### The tenant guard, and why the old one protected nothing
 
 Every script here that writes calls `requireWritableTenant()` from `scripts/lib/write-guard.mjs`, at the top
