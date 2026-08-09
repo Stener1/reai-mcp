@@ -276,7 +276,19 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // policy.ts classifies it as external. "Vis" does not mean "file something with a tax authority", so the
       // read penalty has to apply by TRANSMISSION and not only by method. Caught by an assertion of mine that
       // was wrong about what the vat-return family contains, which is the only reason it was noticed.
-      if (score > 0 && !wantMethod && readIntent && op.method === "GET" && classifyTransmission(op.method, op.path) === "external") {
+      if (
+        score > 0 &&
+        !wantMethod &&
+        readIntent &&
+        op.method === "GET" &&
+        classifyTransmission(op.method, op.path) === "external" &&
+        // ...unless the query NAMED it. The demotion is about unstated intent, not about hiding an operation
+        // from someone who asked for it — which the test for this already claimed, while asserting it with
+        // "altinn sync", a query that contains no read verb and so could never have exercised the branch.
+        // Without this, "hent altinn", "sok altinn" and "vis altinn" all cut the one operation they name to
+        // 2.38 and left it clinging to rank 1 above unrelated noise. Found by the independent review of #121.
+        !namesOperation(rawTerms, op.path)
+      ) {
         score *= 0.25;
       }
       if (score > 0 && !wantMethod && op.method !== "GET") {
@@ -759,6 +771,13 @@ function tokenize(query: string): string[] {
  * whose main word was "departments".
  */
 const STOPWORDS = new Set([
+  // "se" is two letters and substring-matches "asset", so every "se <noun>" query carried
+  // GET /api/ledger/asset as noise at 4.0. It always ranked second; the read-intent penalty demoted the
+  // real answer past it and it took first place — "se oreavrunding", "se innsending" and "se utgaende" all
+  // returned the ASSET LEDGER. The penalty exposed it rather than caused it: a word that cannot identify an
+  // endpoint belongs here, which is this list's whole definition. Read intent still sees it, because
+  // intentTokens deliberately does not strip stopwords.
+  "se",
   "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "api", "get", "all",
   // Question and filler words.
   "how", "do", "does", "did", "what", "which", "who", "when", "where", "why",
@@ -959,13 +978,28 @@ function hasWriteIntent(tokens: readonly string[]): boolean {
  * such exposure — no write verb is a stopword, checked rather than assumed.
  */
 const READ_INTENT_VERBS: ReadonlySet<string> = new Set([
-  // Norwegian imperatives and the nouns that stand in for them.
+  // Norwegian read imperatives.
   "vis", "vise", "se", "list", "liste", "hent", "finn", "finne", "sok", "søk", "soke", "søke",
-  "oversikt", "rapport", "status", "hvilke", "hvilken", "hvor", "hva", "hvem", "hvorfor",
+  // Question words. Every one of these is a STOPWORD, which is why intent is matched against the unfiltered
+  // query rather than against rawTerms.
+  "hvilke", "hvilken", "hvor", "hva", "hvem", "hvorfor",
   // English.
-  "show", "list", "get", "find", "search", "view", "read", "display", "fetch",
-  "which", "what", "who", "how", "many", "report", "overview", "summary", "total",
+  "show", "get", "find", "search", "display", "which", "what", "who", "how",
 ]);
+
+// DELIBERATELY NOT HERE: `status`, `rapport`, `oversikt`, `report`, `overview`, `summary`, `total`, `many`,
+// `read`, `fetch`, `view`. Each is a domain NOUN as well as a reading word, and treating a noun as an intent
+// signal damaged writes the user had asked for. Measured on the first version of this feature:
+//
+//     send inn rapport   GET /vat-return/altinn-sync  ->  POST .../sign-requests/{signRequestId}/send
+//     send status        PUT /api/leads/{id}/status              17.6 -> 10.0
+//     sett total         POST /invoice/setting/daysUntilDue       2.7 -> 1.7
+//
+// The first settles it: `send` is not in WRITE_INTENT_VERBS, so `rapport` alone made "send inn rapport" a
+// read, cut the external GET it used to return, and handed rank 1 to an operation that SENDS a signing
+// request. A word that is a noun half the time cannot carry intent. `oversikt` and `rapport` still reach the
+// a-melding collection, because the phrase rule below names them explicitly -- a statement about one phrase
+// rather than about every query containing the word. Found by the independent review of PR #121.
 
 /**
  * Query tokens WITHOUT stopword removal, for intent detection only.
@@ -980,6 +1014,20 @@ function intentTokens(query: string): string[] {
     .split(/[^a-z0-9æøå]+/i)
     .map((t) => t.trim())
     .filter((t) => t.length > 1);
+}
+
+/**
+ * Did the query name this operation's own path?
+ *
+ * A literal path segment in the query is the strongest possible statement that the user meant this operation,
+ * and it is what separates "show me the VAT return" from "run the Altinn sync".
+ */
+function namesOperation(tokens: readonly string[], path: string): boolean {
+  const segments = path
+    .toLowerCase()
+    .split(/[^a-z0-9æøå]+/i)
+    .filter((seg) => seg.length > 2 && seg !== "api");
+  return segments.some((seg) => tokens.includes(seg));
 }
 
 function hasReadIntent(query: string): boolean {
@@ -1117,7 +1165,7 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // filing for every query including "lever amelding" and the bare noun, which is the property the filing
   // rule exists to protect.
   [
-    /\b(vis|vise|se|list|liste|hent|finn|finne|sok|søk|soke|søke|oversikt|rapport|hvilke|hvilken|hva|hvem|apne|apn|open|show|get|find|search|view|display|report|overview)\s+(?:\w+\s+)?(a[-\s]?melding\w*)\b/g,
+    /\b(vis|vise|se|list|liste|hent|finn|finne|sok|søk|soke|søke|oversikt|rapport|hvilke|hvilken|hva|hvem|apne|apn|open|show|get|find|search|view|display|report|overview)\s+(?:(?:alle|siste|min|mine|denne|en|et|er|the|my|all|last|latest)\s+)?(a[-\s]?melding\w*)\b/g,
     "salary-payments",
   ],
   [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],

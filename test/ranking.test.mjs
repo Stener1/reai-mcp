@@ -526,12 +526,68 @@ test("read intent does not disturb a query that asks to write", () => {
   // exactly why policy.ts keeps TRANSMITTING_GETS and classifies it as external. "Vis" does not mean "file
   // something with a tax authority". This assertion is the one that caught it, by being wrong about what the
   // vat-return family contains.
+  //
+  // This assertion is written to FAIL on main, which the first version was not: `top(...).path ===
+  // "/api/vat-returns"` already held there, and the companion check used "altinn sync" — a query with no read
+  // verb, so `readIntent` is false and it is byte-identical to main. The independent review of PR #121 pointed
+  // out that the pair therefore guarded nothing. What can only be true with the fix is that the transmitting
+  // operation is ABSENT from the results a read query gets, and it was rank 1 on main.
   for (const query of ["vis mva-melding", "hva er mva-meldingen"]) {
-    assert.equal(top(query).path, "/api/vat-returns", `"${query}" -> ${top(query).path}`);
+    const paths = searchOperations({ query, limit: 5 }).map((h) => h.path);
+    assert.equal(paths[0], "/api/vat-returns", `"${query}" -> ${paths.join(", ")}`);
+    // Demoted, not removed — and the assertion says so rather than overreaching. It sits at rank 5 here; on
+    // main it was rank 1, so this still fails there, which is the property that was missing before.
+    const rank = paths.indexOf("/vat-return/altinn-sync");
+    assert.ok(rank === -1 || rank >= 3, `"${query}" ranked the Altinn transmission ${rank + 1}: ${paths.join(", ")}`);
   }
-  // But naming it outright still finds it: the demotion is about unstated intent, not about hiding the
-  // operation from someone who asked for it.
+  // But naming it keeps it at FULL strength: the demotion is about unstated intent, not about hiding an
+  // operation from someone who asked for it. "hent altinn" is the case that matters — it has a read verb, so
+  // the branch really is exercised, and without the guard it was cut from 9.5 to 2.38.
+  for (const query of ["hent altinn", "sok altinn", "vis altinn"]) {
+    const hit = searchOperations({ query, limit: 1 })[0];
+    assert.equal(hit.path, "/vat-return/altinn-sync", `"${query}" -> ${hit.path}`);
+    assert.ok(hit.score > 5, `"${query}" scored ${hit.score}; naming the operation must not demote it`);
+  }
   assert.equal(top("altinn sync").path, "/vat-return/altinn-sync");
+});
+
+test("a phrase rule must not swallow a meaningful word as filler", () => {
+  // The a-melding read rule allows filler between the verb and the noun, and `(?:\\w+\\s+)?` — any word —
+  // destroyed meaning, because the whole match is replaced. "hent bilag amelding", "finn kunde amelding" and
+  // "vis mva amelding" all scored 40.4, identically, because the middle word was consumed. Four correct
+  // answers lost, and the identical score across four different nouns is what proves the cause.
+  //
+  // Found by the independent review of PR #121, which also made the sharper point: this is the same
+  // displacement the husleie test below guards against in TERM_SYNONYMS, broken in PHRASE_SYNONYMS in the very
+  // same commit. The filler is now a closed set of actual filler words.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const [query, wanted] of [
+    ["hent bilag amelding", "/api/vouchers"],
+    ["vis bilag amelding", "/api/vouchers"],
+    ["finn kunde amelding", "/api/ledger/customer"],
+    ["vis mva amelding", "/api/vat-codes"],
+    ["vis faktura amelding", "/api/invoices"],
+  ]) {
+    assert.equal(top(query).path, wanted, `"${query}" -> ${top(query).path}`);
+  }
+  // Real filler still works, so the rule was narrowed rather than disabled.
+  for (const query of ["vis alle amelding", "hent siste amelding", "vis amelding"]) {
+    assert.equal(top(query).path, "/api/salary-payments", `"${query}" -> ${top(query).path}`);
+  }
+});
+
+test("a two-letter read verb does not become substring noise", () => {
+  // `se` substring-matches "asset", so every "se <noun>" query carried GET /api/ledger/asset at 4.0. It always
+  // ranked second; the read penalty demoted the real answer past it and it took first — "se oreavrunding",
+  // "se innsending" and "se utgaende" all returned the ASSET LEDGER. The penalty exposed the noise rather than
+  // causing it, and the fix is that a word which cannot identify an endpoint is a stopword.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.match(top("se oreavrunding").path, /rounding-adjustment/);
+  assert.match(top("se innsending").path, /tax-returns/);
+  assert.match(top("se utgaende").path, /ending-balance|manual-reconciliations/);
+  // And it still reads as intent, because intentTokens does not strip stopwords.
+  assert.equal(top("se faktura").method, "GET");
+  assert.equal(top("se kunde").method, "GET");
 });
 
 test("the Norwegian word for a contract reaches the agreements family", () => {
