@@ -20,7 +20,7 @@ This defeats the routing rule below, which escalates a body that *contains* a de
 
 ### And the escape hatch now refuses to send one blind
 
-Naming the two worst instances is not the same as covering the class. Sweeping the document turns up **31 public `PUT` endpoints that can clear at least one documented field by omission**, and only 15 of them have a curated tool — the other 16 are reachable solely through `reai_request`, which cannot merge on a caller's behalf. Every instance of this bug in this repo was found *after* the write, on a live tenant, so a warning attached to the response is a post-mortem rather than a control.
+Naming the two worst instances is not the same as covering the class. Sweeping the document turns up **31 public `PUT` endpoints that can clear at least one documented field by omission**, and only 17 of them have a curated tool — the other 14 are reachable solely through `reai_request`, which cannot merge on a caller's behalf. (That split was 15/16 when this was written and moves whenever a curated tool is added; the 31 is the figure that matters and has not.) Every instance of this bug in this repo was found *after* the write, on a live tenant, so a warning attached to the response is a post-mortem rather than a control.
 
 So `reai_request` now refuses a `PUT` whose body omits documented optional fields, and names them:
 
@@ -42,12 +42,29 @@ Three details worth stating, because each is a decision rather than an omission:
 - **The write policy speaks first.** A call the current write mode forbids is refused for that reason, not for this one — otherwise an agent goes after the wrong permission.
 - **Both path forms are resolved.** ReAI decodes before routing and this server does not: `GET /api/company%2Dbanks` and `GET /api/employe%65s` both answer `200`, while the spec lookup matches the literal string. So the first version of this gate resolved nothing for an encoded path and therefore refused nothing — `PUT /api/company%2Dbanks/{id}` with a partial body went straight through and cleared the account number. Caught in review, and fixed the way the write ladder already handled it: resolve every form the request might route as. Verified live — the encoded call is now refused and the account number is untouched. The same blind spot was silencing the quirk note on successful writes reached that way.
 
+## Changing where money goes is treated as irreversible
+
+[The README](../README.md#changing-where-money-goes-is-treated-as-irreversible) names the field set
+and states the rule. This is the table it applies, and the next section is how that table came to be
+trusted.
+
+A few fields are ordinary master data as *records* and permanent as *consequences*. Undoing the edit is trivial; undoing what follows is not, because it happens later and through someone acting perfectly normally.
+
+| Fields | Where | What happens later |
+|---|---|---|
+| `iban`, `bankAccountNumber`, `swiftCode`, `swiftBic`, `routingNumber`, `accountNumber`, `bban`, `rentAccountNumber`, `depositAccountNumber` | suppliers, customers, creditors, **employees**, supplier invoices (including `paymentDetails` nested inside them), invoice-reception documents, and **editing** an existing company bank or lease | Whoever pays that counterparty next — quite possibly a person clicking through the ReAI web UI weeks afterwards — sends money to whatever account is on file. On an employee it is their salary, paid on a schedule by machinery nobody re-reads each month. On a company bank it is your own customers who are redirected, and invoices already issued name that account. *Adding* a company bank stays ordinary work; repointing one does not |
+| `invoiceEmail` | customers, orders, subscriptions | Every future invoice is delivered to that address. Not a payment — a disclosure — so the refusal says so, and tells you to confirm the address through a channel you already trust rather than to check bank details. **Emptying one counts too, in a partial body**: `invoiceEmail: ""` through a `PATCH` or through any curated tool stops invoices reaching the address someone chose, and needs `full` mode exactly as setting one does. Measured on `PATCH /api/customers/{id}`: `""` clears the address, `null` is the documented no-op, `" "` is a `400` — so the form that empties a billing address is the one that looks like a typo, and `""` is also the schema's declared default. Not on a `POST`, where no stored address exists to redirect, and **not on a replacement `PUT`**, where an empty value cannot be told apart from faithfully carrying back an address that is already empty — the omission gate covers that case instead |
+
+The field list is not path-specific: any of them reaching any of those paths escalates. An earlier version of this table split them up, which read as though `bban` mattered only on company banks.
+
+So a call carrying one of those fields is classified **irreversible** and refused in the default mode, on the curated tools and through `reai_request` alike, even though the endpoint itself is otherwise reversible. Every other field on the same tool is unaffected: renaming a supplier still works in `reversible`. Adding a new company bank stays ordinary work; repointing an existing one does not.
+
 ## How the payment-destination field set was checked
 
-[The README](../README.md#changing-where-money-goes-is-treated-as-irreversible) states the rule and
-the field set it applies to. This is how that table came to be trusted.
-
-Two of its entries were found by checking the table against the API rather than trusting it, and the process is now a test (`test/payment-routing.test.mjs`) that reads the OpenAPI document on every run:
+Two of that table's entries, and a whole lease's worth of a third, were found by checking it against
+the API rather than trusting it — employees were missing, which is the sharpest member of the class,
+and so were `swiftBic` and `routingNumber`. The process is now a test
+(`test/payment-routing.test.mjs`) that reads the OpenAPI document on every run:
 
 - **Employees were missing.** `PATCH /api/employees/{id}` accepts `accountNumber` — the account that employee's salary is paid to — and was classified as ordinary reversible master data. That is the sharpest member of this whole class, not a footnote: salary is paid on a schedule, by machinery nobody re-examines, and the person who notices is the employee whose pay did not arrive.
 - **`swiftBic` and `routingNumber` were missing.** The field set was written against the supplier schema, which spells the same concepts `swiftCode` and `bankAccountNumber`. The supplier-invoice payment details use different names for them, so those writes went undetected.

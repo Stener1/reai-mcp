@@ -482,7 +482,11 @@ test("the README documents the transport limits the code enforces", async () => 
   assert.ok(bodyBytes, "could not read the body limit from src/http.ts");
   assert.ok(batch, "could not read the batch limit from src/http.ts");
 
-  assert.match(readme, /### Request limits/, "the Request limits section is missing");
+  // `## ` rather than `### `, which also matches a `###` heading: the section used to exist at both
+  // levels — a summary on the front page and the detail in docs/self-hosting.md — and the front-page
+  // one is now a sentence plus a link. The heading LEVEL was never the guarantee; the section being
+  // findable in the corpus is. The three content assertions below are unchanged.
+  assert.match(readme, /## Request limits/, "the Request limits section is missing");
   assert.ok(
     readme.includes(`${bodyBytes} MB`),
     `the README does not mention the ${bodyBytes} MB body limit the code enforces`,
