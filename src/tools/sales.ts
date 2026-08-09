@@ -18,6 +18,7 @@ import {
   PHONE_RULE,
   SKIP_REGISTRY_LOOKUP_RULE,
 } from "./registry.js";
+import { bindsToTrue } from "../policy.js";
 import { ReaiApiError } from "../reai/errors.js";
 
 /**
@@ -1031,7 +1032,12 @@ const updateOrder = defineTool({
       return fail(`Order ${id} could not be read, so nothing was written. A PUT here REPLACES the order.`);
     }
 
-    if (order.sendEhf === true) {
+    // bindsToTrue, NOT `=== true`. The backend is Jackson, whose default coercion binds the string "true"
+    // and the integer 1 to boolean true — the repo already has a recorded case where `{"sendEhf": "true"}`
+    // armed a send the policy scored as sending nothing. A tool READING the flag off a record to decide
+    // whether an edit could re-arm a transmission faces exactly the same ambiguity, and the cost of being
+    // wrong is irrecoverable in one direction and a refused call in the other.
+    if (bindsToTrue(order.sendEhf)) {
       return fail(
         `Order ${id} has sendEhf set, so this tool will not update it. Nothing was written.\n\n` +
           `A PUT replaces the record, so the flag must either be sent again — which the write policy reads ` +

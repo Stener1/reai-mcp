@@ -166,3 +166,24 @@ test("updating an order is reversible and transmits nothing", () => {
   // And it does not offer the one field that would change that.
   assert.equal(tool().inputSchema.sendEhf, undefined, "sendEhf must not be an argument");
 });
+
+test("a sendEhf that only COERCES to true is still refused", async () => {
+  // The backend is Jackson, whose default coercion binds "true", "1", 1, "yes" and "on" to boolean true —
+  // the repo has a recorded case where `{"sendEhf": "true"}` armed a send the policy scored as sending
+  // nothing. A `=== true` check here would read those records as unarmed and then re-send the flag on an
+  // edit that had nothing to do with sending. This is the safety direction: ambiguous counts as armed.
+  for (const value of [true, "true", "TRUE", " true ", "1", 1, "yes", "on"]) {
+    const { calls, result, text } = await run({ id: 4105, comment: "ZZ" }, () => order({ sendEhf: value }));
+    assert.equal(result.isError, true, `sendEhf ${JSON.stringify(value)} must be refused`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `sendEhf ${JSON.stringify(value)} reached a write`);
+    assert.match(text, /sendEhf/);
+  }
+  // And the genuinely-unarmed shapes still proceed, or the tool would refuse every order.
+  for (const value of [false, "false", "0", 0, null, undefined]) {
+    const { calls, result } = await run({ id: 4105, comment: "ZZ" }, (req, n) => (n === 1 ? order({ sendEhf: value }) : order()));
+    assert.notEqual(result.isError, true, `sendEhf ${JSON.stringify(value)} must not block an ordinary edit`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+    // Whatever the record said, the flag is never in the body this tool sends.
+    assert.equal("sendEhf" in calls[1].body, false, "sendEhf must never be sent");
+  }
+});
