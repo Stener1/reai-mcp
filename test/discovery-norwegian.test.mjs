@@ -92,9 +92,11 @@ test("the English queries did not regress in RANK, not merely in presence", () =
     if (rank < 0) worse.push(`${query} → not found`);
     else if (rank >= 3) worse.push(`${query} → rank ${rank + 1}`);
   }
-  // "salary run" sits outside the top three on main as well; it is the one query here that
-  // was already mediocre, and this change does not affect it either way.
-  assert.deepEqual(worse, ["salary run → rank 8"], "an English query lost ground");
+  // "salary run" is the one mediocre query here and it MOVED, from rank 8 to 7 — which is why this assertion
+  // changed rather than the code. POST /api/salary-payments/{id}/complete, the operation that files payroll
+  // with Skatteetaten, had been ranking above the salary-payments resource for a query naming neither
+  // "complete" nor any filing. Pinned at the new value so the gain cannot quietly disappear.
+  assert.deepEqual(worse, ["salary run → rank 7"], "an English query lost ground");
 });
 
 // The order-dependence bug in its own right, since it is the kind that hides: both phrasings

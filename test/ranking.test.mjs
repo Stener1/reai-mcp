@@ -648,3 +648,79 @@ test("widening a synonym to reach a family would displace the families it names"
     assert.equal(top(query).path, "/api/agreements", `"${query}" -> ${top(query).path}`);
   }
 });
+
+/**
+ * An ACTION the query never asked for, however well its path happens to match.
+ *
+ * /api/salary-payments is the collection, /api/salary-payments/{id} the item, and
+ * /api/salary-payments/{id}/complete the action that FILES payroll with Skatteetaten. Measured on main:
+ *
+ *     opprett salary payments   POST /api/salary-payments/{id}/complete   63.8   <- files with Skatteetaten
+ *                               POST /api/salary-payments                 61.3   <- creates one, fifth
+ *     opprett agreements        POST /api/agreements/{id}/sign-request     41.4   <- sends to a counterparty
+ *                               POST /api/agreements/employee-contract     38.4
+ *
+ * Found by auditing 804 resource-only queries: 56 ranked an irreversible nested action first and 24 of those
+ * transmit outside the tenant. Only irreversible or transmitting actions are demoted — a first version also cut
+ * ordinary nested reads and the held-out corpora caught the cost within one run.
+ */
+test("a single-word action the query never named does not outrank the resource it did name", () => {
+  // /api/salary-payments is the collection and /api/salary-payments/{id}/complete is the action that FILES
+  // payroll with Skatteetaten. On main, "opprett salary payments" ranked the filing at 63.8 and the create
+  // fifth at 61.3, and "salary run" reached the resource only at rank 8.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(`${top("opprett lonnskjoring").method} ${top("opprett lonnskjoring").path}`, "POST /api/salary-payments");
+  // The filing must not be first for ANY of these, which is the property that matters. It is asserted this way
+  // rather than pinning one winner because "opprett salary payments" reaches
+  // POST /api/salary-payments/{id}/wage-specs — a two-part segment, so exempt, and reversible. Better than a
+  // government filing and still not the create; named rather than glossed.
+  for (const query of ["opprett salary payments", "create salary payments", "opprett lonnskjoring", "salary run"]) {
+    assert.notEqual(top(query).path, "/api/salary-payments/{id}/complete", `"${query}" ranked the filing first`);
+  }
+  // "salary run" reaches the resource at rank 7 now, from 8 on main; the exact figure is pinned in
+  // discovery-norwegian.test.mjs, which is where that corpus lives.
+  assert.notEqual(top("salary run").path, "/api/salary-payments/{id}/complete");
+});
+
+test("the demotion is scoped to single-word segments, because the general form did harm", () => {
+  // Both reviews of PR #122 found the unrestricted rule doing more damage than the defect, and each case below
+  // is one of theirs, asserted so the general form cannot come back quietly.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+
+  // It inverted a request into its own undo. This query is the endpoint's own summary, verbatim, and requiring
+  // every hyphen part of `manual-credit-note-applications` to be named made it unexemptable — so the DELETE,
+  // which took a milder cut, became first and would UNAPPLY the credit note.
+  assert.equal(
+    top("Apply a manual credit note to an invoice").path,
+    "/api/invoices/{id}/manual-credit-note-applications",
+  );
+  assert.notEqual(top("Apply a manual credit note to an invoice").method, "DELETE");
+
+  // And it pushed legitimate requests down or out: "signer avtalen" lost the signing operations from the top
+  // three, and the rounding-adjustment endpoint lost its own summary as a query at rank 29 — past the default
+  // limit of 25, so out of reach altogether.
+  assert.match(top("signer avtalen").path, /sign-request/);
+  const settle = searchOperations({ query: "Settle insignificant invoice outstanding", limit: 25 }).map((h) => h.path);
+  assert.ok(
+    settle.includes("/api/invoices/{id}/rounding-adjustment"),
+    `the rounding adjustment must stay within the default limit: ${settle.slice(0, 5).join(", ")}`,
+  );
+});
+
+test("an action with no better alternative is not pushed out of reach", () => {
+  // The condition that stops this becoming a blunt instrument. /api/manual-reconciliations has no
+  // collection-level POST, so demoting .../reopen promotes nothing — and "åpne avstemmingen på nytt" asks to
+  // reopen a reconciliation while never containing the word "reopen". A hard cut dropped it out of the top ten
+  // entirely, which the ratcheted held-out corpus caught.
+  const rankOf = (query, want) =>
+    searchOperations({ query, limit: 10 })
+      .map((h) => h.path)
+      .findIndex((p) => p.startsWith(want));
+  assert.ok(
+    rankOf("åpne avstemmingen på nytt", "/api/manual-reconciliations/{bankAccountId}/reopen") >= 0,
+    "the reconciliation reopen must stay reachable for the phrasing that asks for it",
+  );
+  // Pinned at its exact rank rather than ">= 0". The review pointed out that the loose form passed while the
+  // very thing it guards degraded: an earlier version moved this from rank 8 to 9 and the test said nothing.
+  assert.equal(rankOf("aktiver abonnementet igjen", "/api/subscriptions/{id}/activate"), 8);
+});
