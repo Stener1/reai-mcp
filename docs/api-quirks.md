@@ -75,7 +75,7 @@ and none was given:
   line 1, account 1320 → subAccountId 6231 (Default)
 ```
 
-A failed lookup does **not** block the write. This document has understated requirements before, and refusing a voucher because a helper read failed would be the check doing harm — the API stays the authority, and its `400` is enriched by the quirk registry either way. The bank rule is documented rather than pre-checked, because nothing in the company-bank response says which ledger account each bank belongs to, so which accounts demand it cannot be established locally.
+A failed lookup does **not** block the write. This document has understated requirements before, and refusing a voucher because a helper read failed would be the check doing harm — the API stays the authority, and its `400` is enriched by the quirk registry either way. Both rules are pre-checked. The bank one used to be documented only, on the grounds that nothing in the company-bank response says which ledger account each bank belongs to — true of that response, but the pairing is in `GET /api/chart-of-accounts/accounts`, which returns one row per account-plus-dimension (`1920/1337` carrying `subsidiaryLedger {type: "bank", id: 1337}`, and that id IS the companyBankId). `reai_create_voucher` now reads it and refuses locally, naming the actual ids, for both dimensions in one pass.
 
 Sub-accounts are also **permanent**: `DELETE /api/general-sub-accounts/{id}` answers `405`, and `PUT` accepts only `name` (`accountNumber` answers `400 "Unknown field: accountNumber"`), so one cannot be removed or moved. Adding the *first* sub-account to an account changes that account's rules for everyone posting to it, and `reai_create_sub_account` says so when that is what you are about to do.
 

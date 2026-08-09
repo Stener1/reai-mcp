@@ -9,6 +9,94 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_create_voucher` now pre-checks `companyBankId`, the way it already pre-checked `subAccountId`.**
+  The deferred half of #132, and the reviewer there was right that it is the smaller, better fix: it closes
+  the gap rather than describing it.
+  - A posting to a bank account without a `companyBankId` answers 400 `"Linje 1: Konto 1920 må posteres med
+    bankkonto."` — naming the line and nothing a caller can act on. The tool now refuses before sending and
+    names the actual ids. Verified live against 2634's real chart, with a client that throws on any non-GET
+    so a failed check could not become a write:
+
+    ```
+    Nothing was sent. 1 posting(s) are on a bank account, which must say WHICH company bank:
+      line 1, account 1920 → companyBankId 1338 (drift), 1337 (mva), 1339 (Skatt tilsidesatt - NOK)
+    ```
+
+    Those are 2634's three company banks exactly, resolved from the API rather than from a fixture.
+  - The pairing comes from `GET /api/chart-of-accounts/accounts`, which returns one row per
+    account-plus-dimension: `1920/1337` carrying `subsidiaryLedger {type: "bank", id: 1337}`, and that id IS
+    the `companyBankId`. The argument's own description previously justified skipping the check with
+    *"nothing in the company-bank response says which ledger account each bank belongs to"* — true of that
+    response, wrong as a conclusion.
+  - **It only fires on a positive finding.** The prefix search returns nothing both for an account with no
+    bank dimension and for an account that does not exist (measured: 2783 has 1920 in its chart, zero
+    company banks, and the search returns 0 rows), so absence proves nothing and must not block. Matched on
+    `accountNumber` EXACTLY, because the search is a prefix search — 1920 would also return 19205 — and
+    `query` is worse still, matching names too: `query=bank` returns 1920 **and** 7770.
+  - **A failed lookup does not block the write**, the same discipline the sub-account check already has:
+    this spec has under-stated requirements before, and refusing a voucher because a helper read failed
+    would be the check doing harm. The API stays the authority, and the existing catch still translates its
+    Norwegian refusal.
+  - Bounded to one read per distinct account lacking the field, and it steps aside past eight rather than
+    issuing a burst before the API has been asked at all.
+  - **An independent review then found nine defects, one a genuine hazard, and six mutations my tests could
+    not see.** The hazard: the lookup sent no `limit`, so it read a 20-row page of a possibly longer answer —
+    measured, `accountNumberPrefix=2400` returns 20 rows unasked and **70** with `limit=100`, and
+    `accountNumberPrefix=24` returns 2460 *before* the 2400/* rows, so ordering is not exact-match-first. An
+    account with more than 20 bank dimensions would have had its list truncated and then offered under "pick
+    from the ids above", which is how an agent books to the **wrong bank, irreversibly** — worse than the bare
+    400 this check replaces, since that named nothing at all. Now sends `limit=100` and, if a response comes
+    back at the cap, says so and offers nothing.
+  - The query string was interpolated into `path` rather than passed as `query`. `hasAmbiguousSegments` refuses
+    any path containing `%2F`, so an `accountNumber` containing "/" — the composed form this very endpoint
+    returns as `number` — made the client throw, and the bare `catch` disabled the check for the **whole
+    voucher**. It was the only call site in `src/tools/` embedding a query string in a path.
+  - The two dimension checks ran sequentially and the sub-account one returned first, so a voucher with a
+    sub-account line *and* a bank line was refused twice, one round trip each. "Bank pays an invoice" is the
+    commonest voucher shape there is, so that was the normal path. They are one pass now, reporting both.
+  - The budget was all-or-nothing and silent: nine distinct accounts meant zero protection and no mention of
+    it, while the argument description advertises the check. It now checks the first eight and **names what it
+    skipped**, in the refusal and in the success note — because a check that silently stopped working
+    otherwise looks exactly like a check that found nothing.
+  - `catch {}` wrapped the whole loop, so one failure ended the lookups for every remaining account. Per
+    account now.
+  - **Six mutations survived my tests**, and the two the PR argued hardest for were the two nothing pinned:
+    the `type === "bank"` discriminator (matching any non-null dimension would have offered sub-account and
+    *supplier* ids as company bank ids — both live on a real tenant) and the request shape itself. Worse, the
+    stub still parsed a query string out of `path` after the tool moved to `query`, so it silently returned
+    every row and the bank tests were passing for the wrong reason. Fixtures now carry a null-dimension row
+    and non-bank dimensions, one test puts the bank posting on line 2, one asserts the request shape, one
+    covers the budget boundary, and one drives a saturated page. Eight mutations verified failing.
+  - Also: a grammar defect shipped in the tool schema — the rendered text read *"This tool does PRE-CHECKS
+    this…"* — which my own test locked in by matching `/PRE-CHECKS/`. And `docs/api-quirks.md` still asserted
+    the premise this PR refutes.
+- **Two undeclared pre-reads, one of them the new pre-check's own.** `apiPaths` is what tells a consumer —
+  and this repository's own coverage audits — which endpoints a curated tool touches, so a pre-read missing
+  from it understates the tool and hides it from those checks. Codex found the new one;
+  `reai_create_voucher` now declares `GET /api/chart-of-accounts/accounts`.
+  - Sweeping for the same class found one more, pre-existing: `reai_activate_subscription` reads
+    `GET /api/subscriptions/{id}` before activating and declared only the POST. Also fixed.
+  - **The sweep is not shipped as a test**, because it has three known false-positive classes and I would be
+    adding a noisy guard. Comparing declared against called paths needs to be insensitive to parameter NAMES
+    (`{bankAccountId}` vs a `${bankAccountId}` template — same endpoint, 10 false hits) and to path segments
+    built at runtime (`/api/agreements/${type}/${id}` against five declared concrete forms;
+    `reai_set_customer_address` choosing `address` or `delivery-address`). Of 29 initial hits, 2 were real.
+    A correct version would resolve dynamic segments against the enum that produces them.
+- **Fixed a false claim shipped in #132: which of the two account fields a voucher actually takes.** The
+  `reai_list_accounts` description said the composed `number` ("1920/1337") is *"the subledger syntax
+  vouchers accept"*. It is not. The spec's own `AccountNumber` schema — the one `POST /api/vouchers` uses —
+  reads *"Base chart of accounts number. Use the `number` value returned by GET /api/chart-of-accounts or
+  the `accountNumber` value returned by GET /api/chart-of-accounts/accounts"*: this endpoint's
+  `accountNumber`, not this endpoint's `number`. An agent following the old text would have posted
+  `"1920/1337"` into a field wanting `"1920"`.
+  - The claim came from generalising a *different* field on a *different* endpoint, which does take
+    `"accountNumber/subledgerId"`. Found while checking whether the new pre-check had a gap for postings
+    using that syntax — it does not, because the field never accepted it.
+  - The correction deliberately does not name the other tool: it is in the `bank` toolset while this one is
+    in `bookkeeping`, so naming it would add a cross-toolset dependency for a historical aside. The
+    cross-group invariant added in #132 caught that, which is the first time one of these guards has
+    constrained me rather than a hypothetical future edit.
+
 - **`reai_list_accounts` is a search that read like a listing, and told agents to conclude the opposite.**
   - Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on a 399-account chart: **no
     parameters returns 20 rows**, `limit=5` returns 5, `limit=500` returns **100** (silently capped — the
