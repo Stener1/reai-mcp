@@ -458,3 +458,105 @@ test("the a-melding filing cannot be overtaken by the collection", () => {
     `the collection should not compete for a filing query: ${hits.join(", ")}`,
   );
 });
+
+/**
+ * READ intent, which the ranker had no notion of.
+ *
+ * The asymmetry was the defect. A write verb has demoted reads since the method heuristic was built —
+ * `writeIntent && GET` costs a factor of 0.7 — but nothing did the reverse, so a query that says outright
+ * that it wants to look at something scored exactly as if it had said nothing. Measured on `main`:
+ *
+ *     leieavtale       POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *     vis leieavtale   POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *
+ * Identical. "Show me the lease" answered with the operation that CREATES a rent agreement.
+ *
+ * Found by auditing 5325 read-phrased queries against the operations they reach, rather than by reading the
+ * code: 183 landed on a write where the family had a GET available. That is now 60, and every one of the
+ * remaining 60 is a concept with no read operation at all — refunds and rounding adjustments exist only as
+ * POSTs, the same category as /api/vat-returns.
+ */
+test("a query that states read intent does not rank a write first", () => {
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const query of [
+    "vis leieavtale",
+    "list contracts",
+    "vis kontrakter",
+    "hent leiekontrakt",
+    "finn arbeidskontrakt",
+    // The question words matter as much as the verbs, and they are the reason intent is matched against the
+    // UNFILTERED query: `hvilke`, `hva`, `hvem`, `hvor`, `get`, `which`, `what`, `who` and `how` are all
+    // STOPWORDS, so `tokenize` strips them. The first version of this feature checked `rawTerms` and
+    // therefore fixed "vis leieavtale" while leaving "get contract" and "hvilke contract" untouched.
+    "get contract",
+    "hvilke contract",
+    "hva er contracts",
+    "hvor mange kontrakter",
+    "which agreements",
+    "what agreements do we have",
+  ]) {
+    const hit = top(query);
+    assert.ok(hit, `"${query}" returned nothing`);
+    assert.equal(hit.method, "GET", `"${query}" states read intent but ranked ${hit.method} ${hit.path}`);
+  }
+});
+
+test("read intent does not disturb a query that asks to write", () => {
+  // The penalty is only consulted when there is NO write intent, and a query holding both verbs is a write:
+  // acting on a wrongly-inferred read shows the wrong list, while acting on a wrongly-inferred write changes
+  // the books.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const [query, expected] of [
+    ["opprett leieavtale", "POST /api/agreements/rent-agreement"],
+    ["opprett arbeidskontrakt", "POST /api/agreements/employee-contract"],
+    ["opprett faktura", "POST /api/invoices"],
+    ["opprett kunde", "POST /api/customers"],
+    ["slett kunde", "DELETE /api/customers/{id}"],
+    ["opprett bilag", "POST /api/vouchers"],
+  ]) {
+    assert.equal(`${top(query).method} ${top(query).path}`, expected, `"${query}"`);
+  }
+  // A family with no read must rank as before: every non-GET is scaled by the same factor, so the penalty
+  // cannot reorder writes among themselves. /api/vat-returns is entirely POSTs, which the neutral-query test
+  // above already records as the only truthful answer for this family.
+  assert.equal(top("mva-melding").path, "/api/vat-returns");
+
+  // AND the read penalty applies by TRANSMISSION, not only by method. Demoting the writes here first let
+  // GET /vat-return/altinn-sync win — a read-shaped operation that actually transmits to Altinn, which is
+  // exactly why policy.ts keeps TRANSMITTING_GETS and classifies it as external. "Vis" does not mean "file
+  // something with a tax authority". This assertion is the one that caught it, by being wrong about what the
+  // vat-return family contains.
+  for (const query of ["vis mva-melding", "hva er mva-meldingen"]) {
+    assert.equal(top(query).path, "/api/vat-returns", `"${query}" -> ${top(query).path}`);
+  }
+  // But naming it outright still finds it: the demotion is about unstated intent, not about hiding the
+  // operation from someone who asked for it.
+  assert.equal(top("altinn sync").path, "/vat-return/altinn-sync");
+});
+
+test("the Norwegian word for a contract reaches the agreements family", () => {
+  // A bare vocabulary hole rather than a ranking problem: `contract` and `contracts` were in the table and
+  // the Norwegian `kontrakt`/`kontrakter` were not, so "vis kontrakter" returned NOTHING AT ALL.
+  for (const query of ["kontrakt", "kontrakter", "vis kontrakter", "hvor mange kontrakter"]) {
+    const hits = searchOperations({ query, limit: 3 }).map((h) => h.path);
+    assert.ok(hits.length > 0, `"${query}" returned nothing`);
+    assert.ok(hits.some((p) => p.startsWith("/api/agreements")), `"${query}" -> ${hits.join(", ")}`);
+  }
+});
+
+test("widening a synonym to reach a family would displace the families it names", () => {
+  // `husleie` decomposes to hus + leie and shares no token with "agreement", so GET /api/agreements is not a
+  // candidate for "vis husleie" and read intent has nothing to promote — that query still ranks the create.
+  // Adding "agreement" to the synonym fixes those 18 reads and was measured and REVERTED: the third token
+  // made `husleie` win every compound it appeared in, and 26 pairs lost the resource the other word names.
+  // This is the defect this table has now retracted three synonyms for. Asserted so the temptation is
+  // recorded with its price, and so a future widening fails here.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(`${top("husleie mva").method} ${top("husleie mva").path}`, "GET /api/vat-codes");
+  assert.equal(`${top("husleie bilag").method} ${top("husleie bilag").path}`, "GET /api/vouchers");
+  assert.equal(top("husleie postering").path, "/api/postings");
+  // The sibling spellings do reach the family, through compound decomposition rather than a wider synonym.
+  for (const query of ["vis leieavtale", "vis leiekontrakt"]) {
+    assert.equal(top(query).path, "/api/agreements", `"${query}" -> ${top(query).path}`);
+  }
+});

@@ -9,6 +9,60 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The ranker knew what a write verb meant and had no notion of a read verb.** A write verb has demoted
+  reads since the method heuristic was built — `writeIntent && GET` costs a factor of 0.7 — but nothing did
+  the reverse, so a query that says outright it wants to look at something was scored exactly as if it had
+  said nothing:
+
+  ```
+  leieavtale       POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+  vis leieavtale   POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+  ```
+
+  Identical. "Show me the lease" answered with the operation that **creates a rent agreement**.
+  - Found by auditing **5325 read-phrased queries** against the operations they reach, rather than by reading
+    the code: **183** landed on a write where the family had a GET available. That is now **60**, and every
+    one of the remaining 60 is a concept with no read operation at all — refunds and rounding adjustments
+    exist only as POSTs, the same category as `/api/vat-returns`.
+  - Read intent is consulted **only when there is no write intent**. A query holding both verbs is a write,
+    because acting on a wrongly-inferred read shows the wrong list while acting on a wrongly-inferred write
+    changes the books. Under read intent a non-GET is scaled by 0.4, or 0.25 if `classifyRequest` calls it
+    irreversible — the same multiplicative shape as the existing penalties, deepened rather than replaced.
+    Write-vs-write ordering is untouched, which is what makes it safe: a family with no read at all ranks
+    exactly as before.
+  - **Matched against the unfiltered query, not `rawTerms`.** Eleven of the read words — `hvilke`, `hvilken`,
+    `hvor`, `hva`, `hvem`, `hvorfor`, `get`, `which`, `what`, `who`, `how` — are STOPWORDS, because carrying
+    no signal about *which* endpoint is wanted is exactly what that list is for. The first version checked
+    `rawTerms` and so fixed "vis leieavtale" while leaving "get contract" and "hvilke contract" untouched, and
+    the comment claiming the question words earned their place was false when it was written. `hasWriteIntent`
+    has no such exposure — no write verb is a stopword, checked rather than assumed.
+  - **The penalty had to apply by TRANSMISSION, not only by method.** Demoting the writes for "vis
+    mva-melding" let `GET /vat-return/altinn-sync` rise to first place — a read-shaped operation that actually
+    transmits to Altinn, which is why `policy.ts` keeps `TRANSMITTING_GETS` and classifies it as external.
+    "Vis" does not mean "file something with a tax authority". An externally-transmitting GET is now demoted
+    under read intent too, so that query returns `POST /api/vat-returns`, which the ranking tests already
+    record as the only truthful answer for a family that has no read endpoint. Naming the operation outright
+    still finds it. This surfaced only because an assertion of mine was wrong about what that family contains.
+  - **`kontrakt`/`kontrakter` were missing from the vocabulary** while the English `contract`/`contracts` were
+    present, so "vis kontrakter" returned **nothing at all**. Fixed; 38 queries that previously returned
+    nothing now return something.
+  - **`husleie` was deliberately NOT widened**, and the temptation is recorded with its price. It decomposes
+    to hus + leie and shares no token with "agreement", so `GET /api/agreements` is not a candidate for "vis
+    husleie" and read intent has nothing to promote. Adding "agreement" fixes those 18 reads — and was
+    measured and reverted, because the third token made `husleie` win every compound it appeared in: "husleie
+    mva" ranked the create above `/api/vat-codes`, "husleie bilag" above `/api/vouchers`, 26 pairs in total.
+    That is the defect this table has now retracted three synonyms for, after `kontonummer` and `fordring`.
+  - Measured over **22,002 queries**: 278 rank-1 changes, **no query lost its answer**, **148 writes demoted
+    from rank 1 and 10 promoted**. All ten promoted are `kontrakt`/`kontrakter` with an explicit write verb —
+    eight of them returned nothing before.
+  - **Found and not fixed, stated plainly.** "opprett kontrakt" reaches `POST /api/agreements/{id}/sign-request`,
+    which *sends* a signing request. That is pre-existing rather than new — "opprett avtale" does the same on
+    `main` — and the Norwegian word simply reaches it now. There is no generic create for an agreement, only
+    five typed ones, and a risk-aware write boost was tried and did not change the outcome because the
+    operation wins on text score. It is gated in practice: `classifyRequest` calls it irreversible, so a
+    deployment in the default `reversible` mode refuses it. Worth its own change, not a line at the end of
+    this one.
+
 - **A hyphenated term could never match as a token, so the phrase mappings written to be high-confidence
   were scoring as a fraction of themselves.** `FIELD_TOKENS` splits on the hyphen, so every hyphenated
   replacement fell through to a partial-credit branch — and unevenly, because whether it got 0.6 or 0.2
