@@ -247,3 +247,17 @@ test("a depreciation response that is not a record says so, rather than denying 
   );
   assert.match(text, /neither was read back \(the response came back as an array of 1\)/);
 });
+
+test("a depreciation account returned as an object is not stated as a read-back", async () => {
+  // reai_create_asset: `String(stored)` produced "on account [object Object], read back from the response"
+  // after an irreversible write — found by review in the very commit that was hardening these handlers against
+  // unexpected 200 shapes.
+  const { text } = await run(
+    "reai_create_asset",
+    { name: "ZZ asset", accountNumber: "1150" },
+    { id: 9, accountNumber: { value: "1150" } },
+  );
+  assert.doesNotMatch(text, /\[object Object\]/);
+  assert.match(text, /the response carries accountNumber as an object, which is not a value this can state/);
+  assert.match(text, /as SENT/);
+});

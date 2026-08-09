@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  asScalar,
   confirmAgainstResponse,
   defineTool,
   describeConfirmation,
@@ -193,7 +194,7 @@ const createWarehouse = defineTool({
     // description immediately below says names are NOT unique, so telling a caller the wrong one leaves them
     // unable to identify which of two warehouses they just made.
     const record = isRecord(res.data) ? res.data : undefined;
-    const storedName = record?.name;
+    const storedName = asScalar(record?.name);
     return ok(res.data, {
       note: [
         `Created warehouse ${record?.id ?? "?"} (` +
@@ -243,17 +244,18 @@ const renameWarehouse = defineTool({
     // is an array or a string is not a record at all, which is a different thing from a missing field: the
     // note used to deny a name the payload printed directly below it.
     const record = isRecord(res.data) ? res.data : undefined;
-    const stored = record?.name;
+    const stored = asScalar(record?.name);
     return ok(res.data, {
       note: [
-        stored === undefined || stored === null
+        stored === undefined
           ? `Warehouse ${args.warehouseId} was sent the name ${JSON.stringify(args.name)}, and ` +
             (record === undefined
               ? `the response is not a record (it came back as ${describeShape(res.data)}), so nothing ` +
                 `could be read from it`
-              : stored === null
-                ? `the response carries name: null`
-                : `the response does not carry the name`) +
+              : record.name === null || record.name === undefined
+                ? `the response carries name: ${JSON.stringify(record.name ?? null)}`
+                : `the response carries name as ${describeShape(record.name)}, which is not a value this ` +
+                  `can state`) +
             ` — that is what was SENT rather than what is stored.`
           : `Warehouse ${args.warehouseId} is now named ${JSON.stringify(stored)}, read back from the response.`,
         ...describeConfirmation(

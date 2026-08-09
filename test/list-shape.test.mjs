@@ -453,10 +453,21 @@ test("no tool throws on a 200 whose shape is not what its declared type promises
     if (!parsed?.success) { undrivable.push(tool.name); continue; }
     for (const [label, data] of bodies) {
       let reached = false;
+      let call = 0;
       try {
         await tool.handler(parsed.data, {
           client: {
-            request: async () => { reached = true; return { data, status: 200 }; },
+            // The hostile body goes to the FIRST request; later requests get the plausible record.
+            //
+            // Returning it to every endpoint hid branches, which review found concretely: `reai_get_user` reads
+            // its user record and then `/api/users/roles`, and feeding the malformed body to BOTH made the roles
+            // lookup return nothing, so the guard exited before ever touching the malformed field. The sweep
+            // reported the tool safe for exactly the shape it was meant to test.
+            request: async () => {
+              reached = true;
+              call += 1;
+              return { data: call === 1 ? data : base, status: 200 };
+            },
             deepLink: () => "link",
           },
           config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },

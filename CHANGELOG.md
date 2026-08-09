@@ -64,6 +64,20 @@ All notable changes to `reai-mcp`. Format loosely follows
     is the true one.
   - **The repo's own guard caught me inventing a tool name** in one of these notes: `reai_warehouse_inventory`
     does not exist, the real one is `reai_get_warehouse_inventory`.
+- **Codex: `String(stored)` on a malformed field produced `[object Object]` inside an asserting headline** —
+  in the very commit that was hardening these handlers against unexpected 200 shapes. Measured on
+  `reai_create_asset` with `{accountNumber: {value: "1150"}}`: *"Registered asset 9 on account [object Object],
+  read back from the response"*, after an irreversible write. `asScalar` in `registry.ts` now gates all four
+  read-back sites, and the three-way wording distinguishes a stored `null` from a shape that cannot be stated
+  from a field the response omits.
+  - Codex also noted the hostile-shape sweep sends the same malformed body to EVERY endpoint, so a multi-request
+    tool's malformed branch may never run. Fixed — the first request gets the hostile body, later ones a
+    plausible record. Its specific example did not reproduce: `reai_get_user` with an object-valued
+    `effectivePermissionCodes` does not throw, it says *"no permission list was returned"*, which is the correct
+    hedge. The change stands on merit; the claim about that tool does not.
+  - Its other two findings (optional fields never sampled, required numerics skipped as too short) were already
+    fixed in the two commits above — it reviewed an earlier head. Verified against the current build with its own
+    examples rather than assumed.
 - **Six tools threw on a 200 whose shape their declared type did not predict — four irreversible.** Driving all
   172 tools against bodies that keep the keys and break the shapes found `reai_create_expense`
   (`(expense.costs ?? []).filter` on a non-array), `reai_match_bank_transactions`, `reai_book_bank_transactions`,

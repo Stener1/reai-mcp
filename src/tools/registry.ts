@@ -788,6 +788,24 @@ export const isRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 
 /**
+ * A response field this repo is willing to state as a scalar, or nothing.
+ *
+ * `String(stored)` on a field the API returned as an object produces **`[object Object]`** inside a sentence
+ * that asserts a read-back — measured on `reai_create_asset` with `{accountNumber: {value: "1150"}}`:
+ * *"Registered asset 9 on account [object Object], read back from the response"*, after an irreversible write.
+ * Review found it in the very commit that was hardening handlers against unexpected 200 shapes.
+ *
+ * Booleans are included because some of these fields are flags; arrays and objects are not, because there is no
+ * honest one-line rendering of them and the caller is better told the shape was unexpected.
+ */
+export function asScalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+/**
  * The array a response field is DECLARED to be, or none.
  *
  * The declared types in this repo are its reading of the API, not a promise from it — so
@@ -807,7 +825,7 @@ export function describeShape(v: unknown): string {
   if (v === undefined) return "no body";
   if (v === null) return "null";
   if (Array.isArray(v)) return `an array of ${v.length}`;
-  return `a ${typeof v}`;
+  return `${/^[aeiou]/.test(typeof v) ? "an" : "a"} ${typeof v}`;
 }
 
 /** Shared by `confirmAgainstResponse` and by callers that need to explain a difference it found. */
