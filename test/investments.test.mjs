@@ -3,6 +3,7 @@
 // of them cost an unremovable record, which is why the create tool refuses an opening balance by default.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 import { registeredTools } from "../dist/server.js";
 import { classifyRequest } from "../dist/policy.js";
 import { ReaiApiError } from "../dist/reai/errors.js";
@@ -471,4 +472,72 @@ test("every instrument type has a measured asset account, or the refusal cannot 
   for (const type of ["LISTED_SHARE", "UNLISTED_SHARE", "FUND", "BOND", "OTHER"]) {
     assert.match(table, new RegExp(`${type}:\\s*"\\d{4}"`), `${type} needs a measured account`);
   }
+});
+
+test("reai_create_share_investment names the instrument type the record stored", async () => {
+  // One of nine enum fields the behavioural sweep cannot judge: their value is a WORD, so a note may print a
+  // label derived from it and an echo looks identical to a read-back. All nine were driven by hand with a
+  // response naming a DIFFERENT member; this tool already reported from the record, and this test says so
+  // rather than leaving the claim resting on a probe nobody kept.
+  const { ctx } = ctxFor([{ data: { ...POSITION, id: 77, instrumentType: "UNLISTED_SHARE" }, status: 200 }]);
+  const res = await tool("reai_create_share_investment").handler(
+    { name: "Zz Holding AS", instrumentType: "LISTED_SHARE", tenantId: 2783 },
+    ctx,
+  );
+  const text = textOf(res).split("\n\n")[0];
+  assert.match(text, /UNLISTED_SHARE/, `the stored member, not the sent one: ${text}`);
+  // A boundary BEFORE the token: "LISTED_SHARE" is a substring of "UNLISTED_SHARE", so the obvious negative
+  // assertion matches the correct note and fails it. Fifth regex-scoping slip in this line of work.
+  assert.doesNotMatch(text, /(^|[^A-Z_])LISTED_SHARE/, `the sent member must not appear: ${text}`);
+});
+
+/**
+ * The arguments this tool actually declares.
+ *
+ * Validated through its own schema, because the first version of the test below did not: it passed
+ * `investmentId`, which is not a key this tool accepts, and omitted the required `amount` and `companyBankId`.
+ * The handler therefore requested `/api/share-investments/undefined/events` and reported "recorded on share
+ * investment undefined" — and the test passed anyway, because it only grepped for /SALE/.
+ */
+const EVENT_ARGS = {
+  id: 19,
+  eventType: "PURCHASE",
+  eventDate: "2026-08-09",
+  amount: 5000,
+  companyBankId: 3,
+  quantity: 10,
+  pricePerUnit: 100,
+  tenantId: 2783,
+};
+
+test("reai_add_share_investment_event names the event type the record stored", async () => {
+  // reai_add_share_investment_event: one of the nine enum fields the sweep cannot judge. A PURCHASE reported as
+  // a SALE is a sign error on a position, and this tool posts to the ledger.
+  const { ctx, sent } = ctxFor([
+    { data: { id: 88, eventType: "SALE", eventDate: "2026-08-10", quantity: 10 }, status: 200 },
+  ]);
+  const res = await tool("reai_add_share_investment_event").handler(
+    z.object(tool("reai_add_share_investment_event").inputSchema).parse(EVENT_ARGS),
+    ctx,
+  );
+  assert.match(sent[0].path, /share-investments\/19\/events/, `the id must reach the path: ${sent[0].path}`);
+  const text = textOf(res).split("\n\n")[0];
+  assert.match(text, /SALE on 2026-08-10, read back from the response/, text);
+  assert.doesNotMatch(text, /PURCHASE/);
+});
+
+test("an event the response does not describe is not reported as the event that was sent", async () => {
+  // reai_add_share_investment_event: `?? args.eventType` fell back to the REQUEST and stated it as fact. A
+  // response carrying only {id, voucherId} produced "recorded on share investment 19: PURCHASE on 2026-08-09"
+  // with no hedge — irreversible, and once it posts the voucher can only be reversed, never deleted.
+  const { ctx } = ctxFor([{ data: { id: 88, voucherId: 5 }, status: 200 }]);
+  const res = await tool("reai_add_share_investment_event").handler(
+    z.object(tool("reai_add_share_investment_event").inputSchema).parse(EVENT_ARGS),
+    ctx,
+  );
+  const text = textOf(res).split("\n\n")[0];
+  assert.match(text, /sent as PURCHASE on 2026-08-09/);
+  assert.match(text, /carries neither the type nor the date/);
+  assert.match(text, /not confirmed here/);
+  assert.doesNotMatch(text, /read back from the response/);
 });

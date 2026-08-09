@@ -9,6 +9,87 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found the two-attempt drive silently discarding half its own work, and the fix for it was inert.**
+  - When a tool has any required overlapping field, the required-only attempt fills `runs` even if the
+    optional-inclusive attempt fails — so every optional field goes unmeasured while the tool reads as covered.
+    That was happening to `reai_create_customer_contact`. Such tools are now recorded by name.
+  - The cause was **my own sampler** generating an invalid email. My first fix looked for a `.email()` check,
+    which this repo does not use — its email fields carry a custom `refine` with their own message — so the fix
+    was **inert: it looked right and changed nothing**. The mutation battery is what revealed that, by showing the
+    change survived its own removal. Detected by field name now, and the tool is fully driven.
+  - **My stated reason for that tool was also false.** I wrote that it "refuses email AND phone together"; driven
+    by hand with a valid email it accepts both and sends. One tool remains partially driven —
+    `reai_create_expense`, which genuinely refuses `perDiems` outside a TRAVEL claim.
+  - `reached` was set by ANY request, so a tool that reads before writing could refuse after the GET and still
+    count as a measured write. Scoped to the tool's own write methods — and recorded as **latent**: no tool in the
+    population reads-then-refuses today, so reverting it fails nothing. It is closed because the class is real,
+    not because anything demonstrates it.
+  - Its third finding (the `reads` floor counting duplicates) was already fixed one commit earlier.
+
+- **Review falsified two claims in the entry below, and found five more defects — three in code written for it.**
+  - **"The other eight already report from the record" was wrong.** Of the nine rendered enum fields: two were
+    echoing, three report from the record, and **four are never named by their tool's note at all** — which is a
+    weaker guarantee than a test, not a form of coverage. An echo can be reintroduced into any of those four and
+    nothing fails. They are recorded as `null` for that reason, and the docs now say so.
+  - **`reai_add_share_investment_event` fell back to `args.eventType` and `args.eventDate` unhedged.** A response
+    carrying only `{id, voucherId}` produced *"Event 88 recorded on share investment 19: PURCHASE on
+    2026-08-09"* with no caveat — irreversible, and once it posts, its voucher can only be reversed, never
+    deleted. **My certifying test drove only the branch where the response answers**, so it passed while the
+    silent branch stayed wrong; and it passed `investmentId`, which is not a key this tool accepts, so the
+    handler requested `/api/share-investments/undefined/events` and the test asserted on a note about
+    "share investment undefined". It validates through the schema now.
+  - **`reai_create_supplier_invoice` — the field this PR was written to fix — had two false-alarm bugs.**
+    `documentType` is optional and defaults to `invoice` (the request body eleven lines above already writes
+    `args.documentType ?? "invoice"`), so comparing against `args.documentType` reported *"NOT the invoice this
+    call sent, which is the opposite sign in the ledger"* on every call that omitted the field and got exactly
+    what it asked for. And the label mapped anything that was not literally `credit_note` to "invoice", so a
+    stored `"CREDIT_NOTE"` was named an invoice — in a file whose premise is that this API rewrites what it
+    stores.
+  - **`reai_get_loan` told the caller to read the loan back with `reai_get_loan`.** `describeLoan` is shared by
+    the create and the read tool, and I put the pointer in the shared fallback. Only the create site had a test.
+  - **`reai_create_loan`'s inference paragraph asserted the request's `loanType` as fact** — *"relatedParty was
+    set to true because loanType is owner_loan_to_company"* against a record returning `bank_loan` with
+    `relatedParty: false`, while the sibling arm's-length warning stayed silent because it tests the STORED type.
+  - **The `reads` floor was inflated ~1.8× by the two-attempt drive** — 52 raw against 29 distinct, so a floor of
+    10 was met by 5 real fields. Deduped. Recorded honestly: a floor **cannot** pin its own de-duplication,
+    because reverting to the raw count only makes the check more permissive.
+  - **"Covered" was being read into tools that measured nothing.** `sent.size > 0` counts fields a sentinel was
+    planted for, not fields the note spoke about, so `reai_create_customer_contact` came off the unreachable list
+    while contributing no evidence. Thirteen such tools are now listed by name.
+  - **The proof references were defeatable three ways**, two of them inherited from the sibling census: a
+    `{ skip: true }` test satisfies a textual `test("<title>")` check and runs nothing; the tool name and the
+    stored-versus-sent marker were both satisfiable from inside an assertion message; and `record` in the marker
+    regex matches "recorded", which nearly every create-tool test contains. All three closed. The claim that
+    these were "checked the same way the census entries are" was false and is corrected.
+  - **A repo guard caught me matching my own prose**: the create-loan site branched on
+    `describeLoan(...).startsWith("the response carried no")`, and `test/message-drift.test.mjs` flagged it as
+    depending on wording nothing checks. Replaced with a structural `hasLoanTerms`.
+
+- **The two gaps the previous PR named are closed, and the closing found two more.**
+  - **All nine rendered enum fields driven by hand.** The sweep cannot judge them — their value is a word, so a
+    note printing a label derived from one looks identical to a read-back. Eight had never been examined. Result:
+    they already report from the record, which is worth knowing rather than assuming in either direction. Each now
+    carries a named test or an explicit `null` meaning nothing covers it, and those references are **checked**
+    with the same anchoring as the census entries, so the map cannot decay into prose.
+    - `test/purchase.test.mjs` is new — there was no purchase-side test file at all, and `documentType` needed
+      one.
+  - **`reai_create_loan` reported a loan with no terms as though that were a description.** `describeLoan`
+    returned `""` when the response carried none of the fields it names, so the note read *"Loan 77 recorded:
+    ."* — a sentence that looks like a successful record of nothing, on an irreversible create. Found while
+    checking the enum fields, not by the sweep, which reads only whether a sent value appears.
+  - **Each tool is now driven twice** — required fields only, and with the optional fields the response can
+    answer for — and counts as unreachable only if both attempts fail. That recovers
+    `reai_create_customer_contact`, which the previous PR lost to unwrapping optionals and listed as a casualty.
+  - **The sweep now checks the request actually went out.** `reai_apply_reconciliation_rules` had been counted as
+    covered while never reaching the stub: it refuses without a month or a date range, which is correct behaviour
+    and means nothing was measured. Same hole that made `reai_update_expense` look covered while returning "No
+    fields were given". Two tools refuse this way, each requiring one of two arguments — a shape no schema
+    expresses — and both are listed with the refusal text.
+  - Seven mutations, seven named failures, including three ways to defeat the new proof references: naming a test
+    that does not exist, moving a proof to an unrelated file, and dropping a field from the list.
+  - **A fifth regex-scoping slip**, for the record: `/LISTED_SHARE/` matched inside `UNLISTED_SHARE`, so the
+    obvious negative assertion failed a correct note. It needs a boundary before the token, not after.
+
 - **The 40-tool "nobody has checked" list was replaced by a measurement, which found five tools echoing their
   requests and six that crashed on an unexpected 200.** The previous PR left a ratchet: 40 names, meaning nobody
   had examined whether each tool's note quotes the request or the record. A ratchet on a hand-kept list is only

@@ -381,7 +381,13 @@ test("create infers relatedParty for a loan that is one by construction", async 
     ctx,
   );
   assert.equal(sent[0].body.relatedParty, true, "the API stores false unless told — measured");
-  assert.match(textOf(res), /relatedParty was set to true/);
+  // "sent as true", and then what the RECORD says. The old wording asserted the flag was set, which review
+  // showed could be false: sent `owner_loan_to_company` against a record returning `bank_loan` with
+  // `relatedParty: false` produced "relatedParty was set to true because loanType is owner_loan_to_company"
+  // while the record contradicted both halves, and the sibling warning did not fire because it tests the
+  // STORED type.
+  assert.match(textOf(res), /relatedParty was sent as true/);
+  assert.match(textOf(res), /The record confirms relatedParty: true\./);
 
   // An explicit false is respected: the inference must not overrule the caller.
   const explicit = ctxFor([{ status: 201, data: { ...LOAN, id: 16, loanType: "intercompany", relatedParty: false } }]);
@@ -1029,4 +1035,103 @@ test("a relatedParty the API did not store is flagged, not asserted", async () =
   assert.match(text, /relatedParty was sent as true/);
   assert.match(text, /WARNING: the response came back with relatedParty false/);
   assert.match(text, /did NOT take/);
+});
+
+test("reai_create_loan names the loan terms the record stored, not the ones it sent", async () => {
+  // Five of the nine enum fields the behavioural sweep cannot judge live on this tool — loanType, perspective,
+  // repaymentType, dayCountConvention, interestTreatment. Their values are WORDS, so a note printing a label
+  // derived from one looks identical to a read-back and the sweep reports "neither". Driven by hand with a
+  // response naming different members: this tool already reported from the record, and this pins it.
+  //
+  // `loanType` and `perspective` are the two that reach the note, and both are consequential: perspective
+  // decides whether the company is owed the money or owes it.
+  const stored = {
+    ...LOAN,
+    id: 77,
+    loanType: "owner_loan_to_company",
+    perspective: "lender",
+    repaymentType: "bullet",
+  };
+  const { ctx } = ctxFor([{ status: 200, data: stored }]);
+  const res = await tool("reai_create_loan").handler(
+    {
+      reference: "L-1",
+      loanType: "bank_loan",
+      perspective: "borrower",
+      counterpartyId: 1,
+      currency: "NOK",
+      principalAmount: 100000,
+      interestRateAnnual: 5.5,
+      disbursementDate: "2026-08-08",
+      repaymentType: "annuity",
+    },
+    ctx,
+  );
+  const headline = textOf(res).split("\n\n")[0];
+  assert.match(headline, /owner_loan_to_company/, `the stored type: ${headline}`);
+  assert.match(headline, /lender/, `the stored perspective: ${headline}`);
+  assert.doesNotMatch(headline, /bank_loan/, "the sent type must not be stated");
+  assert.doesNotMatch(headline, /borrower/, "the sent perspective must not be stated");
+});
+
+test("a loan the response does not describe is not reported as a loan with no terms", async () => {
+  // reai_create_loan: `describeLoan` returned "" when the response carried none of the fields it names, so the
+  // note read "Loan 77 recorded: ." — a sentence that looks like a successful record of nothing, on a tool that
+  // has just created one irreversibly. Found while checking the enum fields above.
+  const { ctx } = ctxFor([{ status: 200, data: { id: 77 } }]);
+  const res = await tool("reai_create_loan").handler(
+    {
+      reference: "L-1",
+      loanType: "bank_loan",
+      perspective: "borrower",
+      counterpartyId: 1,
+      currency: "NOK",
+      principalAmount: 100000,
+      interestRateAnnual: 5.5,
+      disbursementDate: "2026-08-08",
+      repaymentType: "annuity",
+    },
+    ctx,
+  );
+  const headline = textOf(res).split("\n\n")[0];
+  assert.doesNotMatch(headline, /recorded: \./, `an empty description is not a description: ${headline}`);
+  assert.match(headline, /the response carried no readable terms/);
+  assert.match(headline, /reai_get_loan/, "and it says how to find out");
+});
+
+test("a relatedParty flag the record did not keep is reported as not having stuck", async () => {
+  // reai_create_loan: the inference paragraph stated the request's loanType as fact and claimed the flag was
+  // set. Review drove a record that came back with a DIFFERENT type and relatedParty false — the note asserted
+  // the flag anyway, and the existing arm's-length warning stayed silent because it tests the stored type.
+  const { ctx } = ctxFor([
+    { status: 201, data: { ...LOAN, id: 78, loanType: "bank_loan", perspective: "borrower", relatedParty: false } },
+  ]);
+  const res = await tool("reai_create_loan").handler(
+    {
+      reference: "OWNER-2",
+      loanType: "owner_loan_to_company",
+      perspective: "borrower",
+      counterpartyId: 16,
+      currency: "NOK",
+      principalAmount: 25000,
+      interestRateAnnual: 3,
+      disbursementDate: "2026-08-08",
+      repaymentType: "bullet",
+    },
+    ctx,
+  );
+  const text = textOf(res);
+  assert.match(text, /relatedParty: FALSE and loanType "bank_loan", so the flag did NOT stick/);
+  assert.doesNotMatch(text, /The record confirms relatedParty: true/);
+});
+
+test("reai_get_loan does not advise reading the loan back with reai_get_loan", async () => {
+  // `describeLoan` is shared by the create and the read tool. Its empty-record fallback named `reai_get_loan`,
+  // so the READ tool told the caller to call itself — review caught the circle, and only the create site had a
+  // test. The pointer now lives at the create site, where it means something.
+  const { ctx } = ctxFor([{ status: 200, data: {} }]);
+  const res = await tool("reai_get_loan").handler({ id: 77 }, ctx);
+  const text = textOf(res);
+  assert.match(text, /the response carried no readable terms/);
+  assert.doesNotMatch(text, /reai_get_loan/, `a read tool must not point at itself: ${text}`);
 });

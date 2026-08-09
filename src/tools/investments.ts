@@ -695,9 +695,28 @@ const addEvent = defineTool({
       throw err;
     }
     const event = res.data ?? {};
+    // `?? args.eventType` silently fell back to the REQUEST and stated it as fact. Review found it: a response
+    // carrying only `{id, voucherId}` produced "Event 88 recorded on share investment 19: PURCHASE on
+    // 2026-08-09" with no hedge — on a tool that is irreversible and, when it posts, cannot have its voucher
+    // deleted, only reversed. A PURCHASE reported as a SALE is a sign error on a position.
+    //
+    // The sibling tools in this repo hedge the same case ("as SENT … unconfirmed"); this one did not, and my
+    // own certifying test drove only the branch where the response answers — so it passed while the silent
+    // branch stayed wrong.
+    const storedType = typeof event.eventType === "string" ? event.eventType : undefined;
+    const storedDate = typeof event.eventDate === "string" ? event.eventDate : undefined;
     const notes = [
-      `Event ${event.id ?? "?"} recorded on share investment ${id}: ${event.eventType ?? args.eventType} ` +
-        `on ${event.eventDate ?? args.eventDate}.`,
+      storedType !== undefined && storedDate !== undefined
+        ? `Event ${event.id ?? "?"} recorded on share investment ${id}: ${storedType} on ${storedDate}, read ` +
+          `back from the response.`
+        : `Event ${event.id ?? "?"} recorded on share investment ${id}: sent as ${args.eventType} on ` +
+          `${args.eventDate}, and the response ` +
+          (storedType === undefined && storedDate === undefined
+            ? `carries neither the type nor the date`
+            : storedType === undefined
+              ? `carries the date ${storedDate} but not the type`
+              : `carries the type ${storedType} but not the date`) +
+          ` — so what is stored is not confirmed here. Read it back with reai_get_share_investment.`,
     ];
     if (event.voucherId !== null && event.voucherId !== undefined) {
       notes.push(

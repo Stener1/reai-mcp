@@ -524,8 +524,19 @@ type LoanRecord = {
   accruedInterestBalance?: number | null;
 };
 
-const describeLoan = (loan: LoanRecord): string => {
-  const bits = [
+/**
+ * The loan as the RECORD describes it, or a statement that it did not describe it.
+ *
+ * Returned `""` when the response carried none of these fields, which produced the note
+ * **"Loan 77 recorded: ."** — a sentence that reads like a successful record of nothing, on a tool that has just
+ * created a loan. Found by driving the tool with a response that answered only `{id}`, while checking whether
+ * its enum fields were echoed (they are not — this tool already reported them from the record).
+ *
+ * An empty description is a fact about the RESPONSE, so it says that instead of nothing.
+ */
+/** The terms the record actually carries, so callers can branch without matching this file's own prose. */
+const loanTerms = (loan: LoanRecord): string[] =>
+  [
     loan.reference,
     loan.loanType,
     loan.perspective,
@@ -533,8 +544,20 @@ const describeLoan = (loan: LoanRecord): string => {
     loan.interestRateAnnual !== undefined ? `${loan.interestRateAnnual}% p.a.` : undefined,
     loan.counterpartyName ? `counterparty ${loan.counterpartyName}` : undefined,
     loan.status,
-  ].filter(Boolean);
-  return bits.join(" · ");
+  ].filter((bit): bit is string => Boolean(bit));
+
+const describeLoan = (loan: LoanRecord): string => {
+  const bits = loanTerms(loan);
+  return bits.length > 0
+    ? bits.join(" · ")
+    : // No tool name in the fallback: `reai_get_loan` uses this too, and naming it here made that tool advise
+      // reading the loan back with itself. Review caught the circle; the create site adds its own pointer.
+      "the response carried no readable terms, so nothing here describes it";
+};
+
+/** Whether there is anything to describe, so no caller has to match the sentence above. */
+const hasLoanTerms = (loan: LoanRecord): boolean => {
+  return loanTerms(loan).length > 0;
 };
 
 /**
@@ -802,7 +825,8 @@ const createLoan = defineTool({
     const loan = res.data ?? {};
 
     const notes = [
-      `Loan ${loan.id ?? "?"} recorded: ${describeLoan(loan)}.`,
+      `Loan ${loan.id ?? "?"} recorded: ${describeLoan(loan)}.` +
+        (hasLoanTerms(loan) ? `` : ` Read it back with reai_get_loan.`),
       `Ledger accounts derived by the API: principal ${loan.principalAccountNumber ?? "none"}, ` +
         `interest ${loan.interestExpenseAccountNumber ?? loan.interestIncomeAccountNumber ?? "none"}, ` +
         `accrued ${loan.accruedInterestAccountNumber ?? "none"}. These are set once and never ` +
@@ -812,10 +836,23 @@ const createLoan = defineTool({
         ` (${loan.creditorId !== null && loan.creditorId !== undefined ? `creditorId ${loan.creditorId}` : `debtorId ${loan.debtorId}`}).`,
     ];
     if (inferredRelatedParty !== undefined) {
+      // What the RECORD says relatedParty and loanType are, not what this call inferred and sent. Review found
+      // the paragraph asserting "relatedParty was set to true because loanType is owner_loan_to_company" while
+      // the record came back `bank_loan` with `relatedParty: false` — and the warning below did not fire,
+      // because it tests the STORED type. So the note claimed a flag the record contradicted, unwarned.
+      const storedRelated = loan.relatedParty;
       notes.push(
-        `relatedParty was set to true because loanType is ${body.loanType}, which is a related ` +
-          `party by construction. The API does not infer this — measured, it stores false. Pass ` +
-          `relatedParty: false explicitly if this really is at arm's length.`,
+        `relatedParty was sent as true because the loanType this call passed ` +
+          `(${JSON.stringify(body.loanType)}) is a related party by construction. The API does not infer ` +
+          `this — measured, it stores false. ` +
+          (storedRelated === true
+            ? `The record confirms relatedParty: true.`
+            : storedRelated === false
+              ? `The record came back with relatedParty: FALSE and loanType ` +
+                `${JSON.stringify(loan.loanType ?? null)}, so the flag did NOT stick — set it with ` +
+                `reai_update_loan.`
+              : `The response does not carry relatedParty back, so whether it stuck is unconfirmed.`) +
+          ` Pass relatedParty: false explicitly if this really is at arm's length.`,
       );
     }
     if (loan.relatedParty === false && INHERENTLY_RELATED.includes(String(loan.loanType))) {

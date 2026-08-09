@@ -450,18 +450,21 @@ const NOT_ESTABLISHED = [
   // MEASURED, not guessed. The first version of this list had seven names in it, carried over from a weaker
   // sampler; the four extras are driven fine and one of them, `reai_set_bank_statement_balance`, turned out to
   // be echoing its month — which the sweep then caught the moment the list stopped hiding it.
+  // A shape the sampler cannot construct: a record of arbitrary keys, a discriminated line union, a posting set
+  // that has to balance.
   "reai_create_agreement",
   "reai_create_subscription",
   "reai_create_voucher",
-  // These two are reachable with REQUIRED fields only, and became unreachable when the sampler started also
-  // supplying the optional fields the response can answer for. That change is worth its cost — it is what made
-  // seven update tools measurable at all instead of being driven and judged on nothing — but it is a trade, not
-  // a free win, and these are the two tools it cost. Both refuse a combination the sampler now produces
-  // (mutually exclusive arguments), which is the tool behaving correctly.
+  // These two REFUSE before sending anything, and correctly: each requires one of two arguments and no schema
+  // can express that, so a sampler filling in the required fields produces a body the tool declines.
   //
-  // The fix is to drive each tool twice, required-only and optionals-unwrapped, and take the union. Not done
-  // here: it restructures the loop, and naming the gap is better than a half-done version of the fix.
-  "reai_create_customer_contact",
+  //   reai_apply_reconciliation_rules  "Give either a month (yyyy-MM) or a complete startDate/endDate range."
+  //   reai_register_supplier_invoice_payment  "companyBankId is required unless paidPrivately=true."
+  //
+  // `reai_apply_reconciliation_rules` is here because the sweep now checks that the request actually WENT OUT.
+  // It had been counted as covered while never reaching the stub at all — which is the same "measured nothing"
+  // hole that made `reai_update_expense` look covered while it returned "No fields were given".
+  "reai_apply_reconciliation_rules",
   "reai_register_supplier_invoice_payment",
 ];
 test("a write tool whose response could answer for it is classified, GET or no GET", async () => {
@@ -638,6 +641,51 @@ test("a write tool whose response could answer for it is classified, GET or no G
   }
 });
 
+/**
+ * Fields this sweep cannot judge, because their value is a WORD.
+ *
+ * A note may print a label derived from an enum rather than the value itself — `reai_create_supplier_invoice`
+ * renders anything that is not `credit_note` as "invoice" — so an echo and a read-back produce the same
+ * headline. The sweep reports these rather than guessing, and each is then either covered by a hand-written
+ * test or it is not covered at all.
+ *
+ * All nine have now been driven by hand with a response naming a DIFFERENT member. One was echoing
+ * (`documentType`, fixed in #145 — the two kinds are opposite signs in the ledger) and the other eight already
+ * reported from the record. The `certifiedBy` entries are what keeps that from being a claim resting on a probe
+ * nobody kept; a `null` says plainly that nothing covers it.
+ */
+const RENDERED_FIELDS_WITH_PROOF = {
+  "reai_add_share_investment_event.eventType": [
+    "test/investments.test.mjs",
+    "reai_add_share_investment_event names the event type the record stored",
+  ],
+  "reai_create_share_investment.instrumentType": [
+    "test/investments.test.mjs",
+    "reai_create_share_investment names the instrument type the record stored",
+  ],
+  "reai_create_loan.loanType": [
+    "test/loans.test.mjs",
+    "reai_create_loan names the loan terms the record stored, not the ones it sent",
+  ],
+  "reai_create_loan.perspective": [
+    "test/loans.test.mjs",
+    "reai_create_loan names the loan terms the record stored, not the ones it sent",
+  ],
+  // These three do not reach the note at all — `describeLoan` names the loan by reference, type, perspective,
+  // amount, rate, counterparty and status, and not by these. Nothing to state means nothing to get wrong, which
+  // is a weaker guarantee than a test and is recorded as such.
+  "reai_create_loan.dayCountConvention": null,
+  "reai_create_loan.interestTreatment": null,
+  "reai_create_loan.repaymentType": null,
+  // Set by reai_set_asset_depreciation, which IS certified; the create tool's note does not name it.
+  "reai_create_asset.depreciationMethod": null,
+  "reai_create_supplier_invoice.documentType": [
+    "test/purchase.test.mjs",
+    "a supplier document stored as the other kind is named from the record",
+  ],
+};
+const RENDERED_FIELDS = Object.keys(RENDERED_FIELDS_WITH_PROOF).sort();
+
 /** A stable per-field number, so every field's sample is distinct and the same on every run. */
 function hashOf(key) {
   let h = 0;
@@ -727,12 +775,21 @@ test("the sweep's own verdict function distinguishes an echo from a hedge from a
  */
 test("no candidate tool states a sent value the response contradicted", async () => {
   const { z } = await import("zod");
-  const { readFileSync } = await import("node:fs");
+  const { readFileSync, existsSync, readdirSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const { join, dirname } = await import("node:path");
   const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
   const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
   const schemas = spec.components.schemas;
+  // Rebuilt here rather than shared with the test above: these two tests are independent, and depending on state
+  // one leaves for the other is how the CANDIDATES coupling already needed a guard against measuring nothing.
+  const toolModules = new Map();
+  for (const entry of readdirSync(join(repo, "src", "tools"))) {
+    if (!entry.endsWith(".ts")) continue;
+    const src = readFileSync(join(repo, "src", "tools", entry), "utf8");
+    for (const m of src.matchAll(/name:\s*"(reai_[a-z0-9_]+)"/g)) toolModules.set(m[1], entry.replace(/\.ts$/, ""));
+  }
+  const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
   assert.ok(
     CANDIDATES.length > 0,
@@ -804,10 +861,24 @@ test("no candidate tool states a sent value the response contradicted", async ()
       }
         if (/date/i.test(key)) return { value: "2026-08-09" };
       const max = checks.find((c) => c.kind === "max")?.value ?? 40;
+      const token = `ZZQ${hashOf(key).toString(36).toUpperCase()}`;
+      // Format honoured, or the value fails validation and the whole ATTEMPT is discarded — which review found
+      // happening silently: unwrapping `email` on reai_create_customer_contact produced a value its refinement
+      // rejected, so the optional-inclusive run failed, the required-only run carried the tool, and every
+      // optional field went unmeasured while the tool read as covered.
+      //
+      // By NAME as well as by check. This repo's email fields use a custom `refine` with its own message, not
+      // `.email()`, so `checks.some(kind === "email")` never fired and the first version of this fix was inert —
+      // it looked right and changed nothing, which the mutation battery is what revealed.
+      if (/e-?mail/i.test(key) || checks.some((c) => c.kind === "email")) {
+        return { value: `${token.toLowerCase()}@zz.invalid` };
+      }
+      if (checks.some((c) => c.kind === "url")) return { value: `https://zz.invalid/${token.toLowerCase()}` };
+      if (checks.some((c) => c.kind === "uuid")) return { value: "00000000-0000-4000-8000-000000000000" };
       // Distinct per field, and deliberately not a word that occurs in prose. `"ZZ probe"` for everything meant
       // one echoed string flagged every string field; an ENUM sampled as `"invoice"` matched the word in
       // "Supplier invoice registered" and was reported as an echo of a field the note never mentioned.
-      return { value: `ZZQ${hashOf(key).toString(36).toUpperCase()}`.slice(0, Math.max(3, Math.min(max, 40))) };
+      return { value: token.slice(0, Math.max(3, Math.min(max, 40))) };
     }
     if (kind === "ZodArray") {
       const inner = pick(def.type, key, depth + 1);
@@ -838,6 +909,8 @@ test("no candidate tool states a sent value the response contradicted", async ()
   const reads = [];
   const unmeasurable = [];
   const tooShort = [];
+  const silent = [];
+  const partiallyDriven = [];
   const undrivable = [];
   for (const name of CANDIDATES) {
     // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
@@ -852,68 +925,107 @@ test("no candidate tool states a sent value the response contradicted", async ()
     // that.
     if (Object.hasOwn(READS_BACK_FROM_RESPONSE, name)) continue;
     const tool = registeredTools.find((t) => t.name === name);
-    const args = { tenantId: 2783 };
-    const rendered = new Set();
-    let blocked = false;
-    // Optional fields the RESPONSE can answer for are supplied too. Skipping every optional field meant seven
-    // update tools — reai_update_customer, _customer_contact, _employee, _expense, _supplier,
-    // reai_create_invoice_from_order, reai_register_supplier_invoice_payment — were "driven" while being
-    // measured on zero fields, because everything they accept is optional. A sweep that runs a tool and judges
-    // nothing is the silent-skip failure in its purest form.
     const answerable = new Set(overlapOf(tool));
-    for (const [key, schema] of Object.entries(tool.inputSchema ?? {})) {
-      if (key === "tenantId") continue;
-      const r = pick(schema, key, 0, answerable.has(key));
-      if (r.optional) continue;
-      if (r.skip) { blocked = true; break; }
-      args[key] = r.value;
-      if (r.rendered) rendered.add(key);
-    }
-    const parsed = blocked ? undefined : z.object(tool.inputSchema ?? {}).safeParse(args);
-    if (!parsed?.success) { undrivable.push(name); continue; }
 
-    const record = { id: 4242 };
-    const sent = new Map();
-    for (const field of overlapOf(tool)) {
-      const value = parsed.data[field];
-      if (value === undefined || value === null) continue;
-      sent.set(field, value);
-      // A DISTINCT sentinel per field. One shared literal meant that a tool naming any single stored value in
-      // its headline satisfied `!headline.includes(storedValue)` for every other field at once — so a tool
-      // reading back one field was immune to echo detection on all the rest.
-      const nth = sent.size;
-      record[field] =
-        typeof value === "number"
-          ? 900000 + nth
-          : typeof value === "boolean"
-            ? !value
-            : `STORED_${field.toUpperCase()}_${nth}`;
+    /**
+     * One attempt at driving the tool. `unwrap` decides whether optional fields the response can answer for are
+     * supplied.
+     *
+     * TWO attempts, because each mode loses tools the other reaches. Supplying optional fields is what made
+     * seven update tools measurable at all — everything they accept is optional, so required-only drove them
+     * while judging nothing. But it also made `reai_create_customer_contact` and
+     * `reai_register_supplier_invoice_payment` refuse a mutually-exclusive combination, which cost their
+     * coverage entirely. The previous version picked one mode and listed the casualties; running both and
+     * taking the union costs nothing and loses neither.
+     */
+    const attempt = async (unwrap) => {
+      const args = { tenantId: 2783 };
+      const rendered = new Set();
+      for (const [key, schema] of Object.entries(tool.inputSchema ?? {})) {
+        if (key === "tenantId") continue;
+        const r = pick(schema, key, 0, unwrap && answerable.has(key));
+        if (r.optional) continue;
+        if (r.skip) return undefined;
+        args[key] = r.value;
+        if (r.rendered) rendered.add(key);
+      }
+      const parsed = z.object(tool.inputSchema ?? {}).safeParse(args);
+      if (!parsed.success) return undefined;
+
+      const record = { id: 4242 };
+      const sent = new Map();
+      for (const field of answerable) {
+        const value = parsed.data[field];
+        if (value === undefined || value === null) continue;
+        sent.set(field, value);
+        // A DISTINCT sentinel per field. One shared literal meant that a tool naming any single stored value in
+        // its headline satisfied `!headline.includes(storedValue)` for every other field at once — so a tool
+        // reading back one field was immune to echo detection on all the rest.
+        const nth = sent.size;
+        record[field] =
+          typeof value === "number"
+            ? 900000 + nth
+            : typeof value === "boolean"
+              ? !value
+              : `STORED_${field.toUpperCase()}_${nth}`;
+      }
+      // Reached means the WRITE went out, not that any request did. `reached = true` on every call would let a
+      // tool that reads before writing — `reai_adjust_inventory` does — count as measured when it refused after
+      // the GET and never posted, which is the same false positive this check exists to close, one level in.
+      //
+      // Stated plainly: this is LATENT. No tool in the population currently reads-then-refuses, so reverting it
+      // changes no outcome and no test fails. It is here because the class is real and cheap to close, not
+      // because anything demonstrates it today.
+      const writeMethods = new Set(
+        (tool.apiPaths ?? []).filter(([m]) => ["POST", "PUT", "PATCH"].includes(m)).map(([m]) => m),
+      );
+      let reached = false;
+      let note = "";
+      try {
+        const result = await tool.handler(parsed.data, {
+          client: {
+            request: async (req) => {
+              if (writeMethods.has(req.method)) reached = true;
+              return { data: record, status: 200 };
+            },
+            deepLink: () => "link",
+          },
+          config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+          session: {},
+        });
+        note = (result.content ?? []).map((c) => c.text ?? "").join("\n");
+        // The prose only. The full record is appended to every result, so the sentinel appears in it whatever
+        // the note says — the same whole-text-versus-note trap that has produced four bad assertions here.
+        const bodyAt = note.indexOf("\n{");
+        if (bodyAt > 0) note = note.slice(0, bodyAt);
+      } catch {
+        return undefined;
+      }
+      // A tool that refused before sending anything measured nothing, whatever its note says. Counting that as
+      // a pass is how `reai_update_expense` looked covered while returning "No fields were given".
+      if (!reached || sent.size === 0) return undefined;
+      return { note, sent, record, rendered };
+    };
+
+    const requiredOnly = await attempt(false);
+    const withOptionals = await attempt(true);
+    const runs = [requiredOnly, withOptionals].filter(Boolean);
+    if (runs.length === 0) { undrivable.push(name); continue; }
+    // A tool with answerable OPTIONAL fields whose optional-inclusive run failed is measured on its required
+    // fields only, and the optional ones are unmeasured — silently, until now. Recorded by name: review found
+    // `reai_create_customer_contact` in exactly that state, reading as covered.
+    const optionalOnlyFields = [...answerable].filter((f) => tool.inputSchema?.[f]?.isOptional?.() === true);
+    if (withOptionals === undefined && optionalOnlyFields.length > 0) {
+      partiallyDriven.push(`${name} (optional: ${optionalOnlyFields.join(", ")})`);
     }
-    let note = "";
-    try {
-      const result = await tool.handler(parsed.data, {
-        client: { request: async () => ({ data: record, status: 200 }), deepLink: () => "link" },
-        config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
-        session: {},
-      });
-      note = (result.content ?? []).map((c) => c.text ?? "").join("\n");
-      // The prose only. The full record is appended to every result, so the sentinel appears in it whatever
-      // the note says — the same whole-text-versus-note trap that has produced four bad assertions here.
-      const body = note.indexOf("\n{");
-      if (body > 0) note = note.slice(0, body);
-    } catch {
-      undrivable.push(name);
-      continue;
-    }
+
+    let judged = 0;
+    for (const { note, sent, record, rendered } of runs) {
     // The HEADLINE, not the whole note. This is the correction a mutation battery forced: scanning the whole
     // note meant a tool could state the sent value as fact in its first sentence while a `describeConfirmation`
     // paragraph mentioned the stored one further down, and this sweep called that fine. Reverting
     // `reai_create_asset` to echo its account number survived, because its own warning paragraph named the
     // sentinel. So the sweep was measuring "does the note mention the record at all" — not the defect.
-    //
-    // The headline is what an agent acts on, and the defect is a headline asserting something the response
-    // contradicted. A headline may still NAME the sent value when it also marks it unconfirmed, which is what
-    // the honest tools do — hence the SENT marker exemption rather than a bare containment test.
     const headline = note.split("\n\n")[0] ?? "";
     for (const [field, value] of sent) {
       const asSent = String(value);
@@ -935,9 +1047,11 @@ test("no candidate tool states a sent value the response contradicted", async ()
         continue;
       }
       const verdict = judgeHeadline(headline, note, asSent, String(record[field]));
-      if (verdict === "echo") echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`);
-      else if (verdict === "read") reads.push(`${name}.${field}`);
+      if (verdict === "echo") { echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`); judged += 1; }
+      else if (verdict === "read") { reads.push(`${name}.${field}`); judged += 1; }
     }
+    }
+    if (judged === 0) silent.push(name);
   }
 
   assert.deepEqual(
@@ -947,10 +1061,71 @@ test("no candidate tool states a sent value the response contradicted", async ()
   );
   // A floor on what the sweep actually observed. Without it, a change that made every note stop mentioning
   // its fields would empty `echoes` and pass while measuring nothing — the sweep would be green and blind.
+  // DEDUPED. Driving each tool twice pushes the same field twice whenever the two runs produce the same note,
+  // which is 10 of 27 tools — review measured `reads.length` at 52 against 29 distinct fields, so the stated
+  // floor of 10 was being met by 5 real ones.
+  //
+  // Stated honestly: a floor CANNOT pin its own de-duplication. Reverting to the raw count makes the check more
+  // permissive, and no floor value catches that — 52 clears any threshold 29 clears. The assertion below records
+  // that duplicates are real, so the reason for the `Set` is visible in the file rather than only in this
+  // comment, but it is not a guard and is not claimed as one.
+  const distinctReads = new Set(reads);
   assert.ok(
-    reads.length >= 10,
-    `only ${reads.length} field(s) were seen reported FROM the response; that number should not fall. If a ` +
-      `tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+    reads.length > distinctReads.size,
+    `no duplicate reads were seen, so either a tool stopped producing identical notes across the two drive ` +
+      `modes or the two-attempt loop is gone — the de-duplication above exists because of those duplicates`,
+  );
+  assert.ok(
+    distinctReads.size >= 25,
+    `only ${distinctReads.size} DISTINCT field(s) were seen reported FROM the response; that number should not ` +
+      `fall. If a tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+  );
+
+  // Tools that mentioned NEITHER value for every field they were measured on. Nothing is wrong with that — a
+  // note that makes no claim cannot make a false one — but it is not evidence either, and the previous version
+  // let such a tool move off NOT_ESTABLISHED and read as covered. `reai_create_customer_contact` was recovered
+  // by the two-attempt drive and contributes exactly nothing; that is now visible instead of implied.
+  assert.deepEqual(
+    [...new Set(partiallyDriven)].sort(),
+    [
+      // MEASURED. One entry, not two.
+      //
+      // `reai_create_customer_contact` was here, and my stated reason for it — "refuses email AND phone
+      // together" — was FALSE: driven by hand with a valid email it accepts both and sends. The real cause was
+      // my own sampler generating an invalid email, and the first fix for that was inert because it looked for a
+      // `.email()` check where this repo uses a custom `refine`. It is fully driven now.
+      //
+      // `reai_create_expense` genuinely refuses: "perDiems … only allowed on a TRAVEL claim", so a body with
+      // every optional line collection filled at once is one the tool declines. Listed rather than
+      // asserted-empty, because the consequence is real — its optional fields are unmeasured, and the previous
+      // version let the required-only run carry it as covered with no trace at all.
+      "reai_create_expense (optional: purpose, employeeId, projectId, costs, perDiems, mileageAllowances)",
+    ],
+    `these tools were measured on their REQUIRED fields only, because the optional-inclusive attempt failed to ` +
+      `validate or was refused. Their optional fields are unmeasured while the tool reads as covered: ` +
+      `${[...new Set(partiallyDriven)].join("; ")}`,
+  );
+  assert.deepEqual(
+    [...new Set(silent)].sort(),
+    [
+      // MEASURED. `reai_create_supplier_invoice` is here because its only comparable field is `documentType`,
+      // which is a RENDERED value the sweep skips — it is covered by test/purchase.test.mjs instead, which is
+      // exactly what the rendered-field proofs are for.
+      "reai_book_bank_transactions",
+      "reai_create_department",
+      "reai_create_product",
+      "reai_create_reconciliation_rule",
+      "reai_create_supplier_invoice",
+      "reai_credit_invoice",
+      "reai_match_bank_transactions",
+      "reai_update_customer",
+      "reai_update_department",
+      "reai_update_employee",
+      "reai_update_expense",
+      "reai_update_supplier",
+    ],
+    `the set of tools whose notes name NEITHER the sent nor the stored value has changed. They are not echoing, ` +
+      `but they are not evidence of anything either: ${[...new Set(silent)].sort().join(", ")}`,
   );
   assert.deepEqual(
     tooShort,
@@ -961,24 +1136,79 @@ test("no candidate tool states a sent value the response contradicted", async ()
   );
   // Named, not counted away. A rendered value is a real hole in this sweep — the tool could echo and look
   // identical — so each one is either covered by a hand-written test or it is not covered at all.
+  // The proofs are CHECKED. Not "the same way the census entries are" — that claim was in the changelog and
+  // review showed it false in three ways, so the differences are closed here and the remaining limits are
+  // stated rather than glossed:
+  //
+  //   - a duplicate-title guard, which this list needs more than the census does, because two fields legitimately
+  //     point at ONE test and a third pointing at it by accident would look like coverage;
+  //   - `{ skip: true }` and `{ todo: true }` are rejected. A textual `test("<title>"` check cannot tell a
+  //     skipped test from a running one, and review disarmed a proof by marking it skipped: the file reported
+  //     "2 pass / 1 skipped" and this test stayed green;
+  //   - string literals are stripped before the tool name and the marker are looked for. Review passed a
+  //     two-line stub whose only mention of either was inside an assertion message.
+  //
+  // What it still cannot do is establish that a test proves anything. It raises the cost of a fake to the point
+  // where the real test is cheaper, which is the same honest limit the census's own comment records.
+  const stripStrings = (text) =>
+    text.replace(/`(?:[^`\\]|\\.)*`/g, "``").replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
+  const seenProofs = new Map();
+  for (const [field, proof] of Object.entries(RENDERED_FIELDS_WITH_PROOF)) {
+    if (proof === null) continue; // an explicit "nothing covers this", which is a claim about coverage, not proof
+    const [file, title] = proof;
+    const toolName = field.split(".")[0];
+    assert.ok(existsSync(join(repo, file)), `${field} names ${file}, which does not exist`);
+    const body = readFileSync(join(repo, file), "utf8");
+    assert.ok(body.includes(`test("${title}"`), `${field} claims a test titled "${title}" in ${file}; none opens with it`);
+    // A skipped or todo test satisfies a textual existence check and runs nothing.
+    const opener = body.slice(body.indexOf(`test("${title}"`), body.indexOf(`test("${title}"`) + title.length + 80);
+    assert.ok(
+      !/\bskip\s*:\s*true|\btodo\s*:\s*true|test\.skip|test\.todo/.test(opener),
+      `${field} names "${title}", which is skipped or todo — it proves nothing while looking like coverage`,
+    );
+    const owners = seenProofs.get(`${file}::${title}`) ?? [];
+    owners.push(field);
+    seenProofs.set(`${file}::${title}`, owners);
+    const module = toolModules.get(toolName);
+    assert.ok(module !== undefined, `could not find where ${toolName} is defined under src/tools`);
+    // Either the file imports the tool's module directly, or it IS that module's test file by name. The first
+    // version demanded the import and failed a legitimate proof: test/investments.test.mjs reaches its tools
+    // through `registeredTools` from dist/server.js, which is how several files here are written. The point of
+    // the check is that a proof cannot be parked in an unrelated file, and the filename carries that just as
+    // well.
+    assert.ok(
+      body.includes(`dist/tools/${module}.js`) || file === `test/${module}.test.mjs`,
+      `${toolName} is defined in src/tools/${module}.ts, but ${file} neither imports that module nor is its ` +
+        `test file — a proof for it cannot live there`,
+    );
+    const from = body.indexOf(`test("${title}"`);
+    const next = body.indexOf("\ntest(", from + 1);
+    const raw = stripComments(body.slice(from, next === -1 ? body.length : next));
+    // The tool name must appear as an IDENTIFIER or as a whole string — `tool("reai_x")` counts, which is how
+    // most of these tests reach their tool; a name buried in an assertion message does not. Stripping every
+    // string literal was too blunt and rejected the legitimate form; the first version of the check, which
+    // allowed any occurrence, accepted a two-line stub whose only mention was inside a message.
+    const namedProperly =
+      stripStrings(raw).includes(toolName) ||
+      new RegExp(`(["'\`])${toolName}\\1`).test(raw);
+    assert.ok(namedProperly, `the test "${title}" mentions ${toolName} only inside prose, not as the tool it drives`);
+    const code = stripStrings(raw);
+    assert.ok(/assert\.(match|equal|deepEqual|ok|doesNotMatch|notEqual)\(/.test(code), `"${title}" asserts nothing`);
+    // `record` is gone from this list: it matches "recorded", which nearly every create-tool test contains.
+    assert.ok(
+      /read back|stored|SENT|carried|DESTROYED/.test(raw),
+      `"${title}" never asserts on what the response said versus what was sent`,
+    );
+  }
+  // Two fields may share one test deliberately; a THIRD sharing it is almost always a mistake, and a shared
+  // test deleted would silently uncover every field pointing at it.
+  for (const [key, owners] of seenProofs) {
+    assert.ok(owners.length <= 2, `${owners.length} fields point at one test (${key}): ${owners.join(", ")}`);
+  }
+
   assert.deepEqual(
     [...new Set(unmeasurable)].sort(),
-    [
-      // MEASURED. Nine enum fields across five tools, all with the same property: their value is a word, and a
-      // note may print a label derived from it rather than the value itself. Of these, only
-      // `reai_create_supplier_invoice.documentType` has been looked at by hand — it was echoing, and now reads
-      // the kind back from the response, which matters because the two kinds are opposite signs in the ledger.
-      // The other eight are NOT covered by anything. That is the honest state of this hole.
-      "reai_add_share_investment_event.eventType",
-      "reai_create_asset.depreciationMethod",
-      "reai_create_loan.dayCountConvention",
-      "reai_create_loan.interestTreatment",
-      "reai_create_loan.loanType",
-      "reai_create_loan.perspective",
-      "reai_create_loan.repaymentType",
-      "reai_create_share_investment.instrumentType",
-      "reai_create_supplier_invoice.documentType",
-    ],
+    RENDERED_FIELDS,
     `the set of fields this sweep cannot measure because their value is a word a note may RENDER has changed. ` +
       `Each needs a hand-written test or an explicit decision: ${[...new Set(unmeasurable)].join(", ")}`,
   );

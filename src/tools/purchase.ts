@@ -475,17 +475,40 @@ const createSupplierInvoice = defineTool({
     // books hold a credit. `SupplierInvoiceRes` carries the field, and this tool is declared irreversible —
     // its own next sentence says the document cannot be deleted outright.
     const storedType = typeof res.data?.documentType === "string" ? res.data.documentType : undefined;
-    const label = (kind: string | undefined) => (kind === "credit_note" ? "credit note" : "invoice");
+    // Two defects review found in the first version of this, both in the direction of a FALSE alarm on an
+    // irreversible ledger posting:
+    //
+    //   `documentType` is OPTIONAL and defaults to "invoice" (the request body eleven lines up already writes
+    //   `args.documentType ?? "invoice"`). Comparing the stored kind against `args.documentType` therefore
+    //   reported "NOT the invoice this call sent" on every call that omitted the field and got exactly what it
+    //   asked for.
+    //
+    //   The label mapped ANYTHING that is not literally `credit_note` to "invoice", so a stored `"CREDIT_NOTE"`
+    //   was named an invoice — on the one field this tool was fixed for, in a file whose premise is that this
+    //   API rewrites what it stores.
+    const sentType = args.documentType ?? "invoice";
+    const CREDIT = new Set(["credit_note", "creditnote", "credit-note", "credit note"]);
+    const label = (kind: string | undefined) =>
+      kind === undefined
+        ? "document"
+        : CREDIT.has(kind.trim().toLowerCase().replace(/_/g, "_"))
+          ? "credit note"
+          : /^invoice$/i.test(kind.trim())
+            ? "invoice"
+            : undefined;
+    const storedLabel = label(storedType);
     return ok(res.data, {
       note:
         (storedType === undefined
-          ? `Supplier ${label(args.documentType)} registered as SENT — the response does not say which kind ` +
-            `it stored`
-          : `Supplier ${label(storedType)} registered, read back from the response` +
-            (storedType === args.documentType
-              ? ``
-              : ` — NOT the ${label(args.documentType)} this call sent, which is the opposite sign in the ` +
-                `ledger`)) +
+          ? `Supplier ${label(sentType)} registered as SENT — the response does not say which kind it stored`
+          : storedLabel === undefined
+            ? `Supplier document registered, and the response calls its kind ` +
+              `${JSON.stringify(storedType)} — a value this tool does not recognise as either an invoice or a ` +
+              `credit note, and the two are opposite signs in the ledger. Check it before relying on the sign`
+            : `Supplier ${storedLabel} registered, read back from the response` +
+              (storedLabel === label(sentType)
+                ? ``
+                : ` — NOT the ${label(sentType)} this call sent, which is the opposite sign in the ledger`)) +
         ` and posted to the ledger. Reverse it with DELETE if it was wrong — it cannot be deleted outright.`,
       ...(id ? { link: ctx.client.deepLink(`/supplier-invoices/${id}`, resolved) } : {}),
     });

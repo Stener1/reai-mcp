@@ -432,7 +432,38 @@ artifacts; and skipping optional fields meant seven update tools were driven whi
 green sweep is only as good as its samples.
 
 **What it still cannot see**, named rather than implied: a value the note RENDERS rather than prints (nine enum
-fields, listed in the test), a value it reformats, and five tools whose arguments it cannot construct.
+fields), a value it reformats, and five tools it cannot drive — three because the sampler cannot construct their
+arguments, and **two because they refuse before sending anything**, each requiring one of two arguments in a way
+no schema expresses. Those are different problems and the list stopped calling them one.
+
+Thirteen further tools mention **neither** the sent nor the stored value in any note it could read. That is not a
+defect — a note making no claim cannot make a false one — but it is not evidence either, and they are listed by
+name so "covered" is not read into them.
+
+All nine rendered fields have since been driven **by hand** with a response naming a different member, and the
+result is more mixed than "the other eight already report from the record", which is what an earlier version of
+this page said:
+
+- **two were echoing.** `documentType` on a supplier document, where the two kinds are opposite signs in the
+  ledger; and `eventType`/`eventDate` on a share-investment event, which fell back to the request whenever the
+  response was silent — irreversible, and once it posts its voucher can only be reversed, never deleted.
+- **three report from the record**, now with tests that drive a disagreeing response.
+- **four are never named by their tool's note at all.** Nothing to state means nothing to get wrong, which is a
+  weaker guarantee than a test and is recorded as `null` rather than counted as coverage. An echo could be
+  reintroduced into any of the four and nothing would fail.
+
+Each carries either a named test or that explicit `null`. The references are checked — the test must open with
+the title, be in the tool's own module or its test file, name the tool as an identifier or a whole string rather
+than inside prose, assert something, assert on stored-versus-sent, and **not** be `skip`ped or `todo`. That is
+not "the same checks as the census", which is what this page claimed: it is stricter in two places (skip, and
+the duplicate-title guard) and it still cannot establish that a test proves anything.
+
+Of the five tools the sweep cannot drive, two *refuse before sending anything* — each requires one of two
+arguments, which no schema expresses. One of those, `reai_apply_reconciliation_rules`, had been counted as
+covered while never reaching the API stub at all; the sweep now checks the request actually went out, which is
+the same "measured nothing" hole that made `reai_update_expense` look covered while it returned *"No fields were
+given"*. Each tool is driven twice, with required fields only and with the optional fields the response can
+answer for, and counts as unreachable only if both attempts fail.
 
 What is left on the list is the residue the sweep genuinely cannot construct arguments for — 3 tools, named
 rather than counted. **What the sweep cannot see:** a note that RE-FORMATS the value it echoes reads as "mentions
