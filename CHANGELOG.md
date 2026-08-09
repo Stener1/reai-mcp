@@ -80,6 +80,52 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **`reai_update_subscription` reported the arming flags from what it SENT, and silence meant disarmed.** The
+  worst of the five request-sourced outcome reports #141's review found, and named there as the one to fix
+  next: `outputMode`, `automaticBillingGeneration` and `sendEhf` were read off `merged`, so a caller who sent
+  `sendEhf: false` to stop an unattended invoicing machine and had it discarded got **no note at all** — and
+  the absence of a warning reads as confirmation that the machine is stopped.
+  - Three defects, not one. It could announce an arming the API had not stored; it said *"This edit did not
+    change that — it carries over what was already set"* even when the caller had just armed it; and the
+    missing-note case above.
+  - Now read from the response. A disarming the response contradicts is **warned** about by name, and points
+    at `reai_deactivate_subscription` for the case where the intent was to stop it billing at all. An arming
+    the caller performed is reported as *"armed BY THIS EDIT, not carried over"*. A response that does not
+    carry the fields says the state could not be confirmed and names what was sent, rather than falling silent.
+  - The flags are read with `bindsToCreateInvoice` and `bindsToTrue` rather than `=== true`, because the
+    backend coerces `"true"` and `1` and this repo has a recorded case of `{"sendEhf": "true"}` arming a send
+    the policy scored as harmless. `bindsToCreateInvoice` is exported for it.
+  - **Deliberately not measured against the live API — and the first version of this entry gave a reason this
+    repo has measured to be false.** It said "subscriptions are created ACTIVE, so a throwaway one on a real
+    company could generate an invoice". But `subscription-created-active`, verified on a live create, says
+    exactly the opposite of the inference: *"What makes a new subscription harmless is
+    `automaticBillingGeneration: false` … being newly created does not."* So an inert throwaway is
+    constructible, and there is a design that answers the question without producing a document. The reason
+    that actually holds is the other one: measuring means creating a subscription on a real company, and the
+    only subscription on the test tenant is a real one. Corrected in the tool text too — the irony of getting
+    that wrong in the one paragraph about measured-versus-reasoned is not lost on me.
+  - Reachability, which is the obvious objection and now has tests: `sendEhf` is deliberately outside
+    `BILLING_SUBSTANCE`, so a disarm-only edit does not trip `assertTransmitAllowed` and reaches the PUT in the
+    **default** configuration. And the escalation is value-aware — `sendEhf: false` does not escalate while
+    `sendEhf: true` does — so a caller can turn the dangerous thing off without the permission arming needs.
+    That is the opposite of #140's `invoiceEmail` trap.
+  - **A review then found I had reintroduced #141's creditor defect in the same shape**: `notDisarmed` was
+    gated on the caller having NAMED the field, so a replacement that changed a value it merely CARRIED was
+    narrated as the caller's own status quo, with no warning. `reai_update_creditor` had been corrected for
+    exactly that and says why. Four more from the same review: `armedByThisEdit` keyed on the response, so a
+    contradicted disarm was also reported as the caller arming it; a present-but-`null` response was folded
+    into "confirmed disarmed", relocating this tool's own bug from the request to the response; `active: null`
+    asserted billing about a stopped subscription, which `main` got right; and the line count was still
+    asserted from the request — on the one field `subscription-read-and-write-shapes-differ` has **measured**
+    the response to disagree about ("the second line gone"). A lost line now warns.
+  - Six mutations that previously survived now fail by name, which is why they were found: the `given` gate,
+    the response-keyed attribution, present-null, the unknown-`active` branch, `bindsToCreateInvoice` (the one
+    export this change adds, and it had no test reaching it), and the line verification.
+  - Remaining instances of the pattern: `reai_update_share_investment`, `reai_set_customer_address`,
+    `reai_set_supplier_address`, `reai_update_salary_line`. This tool's own first sentence still reports the
+    carried-field count from `kept` rather than the response, so it is not fully off that list either.
+
+
 - **`reai_update_creditor` announced where loan repayments no longer go, from what it SENT.** Its note read
   *"This creditor now has NO bank account number, so a loan repayment to it has no destination"* off
   `merged.bankAccountNumber`, never checking that the API agreed — while `reai_update_company_bank`, the

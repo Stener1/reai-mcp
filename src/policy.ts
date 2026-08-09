@@ -447,7 +447,7 @@ export function bindsToTrue(v: unknown): boolean {
  * ordinal: an unrecognised shape means we cannot tell what it binds to, and the safe
  * reading of "cannot tell" is the dangerous one.
  */
-function bindsToCreateInvoice(v: unknown): boolean {
+export function bindsToCreateInvoice(v: unknown): boolean {
   if (typeof v === "string") {
     const t = v.trim().toLowerCase();
     // Anything that is not plainly create_order is treated as create_invoice.
