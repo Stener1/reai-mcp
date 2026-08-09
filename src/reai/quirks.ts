@@ -1162,7 +1162,8 @@ export const QUIRKS: readonly Quirk[] = [
       "No field is required in any of the five agreement schemas, so POST {} answers 201 and " +
       "creates a draft in which every term is null — and the PDF renders for it. A 201 here is " +
       "not evidence that a usable contract exists; count the populated fields. Fourteen fields " +
-      "across the five templates are ENUMS and the document declares every member, so read them " +
+      "across FOUR of the five templates are ENUMS — purchase-agreement declares none — and the " +
+      "document names every member, so read them " +
       "from this endpoint rather than guessing: the members are lowercase snake_case, which is " +
       "not what the Norwegian contract form suggests. leaseDurationType is indefinite | " +
       "fixed_standard | fixed_special_reason and depositType is deposit | guarantee. Norwegian " +

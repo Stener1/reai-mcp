@@ -28,7 +28,11 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Verified rather than asserted: **14 enum fields across the five POST templates**, every member named in the
     document — `clientEntityType`, `pricingModel`, `billingFrequency`, `employmentType`, `salaryType`,
     `rentObjectType`, `electricityTerms`, `waterTerms`, `leaseDurationType`, `shortFixedTermReasonType`,
-    `depositType`, `issuerRole` and two more. The count matches the one the header states.
+    `depositType` and `issuerRole`. That is **twelve distinct names in fourteen places** —
+    `clientEntityType` and `billingFrequency` each appear on two templates — and across **four** of the five,
+    because `purchase-agreement` declares none. An earlier draft of this entry said "and two more", which named
+    all twelve and then claimed two unnamed extras; the independent review counted. The total matches the figure
+    the file header states.
   - Two tests guard it. One asserts the spec really does declare fourteen, with the two members the prose quotes
     by hand, so a spec refresh that drops them makes the prose stale *there* rather than leaving four documents
     quietly wrong again. The other scans the quirk notes as **served**, the tool descriptions, the README and the
@@ -42,24 +46,13 @@ All notable changes to `reai-mcp`. Format loosely follows
     quirk notes and tool descriptions rather than only source lines: a description is concatenated from a dozen
     literals, so a claim split across two of them matches no single line. Verified load-bearing — with only that
     one wording restored, the guard still fails.
-
-### Investigated and deliberately not changed
-
-- **A curated create for agreements was written and then reverted.** 143 public operations had no curated tool
-  and the five agreement creates were among them, so this looked like a capability gap — an agent could amend a
-  lease but not start one. It is not: `docs/tools.md` already records the decision and the reason, that the
-  bodies "run to 78 fields for a lease … that the spec documents properly", `reai_describe_endpoint` shows them,
-  and every trap reaches a `reai_request` caller as a quirk. My justification, that the toolset was unusable
-  from scratch, was simply wrong. Re-litigating a documented decision without new evidence is not an
-  improvement, and the tool was removed before it was committed.
-- **The 143 figure also overstates the gap.** Most of the eleven uncovered Leads operations are `{id}` duplicates
-  of `org/{orgNumber}` paths already covered — alternate addressing for one capability, counted twice. The real
-  Leads gap is three capabilities, not eleven.
-- **`opprett postings` ranks `POST /api/postings/customer/close`**, a close operation for a create query.
-  Adding `postings` to the synonym table was measured and does not fix it: the word matches
-  `/api/postings/customer/close` literally, so an injected `voucher` cannot outweigh it — unlike `postering`,
-  which reaches `POST /api/vouchers` because it matches no path. The real fix is the param-less action demotion
-  that #122 deferred, which needs its own design.
+  - **And the skip-list switched the guard off for a whole paragraph.** It skipped any line containing "an
+    earlier version", "for a while" and similar, so that recording the mistake stayed legal — but markdown puts
+    a paragraph on one line, and the new prose in `docs/tools.md` added "said the opposite for a while" to the
+    very paragraph being protected. The independent review proved it by appending a fresh false sentence there
+    and watching the test stay green. Quoted spans are now stripped instead of lines skipped, which keeps the
+    correction legal and leaves every other word checked. The four historical wordings are also asserted as a
+    fixture, so the pattern list is checked against the examples it exists for.
 
 - **An action the query never asked for could outrank the resource it did name** (#122). `/api/salary-payments` is the
   collection and `/api/salary-payments/{id}/complete` is the action that **files payroll with Skatteetaten**.
@@ -100,8 +93,11 @@ All notable changes to `reai-mcp`. Format loosely follows
     is `internal: true`, so search never returns it unless a caller asks for internal operations — I repeated the
     review's concern without checking the flag. `POST /api/invoices/reminders/bulk` is public and does transmit,
     but no reminder query ranks it first: measured over 190 phrasings, the reminders GET wins every one.
-    `POST /api/subscriptions/generate-due` also transmits and sits at rank 2 behind the correct per-subscription
-    generate. So the param-less hole is real and currently not reachable at rank 1 by any query measured. Nor is
+    `POST /api/subscriptions/generate-due` is the one that does: it transmits, it is param-less, and it ranks
+    **first** both for "generate due" and for its own summary "Generate due subscription billing" — only the
+    Norwegian "generer forfalte abonnement" puts the per-subscription generate above it. So the param-less hole
+    is real AND reachable at rank 1, which is the opposite of what a first draft of this paragraph said. Caught
+    by the independent review, in the paragraph whose whole purpose was admitting an unchecked claim. Nor is
     `POST /api/invoices/{id}/reminders/forgive` ranking above the reminder-creation endpoint fixed — that is
     rank 1 on `main` too, pre-existing rather than introduced.
   - Measured over **12,193 queries**, this time including **every endpoint's own summary** as a query, which is
@@ -109,6 +105,24 @@ All notable changes to `reai-mcp`. Format loosely follows
     newly at rank 1, one write demoted.** Six queries lost main's rank-1 answer from the default limit of 25 —
     all of the shape "close/lukk/fullfor invoices" → `POST /api/invoices/{id}/payments`, where registering a
     payment was a poor answer to closing an invoice in the first place. Named rather than averaged away.
+
+### Investigated and deliberately not changed
+
+- **A curated create for agreements was written and then reverted.** 143 public operations had no curated tool
+  and the five agreement creates were among them, so this looked like a capability gap — an agent could amend a
+  lease but not start one. It is not: `docs/tools.md` already records the decision and the reason, that the
+  bodies "run to 78 fields for a lease … that the spec documents properly", `reai_describe_endpoint` shows them,
+  and every trap reaches a `reai_request` caller as a quirk. My justification, that the toolset was unusable
+  from scratch, was simply wrong. Re-litigating a documented decision without new evidence is not an
+  improvement, and the tool was removed before it was committed.
+- **The 143 figure also overstates the gap.** Most of the eleven uncovered Leads operations are `{id}` duplicates
+  of `org/{orgNumber}` paths already covered — alternate addressing for one capability, counted twice. The real
+  Leads gap is three capabilities, not eleven.
+- **`opprett postings` ranks `POST /api/postings/customer/close`**, a close operation for a create query.
+  Adding `postings` to the synonym table was measured and does not fix it: the word matches
+  `/api/postings/customer/close` literally, so an injected `voucher` cannot outweigh it — unlike `postering`,
+  which reaches `POST /api/vouchers` because it matches no path. The real fix is the param-less action demotion
+  that #122 deferred, which needs its own design.
 
 ### Added
 

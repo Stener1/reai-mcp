@@ -543,6 +543,13 @@ test("the spec declares every agreement enum, and nothing says otherwise", async
   // The figure the docs now state. Asserted so a spec refresh that drops the declarations makes the
   // prose stale HERE, rather than leaving four documents quietly wrong again.
   assert.equal(declared.length, 14, `enum fields declared: ${declared.join(", ")}`);
+  // FOUR of the five templates, not five: purchase-agreement declares none. And 14 occurrences are only 12
+  // distinct names, because clientEntityType and billingFrequency appear on two templates each. Both were
+  // stated wrongly in the first version of this work and are asserted here so the prose cannot drift again.
+  const withEnums = new Set(declared.map((d) => d.split(".")[0]));
+  assert.equal(withEnums.size, 4, `templates declaring an enum: ${[...withEnums].join(", ")}`);
+  assert.ok(!withEnums.has("purchase-agreement"), "purchase-agreement declares no enum");
+  assert.equal(new Set(declared.map((d) => d.split(".")[1])).size, 12, "distinct enum field names");
   // And the two the prose names by hand have to be among them, with the members it quotes.
   const lease = findOperation("POST", "/api/agreements/rent-agreement")?.body?.fields ?? {};
   assert.match(String(lease.leaseDurationType), /^enum\(indefinite\|fixed_standard\|fixed_special_reason\)/);
@@ -569,17 +576,38 @@ test("no agent-facing text claims the agreement enums are undocumented", async (
     ["docs/tools.md", readFileSync("docs/tools.md", "utf8")],
     ["README.md", readFileSync("README.md", "utf8")],
   ];
+  // QUOTED spans are stripped rather than whole lines skipped, and that distinction is the finding.
+  // The first version skipped any line containing "an earlier version", "for a while" and so on, so that
+  // recording the mistake stayed legal. But markdown puts a whole paragraph on one line: adding "This
+  // paragraph said the opposite for a while" to docs/tools.md switched the guard OFF for the entire
+  // agreements paragraph, and the independent review of PR #123 proved it by appending a fresh false sentence
+  // there and watching the test stay green. Removing the quotes instead keeps the correction legal and leaves
+  // every other word on the line checked.
+  const stripQuotes = (line) =>
+    line.replace(/"[^"]*"/g, " ").replace(/\u201c[^\u201d]*\u201d/g, " ").replace(/`[^`]*`/g, " ");
   const offenders = [];
   for (const [file, text] of sources) {
-    // The file header in agreements.ts QUOTES the old wording in order to correct it, so the check
-    // runs on lines that are not part of that correction. Without this the guard would forbid
-    // recording the mistake, which is the opposite of what this repository wants.
     for (const line of text.split("\n")) {
-      if (/an earlier version|said otherwise|for a while|used to say|WAS wrong|no longer claims/i.test(line)) continue;
-      if (false_claims.some((re) => re.test(line))) offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
+      const naked = stripQuotes(line);
+      if (false_claims.some((re) => re.test(naked))) offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
     }
   }
   assert.deepEqual(offenders, [], `these still say the enums are undocumented:\n  ${offenders.join("\n  ")}`);
+
+  // The four wordings this guard exists for, as they actually stood, asserted to be caught. Written as a
+  // fixture rather than trusted: the first version matched three of them while its comment claimed four, and
+  // the one it missed — the README's — was the most-read surface of the four. A pattern list is only as good
+  // as the examples it is checked against.
+  const historical = {
+    "quirks.ts": "schema types as plain strings are validated as enums the document does not list, and the",
+    "agreements.ts": "schema types as plain strings are validated as enums that the spec does not list; the API",
+    "docs/tools.md": "some fields the schema types as plain strings are validated as enums the spec never lists",
+    "README.md": "That, the enums the spec types as plain strings, and why the five create endpoints",
+  };
+  const uncaught = Object.entries(historical)
+    .filter(([, wording]) => !false_claims.some((re) => re.test(wording)))
+    .map(([where]) => where);
+  assert.deepEqual(uncaught, [], `the guard would not catch these historical wordings: ${uncaught.join(", ")}`);
 
   // Then the same check on the strings as SERVED rather than as written, which is the version that matters and
   // the one a line-by-line scan cannot see: a description is concatenated from a dozen literals, so a claim
