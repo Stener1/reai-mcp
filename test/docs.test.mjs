@@ -325,25 +325,66 @@ test("every stated uncovered-operation count matches the registry", async () => 
   );
 });
 
-test("the undocumented-operation counts docs/discovery.md states are real", () => {
+test("every stated undocumented-operation count matches the spec index", () => {
   // docs/discovery.md argues that ranking is biased toward whatever ReAI wrote prose about, and the argument
   // rests entirely on how MANY operations have none. An unenforced number in a page that reasons from it is
-  // the kind that rots quietly and takes the reasoning with it — a spec refresh adding summaries is exactly
-  // the change that should make the page wrong, and should say so.
+  // the kind that rots quietly and takes the reasoning with it.
+  //
+  // EVERY occurrence, not the first. The count is repeated in the derived-phrase paragraph and again in the
+  // diagnostic comment at the demotion site in src/reai/spec.ts, and a first-match-only check let those go
+  // stale: after a spec refresh a maintainer updates the sentence this test names, the suite goes green, and
+  // two other places still state the old figure. That is the drift this exists to stop, so the corpus includes
+  // the source comment and the regex is global.
   const ops = getSpecIndex().operations.filter((o) => !o.internal);
   const bare = ops.filter((o) => !o.summary && !(o.description ?? "").trim());
   const covered = new Set(allTools.flatMap((t) => (t.apiPaths ?? []).map(([m, p]) => `${m} ${p}`)));
   const bareUncovered = bare.filter((o) => !covered.has(`${o.method} ${o.path}`));
 
-  const DISCOVERY = readFileSync(join(repo, "docs", "discovery.md"), "utf8");
-  const stated = /\*\*(\d+) of the (\d+) public operations carry neither a summary nor a description/.exec(DISCOVERY);
-  assert.ok(stated, "docs/discovery.md no longer states the count its argument depends on");
-  assert.equal(Number(stated[1]), bare.length, "the stated bare-operation count is wrong");
-  assert.equal(Number(stated[2]), ops.length, "the stated public-operation count is wrong");
+  const CORPUS = [
+    ...DOC_FILES.map((f) => [f, readFileSync(join(repo, f), "utf8")]),
+    ["src/reai/spec.ts", readFileSync(join(repo, "src", "reai", "spec.ts"), "utf8")],
+  ];
 
-  const remaining = /(\d+) bare operations no curated tool covers/.exec(DISCOVERY);
-  assert.ok(remaining, "docs/discovery.md no longer states how many are left without a tool");
-  assert.equal(Number(remaining[1]), bareUncovered.length, "the stated uncovered-and-undocumented count is wrong");
+  // Each pattern is a way the count is actually phrased. A repetition matching none of them is caught by the
+  // floor below rather than passing unnoticed.
+  const BARE_CLAIMS = [
+    /(\d+) of the (\d+) public operations carry neither a summary nor a description/g,
+    // The lookahead matters: "the 60 bare operations no curated tool covers" is a DIFFERENT count, and without
+    // it this pattern claimed 60 was the bare total and failed on a correct page.
+    /(?:the|all) (\d+) (?:public operations with NO summary|bare operations(?! no curated tool))/g,
+    /across all (\d+), ONE improvement/g,
+  ];
+  const found = [];
+  for (const [file, text] of CORPUS) {
+    for (const pattern of BARE_CLAIMS) {
+      for (const m of text.matchAll(pattern)) {
+        found.push({ file, stated: Number(m[1]), publicStated: m[2] === undefined ? undefined : Number(m[2]) });
+      }
+    }
+  }
+  const wrong = found
+    .filter((c) => c.stated !== bare.length || (c.publicStated !== undefined && c.publicStated !== ops.length))
+    .map((c) => `${c.file}: says ${c.stated}${c.publicStated ? ` of ${c.publicStated}` : ""}`);
+  assert.deepEqual(
+    wrong,
+    [],
+    `${bare.length} of ${ops.length} public operations have no prose. These say otherwise:\n  ${wrong.join("\n  ")}`,
+  );
+  // A floor, so deleting a claim — or rewording one out of every pattern above — fails instead of quietly
+  // reducing what this test covers. FIVE today: three in docs/discovery.md, two in the spec.ts comment. The
+  // first version of this said four, from counting by eye rather than measuring; rewording a claim then left
+  // four and passed. Mutation-tested at five.
+  assert.ok(
+    found.length >= 5,
+    `only ${found.length} undocumented-operation claims matched; a repetition was reworded out of every pattern`,
+  );
+
+  const remaining = [...readFileSync(join(repo, "docs", "discovery.md"), "utf8")
+    .matchAll(/(\d+) bare operations no curated tool covers/g)];
+  assert.ok(remaining.length > 0, "docs/discovery.md no longer states how many are left without a tool");
+  for (const m of remaining) {
+    assert.equal(Number(m[1]), bareUncovered.length, "the stated uncovered-and-undocumented count is wrong");
+  }
 });
 
 test("every documented toolset group exists", () => {
