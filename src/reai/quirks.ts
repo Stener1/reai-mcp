@@ -1206,7 +1206,11 @@ export const QUIRKS: readonly Quirk[] = [
       "tenancy law caps a " +
       "deposit at six months' rent and wants a statutory reason for a fixed term under three " +
       "years; neither is enforced — a deposit of 9 999 999 against a rent of 10 000 was accepted, " +
-      "as was a four-month fixed_standard lease with no reason.",
+      "as was a four-month fixed_standard lease with no reason. And a field name the template does " +
+      "not declare is SILENTLY DROPPED: measured on a lease, an undeclared name was accepted with " +
+      "the 201 and then came back nowhere — not under the template sub-object and not at the top " +
+      "level — so a misspelt term is simply absent from the finished contract with nothing in the " +
+      "response to say so. reai_create_agreement names any undeclared term before you rely on it.",
   },
   {
     id: "agreement-shapes",

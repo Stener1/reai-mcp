@@ -179,18 +179,42 @@ test("the enum check reads the spec rather than a copy of it", async () => {
   // If it were a hand-written list, a field the document constrains and the list forgot would
   // pass through to a bare 400 — which is the failure the check exists to remove.
   const { findOperation } = await import("../dist/reai/spec.js");
-  const fields = findOperation("PUT", "/api/agreements/rent-agreement/{id}")?.body?.fields ?? {};
-  const enums = Object.entries(fields).filter(([, v]) => typeof v === "string" && v.startsWith("enum("));
-  assert.ok(enums.length >= 6, `expected the lease's documented enums; found ${enums.length}`);
-  // Every one of them must be enforced, not just the two that were measured by hand.
-  for (const [name, declared] of enums) {
-    const { result } = await run(
-      "reai_update_agreement",
-      { id: 290, changes: { [name]: "ZZ-not-a-member" } },
-      () => lease(),
-    );
-    assert.equal(result.isError, true, `${name} (${declared}) must be checked`);
+  // ALL FIVE templates, not just the lease. test/spec-bounds.test.mjs justifies skipping the template PUTs
+  // in its bounds sweep on the grounds that the enums are exercised here "for both tools" — that claim was
+  // false while this only iterated the lease, leaving employmentType, salaryType, clientEntityType,
+  // pricingModel, billingFrequency and issuerRole unexercised on the update path.
+  const SEGMENTS = {
+    rent_agreement: "rent-agreement",
+    employee_contract: "employee-contract",
+    accounting_services: "accounting-services",
+    service_agreement: "service-agreement",
+    purchase_agreement: "purchase-agreement",
+  };
+  const SUBS = {
+    rent_agreement: "rentAgreement",
+    employee_contract: "employeeContract",
+    accounting_services: "accountingServices",
+    service_agreement: "serviceAgreement",
+    purchase_agreement: "purchaseAgreement",
+  };
+  let checked = 0;
+  for (const [templateType, segment] of Object.entries(SEGMENTS)) {
+    const fields = findOperation("PUT", `/api/agreements/${segment}/{id}`)?.body?.fields ?? {};
+    const enums = Object.entries(fields).filter(([, v]) => typeof v === "string" && v.startsWith("enum("));
+    for (const [name, declared] of enums) {
+      checked += 1;
+      const { calls, result } = await run(
+        "reai_update_agreement",
+        { id: 290, changes: { [name]: "ZZ-not-a-member" } },
+        // The record's OWN templateType picks the PUT path, so it has to match the template whose enum is
+        // under test — through the wrong path the field is not declared and nothing would be checked.
+        () => ({ agreementId: 290, templateType, [SUBS[templateType]]: { otherTerms: "ZZ" } }),
+      );
+      assert.equal(result.isError, true, `${templateType}.${name} (${declared}) must be checked`);
+      assert.deepEqual(calls.map((c) => c.method), ["GET"], `${templateType}.${name} wrote anyway`);
+    }
   }
+  assert.equal(checked, 14, `expected the 14 documented enums on the PUT side, checked ${checked}`);
   // ...and a legitimate member passes.
   const good = await run(
     "reai_update_agreement",
@@ -432,7 +456,7 @@ test("a signed agreement is not deleted, because that behaviour was never establ
 // ---------------------------------------------------------------------------
 
 test("every agreement tool is inside the sweeps and none transmits", () => {
-  assert.equal(agreementTools.length, 5);
+  assert.equal(agreementTools.length, 6);
   for (const t of agreementTools) {
     assert.ok(registeredTools.includes(t), `${t.name} must be inside the invariant sweeps`);
     assert.ok(!t.transmits, `${t.name} must not leave the tenant`);
@@ -627,4 +651,266 @@ test("no agent-facing text claims the agreement enums are undocumented", async (
     assert.doesNotMatch(served, re, "a quirk served to agents says the enums are undocumented");
     assert.doesNotMatch(descriptions, re, "a tool description says the enums are undocumented");
   }
+});
+
+/**
+ * `reai_create_agreement`.
+ *
+ * The toolset could update and delete an agreement but not make one, so the only route to the five
+ * POST endpoints was `reai_request` — and endpoint search answers "create agreement" with
+ * `POST /api/agreements/{id}/sign-request`, an irreversible EXTERNAL send, ranked above all five
+ * creation calls. The gap is why the wrong answer was the reachable one.
+ */
+
+/** The five templates and the sub-object each response carries its terms in. */
+const TEMPLATES = {
+  rent_agreement: { segment: "rent-agreement", sub: "rentAgreement" },
+  employee_contract: { segment: "employee-contract", sub: "employeeContract" },
+  accounting_services: { segment: "accounting-services", sub: "accountingServices" },
+  service_agreement: { segment: "service-agreement", sub: "serviceAgreement" },
+  purchase_agreement: { segment: "purchase-agreement", sub: "purchaseAgreement" },
+};
+
+/** A create response: the wrapper, with the created terms echoed under the template's own key. */
+const created = (templateType, fields, overrides = {}) => ({
+  agreementId: 601,
+  templateType,
+  signStatus: "draft",
+  ...Object.fromEntries(Object.values(TEMPLATES).map(({ sub }) => [sub, null])),
+  [TEMPLATES[templateType].sub]: fields,
+  ...overrides,
+});
+
+test("creating with no terms is refused, and nothing is sent", async () => {
+  // The API marks no field required, so POST {} answers 201 with every term null — and the PDF
+  // renders that. An agent that lost the terms would otherwise create a contract saying nothing.
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: {} },
+    () => created("rent_agreement", {}),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls, [], "a refusal must not reach the API");
+  assert.match(text, /every term is null/);
+  assert.match(text, /reai_request/, "the deliberate blank-draft route is named");
+});
+
+test("every documented enum is checked on every template, before anything is created", async () => {
+  const { findOperation } = await import("../dist/reai/spec.js");
+  let checked = 0;
+  for (const [templateType, { segment }] of Object.entries(TEMPLATES)) {
+    const fields = findOperation("POST", `/api/agreements/${segment}`)?.body?.fields ?? {};
+    for (const [name, declared] of Object.entries(fields)) {
+      if (typeof declared !== "string" || !declared.startsWith("enum(")) continue;
+      checked += 1;
+      const { calls, result } = await run(
+        "reai_create_agreement",
+        { templateType, terms: { [name]: "ZZ-not-a-member" } },
+        () => created(templateType, {}),
+      );
+      assert.equal(result.isError, true, `${templateType}.${name} (${declared}) must be checked`);
+      assert.deepEqual(calls, [], `${templateType}.${name} refused but still called the API`);
+    }
+  }
+  // The document declares 14 across four templates; purchase_agreement carries none. A refresh that
+  // drops them all would otherwise leave this test asserting nothing.
+  assert.equal(checked, 14, `expected the 14 documented enums, checked ${checked}`);
+});
+
+test("a legitimate value posts to the template's own path, with the terms as the body", async () => {
+  const terms = { employmentType: "permanent", salaryType: "monthly", employeeName: "ZZ Ansatt" };
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms },
+    () => created("employee_contract", terms),
+  );
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, 1, "creating reads nothing first");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].path, "/api/agreements/employee-contract");
+  assert.deepEqual(calls[0].body, terms, "the terms are the body, unwrapped");
+  assert.match(text, /agreementId 601/);
+  assert.match(text, /unsigned draft/, "an agent must not read this as having sent anything");
+});
+
+test("a term the template does not declare is reported, not silently dropped", async () => {
+  // A misspelt field name is accepted by the API and simply missing from the finished contract.
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, mnthlyRnt: 999, tenantName: "ZZ" } },
+    (req) => created("rent_agreement", { monthlyRent: 12000, tenantName: "ZZ" }),
+  );
+  assert.notEqual(result.isError, true, "the spec can lag the API, so this warns rather than refuses");
+  assert.equal(calls.length, 1);
+  assert.match(text, /mnthlyRnt/);
+  assert.match(text, /not declared in/);
+});
+
+test("a term the API did not store is reported against what was sent", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, tenantName: "ZZ Leietaker" } },
+    () => created("rent_agreement", { monthlyRent: null, tenantName: "ZZ Leietaker" }),
+  );
+  assert.match(text, /WARNING/);
+  assert.match(text, /monthlyRent: sent 12000, stored null/);
+});
+
+test("a near-empty created contract says so, because the PDF will render anyway", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "purchase_agreement", terms: { sellerName: "ZZ Selger" } },
+    () => created("purchase_agreement", { sellerName: "ZZ Selger" }),
+  );
+  assert.match(text, /very few terms/);
+});
+
+test("a term named after an Object prototype member is treated as a term, not as declared", async () => {
+  // `k in declared` walks the prototype chain, so `toString` looked like a declared field and
+  // skipped the warning. Object.hasOwn is why this reports it.
+  const { result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "purchase_agreement", terms: { toString: "ZZ", constructor: "ZZ" } },
+    () => created("purchase_agreement", {}),
+  );
+  assert.notEqual(result.isError, true);
+  assert.match(text, /toString/);
+  assert.match(text, /constructor/);
+});
+
+test("creating is reversible and transmits nothing, unlike the sign-request it outranks", async () => {
+  const create = tool("reai_create_agreement");
+  assert.equal(create.risk, "reversible");
+  const { classifyTransmission } = await import("../dist/policy.js");
+  for (const [method, path] of create.apiPaths) {
+    assert.equal(classifyRequest(method, path), "reversible", `${method} ${path}`);
+    assert.equal(classifyTransmission(method, path), "none", `${method} ${path}`);
+  }
+  // The five it covers are exactly the five templates, and none of them is a signing call.
+  assert.equal(create.apiPaths.length, 5);
+  for (const [, path] of create.apiPaths) assert.doesNotMatch(path, /sign/);
+});
+
+/**
+ * The preflight compared `String(value)`, which coerces.
+ *
+ * `{ salaryType: ["monthly"] }` stringifies to `"monthly"` and passed a check whose entire purpose is
+ * to answer locally instead of letting the API answer with a bare 400 — so the tool issued a POST the
+ * API rejects, which is the failure it exists to remove. Both agreement tools had it, since the create
+ * tool copied the loop from the update tool.
+ *
+ * The cases have to coerce to a member of the field being tested, or they prove nothing: the first
+ * version of this test sent `["monthly"]` to `leaseDurationType`, whose members are
+ * indefinite | fixed_standard | fixed_special_reason — so it was refused with or without the bug and
+ * only looked like coverage. Each case below carries the member it coerces to, per field.
+ */
+const COERCING = (member) => [
+  ["a single-element array", [member]],
+  ["an object with a toString", { toString: () => member }],
+];
+/** These never coerced to anything valid, so they were already refused. Kept to pin that. */
+const NEVER_VALID = [
+  ["an array of two members", ["monthly", "hourly"]],
+  ["a number", 1],
+  ["a boolean", true],
+  ["an object", { salaryType: "monthly" }],
+];
+
+for (const [label, value] of [...COERCING("monthly"), ...NEVER_VALID]) {
+  test(`creating refuses ${label} where a scalar enum member is declared`, async () => {
+    const { calls, result, text } = await run(
+      "reai_create_agreement",
+      { templateType: "employee_contract", terms: { salaryType: value } },
+      () => created("employee_contract", {}),
+    );
+    assert.equal(result.isError, true, `${label} reached the API`);
+    assert.deepEqual(calls, [], `${label} was refused but a request still went out`);
+    assert.match(text, /salaryType/);
+    assert.match(text, /as a string|not one of|not among/);
+  });
+}
+
+for (const [label, value] of COERCING("indefinite")) {
+  test(`changing terms refuses ${label} too — the same loop, the same bug`, async () => {
+    // `indefinite` IS a leaseDurationType member, so this genuinely exercises the coercion: with
+    // String(value) restored, the array and the toString object both walk through to the PUT.
+    const { calls, result, text } = await run(
+      "reai_update_agreement",
+      { id: 290, changes: { leaseDurationType: value } },
+      () => lease(),
+    );
+    assert.equal(result.isError, true, `${label} reached the API`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${label} got past the read`);
+    assert.match(text, /leaseDurationType/);
+  });
+}
+
+test("a real string member still passes, and null still clears a term", async () => {
+  const good = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms: { salaryType: "monthly" } },
+    () => created("employee_contract", { salaryType: "monthly" }),
+  );
+  assert.notEqual(good.result.isError, true);
+  assert.equal(good.calls.length, 1);
+
+  // null is passed over as clearing the term deliberately, which is the pre-existing contract.
+  const cleared = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms: { salaryType: null, employeeName: "ZZ" } },
+    () => created("employee_contract", { salaryType: null, employeeName: "ZZ" }),
+  );
+  assert.notEqual(cleared.result.isError, true);
+  assert.equal(cleared.calls.length, 1);
+});
+
+test("terms that are all null are refused — counting keys let an all-null contract through", async () => {
+  // The guard counted Object.keys, so `{ tenantName: null }` satisfied it and produced exactly the
+  // all-null contract its own 90-word refusal exists to prevent. One JSON token defeated it.
+  for (const terms of [{ tenantName: null }, { tenantName: null, monthlyRent: null, landlordName: undefined }]) {
+    const { calls, result, text } = await run(
+      "reai_create_agreement",
+      { templateType: "rent_agreement", terms },
+      () => created("rent_agreement", {}),
+    );
+    assert.equal(result.isError, true, JSON.stringify(terms));
+    assert.deepEqual(calls, [], "a refusal must not reach the API");
+    assert.match(text, /Every term given is null/);
+  }
+});
+
+test("a term stated as false is a real term, not an absent one", async () => {
+  // populatedCount treats false as unset, deliberately, so it is the wrong test for "did you give me
+  // anything" — a lease whose only stated term is "no pets" is stating something.
+  const { calls, result } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { petsAllowed: false } },
+    () => created("rent_agreement", { petsAllowed: false }),
+  );
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, 1);
+});
+
+test("a response with no template sub-object says the comparison could not be made", async () => {
+  // Otherwise both verification notes vanish and the caller is told only that something was created,
+  // while the description promises the terms are checked against what came back.
+  const { result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000 } },
+    () => ({ agreementId: 601, templateType: "rent_agreement", monthlyRent: null }),
+  );
+  assert.notEqual(result.isError, true, "the record was created; only the verification is missing");
+  assert.match(text, /Could not verify what was stored/);
+  assert.match(text, /rentAgreement/);
+});
+
+test("an undeclared term is reported once, not twice", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, mnthlyRnt: 999 } },
+    () => created("rent_agreement", { monthlyRent: 12000 }),
+  );
+  assert.match(text, /not declared in/);
+  // It used to appear in the WARNING as "stored undefined" as well, with two overlapping explanations.
+  assert.doesNotMatch(text, /mnthlyRnt: sent/);
 });

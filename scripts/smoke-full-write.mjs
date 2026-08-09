@@ -547,12 +547,14 @@ async function main() {
     // why it sits at this tier. Verified here on live data rather than only against a fake
     // client: the whole value of the tool is that the terms it was not asked about survive.
     console.log("\n  Agreement terms (the underlying PUT replaces the record):");
+    // Through the curated tool, not reai_request. It was the escape hatch here for as long as no create
+    // tool existed; using it now would leave reai_create_agreement unexercised against real data in the
+    // one harness that writes to real books — and it is the tool an agent will actually reach for.
     const agMade = await client.callTool({
-      name: "reai_request",
+      name: "reai_create_agreement",
       arguments: {
-        method: "POST",
-        path: "/api/agreements/rent-agreement",
-        body: {
+        templateType: "rent_agreement",
+        terms: {
           landlordName: `${STAMP} utleier`,
           tenantName: `${STAMP} leietaker`,
           propertyAddress: "Prøvegata 1",
@@ -562,15 +564,25 @@ async function main() {
           depositType: "deposit",
           depositAmount: 36000,
           otherTerms: `${STAMP} original terms`,
+          // An undeclared name, so the harness re-measures the claim the tool text makes about it: the API
+          // takes the 201 and drops this silently. The tool must say so.
+          zzUndeclaredTerm: "dropped silently",
         },
       },
     });
     const agreement = agMade.isError ? undefined : jsonOf(agMade);
     if (Number.isInteger(agreement?.agreementId)) created.agreementId = agreement.agreementId;
     report(
-      "a lease exists to edit",
+      "a lease exists to edit, created through reai_create_agreement",
       Number.isInteger(created.agreementId),
       created.agreementId ? `agreementId=${created.agreementId}` : textOf(agMade).slice(0, 180),
+    );
+    // The claim is asserted in the tool text, docs/tools.md and the quirk registry, so it is re-measured
+    // here rather than trusted to one run of a scratch script.
+    report(
+      "an undeclared term is reported as not declared, and did not reach the record",
+      /zzUndeclaredTerm/.test(textOf(agMade)) && /not declared in/.test(textOf(agMade)),
+      textOf(agMade).slice(0, 200),
     );
 
     if (created.agreementId) {

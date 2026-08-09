@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **172 tools**: 165 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **173 tools**: 166 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **122 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -56,7 +56,7 @@ Both switches sit on one path, and a curated tool is not a softer route to the A
 hatch is — they converge on the same gates, in this order:
 
 ```
-  curated tool (165) ---+
+  curated tool (166) ---+
                         +---> 1. write policy .......... REAI_WRITE_MODE
   reai_request (321) ---+     2. external-send gate .... REAI_ALLOW_EXTERNAL_SEND  ---> ReAI API
                               3. PUT omission gate ..... reai_request only
@@ -234,7 +234,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 `reai_request` — which between them reach all 321 public operations. They cannot be disabled, so a
 narrowed server still reaches everything.
 
-The other 165 are curated, in thirteen groups. **[docs/tools.md](docs/tools.md) is the reference**:
+The other 166 are curated, in thirteen groups. **[docs/tools.md](docs/tools.md) is the reference**:
 every tool with its purpose and its risk classification, and per domain what driving it against live
 books actually turned out to do.
 
@@ -259,7 +259,7 @@ stop a rename destroying a payment destination
 ([docs/tools.md](docs/tools.md#renaming-something-must-not-erase-where-money-goes)). That is a
 documentation grouping only — `reai_update_company_bank` belongs to `bank`,
 `reai_set_supplier_address` to `purchase` and `reai_update_creditor` to `loans`, they are inside the
-165, and narrowing with `REAI_TOOLSETS` enables each one with its own domain. One tool genuinely is
+166, and narrowing with `REAI_TOOLSETS` enables each one with its own domain. One tool genuinely is
 outside all thirteen: `reai_reconcile_ui` is off unless `REAI_ENABLE_UI=1`, because it is the only *view* here, and the only
 payload in this API that does not fit comfortably in text
 ([why](docs/tools.md#the-one-ui-surface)).
@@ -267,7 +267,7 @@ payload in this API that does not fit comfortably in text
 Anything not listed — projects, timesheets, documents — is reachable through
 `reai_search_endpoints` + `reai_request`, and carries its known quirks automatically.
 
-If 172 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only**
+If 173 tools is more than your client wants to see, narrow it with `REAI_TOOLSETS` — list **only**
 the groups you want. Each count below includes the 7 always-on tools:
 
 ```
@@ -279,12 +279,12 @@ REAI_TOOLSETS=organisation         # 25 tools
 REAI_TOOLSETS=assets               # 13 tools
 REAI_TOOLSETS=subscriptions        # 16 tools
 REAI_TOOLSETS=warehouses           # 14 tools
-REAI_TOOLSETS=agreements           # 12 tools
+REAI_TOOLSETS=agreements           # 13 tools
 REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
 REAI_TOOLSETS=loans                # 20 tools
 REAI_TOOLSETS=investments          # 14 tools
-(unset)                            # all 172
+(unset)                            # all 173
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference`, `loans` and `investments`; listing all thirteen is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.
@@ -314,7 +314,7 @@ Most of what this server knows about ReAI was learned from a rejected request ra
 reading the spec. Rather than leave that in commit messages, it lives in
 [`src/reai/quirks.ts`](src/reai/quirks.ts) as **122 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
-143 public operations no curated tool covers. A test asserts every quirk still matches a real
+138 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
 
 Four to give the flavour: an invoice is created from an *order*, not from line items; there is no

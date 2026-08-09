@@ -23,7 +23,7 @@ const README = readFileSync(join(repo, "README.md"), "utf8");
 /**
  * The README plus everything under `docs/`, as one haystack.
  *
- * These assertions exist to guarantee that something is DOCUMENTED — that all 172 tools are listed
+ * These assertions exist to guarantee that something is DOCUMENTED — that all 173 tools are listed
  * somewhere a reader will find them, that an enforced transport limit is written down. They were
  * pinned to README.md, which quietly made them assertions about documentation ARCHITECTURE too: when
  * the README was split into a front door plus `docs/`, the three sections these tests name could not
