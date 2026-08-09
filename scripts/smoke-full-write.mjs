@@ -32,6 +32,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { requireTokenReachesTenant, requireWritableTenant } from "./lib/write-guard.mjs";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function arg(name) {
@@ -40,6 +41,9 @@ function arg(name) {
 }
 
 const token = process.env.REAI_USER_API_TOKEN ?? process.env.REAI_TOKEN;
+// The audit talks to the MCP server over stdio, but the tenant-reachability check reads /api/me
+// directly — the structured list, not whoami's prose. Same default the server uses.
+const API_BASE = process.env.REAI_BASE_URL ?? "https://app.reai.no";
 const tenantId = arg("tenant") ? Number(arg("tenant")) : undefined;
 const acknowledged = process.argv.includes("--i-understand-this-posts-to-real-books");
 
@@ -51,6 +55,18 @@ if (!tenantId) {
   console.error("--tenant <id> is required, so this cannot post to the wrong company.");
   process.exit(2);
 }
+// BEFORE the acknowledgement flag. With the flag checked first, `--tenant 2634` without it exited with
+// "Refusing to run without --i-understand-this-posts-to-real-books" and never mentioned that the tenant is
+// protected — so the operator learns to add the flag and meets the real refusal one step later. Report the
+// blocking reason, not the first missing formality.
+// The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
+// divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
+// consistency check between two operator-supplied values: set both to the same wrong number and every
+// one of them proceeded. Measured — all FOUR did, and between them attempted POST /api/vouchers,
+// POST /api/salary-payments, POST /api/loans, POST /api/employees and DELETE /api/vouchers against
+// tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
+requireWritableTenant(tenantId, { scriptName: "scripts/smoke-full-write.mjs" });
+
 if (!acknowledged) {
   console.error(
     "Refusing to run without --i-understand-this-posts-to-real-books.\n" +
@@ -66,30 +82,6 @@ if (!acknowledged) {
 //
 // Added after a full-write run went against a live company: the intended test
 // tenant was unreachable, and "--tenant <the other one>" was all it took.
-const declaredTestTenants = (process.env.REAI_WRITE_TEST_TENANTS ?? "")
-  .split(",")
-  .map((t) => t.trim())
-  .filter(Boolean);
-
-if (declaredTestTenants.length === 0) {
-  console.error(
-    "REAI_WRITE_TEST_TENANTS is not set.\n\n" +
-      "This script writes to a live ReAI tenant, so it will only run against a tenant that has\n" +
-      "been explicitly declared safe to write to:\n\n" +
-      "  REAI_WRITE_TEST_TENANTS=2783 node " + process.argv[1].split("/").pop() + " --tenant 2783 ...\n\n" +
-      "Do not list a tenant that holds a real business's books.",
-  );
-  process.exit(2);
-}
-if (!declaredTestTenants.includes(String(tenantId))) {
-  console.error(
-    `Refusing to write to tenant ${tenantId}: it is not in REAI_WRITE_TEST_TENANTS ` +
-      `(${declaredTestTenants.join(", ")}).\n\n` +
-      `If ${tenantId} really is a test tenant, add it there deliberately. If it belongs to a real\n` +
-      `business, this refusal is the point.`,
-  );
-  process.exit(2);
-}
 
 let passed = 0;
 let failed = 0;
@@ -208,17 +200,12 @@ async function main() {
   // to another company posts to THAT company while every guard here passes. Codex found this on
   // PR #114, against a script that only refuses writes; it applies with far more force here, where the
   // next few hundred lines post to the general ledger. Nothing in this repository checked it.
-  const whoamiRes = await client.callTool({ name: "reai_whoami", arguments: {} });
-  const reachable = [...textOf(whoamiRes).matchAll(/\b(\d{4,})\b/g)].map((m) => Number(m[1]));
-  if (!reachable.includes(tenantId)) {
-    console.error(
-      `Refusing to write: the token does not reach tenant ${tenantId}.\n` +
-        `reai_whoami reports ${reachable.join(", ") || "(none)"}.\n\n` +
-        `A token scoped to a single tenant IGNORES X-Tenant-Id, so this run would have posted to\n` +
-        `${reachable[0] ?? "another company"} while --tenant said ${tenantId}.`,
-    );
-    process.exit(2);
-  }
+  // Structured, from /api/me. This read `reai_whoami`'s PROSE and harvested every four-digit number from
+  // it — and src/tools/meta.ts emits "Active tenant is set to 2783, but that id is NOT in this token's
+  // tenant list" when the id is absent, so the warning that the tenant was unreachable contained the number
+  // that made it look reachable. `--tenant 2783` on a token scoped to 2634 passed this check, and this is
+  // the script that posts to the general ledger. Found by review on PR #130.
+  await requireTokenReachesTenant(tenantId, { token, baseUrl: API_BASE });
 
   console.log(`\nFull-write run against tenant ${tenantId} (write mode: full, external send: OFF)`);
   console.log(`Stamp: ${STAMP}\n`);

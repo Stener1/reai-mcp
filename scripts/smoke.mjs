@@ -63,7 +63,17 @@ async function main() {
       ...process.env,
       REAI_USER_API_TOKEN: token,
       ...(arg("tenant") ? { REAI_TENANT_ID: arg("tenant") } : {}),
-      REAI_WRITE_MODE: process.env.REAI_WRITE_MODE ?? "read-only",
+      // FORCED, not forwarded. This script POSTs to /api/vat-returns,
+      // /api/manual-reconciliations/{id}/close, /api/bank-reconciliations/{id}/vouchers and
+      // /api/subscriptions expecting each to be REFUSED, and every one of those assertions is written for
+      // read-only mode ("In read-only mode every write is blocked", below). Forwarding an ambient
+      // REAI_WRITE_MODE=full turned those four into real writes against whatever --tenant said — measured, and
+      // three of them are classified irreversible with no transmission gate to stop them. This script has no
+      // tenant guard, so that reached the protected books.
+      //
+      // The comment further down already says a reversible-mode server pointed at 2634 is "not a check worth
+      // having". Forcing the mode is that reasoning applied to the line that chooses it.
+      REAI_WRITE_MODE: "read-only",
       ...(verbose ? { REAI_VERBOSE: "1" } : {}),
     },
     stderr: verbose ? "inherit" : "pipe",

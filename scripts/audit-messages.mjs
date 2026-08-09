@@ -66,6 +66,8 @@
  *   REAI_USER_API_TOKEN=… REAI_WRITE_TEST_TENANTS=2783 node scripts/audit-messages.mjs --tenant 2783
  */
 
+import { installProtectedTenantFetchGuard, requireWritableTenant } from "./lib/write-guard.mjs";
+
 const args = process.argv.slice(2);
 const tenantArg = args.indexOf("--tenant");
 const tenantId = tenantArg >= 0 ? Number(args[tenantArg + 1]) : undefined;
@@ -82,28 +84,17 @@ if (!tenantId) {
   process.exit(2);
 }
 
-const declaredTestTenants = (process.env.REAI_WRITE_TEST_TENANTS ?? "")
-  .split(",")
-  .map((t) => t.trim())
-  .filter(Boolean);
-if (declaredTestTenants.length === 0) {
-  console.error(
-    "REAI_WRITE_TEST_TENANTS is not set.\n\n" +
-      "Most cases here are refused writes, but three create a customer to refuse against, so this\n" +
-      "runs only against a tenant declared safe to write to:\n\n" +
-      "  REAI_WRITE_TEST_TENANTS=2783 node scripts/audit-messages.mjs --tenant 2783\n\n" +
-      "Do not list a tenant that holds a real business's books.",
-  );
-  process.exit(2);
-}
-if (!declaredTestTenants.includes(String(tenantId))) {
-  console.error(
-    `Refusing to run against tenant ${tenantId}: it is not in REAI_WRITE_TEST_TENANTS ` +
-      `(${declaredTestTenants.join(", ")}).\n\n` +
-      `If ${tenantId} really is a test tenant, add it there deliberately.`,
-  );
-  process.exit(2);
-}
+// The allowlist AND the protected-tenant denylist, in one place for all four writing scripts. Four
+// divergent copies used to check only that --tenant appeared in REAI_WRITE_TEST_TENANTS, which is a
+// consistency check between two operator-supplied values: set both to the same wrong number and every
+// one of them proceeded. Measured — all FOUR did, and between them attempted POST /api/vouchers,
+// POST /api/salary-payments, POST /api/loans, POST /api/employees and DELETE /api/vouchers against
+// tenant 2634 with the env var agreeing. See scripts/lib/write-guard.mjs.
+requireWritableTenant(tenantId, { scriptName: "scripts/audit-messages.mjs" });
+// And a runtime refusal at the socket, because every check above reads a number the caller supplied
+// and the coverage test reads the caller's source. PR #129 established that source-level checks lose to
+// ordinary indirection; this one fires when the request is actually made.
+installProtectedTenantFetchGuard();
 
 const call = async (method, path, body, { omitTenant = false } = {}) => {
   const res = await fetch(baseUrl + path, {

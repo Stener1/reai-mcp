@@ -228,10 +228,22 @@ test("every exemption names a real dependency, so the list cannot rot", () => {
   }
 });
 
-test("the audit refuses a tenant that has not been opted in, and reports a leak as failure", () => {
+test("the audit refuses a tenant that has not been opted in, and reports a leak as failure", async () => {
   const src = readFileSync(AUDIT, "utf8");
-  assert.match(src, /REAI_WRITE_TEST_TENANTS/);
-  assert.match(src, /Refusing to run against tenant/);
+  // The tenant check moved out of this file into scripts/lib/write-guard.mjs, because four scripts each had
+  // their own copy of it and all four checked only that --tenant appeared in REAI_WRITE_TEST_TENANTS — a
+  // comparison between two operator-supplied values, which agreed with the mistake that put a full-write test
+  // on real books. So this asserts the guard is CALLED rather than that a message string is present, and
+  // test/write-guard.test.mjs exercises the guard's behaviour directly.
+  const { default: ts } = await import("typescript");
+  const sf = ts.createSourceFile(AUDIT, src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
+  const calls = sf.statements.filter(
+    (st) =>
+      ts.isExpressionStatement(st) &&
+      ts.isCallExpression(st.expression) &&
+      st.expression.expression.getText(sf) === "requireWritableTenant",
+  );
+  assert.equal(calls.length, 1, "this audit must call requireWritableTenant exactly once at the top level");
   // A stranded record is a failed run, not a warning. DELETE /api/customers/{id} can answer
   // "archived", and an archived customer is invisible to the default list — so the first version could
   // leave a record on real books and still exit 0.
@@ -279,18 +291,34 @@ test("every record-creating script verifies the TOKEN's tenant, not just the arg
   // X-Tenant-Id — so an allowlisted `--tenant 2783` with a token scoped elsewhere writes to that other
   // company while every guard passes. Codex found it on PR #114 against the audit; nothing in the repo
   // checked it, including the two scripts that post to the general ledger. Pinned for all three.
+  // Two shapes are acceptable, because the two smoke scripts moved onto the shared implementation while the
+  // two audits keep their own — and theirs was already correct, reading the structured `tenants` list. What is
+  // NOT acceptable is what the smokes used to do: harvest four-digit numbers out of `reai_whoami`'s prose.
+  // src/tools/meta.ts emits "Active tenant is set to 2783, but that id is NOT in this token's tenant list", so
+  // the warning that a tenant was unreachable contained the number that made it look reachable, and
+  // `--tenant 2783` on a token scoped to 2634 passed. Found by review on PR #130.
   for (const script of [
     "scripts/audit-messages.mjs",
+    "scripts/audit-storage.mjs",
     "scripts/smoke-write.mjs",
     "scripts/smoke-full-write.mjs",
   ]) {
     const src = readFileSync(path.join(ROOT, script), "utf8");
-    assert.match(
-      src,
-      /does not reach tenant/,
+    const shared = /await requireTokenReachesTenant\(/.test(src);
+    const own = /await assertTokenReachesTenant\(\)/.test(src);
+    assert.ok(
+      shared || own,
       `${script} does not verify that the token reaches the tenant it was told to use`,
     );
-    assert.match(src, /IGNORES? X-Tenant-Id/i, `${script} should say why the check matters`);
+    assert.doesNotMatch(
+      src,
+      /matchAll\(\/\\b\(\\d\{4,\}\)\\b\/g\)/,
+      `${script} must not derive reachable tenants from prose — a warning naming an UNREACHABLE tenant ` +
+        `contains that tenant's number`,
+    );
+    // The reason has to be written down wherever the check lives.
+    const where = shared ? readFileSync(path.join(ROOT, "scripts/lib/write-guard.mjs"), "utf8") : src;
+    assert.match(where, /IGNORES? X-Tenant-Id/i, `the check for ${script} should say why it matters`);
   }
 });
 

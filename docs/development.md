@@ -48,6 +48,74 @@ It was written during a multi-hour GitHub Actions outage, when no workflow could
 
 ## Live harnesses
 
+### The tenant guard, and why the old one protected nothing
+
+Every script here that writes calls `requireWritableTenant()` from `scripts/lib/write-guard.mjs`, at the top
+level, before it can issue anything. There are two layers and they do different jobs:
+
+- **an allowlist** — `REAI_WRITE_TEST_TENANTS` must name the `--tenant` being written to. Catches the ordinary
+  typo.
+- **a denylist** — module-private in that module, reachable only through `isProtectedTenant()`. It is
+  **env-addable and never env-removable**: `REAI_PROTECTED_TENANTS` can add your own production tenants, and
+  nothing can take one off the list. It was briefly an exported `Set`, and review defeated the whole guard with
+  one line — `PROTECTED_TENANTS.delete(2634)` in a caller, then 41 non-GET requests to 2634 with every test
+  passing, because `export const` blocks rebinding rather than mutation.
+- **a runtime refusal at the socket** — `installProtectedTenantFetchGuard()` throws on any non-GET whose
+  `X-Tenant-Id` names a protected tenant. The two number-based layers read values the caller supplied and the
+  coverage test reads the caller's *source*; this one fires when the request is actually made. It covers the two
+  audits, which call `fetch` in-process. It does **not** cover the two smoke scripts, which spawn the MCP server
+  — for those the control point is the tenant handed to the child, checked before it starts.
+
+The second layer exists because the first one is not a protection. It compares two values the *operator*
+supplies, so setting both to the same wrong number makes it agree with the mistake — and that is precisely the
+incident this repository already had: a full-write test reached tenant **2634**, a real business's books,
+because the intended test tenant was unreachable and the run was pointed elsewhere. The books were restored
+(37 vouchers, 84 postings, no MV-number gap), but the guard that should have stopped it had approved it.
+
+Measured 2026-08-09, before the denylist existed. With `REAI_WRITE_TEST_TENANTS=2634 --tenant 2634` against a
+local server mimicking `/api/me`, **all four** write scripts proceeded. The first version of this paragraph said
+"three" and listed only master data; review reproduced all four and the real reach is the ledger and payroll:
+
+```
+POST /api/vouchers ×3       DELETE /api/vouchers        POST /api/loans
+POST /api/salary-payments   POST /api/employees         POST /api/company-banks
+POST /api/expenses/{id}/voucher                         POST /api/creditors, /api/debtors
+POST /api/customers         POST /api/suppliers         POST /api/warehouses
+POST /api/subscriptions     POST /api/agreements/rent-agreement
+plus PATCH and DELETE follow-ups on customers, suppliers, warehouses and leads
+```
+
+`POST /api/vouchers` is the shape of the original incident.
+
+There is deliberately **no override flag**. The thing that failed was an environment variable, so adding
+another one would reintroduce it; if a protected tenant ever genuinely needs writing to, that is a code change
+in a diff someone reads. `2634` is not a fact about ReAI — it is this repository's operator's own company, and
+anyone self-hosting should put their own production tenants in that list.
+
+**Two layers, because the number is not the destination.** A token scoped to a single tenant IGNORES
+`X-Tenant-Id`, so both the allowlist and the denylist check a number that may not be where the write lands.
+`requireTokenReachesTenant()` reads the structured `tenants` list from `/api/me` and refuses if the token does
+not reach the declared tenant — or if it reaches exactly one tenant and that one is protected.
+
+It must be the structured list. The version this replaces harvested four-digit numbers out of `reai_whoami`'s
+prose, and `src/tools/meta.ts` emits *"Active tenant is set to 2783, but that id is NOT in this token's tenant
+list"* — so the warning that a tenant was unreachable contained the number that made it look reachable, and
+`--tenant 2783` on a token scoped to 2634 passed. Parse the list, never the sentence.
+
+**`smoke.mjs` forces `REAI_WRITE_MODE=read-only`** rather than forwarding it. It POSTs to `/api/vat-returns`,
+`/api/manual-reconciliations/{id}/close`, `/api/bank-reconciliations/{id}/vouchers` and `/api/subscriptions`
+expecting refusals; with an ambient `full` those became real writes, and that file has no tenant guard. Forcing
+the mode is also what makes its assertions mean anything, since all of them are written for read-only.
+
+**The guard used to be four divergent copies**, one per script. It is one module now, so it cannot drift, and
+`test/write-guard.test.mjs` checks it two ways: the behavioural tests **call** `assertWritableTenant` rather
+than grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and
+fails if one can issue a non-GET without calling the guard. That shape is deliberate — PR #129 spent three
+review rounds watching **one** guard get worded around **seven** different ways, and a new write script that
+forgets the guard is the realistic way this protection would be lost. Verified by removing the guard, hiding it behind an
+`if`, and adding a fresh writing script: each fails the build.
+
+
 These run against the real API, and all of them assert the **negatives** as well as the happy path:
 
 ```bash
@@ -57,7 +125,7 @@ REAI_USER_API_TOKEN=... node scripts/smoke.mjs --tenant 1234
 # The whole OAuth flow against a deployment.
 REAI_USER_API_TOKEN=... node scripts/smoke-http.mjs --url https://…
 
-# WRITES. Reversible master data only.
+# WRITES. Reversible master data only. 2634 is refused whatever these say — see the tenant guard below.
 REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
   node scripts/smoke-write.mjs --tenant 1234
 

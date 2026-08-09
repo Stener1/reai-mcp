@@ -9,6 +9,92 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The tenant guard protected nothing, and every write script could reach tenant 2634.** Found by testing the
+  guard instead of trusting it, before starting work that writes.
+  - Four scripts each carried their own copy of one check: refuse unless `--tenant` appears in
+    `REAI_WRITE_TEST_TENANTS`. That compares two values the **operator** supplies, so it cannot protect
+    anything — set both to the same wrong number and it agrees with the mistake. Which is exactly the incident
+    this repository already had: a full-write test reached 2634, a real business's books.
+  - **Measured against a local server** mimicking `/api/me`, with `REAI_WRITE_TEST_TENANTS=2634 --tenant 2634`,
+    all three runnable write scripts proceeded and attempted `POST /api/customers`, `POST /api/suppliers`,
+    `POST /api/warehouses`, `POST /api/subscriptions`, `POST /api/agreements/rent-agreement` and the matching
+    PATCH/PUT/DELETE follow-ups. Nothing real was touched — every request went to `127.0.0.1` — but against the
+    real base URL those would have landed in the books the hard rule exists to protect.
+  - `scripts/lib/write-guard.mjs` now holds the single check: the allowlist as before, plus a
+    **`PROTECTED_TENANTS` denylist that no environment variable can override**, evaluated first so the refusal
+    names the reason that actually applies rather than "not in the allowlist" — which an operator would fix by
+    adding it. Compared numerically, so `" 2634 "` cannot slip past a string equality.
+  - **No override flag, deliberately.** The thing that failed was an environment variable; another one would
+    reintroduce it. A test asserts the module reads no env var except the allowlist.
+  - Checked the way PR #129 established: the behavioural tests **call** `assertWritableTenant` rather than
+    grepping for its message, and a coverage test **parses every script with the TypeScript compiler** and
+    fails if one can issue a non-GET without calling the guard. Exemptions are listed with reasons and a known
+    writing script may never appear among them. Verified by removing the guard, hiding it behind an `if`, and
+    adding a brand-new writing script — each fails the build.
+  - Four divergent copies collapsed into one module, so the check can no longer drift between scripts. A
+    pre-existing test had pinned the old inline message string; it now asserts the guard is called.
+  - **Codex then found four defects in the fix, two of them P1, and both were real.**
+    - **`smoke.mjs` was exempt from the guard while able to write.** It spawned the server with
+      `REAI_WRITE_MODE: process.env.REAI_WRITE_MODE ?? "read-only"` — forwarding an ambient `full` — and it POSTs
+      to `/api/vat-returns`, `/api/manual-reconciliations/{id}/close`, `/api/bank-reconciliations/{id}/vouchers`
+      and `/api/subscriptions` *expecting refusals*. In full mode three of those are irreversible with no
+      transmission gate, so they became real writes against whatever `--tenant` said, in a file with no tenant
+      guard. It forces `read-only` now, which is also what makes its own assertions mean anything — every one of
+      them is written for that mode. (Codex's named example, `generate-due`, stays blocked by the separate
+      external-send gate; the finding is valid and worse than stated for the other three.)
+    - **The token-reachability check was defeated by the warning that a tenant is unreachable.** Both smoke
+      scripts harvested every four-digit number out of `reai_whoami`'s prose, and `src/tools/meta.ts` emits
+      *"Active tenant is set to 2783, but that id is NOT in this token's tenant list"* — so `--tenant 2783` on a
+      token scoped to 2634 found "2783" in that sentence, passed, and would have written to 2634, because a
+      single-tenant token ignores `X-Tenant-Id`. This matters because it is the one hazard the number-based
+      guards cannot see, and an hour earlier I had cited this check as the layer that covered it. It now reads
+      the structured `tenants` list from `/api/me`, refuses an unrecognised shape rather than assuming success,
+      and separately refuses when the token reaches exactly one tenant and that tenant is protected.
+    - The coverage test only recognised literal HTTP verbs, so a script writing solely through curated tools
+      (`callTool({ name: "reai_create_customer" })`) was invisible to it. It now derives the writing-tool set
+      from each tool's **declared risk** — 95 of 173 — rather than from names.
+    - And its "top level, exactly once" requirement applied only to the four scripts named by hand, so a *new*
+      script could put the guard behind an `if` and pass. That requirement now applies to every detected writer.
+    - Each verified by mutation: re-forwarding the ambient write mode, a new script writing only through a
+      curated tool, a new writer with the guard behind a condition, and reintroducing the prose harvest.
+  - **An independent review then got a write to 2634 three more ways, with every test passing.** All three are
+    closed, and two were in the fix rather than the original code.
+    - **`PROTECTED_TENANTS` was an exported mutable `Set`.** `PROTECTED_TENANTS.delete(2634)` in a caller →
+      **41 non-GET requests to 2634**, tests green. `export const` blocks rebinding, not mutation. The Set is
+      module-private now, reachable only through `isProtectedTenant()`, and `protectedTenants()` hands back a
+      copy — mutating it changes nothing.
+    - **"No override flag, deliberately" was prose, tested by a source regex over `env.X`** — the very pattern
+      this PR argues against. Review added `!process.argv.includes("--force-protected")` to the condition and
+      wrote to 2634 with every test passing. The module must now contain no `process.argv` reference, and a
+      behavioural test pollutes `process.argv` with four plausible hatches and requires the refusal anyway.
+    - **The AST coverage test lost to ordinary indirection and did not recurse.** `const VERB = "POST"`,
+      ``opts.method = `PATCH` `` and a writer in `scripts/lib/` all wrote to 2634 with tests green. It recurses
+      now, and it flags anything **not provably `GET`** rather than enumerating write verbs — being wrong in the
+      safe direction. It also catches `x.method = …` assignments, not just object literals.
+    - Review's other point was the durable one: a source-level check loses, so **a runtime refusal was added at
+      the socket**. `installProtectedTenantFetchGuard()` throws on any non-GET whose `X-Tenant-Id` names a
+      protected tenant, wherever in the file the request came from. It covers the two audits, which fetch
+      in-process; the two smoke scripts spawn the server, so for those the control point remains the tenant
+      handed to the child.
+    - `PROTECTED_TENANTS` is now **env-addable and never env-removable** — review's shape, and better: a
+      self-hoster was inheriting a list protecting this repository's operator's tenant and none of their own,
+      with a test that *forbade* the safe extension. The invariant pinned is "nothing can remove a protected
+      tenant", not "no environment variable is read".
+  - **Corrections to my own account of the incident, all from review.** I said "three runnable write scripts";
+    **four** ran and proceeded. I described the reach as "reversible master data"; it includes
+    `POST /api/vouchers` ×3, `DELETE /api/vouchers`, `POST /api/salary-payments` ×2, `POST /api/loans`,
+    `POST /api/employees`, `POST /api/company-banks`, `POST /api/expenses/{id}/voucher` and
+    `POST /api/creditors`/`debtors` — the general ledger and payroll. `POST /api/vouchers` is the shape of the
+    original incident. I also credited PR #129 with "four review rounds" against "seven regex-based guards"; the
+    repo's own record says **three** rounds and **one** guard worded around **seven** ways.
+  - `smoke-full-write.mjs` checked its `--i-understand-this-posts-to-real-books` flag *before* the guard, so
+    `--tenant 2634` without the flag reported the missing formality and never mentioned that the tenant is
+    protected — teaching the operator to add the flag and meet the real refusal one step later. The guard runs
+    first now.
+  - Re-verified after the change: all four scripts refuse 2634 with the protected message, 2783 still works,
+    and `audit-storage.mjs` against 2783 reports 17 unchanged / 0 drifted with its sweep returning the tenant
+    to 0 suppliers.
+
 - **The read-only quirk audit doubles to 16 cases, and found two more false notes.**
   - `leads-are-the-company-register-not-your-records` claimed the over-cap 400 *"names no field"*. It names it
     precisely — `fieldErrors: [{ field: "pageSize", message: "must be less than or equal to 200" }]` — so the
