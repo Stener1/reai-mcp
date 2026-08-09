@@ -49,6 +49,9 @@ async function run(args, responses) {
 const order = (overrides = {}) => ({
   id: 4105,
   number: "OR-4105",
+  // Present because the handler prefers the API's own URL over a guessed deep link, and that is the branch
+  // that fires live — the first version of this fixture omitted it, so only the fallback was ever exercised.
+  webUrl: "https://app.reai.no/orders/4105",
   status: "open",
   invoiceId: null,
   sendEhf: false,
@@ -73,7 +76,9 @@ const order = (overrides = {}) => ({
       vatTitle: "Utgående 25 %",
       vatRate: 25,
       variantId: null,
-      amounts: { net: 1000, vat: 250, gross: 1250 },
+      // The documented OrderLineAmountsRes shape, not an invented {net,vat,gross} — this is one of the four
+      // fields the PUT does not accept, so getting its shape right is the point of having it here.
+      amounts: { totalAmount: 1250, vatRate: 25, vat: 250, discountAmount: 0, subTotal: 1000, totalExclVatAmount: 1000 },
       accrualEnabled: false,
     },
   ],
@@ -123,7 +128,7 @@ test("sendEhf is never sent, and an order that already has it is refused", async
 });
 
 test("an already-invoiced order is refused rather than replaced on unestablished behaviour", async () => {
-  const { calls, result, text } = await run({ id: 4105, comment: "ZZ" }, () => order({ invoiceId: 771, status: "invoiced" }));
+  const { calls, result, text } = await run({ id: 4105, comment: "ZZ" }, () => order({ invoiceId: 771, status: "closed" }));
   assert.equal(result.isError, true);
   assert.deepEqual(calls.map((c) => c.method), ["GET"]);
   assert.match(text, /invoiceId 771/);
@@ -289,4 +294,11 @@ test("a failed customer read does not undo a write that already succeeded", asyn
   });
   assert.notEqual(result.isError, true, "the PUT succeeded; a failed follow-up read must not report failure");
   assert.match(text, /could not be read/);
+});
+
+test("the link comes from the API's own URL when it returns one", async () => {
+  // The handler prefers res.data.webUrl over a guessed deep link, and that is the branch that fires live.
+  const { result } = await run({ id: 4105, comment: "ZZ" }, (req, n) => (n === 1 ? order() : order()));
+  const link = JSON.stringify(result);
+  assert.match(link, /https:\/\/app\.reai\.no\/orders\/4105/, "the API's own URL must win over a guess");
 });

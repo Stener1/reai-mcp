@@ -1026,9 +1026,13 @@ const updateOrder = defineTool({
     "Like every read-merge-write, this leaves a lost-update window: an edit made in the ReAI UI or by " +
     "another client between the read and the write is silently reverted, lines included. There is no ETag, " +
     "If-Match or version field to prevent it, so it is stated rather than papered over.\n\n" +
-    "An order that has already been invoiced is refused too. The invoice is the legal document and " +
-    "editing the order behind it does not change it; what the API actually does in that case was NOT " +
-    "established, because no invoiced order was available to measure. Stated rather than guessed.",
+    "An order that CARRIES AN invoiceId is refused too — stated that way deliberately, because that is what " +
+    "the code tests. Whether an invoiceId is set only once an invoice has been issued was not established: " +
+    "a draft invoice, or one later credited, would plausibly leave it set, and the documented order status " +
+    "vocabulary is only open|closed. So the refusal may catch an order you could legitimately still edit. " +
+    "The direction is deliberate — the invoice is the legal document, editing the order behind it does not " +
+    "change it, and the remedy for a wrong invoice is reai_credit_invoice — and reai_request will do it if " +
+    "you have decided to.",
   risk: "irreversible",
   apiPaths: [
     ["GET", "/api/orders/{id}"],
