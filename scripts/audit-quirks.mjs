@@ -34,6 +34,19 @@
  * a claim about anything deeper is then reported false on evidence that never touched it. Where a case
  * depends on that ordering it now sends the full valid request and says so.
  *
+ * ## Probe every path the quirk is SERVED for, not the convenient one
+ *
+ * The same failure by another route, and the first version of this file had it twice. A quirk carries a
+ * `paths` list and `quirksFor()` serves it for every entry — so verifying `date-range-required` against
+ * `/api/vouchers` alone left it asserted for `/api/postings` and the nine `/api/ledger/*` endpoints on no
+ * evidence, and `module-gating` was checked on two of the five paths it declares. Each case now declares
+ * `probes`, and `test/quirk-drift.test.mjs` fails unless those cover every path the quirk itself declares.
+ * Adding a path to a quirk therefore breaks the build until the audit probes it.
+ *
+ * `paths` entries can be PREFIXES: `/api/ledger` is not an endpoint — it 404s "No static resource" — it
+ * matches the nine real `/api/ledger/*` operations. So a probe covers a declared path by equalling it or by
+ * sitting beneath it, and a prefix needs a concrete endpoint standing in for it.
+ *
  * ## Three outcomes, and the middle one is the point
  *
  *   OK            the claim still holds
@@ -127,27 +140,39 @@ const DATES = "startDate=2026-01-01&endDate=2026-08-01";
 const CASES = [
   {
     quirk: "date-range-required",
-    claim: "startDate and endDate are required on GET /api/vouchers even though the schema does not say so",
+    claim: "startDate and endDate are required on every path this quirk covers, unmarked in the schema",
     marker: 'Omitting them returns 400 "startDate is required"',
+    // /api/ledger/general stands in for the /api/ledger prefix. The claim held on all five ledger
+    // endpoints when measured; one is enough to notice the rule changing.
+    probes: ["/api/vouchers", "/api/postings", "/api/ledger/general"],
     async check() {
-      const bare = await get("/api/vouchers");
-      if (bare.status === 200) return ["drift", "no date range answered 200; the quirk says it is a 400"];
-      if (bare.status !== 400) return ["inconclusive", `expected 400, got ${bare.status}`];
-      const detail = detailOf(bare);
-      if (!/startdate is required/i.test(detail)) {
-        return ["drift", `400 but the detail is now "${detail.slice(0, 90)}"`];
+      const seen = [];
+      for (const path of this.probes) {
+        const bare = await get(path);
+        if (bare.status === 200) return ["drift", `${path} answered 200 with no date range`];
+        if (bare.status !== 400) return ["inconclusive", `${path} answered ${bare.status}, expected 400`];
+        const detail = detailOf(bare);
+        if (!/startdate is required/i.test(detail)) {
+          return ["drift", `${path} 400s with "${detail.slice(0, 80)}" instead`];
+        }
+        // The claim is that the range is what is missing, so supplying it must also make the call pass.
+        const withRange = await get(`${path}?${DATES}`);
+        if (withRange.status !== 200) {
+          return [
+            "drift",
+            `${path}: the range does not satisfy it either — ${withRange.status} ${detailOf(withRange).slice(0, 60)}`,
+          ];
+        }
+        seen.push(path);
       }
-      // The claim is that the range is required, so the range must also make it pass.
-      const withRange = await get(`/api/vouchers?${DATES}`);
-      return withRange.status === 200
-        ? ["ok", `400 "${detail}" without the range, 200 with it`]
-        : ["drift", `the range does not satisfy it either: ${withRange.status} ${detailOf(withRange).slice(0, 70)}`];
+      return ["ok", `400 "startDate is required" bare and 200 with the range on: ${seen.join(", ")}`];
     },
   },
   {
     quirk: "leads-paginated-object",
     claim: "the three lead collections return three DIFFERENT wrappers, none of them a bare array",
     marker: "{ items, page, hasPrevious, hasNext, latestRegisteredAt }",
+    probes: ["/api/leads", "/api/leads/person-profiles", "/api/leads/person-role-matches"],
     async check() {
       // The note enumerates all three, so all three are checked — the hazard it warns about is assuming
       // they share a shape, which a probe of one endpoint cannot see.
@@ -174,6 +199,7 @@ const CASES = [
     quirk: "person-role-matches-shape",
     claim: "it needs linkedinSlug, refuses without it, and returns no paging fields at all",
     marker: 'omitting it returns a bare 400 "Validation failed" that names nothing',
+    probes: ["/api/leads/person-role-matches"],
     async check() {
       const bare = await get("/api/leads/person-role-matches");
       if (bare.status === 200) return ["drift", "linkedinSlug is no longer required — it answered 200"];
@@ -200,6 +226,7 @@ const CASES = [
     quirk: "warehouse-inventory-object",
     claim: "GET /api/warehouses/inventory returns { warehouseId, rows, totalStockValue, totalRetailValue }",
     marker: "the two totals are already computed",
+    probes: ["/api/warehouses/inventory"],
     async check() {
       const r = await get("/api/warehouses/inventory");
       if (r.status === 403) return ["inconclusive", "403 — the Warehouse module is off on this tenant"];
@@ -219,6 +246,7 @@ const CASES = [
     quirk: "empty-state-is-404",
     claim: "a 404 on these means nothing has been set up yet, and the detail says so in words",
     marker: '"No annual-accounts submission exists for fiscal year 2025"',
+    probes: ["/api/opening-balances", "/api/annual-accounts/2025"],
     async check() {
       // Both details the note quotes, because the claim is that the WORDING carries the meaning.
       const cases = [
@@ -252,32 +280,56 @@ const CASES = [
     quirk: "module-gating",
     claim: "a 403 is a disabled MODULE and the detail names it; share-investments is the empty-body exception",
     marker: 'the detail reads like "Project module is disabled"',
+    probes: [
+      "/api/projects",
+      "/api/warehouses",
+      "/api/timesheets",
+      "/api/salary-payments",
+      "/api/share-investments",
+    ],
     async check() {
-      const projects = await get("/api/projects");
-      if (projects.status === 200) {
-        return ["inconclusive", "the Project module is ON here, so there is no 403 to read the wording of"];
+      // All five, because the claim is about what a 403 MEANS on any of them. Four are enabled on our
+      // tenants and simply answer 200 — not evidence for or against the claim, but evidence the day one of
+      // them starts refusing with wording that means something else.
+      const gated = [];
+      const open = [];
+      for (const path of this.probes) {
+        const r = await get(path);
+        if (r.status === 403) {
+          const detail = detailOf(r);
+          // share-investments is the documented exception: it refuses with an empty body and no detail.
+          if (path === "/api/share-investments" && !detail) {
+            gated.push(`${path} 403 (empty body, as the note says)`);
+            continue;
+          }
+          if (!/module|modul/i.test(detail)) {
+            return ["drift", `${path} 403s with "${detail.slice(0, 80)}", which does not name a module`];
+          }
+          gated.push(`${path} 403 "${detail}"`);
+        } else {
+          open.push(`${path} ${r.status}`);
+        }
       }
-      if (projects.status !== 403) return ["inconclusive", `/api/projects answered ${projects.status}`];
-      const detail = detailOf(projects);
-      if (!/module/i.test(detail)) {
-        return ["drift", `403 but the detail does not mention a module: "${detail.slice(0, 90)}"`];
-      }
-      // The note was corrected on 2026-08-08 to say share investments are NOT gated on these tenants —
-      // a conditional, so it is the half most likely to rot. If it 403s again the note is stale.
-      const shares = await get("/api/share-investments");
-      if (shares.status === 403) {
+      if (gated.length === 0) {
         return [
-          "drift",
-          `/api/share-investments is 403 again; the note says it was re-measured to 200 with an empty list`,
+          "inconclusive",
+          `nothing is gated on this tenant, so no 403 wording could be read: ${open.join(", ")}`,
         ];
       }
-      return ["ok", `/api/projects 403 "${detail}"; /api/share-investments ${shares.status} as re-measured`];
+      // The note was corrected on 2026-08-08 to say share investments are NOT gated on our tenants. A
+      // conditional is the half most likely to rot, so a 403 there now contradicts the note.
+      const shares = await get("/api/share-investments");
+      if (shares.status === 403) {
+        return ["drift", "/api/share-investments 403s again; the note says it was re-measured to 200"];
+      }
+      return ["ok", `gated: ${gated.join("; ")} | open: ${open.join(", ")}`];
     },
   },
   {
     quirk: "timesheets-need-project-module",
     claim: "projectId is required AND rejected at once, so no request succeeds without the module",
     marker: '400 "projectId cannot be used when the Project module is disabled"',
+    probes: ["/api/timesheets"],
     async check() {
       // A FULL request. Sending only projectId trips the date validator first and measures nothing about
       // the module — see the note at the top of this file.
@@ -304,6 +356,7 @@ const CASES = [
     quirk: "tenant-header-ignored-single-tenant",
     claim: "with a token reaching exactly ONE tenant, X-Tenant-Id is ignored",
     marker: "X-Tenant-Id is IGNORED",
+    probes: ["/api/me"],
     // Not answerable from here, and not a gap to be closed by trying harder: verifying it needs a token
     // scoped to ONE tenant, and the only token this repository has reaches four. Left in because the
     // claim is load-bearing — the write scripts' tenant guard exists because of it — so its absence from

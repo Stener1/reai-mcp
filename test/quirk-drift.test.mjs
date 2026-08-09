@@ -62,6 +62,11 @@ function auditCases() {
       // The branch that makes the case able to fail at all.
       canDrift: /return\s*\[\s*"drift"/.test(chunk) || /\[\s*\n?\s*"drift"/.test(chunk),
       conditional: (/conditional:\s*"((?:[^"\\]|\\.)+)"/.exec(chunk) ?? /conditional:\s*'([^']+)'/.exec(chunk))?.[1],
+      // Declared concrete endpoints. Read from the `probes` array so the coverage check below compares
+      // against the quirk's own `paths` rather than against whatever the check() body happens to fetch.
+      probes: [...(/probes:\s*\[([\s\S]*?)\]/.exec(chunk)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(
+        ([, v]) => v,
+      ),
       chunk,
     }))
     .filter((c) => c.quirk);
@@ -222,4 +227,66 @@ test("an unverifiable claim fails the run unless it says WHY it cannot be verifi
       .map((c) => c.quirk)
       .join(", ")}) — raising this number needs a better reason than convenience`,
   );
+});
+
+test("every case probes every path its quirk is SERVED for", () => {
+  // The fragment problem, and this file's own history: `date-range-required` was verified against
+  // /api/vouchers while `quirksFor()` also serves it for /api/postings and the nine /api/ledger/*
+  // endpoints, and `module-gating` was checked on two of the five paths it declares. Both reported OK for
+  // claims that had been tested on part of their surface — the same shape as the shallow-request bug, by
+  // another route.
+  //
+  // Comparing against the quirk's own `paths` is what makes it self-maintaining: add a path to a quirk in
+  // src/reai/quirks.ts and this fails until the audit probes it.
+  // A declared path is covered by a probe that equals it, sits beneath it (`/api/ledger` is a PREFIX, not
+  // an endpoint — it 404s "No static resource" and matches the nine real /api/ledger/* operations), or
+  // instantiates it (`/api/annual-accounts/{year}` is templated, and only a concrete year can be fetched).
+  const covers = (probe, declared) => {
+    if (probe === declared) return true;
+    if (declared.includes("{")) {
+      const pattern = new RegExp(
+        `^${declared.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\{[^}]*\\\}/g, "[^/]+")}$`,
+      );
+      if (pattern.test(probe)) return true;
+    }
+    return probe.startsWith(`${declared}/`);
+  };
+
+  const byId = new Map(QUIRKS.map((q) => [q.id, q]));
+  const gaps = [];
+  for (const c of auditCases()) {
+    const q = byId.get(c.quirk);
+    assert.ok(q, `${c.quirk} is not a known quirk`);
+    assert.ok(c.probes.length > 0, `${c.quirk} declares no probes`);
+
+    for (const declared of q.paths) {
+      if (!c.probes.some((probe) => covers(probe, declared))) {
+        gaps.push(`${c.quirk} is served for ${declared}, which nothing probes`);
+      }
+    }
+
+    // And the converse, so `probes` cannot be padded with unrelated paths to satisfy the check above.
+    for (const probe of c.probes) {
+      assert.ok(
+        q.paths.some((d) => covers(probe, d)),
+        `${c.quirk} probes ${probe}, which is not among the paths that quirk declares (${q.paths.join(", ")})`,
+      );
+    }
+  }
+  assert.deepEqual(gaps, [], "these quirks are asserted to agents on paths the audit never checks");
+});
+
+test("a case that declares many probes actually requests them all", () => {
+  // `probes` is metadata; the guard above compares metadata to metadata. If check() ignores it, the
+  // coverage claim is decoration. The two multi-path cases iterate `this.probes`, so the request set and
+  // the declared set are the same object by construction — assert that rather than trusting it.
+  for (const quirk of ["date-range-required", "module-gating"]) {
+    const c = auditCases().find((x) => x.quirk === quirk);
+    assert.ok(c, `${quirk} case is missing`);
+    assert.match(
+      c.chunk,
+      /for \(const path of this\.probes\)/,
+      `${quirk} must iterate this.probes, or its declared coverage is not what it requests`,
+    );
+  }
 });

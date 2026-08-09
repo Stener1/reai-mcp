@@ -31,11 +31,22 @@ All notable changes to `reai-mcp`. Format loosely follows
     disabled"`. `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
     **ordered**, so an under-specified request trips the first validator and never reaches the layer the claim
     describes. The quirk was right; the probe was shallow. It now sends the full request and a test pins that.
-  - Guards, and the fact that they were **verified by defeating them**: seven mutations — a marker no longer in
-    the note, a nonexistent quirk id, a removed drift branch, a drift branch left only in a comment, a
-    parameterised HTTP method, the shallow timesheets probe, and an exact key comparison downgraded to
-    `includes` — each fails the build, and the file was byte-identical afterwards. The commented-out case is
-    there because that exact trick defeated two assertions in `storage-drift.test.mjs` during #116's review.
+  - **A second fragment bug, found in my own work after the first review round and fixed structurally.** A
+    quirk carries a `paths` list and `quirksFor()` serves it for every entry, so checking
+    `date-range-required` on `/api/vouchers` alone left it asserted for `/api/postings` and the nine
+    `/api/ledger/*` endpoints on no evidence, and `module-gating` was verified on two of its five paths.
+    Cases now declare `probes` and a test fails unless they cover every path the quirk declares, so adding a
+    path to a quirk breaks the build until it is probed. Both `paths` shapes are handled: `/api/ledger` is a
+    **prefix** (not an endpoint — it 404s `"No static resource"`, which I first misread as a dead path in the
+    quirk), and `/api/annual-accounts/{year}` is **templated**. Measured on the way: the claim holds on all
+    five `/api/ledger/*` endpoints and on `/api/postings`. Coverage is now **15 endpoints**, not 8.
+  - Guards, and the fact that they were **verified by defeating them**: eleven mutations — a marker no longer
+    in the note, a nonexistent quirk id, a removed drift branch, a drift branch left only in a comment, a
+    parameterised HTTP method, the shallow timesheets probe, an exact key comparison downgraded to
+    `includes`, a `conditional:` reason too vague to mean anything, a dropped declared path, `probes` padded
+    with an unrelated path, and a `check()` that ignores `this.probes` — each fails the build, and every file
+    was byte-identical afterwards. The commented-out case is there because that exact trick defeated two
+    assertions in `storage-drift.test.mjs` during #116's review.
   - Shape claims compare the **whole wrapper**: `keys.includes("items")` passes on a wrapper that has grown
     three paging fields, and these claims are specifically about which fields are present.
   - An unexpected INCONCLUSIVE exits **3**, matching `audit-storage.mjs`. One case is unanswerable by

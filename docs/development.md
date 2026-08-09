@@ -259,13 +259,24 @@ disabled"`. Sending `GET /api/timesheets?projectId=1` returns 400 `"startDate is
 is about. The probe now sends the full valid request and a test pins that it does. Generalised: a probe
 that sends less than a valid request measures a different claim than the one it reports on.
 
+**Probe every path the quirk is SERVED for.** The same failure by another route, and this file had it
+twice. A quirk carries a `paths` list and `quirksFor()` serves it for every entry, so verifying
+`date-range-required` on `/api/vouchers` alone left it asserted for `/api/postings` and the nine
+`/api/ledger/*` endpoints on no evidence, and `module-gating` was checked on two of its five. Each case now
+declares `probes`, and the test fails unless they cover every path the quirk declares — so adding a path to
+a quirk in `src/reai/quirks.ts` breaks the build until the audit probes it. Coverage handles both shapes
+`paths` uses: `/api/ledger` is a **prefix** (not an endpoint — it 404s "No static resource"), and
+`/api/annual-accounts/{year}` is **templated**, so only a concrete year can be fetched. Padding `probes`
+with an unrelated path fails too, and a `check()` that ignores `this.probes` fails, so the declared
+coverage is what is actually requested.
+
 Each case names its quirk id, a `marker` phrase from that quirk's `note`, and a `check`. The marker is the
 same binding `storage-drift` uses and has the same narrow job — stop a probe outliving the sentence it
 verifies — with the same limitation: `includes` is blind to direction, so **the live run is the only
 authority on whether a claim is true.** The guard adds one thing that file cannot: every case must contain
 a **drift branch**, because a case that can only return OK or INCONCLUSIVE is decoration. Comments are
 stripped before checking, since a commented-out `"drift"` defeated exactly that kind of assertion when
-PR #116 was reviewed. All seven ways of defeating these guards were tried and each fails the build.
+PR #116 was reviewed. All eleven ways of defeating these guards were tried and each fails the build.
 
 An unexpected INCONCLUSIVE exits **3**, as the storage audit does. One case is unanswerable by
 construction rather than by accident — `tenant-header-ignored-single-tenant` needs a token reaching exactly
@@ -274,7 +285,8 @@ ignore. So a case may declare `conditional:` with the missing precondition, and 
 affect the exit status. The reason must be at least twenty characters and name what is missing, and at most
 one case may use the hatch; both are asserted, because it is the field that suppresses a failure.
 
-Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634. The 114 unprobed quirks are mostly
+Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634, across **15 endpoints** — the
+eight quirks between them are served for more paths than they have ids. The 114 unprobed quirks are mostly
 claims about what a write stores or refuses, which needs the test tenant, and that is the next slice.
 
 ### What it does not cover, stated rather than discovered later
