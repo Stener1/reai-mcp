@@ -89,3 +89,71 @@ target that is irreversible or transmitting is now named whatever the previous m
 
 Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
 as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
+
+## More than half the API documents nothing, and prose is worth a flat +3 whatever it says
+
+Measured 2026-08-09: **178 of the 321 public operations carry neither a summary nor a description.** Not thin prose — nothing at all. Verified against the raw document, not just the index: none of the 178 has prose that `scripts/build-spec-index.mjs` dropped, so this is a fact about ReAI's API rather than about the builder.
+
+It shows up as this, identically for "create agreement", "opprett avtale" and "create lease agreement":
+
+```
+19  POST /api/agreements/{id}/sign-request                      irreversible / external
+18  POST /api/agreements/{id}/sign-requests                     irreversible / external
+16  POST /api/agreements/{id}/sign-requests/{signRequestId}/send irreversible / external
+16  POST /api/agreements/accounting-services                    reversible / none
+16  … and the other four creation templates, tied
+```
+
+An agent asking to create a contract is offered three ways to email a counterparty first.
+
+### The mechanism is narrower than it looks, and worth stating exactly
+
+The obvious reading — that the signing call matches more of the query — is **wrong**, and it was the first thing this page claimed. Decomposed:
+
+```
+POST /api/agreements/rent-agreement       path 6 + tag 5 + id 3 = 14   prose 0
+POST /api/agreements/{id}/sign-request     path 6 + tag 5 + id 3 = 14   prose 4.875 -> capped at 3
+```
+
+Both score **14** on structure. The margin is exactly `PROSE_CAP`. Three things follow, none of them what the naive story says:
+
+- The summary's 4.000 is the term **`agreement`** — the *same* term the creation endpoints already match, in the path, the tag and the operation id. It is that word scored a second time, not new evidence.
+- "Send agreement signing **requests**" contributes nothing: `requests` is not a query term in any of the three queries.
+- The description's "**Creates** one signing request…" contributes 0.875, which falls **entirely above the cap**. Delete the description and the score is still 19. The word that looks like the smoking gun is causally inert.
+
+So the bias is not "better documented endpoints match more". It is: **having any prose at all is worth a flat +3, whether or not the prose is about what you asked for** — and where everything else ties, +3 decides it. Strip both prose fields from `sign-request` and it falls to 16, into the tie.
+
+This is not an unknown bias. `PROSE_CAP` and `IDENTITY_BONUS` exist for it and say so at their definitions ("Verbose documentation should not outrank being the right resource"). What this case shows is that the cap bounds the bias without removing it: 3 points is small, and still decisive when 178 operations bring nothing to the other side.
+
+### Three blockers, sequential — and fixing the two obvious ones does not fix the symptom
+
+There is already a rule for this shape: an irreversible or transmitting action hanging off a resource, where the query does not name the action. It does not fire, and would not be enough if it did.
+
+1. **`sign-request` is hyphenated**, and the rule is deliberately scoped to single-word segments, so the block never executes. Removing that scope fails the test pinning it (`test/ranking.test.mjs`, "the demotion is scoped to single-word segments"): it inverts "Apply a manual credit note to an invoice" into the DELETE that *unapplies* it, and drops the rounding-adjustment endpoint for "Settle insignificant invoice outstanding" from rank 2 to 31, outside the default limit.
+2. **Even then the cut is ×0.9, not ×0.45** — 19.0 → 17.1, so it still wins. `familyOffersNonNested` compares `familyOf` values, and `familyOf` truncates at the first `{param}`: the signing call is in family `/api/agreements`, while `/api/agreements/rent-agreement` has no parameter and is its own family. The check that asks "is there a better alternative?" cannot see the five alternatives. Note the order — fixing this *alone* changes nothing, because blocker 1 means the block never runs.
+3. **And fixing both still leaves an external send at rank 1.** Applying both changes, `sign-request` correctly collapses to 8.55 and disappears — and `POST /api/agreements/{id}/sign-requests/{signRequestId}/send` takes its place, exempt for a third reason: `nestedActionSegments` returns **two** segments (`sign-requests`, `send`), so the single-segment requirement excludes it whatever the hyphen guard does. It then wins the 16-point tie on the path tie-break.
+
+An earlier version of this page called blocker 2 "the real defect". That was wrong: it is *a* blocker, and the implied fix path does not fix the reported symptom.
+
+### A third lever, considered and set aside
+
+`isExactly` refuses `IDENTITY_BONUS` to any last path segment containing a hyphen, which is exactly why `POST /api/agreements/rent-agreement` gets no credit for *being* the resource the query names. Dropping that guard fixes all three queries outright — the creation templates come out at 19.5 and take the top places. It also re-breaks the documented `documents` case: `/api/invoice-reception-documents` and `/api/receipt-reception-documents` reach 43.4 and push `/api/documents` out of the top three. So it is not the fix either, but it is the mechanism closest to the actual complaint and should not be left unmentioned.
+
+### One thing tried and rejected: a derived phrase for the bare operations
+
+Give the 178 bare operations a phrase from method plus path, in a separate field so it is never shown as the API's own words, so ranking can see the verb a path cannot carry. The naive form double-counts — it restates resource words the path already scores at 6 — and displaced five known-good answers, including `finn kunde amelding` moving to `/api/customers` from `/api/ledger/customer` and a salary run falling to rank 7. Constrained to contribute **only terms the path lacks**, with no phrase bonus, it reached zero regressions against the committed sweep.
+
+**It was dropped, but the measurement that justified dropping it was weak, and that is worth recording honestly.** A probe of all 178 bare operations, each queried as `<verb> <last path segment>`, returned one improvement and one regression. Four reasons that is thin:
+
+- **Almost no headroom.** Of the 178 bare operations, 129 are *already* at rank 1 on `main` and 176 are already in the top 3; the worst sits at rank 4. "Unchanged: 176" mostly means "already correct". That is structural, not luck: the query is built from the operation's own path, and the path is the heaviest haystack.
+- **The probe assumes its own conclusion.** Constrained to terms the path lacks, the field effectively contributes the verb — and the probe always states the verb, so `writeIntent` and `impliedMethodsFor` always fire. "The verb is already supplied by write intent" is built into the corpus rather than tested by it.
+- **The motivating query was absent, and unwinnable anyway.** `create agreement` is not in the corpus, and simulated as a seventh haystack the creation templates reach 17.31 at weight 3 and 18.63 at weight 6 — equal to the path, the heaviest field there is — still behind 19. Only an indefensible weight 10 wins. The mechanism could not have fixed the defect it was written for.
+- **It used rank-1 only**, the metric this page calls "the least informative alone", for a change whose purpose was making undocumented endpoints *reachable*. An operation moving 9 → 3 counted as unchanged.
+
+Regressions were measured with the committed sweep; benefit with a throwaway script over the same 178 bare operations, which is not committed and so cannot be re-run. So the decision stands on **redundancy with `writeIntent`/`impliedMethods` plus regression risk on a change that could not win the case it was built for** — not on a measured absence of benefit.
+
+### What is actually protecting the live case
+
+Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **60** bare operations no curated tool covers.
+
+One caveat on the table above: among the operations tied at 16, which one is named first comes from `a.path.localeCompare(b.path)`, under which `{` sorts before letters. Codepoint order would put `accounting-services` first. `scripts/build-spec-index.mjs` deliberately refuses `localeCompare` for reproducibility; `searchOperations` does not. And with prose stripped from the whole family, `sign-requests` still comes out first — so "if only ReAI documented these evenly" would not by itself fix the symptom.

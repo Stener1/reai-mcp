@@ -822,3 +822,44 @@ test("a multiword tag and a joined field-name list take the prose rule, not the 
   const nested = "/api/salary-payments/{id}/complete";
   assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", "structural"), 1);
 });
+
+test("the ranking defect docs/discovery.md describes is still present", async () => {
+  // This test EXISTS TO FAIL when the defect is fixed. docs/discovery.md reasons in detail from the table
+  // below — three irreversible external sends above five tied creation endpoints — and nothing asserted it,
+  // so the day someone widens the family notion or drops the identity-bonus hyphen guard the page becomes
+  // false and the suite stays green. If you are reading this because it failed: good. Check whether the
+  // creation endpoints now win, and if so rewrite that section rather than adjusting this test.
+  const { classifyRequest, classifyTransmission } = await import("../dist/policy.js");
+  const CREATION = [
+    "/api/agreements/accounting-services",
+    "/api/agreements/employee-contract",
+    "/api/agreements/purchase-agreement",
+    "/api/agreements/rent-agreement",
+    "/api/agreements/service-agreement",
+  ];
+
+  for (const query of ["create agreement", "opprett avtale", "create lease agreement"]) {
+    const hits = searchOperations({ query, limit: 8 });
+    const top3 = hits.slice(0, 3);
+    for (const hit of top3) {
+      const concrete = hit.path.replace(/\{[^}]+\}/g, "7");
+      assert.match(hit.path, /sign-request/, `"${query}": rank ${hits.indexOf(hit) + 1} is ${hit.path}`);
+      // The reason it matters that these are first, stated as an assertion rather than as prose.
+      assert.equal(classifyTransmission(hit.method, concrete), "external", `${hit.path} should transmit`);
+      assert.equal(classifyRequest(hit.method, concrete), "irreversible", `${hit.path} should be irreversible`);
+    }
+    // And the five creation endpoints tie, which is why the page says "tied for fourth through eighth"
+    // rather than naming an order — the order among them comes from a path tie-break, not from merit.
+    const creation = hits.filter((h) => CREATION.includes(h.path));
+    assert.equal(creation.length, 5, `"${query}": expected all five creation templates in the top 8`);
+    assert.equal(
+      new Set(creation.map((h) => h.score)).size,
+      1,
+      `"${query}": the creation templates no longer tie — docs/discovery.md says they do`,
+    );
+    assert.ok(
+      creation[0].score < top3[2].score || creation[0].score === top3[2].score,
+      `"${query}": a creation endpoint now outscores the third sign endpoint — the defect may be fixed`,
+    );
+  }
+});

@@ -175,6 +175,11 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
         // employee ledger, when /api/timesheets is the endpoint that actually takes
         // projectId and employeeId — the names were there, just never scored.
         [fieldNamesOf(op), 3, false, "prose"],
+        // A seventh haystack was tried here and rejected: a phrase derived from method and path, for the
+        // 178 bare operations that carry NO summary and NO description, so ranking could see the verb a
+        // path cannot carry. Measured across all 178 bare operations: one improvement, one regression —
+        // and at no defensible weight could it win the case it was built for. docs/discovery.md records
+        // the measurement and why it is weaker evidence than it first looks.
       ];
       const phrase = rawTerms.join(" ");
       const matchedResourceTerms = new Set<string>();
@@ -380,6 +385,29 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // untouched, and that includes POST /api/peppol/messages/sendsbdh and POST /api/invoices/reminders/bulk,
       // which both transmit outside the tenant -- the review is right that those are the dangerous class and
       // this does not cover them. Covering them needs its own change and its own measurement.
+      // RE-TESTED 2026-08-09 against a live defect, and the scope below held. Recorded because the case looks
+      // like exactly what this block is for, and because the obvious fix path does NOT fix it.
+      //
+      // "create agreement", "opprett avtale" and "create lease agreement" all answer with three irreversible
+      // EXTERNAL sends in the top three places, ahead of the five endpoints that create an agreement. Three
+      // blockers, and they are SEQUENTIAL rather than independent:
+      //
+      //   1. `sign-request` is hyphenated, so `single` is undefined and this block never runs. Removing that
+      //      restriction fails test/ranking.test.mjs "the demotion is scoped to single-word segments" — it
+      //      inverts "Apply a manual credit note to an invoice" into the DELETE that unapplies it, and drops
+      //      the rounding adjustment for "Settle insignificant invoice outstanding" from rank 2 to 31.
+      //   2. Even then the cut is 0.9, not 0.45 — 19.0 to 17.1, so it still wins — because
+      //      `familyOffersNonNested` cannot see the alternatives. See the note on `familyOf` below, which is
+      //      where that would have to be fixed. Fixing it ALONE changes nothing: blocker 1 comes first.
+      //   3. And fixing both still leaves an external send first. `sign-request` collapses to 8.55 and
+      //      disappears, and POST /api/agreements/{id}/sign-requests/{signRequestId}/send takes its place —
+      //      `nestedActionSegments` returns TWO segments for it, so the single-segment rule excludes it
+      //      whatever happens to the hyphen restriction.
+      //
+      // An earlier version of this note called blocker 2 "the real defect". It is not: it is one of three, and
+      // the fix it points at does not fix the symptom. docs/discovery.md works through the whole case,
+      // including why the margin is exactly PROSE_CAP and a third lever (IDENTITY_BONUS is denied to
+      // hyphenated last segments) that fixes these three queries and re-breaks the `documents` case.
       const actions = nestedActionSegments(op.path);
       const only = actions.length === 1 ? actions[0] : undefined;
       const single = only !== undefined && !only.includes("-") ? only : undefined;
@@ -2079,6 +2107,15 @@ function familyOffersNonNested(index: SpecIndex, path: string, method: string): 
   return known.has(`${familyOf(path)}|${method}`);
 }
 
+/**
+ * NOTE (2026-08-09): truncating at the first parameter is why `familyOffersNonNested` cannot see a sibling
+ * that has no parameter. `/api/agreements/{id}/sign-request` is in family `/api/agreements`, while
+ * `/api/agreements/rent-agreement` is its OWN family — so an irreversible, transmitting nested action is told
+ * "nothing better exists" while five safe alternatives sit next to it. Widening this to the resource root is
+ * the change that would fix it, and it needs its own sweep: this function was NARROWED to the current rule
+ * deliberately, because "first two segments" produced families that were not families. See
+ * docs/discovery.md and the demotion block in searchOperations.
+ */
 /**
  * The resource family: leading path segments up to the first parameter.
  *
