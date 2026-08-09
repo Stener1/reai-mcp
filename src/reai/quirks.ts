@@ -576,11 +576,14 @@ export const QUIRKS: readonly Quirk[] = [
       "wrong twice: the split here is per-FIELD rather than per-endpoint, and other endpoints that clear on " +
       "null were already recorded (PUT /api/leads/{orgNumber}/notes, an employee endDateOfEmployment). The " +
       "rule is that each field on each endpoint has to be measured, not that endpoints disagree.\n\n" +
-      "reai_update_subscription remains unprobed on purpose, and is the one to fix next for a different " +
-      "reason: it reports \"Still armed\" for outputMode, automaticBillingGeneration and sendEhf from what it " +
-      "SENT, so a caller who sends sendEhf: false to stop an unattended invoicing machine and has it " +
-      "discarded is told nothing at all — silence reads as confirmation. Not probed because subscriptions are " +
-      "created ACTIVE, so a throwaway one on a real company could generate an invoice.",
+      "reai_update_subscription used to report \"Still armed\" for outputMode, automaticBillingGeneration and " +
+      "sendEhf from what it SENT, so a discarded disarming produced no note and silence read as confirmation. " +
+      "It reports those from the RESPONSE now, warns when the response disagrees with what was sent in either " +
+      "direction, and says so when the response does not answer. Whether this API ever discards such a value " +
+      "is still unmeasured — not because subscriptions are created active (subscription-created-active " +
+      "measured that an inert one is constructible: automaticBillingGeneration: false is what makes it " +
+      "harmless) but because measuring means creating a subscription on a real company, and the only one on " +
+      "the test tenant is real.",
   },
   {
     id: "order-and-offer-put-rename-the-lines",

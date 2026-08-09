@@ -778,3 +778,43 @@ test("outputMode is read with the coercion-tolerant predicate, which is why it i
   const { text } = await updateArmed({ id: 4, internalComment: "ZZ" }, armed(), armed({ outputMode: 1 }));
   assert.match(text, /Still armed:[^\n]*outputMode/, "the Jackson ordinal must count as create_invoice");
 });
+
+test("an inactive subscription's retained flag is called dormant, not unstopped billing", async () => {
+  // The warning used to tell the caller of an INACTIVE subscription that "the unattended billing is not
+  // stopped" and to run reai_deactivate_subscription — contradicting the branch below it, which correctly
+  // says an inactive one is not billing, and naming the tool it is already the result of.
+  const { text } = await updateArmed(
+    { id: 4, sendEhf: false },
+    armed({ active: false }),
+    armed({ active: false, sendEhf: true }),
+  );
+  assert.match(text, /INACTIVE, so nothing is billing right now/);
+  assert.match(text, /dormant rather than cleared/);
+  assert.doesNotMatch(text, /unattended billing this guards is not stopped/);
+  assert.doesNotMatch(text, /use reai_deactivate_subscription/, "it is already deactivated");
+});
+
+test("a partial response scopes the unknown to the missing flag, not the whole billing state", async () => {
+  // Both notes fired with opposite conclusions: "could not be confirmed" about the subscription while the
+  // next paragraph confirmed the arming it DID answer for.
+  const after = armed();
+  delete after.sendEhf;
+  const { text } = await updateArmed({ id: 4, internalComment: "ZZ" }, armed(), after);
+  assert.match(text, /the state of that flag could not be confirmed/);
+  assert.match(text, /whatever the confirmed ones below say/);
+  assert.match(text, /Still armed:[^\n]*outputMode/, "the answered flags are still reported as confirmed");
+  assert.doesNotMatch(text, /whether this subscription still bills on its own could not be confirmed/);
+});
+
+test("the quirk agent-facing text matches what the tool now does", async () => {
+  // The quirk described the OLD behaviour — computed from what was sent, discarded disarming silent — and is
+  // served by reai_describe_endpoint, so the tool and its own documentation contradicted each other.
+  const { QUIRKS } = await import("../dist/reai/quirks.js");
+  const q = QUIRKS.find((x) => x.id === "order-and-offer-put-ignores-most-nulls");
+  assert.ok(q, "the quirk carrying the subscription note must exist");
+  assert.match(q.note, /reports those from the RESPONSE now/);
+  assert.doesNotMatch(q.note, /is the one to fix next/, "it has been fixed");
+  // And it must not repeat the justification the repo measured to be false.
+  assert.doesNotMatch(q.note, /Not probed because subscriptions are created ACTIVE/);
+  assert.match(q.note, /an inert one is constructible/);
+});

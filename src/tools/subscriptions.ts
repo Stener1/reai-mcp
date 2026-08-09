@@ -715,12 +715,23 @@ const updateSubscription = defineTool({
       .filter(([field, isArmed]) => isArmed(merged[field]) && isArmed(after[field]) && !isArmed(record[field]))
       .map(([, , label]) => label);
 
+    // The active state has to be known here, not just further down: telling the caller of an INACTIVE
+    // subscription that "the unattended billing is not stopped" and to run reai_deactivate_subscription
+    // contradicts the branch below, which correctly says an inactive one is not billing and names the same
+    // tool it is already the result of.
+    const activeState = answered("active") ? after.active : record.active;
+    const knownInactive = activeState !== undefined && activeState !== null && !bindsToTrue(activeState);
     if (notDisarmed.length > 0) {
       notes.push(
         `WARNING: this write sent ${notDisarmed.join(", ")} turned OFF and the subscription came back with ` +
-          `${notDisarmed.length === 1 ? "it" : "them"} STILL SET. The unattended billing this guards is not ` +
-          `stopped. Read the subscription back with reai_get_subscription, and use ` +
-          `reai_deactivate_subscription if the intent was to stop it billing at all.`,
+          `${notDisarmed.length === 1 ? "it" : "them"} STILL SET. ` +
+          (knownInactive
+            ? `The subscription is INACTIVE, so nothing is billing right now — but the flag is dormant rather ` +
+              `than cleared, and activating it would start the machine. Read it back with ` +
+              `reai_get_subscription.`
+            : `The unattended billing this guards is not stopped. Read the subscription back with ` +
+              `reai_get_subscription, and use reai_deactivate_subscription if the intent was to stop it ` +
+              `billing at all.`),
       );
     }
     if (notArmed.length > 0) {
@@ -734,8 +745,9 @@ const updateSubscription = defineTool({
     if (unanswered.length > 0) {
       notes.push(
         `The response did not answer for ${unanswered.map(([f]) => f).join(", ")}` +
-          `${unanswered.some(([f]) => Object.hasOwn(after, f)) ? " (present but null)" : ""}, so whether this ` +
-          `subscription still bills on its own could not be confirmed. This write ` +
+          `${unanswered.some(([f]) => Object.hasOwn(after, f)) ? " (present but null)" : ""}, so the state of ` +
+          `${unanswered.length === 1 ? "that flag" : "those flags"} could not be confirmed` +
+          `${armedNow.length > 0 ? " — whatever the confirmed ones below say" : ""}. This write ` +
           `${unanswered
             .map(([f]) =>
               Object.hasOwn(merged, f) ? `sent ${f}=${JSON.stringify(merged[f])}` : `did not send ${f}`,
@@ -748,7 +760,7 @@ const updateSubscription = defineTool({
       // rather than a reason to assert billing. And read tolerantly — a strict `=== false` sitting under a
       // comment about Jackson coercion made `active: null` assert billing about a stopped subscription, which
       // main got right.
-      const activeAnswer = answered("active") ? after.active : record.active;
+      const activeAnswer = activeState;
       notes.push(
         `Still armed: ${armedNow.join(", ")}, confirmed from the response. ` +
           (armedByThisEdit.length > 0
