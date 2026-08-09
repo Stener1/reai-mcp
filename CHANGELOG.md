@@ -9,6 +9,76 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_list_accounts` is a search that read like a listing, and told agents to conclude the opposite.**
+  - Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on a 399-account chart: **no
+    parameters returns 20 rows**, `limit=5` returns 5, `limit=500` returns **100** (silently capped — the
+    `limit` argument already documented that cap), `query=1320` returns 1. The tool's description ended
+    *"every posting must reference an account that exists in this list"*, which invites an agent that
+    searched, saw 20 rows and missed 1320 to conclude the account does not exist. Same shape as the
+    `includeArchived` defect the quirk audits found: a result that looks unfiltered and is not.
+  - The description now states the default, the cap, that absence from a result is **not** evidence of
+    absence from the chart, and that the chart is per tenant in membership as well as size — measured, 349
+    accounts on one tenant and 399 on another, with account 1320 present on the second and absent from the
+    first.
+  - **My first correction of this description was itself false, and the falsifying evidence was in-tree.**
+    I wrote that the two conditionally-mandatory dimensions are invisible here and that
+    `/api/chart-of-accounts/accounts` "carries no sub-account field at all". Every row carries
+    `subsidiaryLedger`, and the bundled `spec/reai-openapi.json` defines it. Measured on 2634 with
+    `accountNumberPrefix=19`: `1900` with `subsidiaryLedger: null`, then `1920/1337`, `1920/1338`,
+    `1920/1339` each `{type: "bank", id: <companyBankId>}` — and those ids are the company banks exactly.
+    On 2783, `1320/6230` with `{type: "general", id: 6230}`. So `number` is pre-composed in the subledger
+    syntax vouchers accept and `subsidiaryLedger.id` IS the id to post with: the search answers the
+    dimension question in one call. I checked for the field name `generalSubAccounts` — which the *other*
+    endpoint uses — found none, and concluded absence from the wrong name while `subsidiaryLedger` sat in
+    keys I had already printed. Both Codex and the independent review found it.
+  - **An account can be invisible to this search while sitting in the chart**, which is the strongest form
+    of the failure this entry is about and the one my prescribed remedy could not reach. An account that
+    takes a dimension never appears bare, so one with none yet has no rows: measured, tenant 2783 has 1920
+    in its chart and zero company banks, and `accountNumberPrefix=19` returns only 1900. `1300` appears
+    only as `1300/6229` and `1300/6312`. Narrowing and asking again cannot settle existence — reading
+    `GET /api/chart-of-accounts` can, and the description says so.
+  - `reai_create_voucher`'s `companyBankId` argument said the tool cannot pre-check that dimension "because
+    nothing in the company-bank response says which ledger account each bank belongs to". The premise is
+    true — measured, that response carries id, name, bban, iban, currency, providerType and no account
+    number — but the conclusion is wrong: `reai_list_accounts` pairs them. Corrected, and noted as a real
+    improvement not yet made.
+  - The description was rank 1 of 173 by length at 2263 characters, then 3710 after these additions, against
+    a median of 531. Rewritten to 1959 (rank 3, and no longer an outlier), and the retraction narrative moved
+    here — a tool description is not the place for this repository's edit history, and every agent's tool
+    list was being made to carry it.
+  - **A new invariant: every `reai_` name appearing anywhere in `src/` must be a registered tool.** A name
+    that does not resolve is a dead end an agent cannot recover from — it reads as a capability the server
+    has and then does not. The first version swept the registered tool OBJECTS, reading `description` and
+    `inputSchema` only; review got a plausible non-existent `reai_get_account_dimensions` past it in a
+    tool's `title`, in a note a handler RETURNS, and in a quirk note surfaced by `reai_api_notes`. It sweeps
+    the source text now, with a population floor, and both the title and quirk-note variants fail the
+    build.
+  - **A second invariant: a description that points across toolsets is recorded, not accidental.**
+    `REAI_TOOLSETS=bookkeeping` includes `reai_list_accounts` but not `reai_list_company_banks` (that is in
+    `bank`), so the union sweep above could not see the dead end. Sweeping per selection found **19**
+    pre-existing cross-group references — `reai_create_product -> reai_list_vat_codes`,
+    `reai_book_bank_transactions -> reai_list_accounts`, and 17 more. They are not deleted: that is good
+    advice which happens to cross a boundary, and the always-on `reai_request` / `reai_search_endpoints`
+    reach any endpoint. They are enumerated, a new one fails until recorded, and the escape hatch being
+    always-on is itself asserted.
+### Removed
+
+- **Retracted before shipping: a duplicate chart-of-accounts tool.** I set out to close a coverage gap and
+  built `reai_list_chart_of_accounts` on `GET /api/chart-of-accounts`, with local filtering and
+  sub-account annotation. It was a near-duplicate of the existing `reai_list_accounts`, which uses the
+  sibling endpoint `/api/chart-of-accounts/accounts`. The coverage sweep that suggested the gap matched
+  exact `method path` pairs, so a tool on a sibling endpoint read as "uncovered" — the metric was wrong,
+  not the coverage. Removed; what survives is the description fix above, which is the part that was
+  actually broken. Recording it because the failure mode is worth remembering: a coverage number computed
+  by exact-path matching over-reports gaps.
+
+  On the guards: the honest version is that **two** of them caught real defects *inside* the new tool — the
+  `SHAPES_THE_RESPONSE` sweep on four local filters that were never sent, and the empty-vs-shape-surprise
+  sweep on an `Array.isArray(data) ? data : []` that would have read a `{content:[…]}` response as "0
+  accounts". The README/`.env.example`/CHANGELOG count guards fired too, but those detect any *addition*
+  and are satisfied by editing a number; they do not detect duplication. **Nothing in the repo noticed the
+  sibling endpoint** — I caught that myself, and only after building the thing.
+
 - **`npm run audit:quirks:write` — the refusal claims a GET cannot reach.** Six cases against 2783, and it found
   a note half false on its first run.
   - `offer-lines-stricter` said `itemName` and `vatCode` are both required on an offer line "but **optional on an

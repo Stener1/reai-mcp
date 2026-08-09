@@ -389,3 +389,203 @@ test("the documented phrase is found in the raw body too, not only in the messag
   assert.match(r.text, /NO annual-accounts submission exists for 2025/);
   assert.notEqual(r.result.isError, true);
 });
+
+/**
+ * `reai_list_accounts` is a SEARCH that reads like a listing, and its description used to say so.
+ *
+ * Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on tenant 2783:
+ *
+ *   no parameters        -> 20 rows
+ *   ?limit=5             ->  5 rows
+ *   ?limit=500           -> 100 rows   (silently capped; the `limit` argument documents that)
+ *   ?query=1320          ->  1 row
+ *
+ * against a chart of **399** accounts. The old description ended "every posting must reference an
+ * account that exists in this list", which invites an agent that searched, saw 20 rows and missed 1320
+ * to conclude the account does not exist. Same shape as the `includeArchived` defect the quirk audits
+ * found: a result that looks unfiltered and is not.
+ *
+ * Pinned here because the fix is prose, and prose is what rots.
+ */
+test("the accounts search says it is a search, and that absence is not evidence", async () => {
+  const { registeredTools } = await import("../dist/server.js");
+  const t = registeredTools.find((x) => x.name === "reai_list_accounts");
+  assert.ok(t, "reai_list_accounts must exist — five places in src/ tell agents to call it");
+
+  // The wrong inference the old text invited, closed off explicitly.
+  assert.match(
+    t.description,
+    /Absence from a result is not evidence of absence from the chart/,
+    "the wrong inference must be closed off in so many words",
+  );
+  // The retraction itself no longer lives in the description — a tool description is not the place for
+  // this repository's edit history, and an agent's tool list should not have to carry it. The pin that
+  // guarded it was near-vacuous anyway: review appended the old closing sentence in a slightly different
+  // form and the assertion passed, because it matched one em-dash phrasing rather than the claim. What is
+  // pinned instead is the substance — the three independent reasons absence is not evidence — because
+  // those are what the description exists to say, and a rewrite that loses one of them is the regression.
+  assert.doesNotMatch(
+    t.description,
+    /earlier version of this text/,
+    "keep the edit history in CHANGELOG, not in every agent's tool list",
+  );
+  // The bad CLAIM shape, rather than one phrasing of one sentence. The old text invited membership
+  // checking — "an account that exists in this list" — and that inference is wrong however it is worded,
+  // because the list is 20 rows of a chart of hundreds and an account can be missing from it entirely.
+  assert.doesNotMatch(
+    t.description,
+    /in this list/i,
+    "this result is not a list to check membership against; do not invite that reading in any wording",
+  );
+  for (const [claim, pattern] of [
+    ["the 20-row default", /returns 20 rows/],
+    ["the 100 cap", /caps at 100/],
+    ["no paging at all", /no paging at all/],
+    ["an account can be invisible", /never appears bare/],
+    ["the measured invisible case", /zero company banks/],
+    ["per-tenant membership", /349 accounts on one, 399 on another/],
+    ["the exhaustive route", /GET \/api\/chart-of-accounts` through reai_request/],
+  ]) {
+    assert.match(t.description, pattern, `${claim} must stay stated — it is why this description exists`);
+  }
+
+  // The dimensions ARE here, and an earlier version of this description claimed the opposite. Measured:
+  // `accountNumberPrefix=19` on a tenant with three company banks returns 1900 with
+  // `subsidiaryLedger: null` and three 1920 rows — "1920/1337" etc — each carrying
+  // `{type:"bank", id:<companyBankId>}`. So the row is an account-plus-dimension and the id to post with
+  // is in it. Checking for the field name `generalSubAccounts` (which this endpoint does NOT use) is how
+  // that got missed.
+  assert.match(t.description, /subsidiaryLedger/, "the field that carries the dimension must be named");
+  assert.match(t.description, /1920\/1337/, "with the measured example of a composed account number");
+  assert.match(t.description, /companyBankId/);
+  assert.match(t.description, /subAccountId/);
+  assert.doesNotMatch(
+    t.description,
+    /does not tell you what a posting to an account will DEMAND/,
+    "the retracted claim that the dimensions are invisible must not come back",
+  );
+  assert.match(t.description, /reai_sub_accounts_for_account/);
+  assert.match(t.description, /reai_list_company_banks/);
+
+  // And the tool it points at has to exist, or the advice is a dead end.
+  for (const name of ["reai_sub_accounts_for_account", "reai_list_company_banks"]) {
+    assert.ok(
+      registeredTools.some((x) => x.name === name),
+      `${name} is named in the description but is not registered`,
+    );
+  }
+});
+
+/**
+ * Cross-toolset references, recorded rather than banned.
+ *
+ * `REAI_TOOLSETS=bookkeeping` gives 19 tools plus the seven always-on ones. `reai_list_accounts` is in
+ * that selection and `reai_list_company_banks` is not — it is in `bank` — so a description pointing at
+ * it names a tool the agent cannot see. Codex found that on this PR, and the union check below could not
+ * see it because `registeredTools` is every group at once.
+ *
+ * The fix is NOT to delete the references. "Take the VAT code from reai_list_vat_codes" is good advice
+ * that happens to cross a group boundary, and 19 of them already existed before this PR. What matters is
+ * that each is a deliberate, visible choice — so they are enumerated here, and a new one fails until it
+ * is added with the group it lives in. The always-on `reai_request` and `reai_search_endpoints` are the
+ * escape hatch in every narrowed configuration, which is what makes a cross-group reference survivable.
+ */
+const CROSS_GROUP_REFERENCES = new Set([
+  "bookkeeping: reai_list_accounts -> reai_list_company_banks",
+  "bookkeeping: reai_list_sub_accounts -> reai_create_reconciliation_rule",
+  "sales: reai_create_product -> reai_list_vat_codes",
+  "purchase: reai_unarchive_supplier -> reai_unarchive_customer",
+  "purchase: reai_register_supplier_invoice_payment -> reai_list_company_banks",
+  "bank: reai_create_reconciliation_rule -> reai_list_accounts",
+  "bank: reai_create_reconciliation_rule -> reai_list_vat_codes",
+  "bank: reai_book_bank_transactions -> reai_list_accounts",
+  "bank: reai_book_bank_transactions -> reai_list_vat_codes",
+  "bank: reai_create_vat_return -> reai_general_ledger",
+  "organisation: reai_list_employees -> reai_list_postings",
+  "organisation: reai_list_employees -> reai_general_ledger",
+  "organisation: reai_list_employees -> reai_list_expenses",
+  "assets: reai_create_asset -> reai_list_accounts",
+  "subscriptions: reai_create_subscription -> reai_list_customers",
+  "subscriptions: reai_update_subscription -> reai_list_customers",
+  "warehouses: reai_adjust_inventory -> reai_list_products",
+  "investments: reai_add_share_investment_event -> reai_list_vouchers",
+  "investments: reai_add_share_investment_event -> reai_list_company_banks",
+]);
+
+test("a description that points across toolsets is recorded, not accidental", async () => {
+  const { TOOL_GROUPS, selectTools, alwaysOnTools } = await import("../dist/server.js");
+  const always = new Set((alwaysOnTools ?? []).map((t) => t.name));
+  // The escape hatch that makes any of this survivable — if these ever stop being always-on, every
+  // cross-group reference becomes a dead end and this whole allowance has to be revisited.
+  for (const escape of ["reai_request", "reai_search_endpoints", "reai_describe_endpoint"]) {
+    assert.ok(always.has(escape), `${escape} must be always-on for a narrowed toolset to recover`);
+  }
+
+  const found = new Set();
+  for (const group of Object.keys(TOOL_GROUPS)) {
+    const selection = selectTools([group]);
+    const present = new Set([...selection.map((t) => t.name), ...always]);
+    for (const t of selection) {
+      const text = `${t.description ?? ""} ${JSON.stringify(t.inputSchema ?? {})}`;
+      for (const [, ref] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
+        if (ref === t.name || present.has(ref)) continue;
+        found.add(`${group}: ${t.name} -> ${ref}`);
+      }
+    }
+  }
+
+  const added = [...found].filter((f) => !CROSS_GROUP_REFERENCES.has(f));
+  assert.deepEqual(
+    added,
+    [],
+    "these descriptions point at a tool a narrowed REAI_TOOLSETS would not include. That can be fine — " +
+      "the always-on discovery tools reach any endpoint — but say so in the description and add it here.",
+  );
+  const gone = [...CROSS_GROUP_REFERENCES].filter((f) => !found.has(f));
+  assert.deepEqual(gone, [], "these recorded references no longer exist; drop them from the list");
+});
+
+test("every reai_ tool named anywhere in src/ actually exists", async () => {
+  // Sweeping the registered OBJECTS misses most of the places a tool name appears. Review added a
+  // plausible non-existent `reai_get_account_dimensions` to a tool's `title`, to a note the handler
+  // RETURNS, and to a quirk note surfaced by reai_api_notes — and the object sweep saw none of them,
+  // because it reads `description` and `inputSchema` only.
+  //
+  // So sweep the source. A name that does not resolve is a dead end an agent cannot recover from: it
+  // reads as a capability the server has, and then does not.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { registeredTools } = await import("../dist/server.js");
+  const names = new Set(registeredTools.map((t) => t.name));
+
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = `${dir}/${entry}`;
+      if (statSync(full).isDirectory()) walk(full);
+      else if (entry.endsWith(".ts")) files.push(full);
+    }
+  };
+  walk(new URL("../src", import.meta.url).pathname);
+
+  const dangling = new Map();
+  let referencesSeen = 0;
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    for (const [, ref] of text.matchAll(/\b(reai_[a-z0-9_]+)/g)) {
+      referencesSeen += 1;
+      if (!names.has(ref)) dangling.set(ref, file.replace(/.*\/src\//, "src/"));
+    }
+  }
+
+  // A floor, because a sweep that examines nothing passes. Every comparable sweep in this repo has one.
+  assert.ok(
+    referencesSeen >= 300,
+    `only ${referencesSeen} tool references found across ${files.length} source files — the sweep has ` +
+      `stopped matching`,
+  );
+  assert.deepEqual(
+    [...dangling].map(([ref, file]) => `${file}: ${ref}`),
+    [],
+    "these names look like tools and are not registered",
+  );
+});
