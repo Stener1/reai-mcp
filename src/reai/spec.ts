@@ -159,17 +159,22 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
     if (terms.length === 0) {
       score = 1;
     } else {
-      const haystacks: Array<[string, number, boolean?]> = [
-        [op.path.toLowerCase(), 6],
-        [op.tag.toLowerCase(), 5],
-        [(op.summary ?? "").toLowerCase(), 4, true],
-        [(op.description ?? "").toLowerCase(), 2, true],
-        [op.id.toLowerCase(), 3],
+      // The fourth element is how a hyphenated phrase term may match this field. Only the PATH and the operation
+      // ID have their segments adjacent by construction; the review of PR #127 pointed out that the first
+      // version's justification was false for the other two structural fields — there are 26 multiword tags
+      // ("Bank transactions", "Chart of accounts"), and fieldNamesOf joins unrelated parameter names with
+      // spaces, so a term's parts can come from two different parameters. Both take the prose rule.
+      const haystacks: Array<[string, number, boolean?, CompoundMode?]> = [
+        [op.path.toLowerCase(), 6, false, "structural"],
+        [op.tag.toLowerCase(), 5, false, "prose"],
+        [(op.summary ?? "").toLowerCase(), 4, true, "prose"],
+        [(op.description ?? "").toLowerCase(), 2, true, "prose"],
+        [op.id.toLowerCase(), 3, false, "structural"],
         // Parameter and body field names say what an endpoint is ABOUT, often more
         // plainly than its prose. "employee hours on a project" was landing on the
         // employee ledger, when /api/timesheets is the endpoint that actually takes
         // projectId and employeeId — the names were there, just never scored.
-        [fieldNamesOf(op), 3],
+        [fieldNamesOf(op), 3, false, "prose"],
       ];
       const phrase = rawTerms.join(" ");
       const matchedResourceTerms = new Set<string>();
@@ -180,13 +185,41 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // reporting view above the endpoint that actually creates an employee.
       // Verbose documentation should not outrank being the right resource.
       let prose = 0;
-      for (const [text, weight, isProse] of haystacks) {
+      for (const [text, weight, isProse, compoundMode] of haystacks) {
         if (!text) continue;
         const tokens = fieldTokens(text);
         let contribution = 0;
         if (rawTerms.length > 1 && text.includes(phrase)) contribution += weight * 3;
         for (const { term, weight: termWeight, fromPhrase } of terms) {
-          const strength = matchStrength(text, tokens, term, fromPhrase);
+          // Three modes, because the right rule for a hyphenated phrase term differs by haystack. STRUCTURAL
+          // (path, tag, operation id, field names): all parts present, since the segments are adjacent there by
+          // construction. PROSE (summary, description): all parts present AND ADJACENT. OFF for an ordinary
+          // synonym, which must not name an exact compound at all.
+          //
+          // Requiring merely that all parts appear SOMEWHERE let boilerplate score a full 1. Measured over all
+          // 430 operations against every hyphenated phrase replacement: 18 prose matches, of which 14 have the
+          // words adjacent and are correct ("list chart of accounts", "match bank transactions and postings"),
+          // and TWO are wrong:
+          //
+          //     "vat-returns"       vs  GET /api/vat-codes             "returns every vat code supported by reai…"
+          //     "chart-of-accounts" vs  GET /api/general-sub-accounts  "…subsidiary ledger sub-accounts…"
+          //
+          // A first version of this comment claimed 35 and said every one was false, and offered a third example,
+          // `tax-returns` against the wage-specs description. That example was FABRICATED: `tax-returns` comes
+          // only from TERM_SYNONYMS (`skattemelding`), never from a phrase, so it never reached this branch. The
+          // review of PR #127 counted properly. Adjacency is what separates the 14 from the 2 — which is why the
+          // rule is adjacency here rather than exclusion, since excluding prose outright demoted all 14.
+          //
+          // A strength of 1 with weight >= 1 enters matchedResourceTerms, so those bought the uncapped coverage
+          // multiplier — exactly what the 0.2-substring guard three lines below was written to stop. Measured:
+          // 35 such matches, every one in a summary or description.
+          //
+          // Requiring ADJACENCY instead was tried and rejected: it breaks the two terms that deliberately name a
+          // nested path — `salary-payments-complete` for /api/salary-payments/{id}/complete — because the
+          // parameter sits between the segments, and it breaks the singular/plural folding that lets
+          // `salary-payment` match /api/salary-payments. Prose is where the false matches are, and prose is
+          // already flagged here.
+          const strength = matchStrength(text, tokens, term, fromPhrase ? (compoundMode ?? "prose") : "off");
           if (strength === 0) continue;
           contribution += weight * strength * termWeight;
           // A 0.2 bare-substring hit is noise and must not buy the coverage
@@ -2108,12 +2141,17 @@ function namesAction(terms: ReadonlyArray<{ term: string }>, actions: readonly s
   });
 }
 
+/** How a hyphenated term may match this haystack. See the call site for why it differs by field. */
+export type CompoundMode = "off" | "structural" | "prose";
+
 export function matchStrength(
   haystack: string,
   haystackTokens: ReadonlySet<string>,
   term: string,
-  exactCompound = false,
+  compound: CompoundMode | boolean = "off",
 ): number {
+  // `true`/`false` are accepted so the older call shape keeps working; `true` means structural.
+  const mode: CompoundMode = compound === true ? "structural" : compound === false ? "off" : compound;
   if (haystackTokens.has(term)) return 1;
   // A HYPHENATED term can never be a token, because FIELD_TOKENS splits on the hyphen. Every such term was
   // therefore scoring as a fraction of itself, and unevenly — which is what made PHRASE_WEIGHT largely
@@ -2154,9 +2192,29 @@ export function matchStrength(
   //
   // A PHRASE_SYNONYMS replacement is a deliberate high-confidence statement about the user's words and is
   // what this rule exists for. An ordinary synonym is a hint, and a hint must not name an exact compound.
-  if (exactCompound && term.includes("-")) {
+  if (mode !== "off" && term.includes("-")) {
     const parts = term.split("-").filter((p) => p.length > 1);
-    if (parts.length > 1) return parts.every((p) => haystackTokens.has(p)) ? 1 : 0;
+    if (parts.length > 1) {
+      if (mode === "prose") {
+        // ADJACENT in prose, and 0 otherwise — not merely "not a full match". Falling through to the branches
+        // below was the first version of this fix and it left the defect in place for any term whose first
+        // segment is four characters or longer: the prefix branch returns 0.6, which still clears the
+        // matchedResourceTerms threshold and still buys the coverage multiplier. Measured — `chart-of-accounts`
+        // scored 0.6 on "returns general subsidiary ledger sub-accounts…" and left GET /api/general-sub-accounts
+        // at rank 3 for "chart of accounts", unchanged. Only the short-leading terms like `vat-returns` were
+        // fixed, because "vat" is three characters and misses the prefix branch. Codex, PR #127.
+        //
+        // Adjacency is safe HERE and not on the path or the operation id, where a parameter sits between the
+        // segments — `salary-payments-complete` names /api/salary-payments/{id}/complete, written `_id_` in the
+        // id — and neither of those is a sentence. A first version also cited `salary-payment` against
+        // /api/salary-payments as a second such case; it is not one. That term comes from TERM_SYNONYMS (`aga`),
+        // so it never reaches this branch at all. Review of PR #127.
+        const separator = "(?:[^a-z0-9æøå]|\\{[^}]*\\})+";
+        const pattern = new RegExp(`(^|[^a-z0-9æøå])${parts.join(separator)}([^a-z0-9æøå]|$)`);
+        return pattern.test(haystack) ? 1 : 0;
+      }
+      return parts.every((p) => haystackTokens.has(p)) ? 1 : 0;
+    }
   }
   for (const token of haystackTokens) {
     // Plural and inflected forms: "department" in "departments". Restricted to

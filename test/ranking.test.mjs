@@ -724,3 +724,101 @@ test("an action with no better alternative is not pushed out of reach", () => {
   // very thing it guards degraded: an earlier version moved this from rank 8 to 9 and the test said nothing.
   assert.equal(rankOf("aktiver abonnementet igjen", "/api/subscriptions/{id}/activate"), 8);
 });
+
+/**
+ * An exact compound names a PATH, so it is matched against the structural fields only.
+ *
+ * The all-or-nothing rule from PR #120 required merely that every part of a hyphenated term appear SOMEWHERE
+ * in the haystack. In a path or an operation id the segments are adjacent by construction, so that was the same
+ * thing. In prose the words scatter, and boilerplate scored a full 1:
+ *
+ *     "vat-returns"       vs  GET /api/vat-codes             "returns every vat code supported by reai…"
+ *     "tax-returns"       vs  POST …/wage-specs              "…returns the updated salary payment"
+ *     "chart-of-accounts" vs  GET /api/general-sub-accounts
+ *
+ * A strength of 1 with weight >= 1 enters `matchedResourceTerms`, so each of those bought the uncapped coverage
+ * multiplier — exactly what the "a 0.2 bare-substring hit is noise and must not buy the coverage multiplier"
+ * guard was written to stop. Measured: 35 such matches, every one in a summary or a description.
+ *
+ * Found by the independent review of PR #120, which reported it against that PR's first commit and noted the
+ * later scoping did not address it. It did not: `vat-returns` and `tax-returns` ARE phrase replacements, so the
+ * opt-in narrowed the blast radius without touching this.
+ */
+test("an exact compound does not match prose that merely contains its parts", () => {
+  const description = "returns every vat code supported by reai, including its code, rate, and description";
+  const tokens = fieldTokens(description);
+  // Both parts are present, in the wrong order and far apart. Off for prose now.
+  assert.equal(matchStrength(description, tokens, "vat-returns", false), 0);
+
+  // And through the SCORER, which is where the change lives — the two assertions above pass on `main` too,
+  // because they call the primitive with the flag already off. This one does not: on `main`, "mva-melding"
+  // surfaced GET /api/vat-codes at rank 5, on the strength of "returns every vat code…" scoring a full 1 for
+  // the phrase term `vat-returns`. An unrelated resource, reached through boilerplate.
+  const forVatReturn = searchOperations({ query: "mva-melding", limit: 20 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(forVatReturn[0], "POST /api/vat-returns");
+  assert.ok(
+    !forVatReturn.includes("GET /api/vat-codes"),
+    `the VAT CODES list should not be reachable through prose here: ${forVatReturn.slice(0, 6).join(", ")}`,
+  );
+  // And the structural fields, where the segments are adjacent by construction, still score a full match.
+  assert.equal(matchStrength("/api/vat-returns", fieldTokens("/api/vat-returns"), "vat-returns", true), 1);
+  assert.equal(
+    matchStrength("post_api_vat_returns", fieldTokens("post_api_vat_returns"), "vat-returns", true),
+    1,
+  );
+});
+
+test("requiring adjacency instead was rejected, and these are the cases that reject it", () => {
+  // Recorded because adjacency is the obvious fix and it does not work. Two terms deliberately name a NESTED
+  // path, where the parameter sits between the segments — and the singular/plural folding means a term's last
+  // part is often not at a word boundary in the haystack. Both would break.
+  const nested = "/api/salary-payments/{id}/complete";
+  assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", true), 1);
+  const plural = "/api/salary-payments";
+  assert.equal(matchStrength(plural, fieldTokens(plural), "salary-payment", true), 1);
+  // Which is why the a-melding split still resolves the way PR #121 left it.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(top("a-melding").path, "/api/salary-payments/{id}/complete");
+  assert.equal(top("a-melding feedback").path, "/amelding/{id}/feedback-raw");
+  assert.equal(top("vis amelding").path, "/api/salary-payments");
+});
+
+test("the correct prose matches survive, and only the two wrong ones go", () => {
+  // The population matters, and a first version of this work got it wrong in both directions. Measured over all
+  // 430 operations against every hyphenated phrase replacement: 18 prose matches, 14 with the words ADJACENT and
+  // correct, 2 genuinely wrong. The CHANGELOG had claimed 35 and "every one false" — a number built by scanning
+  // every hyphenated string in the source, including term-table values that never reach this branch. The review
+  // of PR #127 counted properly.
+  //
+  // So the rule is adjacency in prose, not exclusion of prose: excluding it outright removed the same 2 and
+  // demoted all 14, which measurably cost `mva-koder` 43.40 -> 40.40 and swapped two ranks under "mva-melding".
+  const top = (q, n = 1) => searchOperations({ query: q, limit: n });
+
+  // The 14, spot-checked at their scores: these are phrases, adjacent in a summary, and must not be demoted.
+  assert.equal(`${top("chart of accounts")[0].method} ${top("chart of accounts")[0].path}`, "GET /api/chart-of-accounts");
+  assert.equal(top("mva-koder")[0].path, "/api/vat-codes");
+  assert.equal(top("mva-koder")[0].score, 43.4, "the blunt prose exclusion cost this 3 points");
+  assert.match(top("bank transactions")[0].path, /bank-transactions/);
+  assert.match(top("annual accounts")[0].path, /annual-accounts/);
+
+  // And the two that were wrong: an unrelated resource reached through scattered words in a description.
+  const chart = top("chart of accounts", 20).map((h) => `${h.method} ${h.path}`);
+  assert.ok(!chart.includes("GET /api/general-sub-accounts"), `general-sub-accounts still present: ${chart.slice(0, 5)}`);
+  const vat = top("mva-melding", 20).map((h) => `${h.method} ${h.path}`);
+  assert.ok(!vat.includes("GET /api/vat-codes"), `vat-codes still present: ${vat.slice(0, 5)}`);
+});
+
+test("a multiword tag and a joined field-name list take the prose rule, not the structural one", () => {
+  // The first version called all four non-prose fields "adjacent by construction". False for two of them, as the
+  // review of PR #127 measured: there are 26 multiword tags, and fieldNamesOf joins unrelated parameter names
+  // with spaces, so a term's parts can arrive from two different parameters — the same non-adjacency, at weight
+  // 3, on the side the rule was leaving alone. Both are on the prose rule now.
+  // A tag whose words ARE adjacent still matches at full strength.
+  assert.equal(matchStrength("bank transactions", fieldTokens("bank transactions"), "bank-transactions", "prose"), 1);
+  // Scattered across a joined field-name list, it does not.
+  const joined = "transactionid bankaccountid postingdate";
+  assert.equal(matchStrength(joined, fieldTokens(joined), "bank-transactions", "prose"), 0);
+  // While the path keeps the structural rule, where a parameter may sit between the segments.
+  const nested = "/api/salary-payments/{id}/complete";
+  assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", "structural"), 1);
+});
