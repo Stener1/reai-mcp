@@ -226,7 +226,8 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "gotcha",
     statuses: [403],
     note:
-      'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
+      'Measured on tenant 2634: GET /api/projects answers 403 with detail "Project module is disabled" — ' +
+      'verbatim. A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
       "this tenant. /api/share-investments is the exception worth knowing: when it refuses it does so " +
       "with an ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
@@ -2096,6 +2097,44 @@ export const QUIRKS: readonly Quirk[] = [
       "customer, and converting a FRESH lead for an org that already has a customer likewise added " +
       "none. The response body is the company record, not the customer, so the new customer id has " +
       "to be read back from the lead's convertedCustomerId.",
+  },
+  {
+    id: "attachments-listed-per-owner-not-globally",
+    // Keyed to the POST, because the registry's own guard refuses a quirk whose operation does not exist — and
+    // the GET on this collection is precisely the one that does not.
+    paths: ["/api/attachments"],
+    methods: ["POST"],
+    kind: "workflow",
+    note:
+      "There is no GLOBAL attachment list — measured, GET /api/attachments answers 405 Method Not Allowed, " +
+      "because only POST exists on this collection. But attachments ARE enumerable per owner, and that is " +
+      "where ids come from: GET /api/orders/{id}/attachments and GET /api/supplier-invoices/{id}/attachments " +
+      "both return arrays of AttachmentRes. Measured on 2634, supplier invoice 5830 returned one " +
+      "(faktura_2026_10009.pdf, 1.7 MB).\n\n" +
+      "Two differences between the two routes are worth knowing. The scoped list leaves `usedBy` NULL, while " +
+      "GET /api/attachments/{id} fills it in — the same attachment read by id came back with " +
+      '`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]` — so to learn what else references a file you must ' +
+      "fetch it by id. And `contentUrl` on the scoped row points at the OWNER path " +
+      "(/api/supplier-invoices/5830/attachments/19780/content), not at /api/attachments/{id}/content.\n\n" +
+      "Also measured: GET /api/attachments/0 answers 400 because the id must be positive, while a " +
+      "valid-but-absent id answers 404, so those two mean different things. And the /ehf parse endpoint " +
+      'answers 400 "Attachment is not a valid EHF XML" on a PDF rather than returning an empty document.',
+  },
+  {
+    id: "paging-parameters-are-ignored-not-refused",
+    paths: ["/api/postings"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "This endpoint takes no paging parameter, and sending one anyway is NOT an error. Measured on tenant 2634 " +
+      "against 160 postings: limit=5, page=2 and size=5 each returned all 160 rows with a 200 and no complaint. " +
+      "So a caller who adds one believes it narrowed a result it did not narrow — the dangerous direction, " +
+      "because nothing signals the mistake. Narrow with the filters the endpoint documents (accountNumber, " +
+      "voucherId, customerId, supplierId, projectId, employeeId, companyBankId), which do work and combine as " +
+      "AND. Of the 78 distinct GET endpoints this server curates, 76 declare no paging parameter at all — the " +
+      "two that do are /api/chart-of-accounts/accounts (limit) and /api/leads (page, pageSize), and both HONOUR " +
+      "it. So paging is absent here and on nearly everything else, but it is not absent everywhere: check " +
+      "whether the tool you are using takes it as an argument.",
   },
 ];
 
