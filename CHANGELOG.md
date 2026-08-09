@@ -9,6 +9,47 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The 40-tool "nobody has checked" list was replaced by a measurement, which found five tools echoing their
+  requests and six that crashed on an unexpected 200.** The previous PR left a ratchet: 40 names, meaning nobody
+  had examined whether each tool's note quotes the request or the record. A ratchet on a hand-kept list is only
+  as good as the hand, so every candidate is now DRIVEN — arguments built from its own zod schema, against a
+  response whose fields disagree with what was sent — and the note read.
+  - **Five echoes, all previously on that list, four declared irreversible.**
+    - `reai_create_asset` named the balance-sheet account the asset would sit on, from `args`.
+    - `reai_create_warehouse` named the warehouse it had just made — and its own description says names are not
+      unique, so the wrong name leaves a caller unable to tell which of two they created.
+    - `reai_set_bank_statement_balance`, `reai_close_manual_reconciliation` and
+      `reai_reopen_manual_reconciliation` each stated the month they were given. This is the family where that is
+      least defensible: this file already documents closing answering
+      409 `"Godkjenning er kun tilgjengelig for 2026-07."`, so the API has its own opinion about which month is
+      in play. *"2026-08 is closed for this account"* is a lock an agent will believe it holds.
+  - **The list is now 3, not 40** — the residue the sampler genuinely cannot construct arguments for, named
+    rather than counted. The first version of that shorter list had **seven** names, carried over from a weaker
+    sampler; four of the extras drive fine, and one of them was `reai_set_bank_statement_balance`, which the
+    sweep caught the moment the list stopped hiding it.
+  - **The sweep was weaker than its own docstring until a mutation battery said so.** Scanning the whole note
+    meant a tool could assert the sent value in its FIRST sentence while a `describeConfirmation` paragraph below
+    mentioned the stored one — and this counted as fine. Reverting `reai_create_asset` to echo its account number
+    survived. Scoped to the headline, it immediately found the two reconciliation tools above. This was caught by
+    the battery, not by a review.
+  - **And the verdict function had no positive control**, so setting its hedge branch to a constant `true`
+    disarmed the whole sweep with every other check green. It is extracted and tested directly now, on five
+    cases including the whole-note one that survived before.
+- **Six tools threw on a 200 whose shape their declared type did not predict — four irreversible.** Driving all
+  172 tools against bodies that keep the keys and break the shapes found `reai_create_expense`
+  (`(expense.costs ?? []).filter` on a non-array), `reai_match_bank_transactions`, `reai_book_bank_transactions`,
+  `reai_add_salary_line` and `reai_get_user`. Every one type-checked, because the declared response types are
+  this repo's reading of the API rather than a promise from it.
+  - The failure shape is what makes it worth a sweep: **the throw happens after the write succeeded**, so the
+    caller is handed something indistinguishable from the call never landing — and an agent's natural next move
+    is to retry an irreversible write.
+  - `?? []` does not help and `?.length` is worse: a string has a length, so a reconciliation field returned as
+    `"oops"` reported **four** transactions booked. Two notes written specifically to avoid a confident wrong
+    count were producing one. `asArray` in `registry.ts` is the single check now.
+  - Kept as a test in `test/list-shape.test.mjs`, whose subject already was "the API returned something I did not
+    expect". The four tools it cannot generate arguments for are asserted by name, because a silent skip is how
+    a sweep stops sweeping.
+
 - **The four tools that still stated an outcome from the request, and the reason the tripwire could not see
   them.** #143 fixed thirteen read-merge-write tools and recorded four more it could not reach. All four now
   report from the record, and the guard that missed them has been rebuilt around a population it derives rather

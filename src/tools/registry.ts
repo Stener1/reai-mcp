@@ -787,6 +787,21 @@ export function mergeForReplacement(opts: {
 export const isRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * The array a response field is DECLARED to be, or none.
+ *
+ * The declared types in this repo are its reading of the API, not a promise from it — so
+ * `(res.data.costs ?? []).filter(...)` type-checks and still throws when the field comes back as anything else.
+ * Driving all 172 tools against a 200 whose array fields were strings found six that threw, four of them
+ * declared irreversible. The shape of the bug is what makes it worth a helper: the throw happens AFTER the
+ * write succeeded, so the agent is handed something indistinguishable from the call never landing.
+ *
+ * `?? []` is not enough and `?.length` is worse — a string has a length, so a field returned as "oops" reported
+ * FOUR transactions reconciled.
+ */
+export const asArray = <T>(value: T[] | readonly T[] | undefined | null): T[] =>
+  Array.isArray(value) ? (value as T[]) : [];
+
 /** What a response came back as, for a note that has to say why nothing could be read from it. */
 export function describeShape(v: unknown): string {
   if (v === undefined) return "no body";

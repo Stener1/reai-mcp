@@ -181,16 +181,34 @@ const createWarehouse = defineTool({
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request({
       method: "POST",
       path: "/api/warehouses",
       body: { name: args.name },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
+    // The stored name, for the same reason as reai_rename_warehouse alongside it: `WarehouseRes` carries it,
+    // and this API is documented as storing a name title-cased. Found by driving every unexamined tool with a
+    // response that disagreed with the request — which is also why the name matters here specifically: the
+    // description immediately below says names are NOT unique, so telling a caller the wrong one leaves them
+    // unable to identify which of two warehouses they just made.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const storedName = record?.name;
     return ok(res.data, {
-      note:
-        `Created warehouse ${res.data?.id ?? "?"} (${args.name}). It holds no stock yet; use ` +
-        `reai_adjust_inventory to put stock in it.`,
+      note: [
+        `Created warehouse ${record?.id ?? "?"} (` +
+          (storedName === undefined || storedName === null
+            ? `${JSON.stringify(args.name)} as SENT — ` +
+              (record === undefined
+                ? `the response came back as ${describeShape(res.data)}`
+                : `the response does not carry the name`)
+            : `${JSON.stringify(storedName)}, read back from the response`) +
+          `). It holds no stock yet; use reai_adjust_inventory to put stock in it.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, record, { wholeRecord: true }),
+          `warehouse ${record?.id ?? "?"}`,
+        ),
+      ].join("\n\n"),
     });
   },
 });

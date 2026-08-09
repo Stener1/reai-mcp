@@ -387,7 +387,7 @@ Two populations, both derived rather than listed by hand, and both enforced by
 | population | how it is found | state |
 |---|---|---|
 | read-merge-write | declares a `GET` **and** a `PUT`/`PATCH` | 13 tools, 11 certified against the response, 2 recorded as unverified with the reason |
-| not a merge tool | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts, at ANY depth | 47 tools, 7 proven, 40 **not examined** |
+| not a merge tool | a write endpoint answers with a schema carrying a field the tool's own `inputSchema` accepts, at ANY depth | 47 tools, 7 proven, 3 **not examined** |
 
 The second row is the blind spot that let tools echo their arguments through five rediscoveries. Three refinements
 were each forced by a tool that escaped:
@@ -403,10 +403,29 @@ were each forced by a tool that escaped:
 Identity fields (`id`, `orgNumber`) are excluded — they go out in the path and come back unchanged whatever the
 API did with the payload, so they confirm nothing.
 
-The 40 is a **ratchet**: it may fall and must never rise. Being on that list is a statement that nobody has
-checked whether the tool quotes the request or the record — not that it is fine. Most are `create` tools, where
-the question is softer, because a caller who supplied every field has more reason to re-read anyway than one
-whose carried field was destroyed without mention.
+That third column used to read **40 not examined**, and it was a list of names meaning "nobody has checked". A
+ratchet on a hand-kept list is only as good as the hand, so it was replaced by a **measurement**: every candidate
+is driven with arguments built from its own schema against a response whose fields DISAGREE with the request,
+and the note is read. Three outcomes — it states the stored value (good), it states the sent one (a defect), or
+it mentions neither (no claim to be wrong about).
+
+That found five tools echoing their arguments, all of which had been sitting on the list:
+`reai_create_asset` (irreversible, and the field was the balance-sheet account carrying the asset),
+`reai_create_warehouse` (whose own description says names are not unique, so the wrong name leaves a caller
+unable to tell which of two they just made) and the three manual-reconciliation tools —
+`reai_set_bank_statement_balance`, `reai_close_manual_reconciliation` and `reai_reopen_manual_reconciliation`,
+all irreversible, in the one family where this repo already documents the API having its own opinion about which
+month is in play (`"Godkjenning er kun tilgjengelig for 2026-07."`). A note reading "2026-08 is closed for this
+account" when the record says otherwise is a lock an agent will believe it holds.
+
+The last three were found only after the sweep was **scoped to the headline**. Reading the whole note let a tool
+assert the sent value in its first sentence while a confirmation paragraph below mentioned the stored one — and
+the sweep called that fine. A mutation battery caught that, not a review.
+
+What is left on the list is the residue the sweep genuinely cannot construct arguments for — 3 tools, named
+rather than counted. **What the sweep cannot see:** a note that RE-FORMATS the value it echoes reads as "mentions
+neither", so a green sweep means no tool echoes a value *verbatim*, not that every note is honest. The
+hand-written certifications remain the stronger per-tool evidence.
 
 Counter-examples elsewhere, all measured: `PUT /api/leads/{…}/notes` clears on null, so does an employee's `endDateOfEmployment`, and so does `bankAccountNumber` on `PUT /api/creditors/{id}` — cleared by a null, by omitting the field and by an empty string alike, on three throwaway creditors. Creditors therefore fall in the **plain replacement** family above, with `buyerReference`, rather than in the comment family. **The split is per-field, not per-endpoint** — which is the rule, and the reason each field has to be measured where it matters.
 

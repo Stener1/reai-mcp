@@ -431,57 +431,29 @@ const READS_BACK_FROM_RESPONSE = {
 };
 
 /**
- * NOT examined. Being here is a statement that nobody has checked whether this tool's note quotes the request
- * or the record — not that it is fine. The list may only ever shrink, which is what makes it a ratchet rather
- * than a TODO: moving one out requires a test that drives a disagreeing response.
+ * The tools the behavioural sweep below cannot generate arguments for, and therefore cannot judge.
  *
- * Most are `create` tools, where the question is real but softer — a caller who just supplied every field has
- * more reason to re-read than one whose carried field was destroyed without mention. That is a reason to do
- * them second, not a reason to call them done.
+ * This list used to hold 40 names and mean "nobody has checked". It was a ratchet, and a ratchet on a hand-kept
+ * list is only ever as good as the hand. Driving every candidate against a response that DISAGREED with the
+ * request replaced 40 assertions with 40 measurements, and found two tools echoing their arguments —
+ * `reai_create_asset` (irreversible, and the field was the balance-sheet account carrying the asset) and
+ * `reai_create_warehouse` (whose own description says names are not unique, so naming the wrong one leaves a
+ * caller unable to tell which of two they just made).
+ *
+ * What remains here is the residue the sweep genuinely cannot reach: a schema whose required shape the sampler
+ * cannot construct. That is a real gap, not a soft one, so it is named rather than counted.
  */
-const NOT_ESTABLISHED = [
-  "reai_add_share_investment_event",
-  "reai_adjust_inventory",
-  "reai_apply_reconciliation_rules",
-  "reai_book_bank_transactions",
-  "reai_close_manual_reconciliation",
-  "reai_create_agreement",
-  "reai_create_asset",
-  "reai_create_company_bank",
-  "reai_create_creditor",
-  "reai_create_customer",
-  "reai_create_customer_contact",
-  "reai_create_debtor",
-  "reai_create_department",
-  "reai_create_employee",
-  "reai_create_expense",
-  "reai_create_invoice_from_order",
-  "reai_create_offer",
-  "reai_create_order",
-  "reai_create_loan",
-  "reai_create_product",
-  "reai_create_reconciliation_rule",
-  "reai_create_salary_run",
-  "reai_create_share_investment",
-  "reai_create_subscription",
-  "reai_create_supplier",
-  "reai_create_supplier_invoice",
-  "reai_create_voucher",
-  "reai_create_warehouse",
-  "reai_credit_invoice",
-  "reai_match_bank_transactions",
-  "reai_register_supplier_invoice_payment",
-  "reai_reopen_manual_reconciliation",
-  "reai_set_bank_statement_balance",
-  "reai_update_customer",
-  "reai_update_customer_contact",
-  "reai_update_debtor",
-  "reai_update_department",
-  "reai_update_employee",
-  "reai_update_expense",
-  "reai_update_supplier",
-];
+/** Filled by the classification test, read by the sweep, so the population is derived in one place. */
+const CANDIDATES = [];
 
+const NOT_ESTABLISHED = [
+  // MEASURED, not guessed. The first version of this list had seven names in it, carried over from a weaker
+  // sampler; the four extras are driven fine and one of them, `reai_set_bank_statement_balance`, turned out to
+  // be echoing its month — which the sweep then caught the moment the list stopped hiding it.
+  "reai_create_agreement",
+  "reai_create_subscription",
+  "reai_create_voucher",
+];
 test("a write tool whose response could answer for it is classified, GET or no GET", async () => {
   const { readFileSync, existsSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
@@ -566,16 +538,15 @@ test("a write tool whose response could answer for it is classified, GET or no G
     .map((t) => t.name)
     .sort();
 
-  const classified = new Set([...Object.keys(READS_BACK_FROM_RESPONSE), ...NOT_ESTABLISHED]);
-  const missing = candidates.filter((n) => !classified.has(n));
-  assert.deepEqual(
-    missing,
-    [],
-    `these tools write, and the response they get back carries a field they accept — so they CAN state what ` +
-      `was stored. Decide whether each does, and add it to READS_BACK_FROM_RESPONSE with the test that ` +
-      `proves it, or to NOT_ESTABLISHED: ${missing.join(", ")}`,
+  // The population is exported for the behavioural sweep in the next test, which is what actually judges the
+  // members. This test's remaining job is the two lists: nothing stale in them, and no candidate is BOTH
+  // hand-certified and parked as unreachable.
+  CANDIDATES.push(...candidates);
+  const both = Object.keys(READS_BACK_FROM_RESPONSE).filter((n) => NOT_ESTABLISHED.includes(n));
+  assert.deepEqual(both, [], `certified and parked as unreachable at once: ${both.join(", ")}`);
+  const stale = [...Object.keys(READS_BACK_FROM_RESPONSE), ...NOT_ESTABLISHED].filter(
+    (n) => !candidates.includes(n),
   );
-  const stale = [...classified].filter((n) => !candidates.includes(n));
   assert.deepEqual(stale, [], `no longer in this population (renamed, or gained a GET): ${stale.join(", ")}`);
 
   // The numbers in docs/tools.md are ENFORCED here, because the last commit moved this population and left
@@ -587,21 +558,6 @@ test("a write tool whose response could answer for it is classified, GET or no G
     doc.includes(`${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} **not examined**`),
     `docs/tools.md must say "${candidates.length} tools, ${proven} proven, ${NOT_ESTABLISHED.length} ` +
       `**not examined**" for this census; update it when the population moves`,
-  );
-
-  // The ratchet. It may fall and must never rise for a FIXED population: a new tool that quotes its request
-  // instead of the record cannot be parked here without the number moving, which is the visible act the first
-  // version lacked.
-  //
-  // It moved once, from 35 to 40, and the reason belongs here rather than in a commit message: review found the
-  // census itself too narrow twice over — it read only 200/201 responses, and it excluded any tool declaring a
-  // GET when the other census only owns GET-plus-PUT/PATCH. Widening it made five tools visible that had been
-  // falling between the two lists. Nothing regressed; the guard simply started seeing further. A rise for any
-  // other reason is the thing this asserts against.
-  assert.ok(
-    NOT_ESTABLISHED.length <= 40,
-    `NOT_ESTABLISHED grew to ${NOT_ESTABLISHED.length}. A new tool reporting from its request is the thing ` +
-      `this file exists to stop; fix it, or widen the ceiling only alongside a stated reason like the one above.`,
   );
 
   // What this can and cannot check, stated honestly, because the version of this comment on the merge-tool
@@ -667,4 +623,258 @@ test("a write tool whose response could answer for it is classified, GET or no G
         `thing that would make it a proof for ${name}`,
     );
   }
+});
+
+/**
+ * Did this headline state the sent value as fact?
+ *
+ * Extracted from the sweep so it can be tested on its own. It has to be: setting its hedge branch to a constant
+ * `true` disarmed the entire sweep and every other check stayed green — a guard nothing guards.
+ *
+ * Only the HEADLINE matters. Scanning the whole note meant a tool could assert the sent value in its first
+ * sentence while a `describeConfirmation` paragraph below mentioned the stored one, and this called it fine;
+ * reverting `reai_create_asset` to echo its account number survived exactly that way.
+ */
+function judgeHeadline(headline, note, sentValue, storedValue) {
+  // "as SENT", "not what is stored", "unconfirmed" — the wording this repo uses when it declines to vouch for a
+  // figure. A headline carrying one of those is not asserting the value, it is flagging it.
+  const hedged = /\bSENT\b|not what is stored|unconfirmed|could not/.test(headline);
+  if (headline.includes(sentValue) && !headline.includes(storedValue) && !hedged) return "echo";
+  if (note.includes(storedValue)) return "read";
+  return "neither";
+}
+
+test("the sweep's own verdict function distinguishes an echo from a hedge from a read-back", () => {
+  // The positive controls. Without these, `hedged = true` (or any other short-circuit) leaves the sweep green
+  // while it measures nothing — which is how the version before this one behaved under mutation.
+  assert.equal(
+    judgeHeadline("Warehouse 4 is now named Lager A.", "Warehouse 4 is now named Lager A.", "Lager A", "STORED"),
+    "echo",
+    "a headline stating the sent value, with the stored value nowhere, is an echo",
+  );
+  assert.equal(
+    judgeHeadline('Sent "Lager A" as SENT.', 'Sent "Lager A" as SENT.', "Lager A", "STORED"),
+    "neither",
+    "naming the sent value while marking it SENT is not an assertion",
+  );
+  assert.equal(
+    judgeHeadline("Warehouse 4 is now named STORED.", "Warehouse 4 is now named STORED.", "Lager A", "STORED"),
+    "read",
+    "a headline stating the stored value is a read-back",
+  );
+  assert.equal(
+    judgeHeadline("Renamed to Lager A.", "Renamed to Lager A.\n\nWARNING: came back with STORED", "Lager A", "STORED"),
+    "echo",
+    "a warning further down does NOT excuse a headline that asserts the sent value — this is the case that " +
+      "survived mutation before the verdict was scoped to the headline",
+  );
+  assert.equal(
+    judgeHeadline("Nothing about the field.", "Nothing about the field.", "Lager A", "STORED"),
+    "neither",
+    "a note that mentions neither makes no claim",
+  );
+});
+
+/**
+ * The measurement that replaced a 40-name list of "nobody has checked".
+ *
+ * Every candidate is driven with arguments built from its own schema, against a response whose overlapping
+ * fields carry SENTINEL values distinct from what was sent. Then the note is read:
+ *
+ *   ECHOES   the sent value appears and the stored one does not. A defect: the note states as fact something
+ *            the response contradicted. Two were found this way — `reai_create_asset`, which named the
+ *            balance-sheet account the asset would sit on and is declared irreversible, and
+ *            `reai_create_warehouse`, whose own description says names are not unique.
+ *   READS    the stored value appears. Good, whether or not the sent one is also named for contrast.
+ *   NEITHER  the note does not mention the field at all, so it makes no claim to be wrong about. Acceptable.
+ *
+ * What this cannot see, stated so the pass is not read as more than it is: a note that RE-FORMATS the value it
+ * echoes — a currency rendered with a thousands separator, a date rendered long-form — looks like NEITHER. So
+ * a green sweep means "no tool echoes a value verbatim", not "every note is honest". The hand-written
+ * certifications in READS_BACK_FROM_RESPONSE remain the stronger evidence, per tool.
+ */
+test("no candidate tool states a sent value the response contradicted", async () => {
+  const { z } = await import("zod");
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  const schemas = spec.components.schemas;
+
+  assert.ok(
+    CANDIDATES.length > 0,
+    "the population is empty — this sweep depends on the classification test above having run first, and " +
+      "an empty list would make it pass while measuring nothing",
+  );
+
+  const fieldsOf = (schema, depth = 0, seen = new Set()) => {
+    if (!schema || depth > 4) return [];
+    if (schema.$ref) {
+      const name = schema.$ref.split("/").pop();
+      return seen.has(name) ? [] : fieldsOf(schemas[name], depth, new Set([...seen, name]));
+    }
+    const names = [];
+    for (const member of schema.allOf ?? []) names.push(...fieldsOf(member, depth, seen));
+    if (schema.items) names.push(...fieldsOf(schema.items, depth + 1, seen));
+    for (const [key, prop] of Object.entries(schema.properties ?? {})) {
+      names.push(key);
+      names.push(...fieldsOf(prop, depth + 1, seen));
+    }
+    return names;
+  };
+  const overlapOf = (tool) => {
+    const accepts = new Set(Object.keys(tool.inputSchema ?? {}));
+    const hits = new Set();
+    for (const [method, path] of (tool.apiPaths ?? []).filter(([m]) =>
+      ["PUT", "PATCH", "POST"].includes(m),
+    )) {
+      const op = spec.paths[path]?.[method.toLowerCase()];
+      for (const [code, body] of Object.entries(op?.responses ?? {})) {
+        if (!/^2\d\d$/.test(code)) continue;
+        for (const media of Object.values(body?.content ?? {}))
+          for (const f of fieldsOf(media?.schema)) if (accepts.has(f) && !IDENTITY_FIELDS.includes(f)) hits.add(f);
+      }
+    }
+    return [...hits];
+  };
+
+  const pick = (schema, key, depth = 0) => {
+    const def = schema?._def;
+    if (!def || depth > 4) return { skip: true };
+    const kind = def.typeName;
+    if (kind === "ZodOptional" || kind === "ZodNullable" || kind === "ZodDefault") return { optional: true };
+    if (kind === "ZodEffects") return pick(def.schema, key, depth + 1);
+    if (kind === "ZodEnum") return { value: def.values[0] };
+    if (kind === "ZodNativeEnum") return { value: Object.values(def.values)[0] };
+    if (kind === "ZodLiteral") return { value: def.value };
+    if (kind === "ZodBoolean") return { value: false };
+    if (kind === "ZodNumber") return { value: (def.checks ?? []).some((c) => c.kind === "int") ? 7 : 7.5 };
+    if (kind === "ZodString") {
+      const checks = def.checks ?? [];
+      const pattern = checks.find((c) => c.kind === "regex")?.regex;
+      if (pattern) {
+        for (const c of ["2026-08-09", "2026-08", "1500", "NO", "NOK", "12345678901", "930000000", "0150", "ZZ"])
+          if (pattern.test(c)) return { value: c };
+        return { skip: true };
+      }
+      if (/date/i.test(key)) return { value: "2026-08-09" };
+      const max = checks.find((c) => c.kind === "max")?.value ?? 40;
+      return { value: "ZZ probe".slice(0, Math.max(2, Math.min(max, 40))) };
+    }
+    if (kind === "ZodArray") {
+      const inner = pick(def.type, key, depth + 1);
+      if (inner.skip || inner.optional) return (def.minLength?.value ?? 1) > 0 ? { skip: true } : { value: [] };
+      return { value: [inner.value] };
+    }
+    if (kind === "ZodObject") {
+      const out = {};
+      for (const [k, v] of Object.entries(def.shape())) {
+        const r = pick(v, k, depth + 1);
+        if (r.optional) continue;
+        if (r.skip) return { skip: true };
+        out[k] = r.value;
+      }
+      return { value: out };
+    }
+    if (kind === "ZodUnion") {
+      for (const option of def.options) {
+        const r = pick(option, key, depth + 1);
+        if (!r.skip && !r.optional) return r;
+      }
+      return { skip: true };
+    }
+    return { skip: true };
+  };
+
+  const echoes = [];
+  const reads = [];
+  const undrivable = [];
+  for (const name of CANDIDATES) {
+    // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
+    // handles nuance it cannot. Concretely: `reai_add_salary_line` and `reai_log_lead_contact` identify their
+    // row by MATCHING, and when nothing matches they correctly state the sent values labelled `SENT` beside a
+    // warning — which this sweep reads as an echo, because the sentinel never appears. Flagging honest tools
+    // would train the sweep to be ignored.
+    //
+    // The exemption is not free: READS_BACK_FROM_RESPONSE requires a test that opens with the named title, in
+    // the file importing the tool's own module, naming the tool outside comments, asserting something, and
+    // asserting on what the response said versus what was sent. Writing the real test is cheaper than faking
+    // that.
+    if (Object.hasOwn(READS_BACK_FROM_RESPONSE, name)) continue;
+    const tool = registeredTools.find((t) => t.name === name);
+    const args = { tenantId: 2783 };
+    let blocked = false;
+    for (const [key, schema] of Object.entries(tool.inputSchema ?? {})) {
+      if (key === "tenantId") continue;
+      const r = pick(schema, key);
+      if (r.optional) continue;
+      if (r.skip) { blocked = true; break; }
+      args[key] = r.value;
+    }
+    const parsed = blocked ? undefined : z.object(tool.inputSchema ?? {}).safeParse(args);
+    if (!parsed?.success) { undrivable.push(name); continue; }
+
+    const record = { id: 4242 };
+    const sent = new Map();
+    for (const field of overlapOf(tool)) {
+      const value = parsed.data[field];
+      if (value === undefined || value === null) continue;
+      sent.set(field, value);
+      record[field] =
+        typeof value === "number" ? 999777 : typeof value === "boolean" ? !value : "SENTINEL_STORED";
+    }
+    let note = "";
+    try {
+      const result = await tool.handler(parsed.data, {
+        client: { request: async () => ({ data: record, status: 200 }), deepLink: () => "link" },
+        config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+        session: {},
+      });
+      note = (result.content ?? []).map((c) => c.text ?? "").join("\n");
+      // The prose only. The full record is appended to every result, so the sentinel appears in it whatever
+      // the note says — the same whole-text-versus-note trap that has produced four bad assertions here.
+      const body = note.indexOf("\n{");
+      if (body > 0) note = note.slice(0, body);
+    } catch {
+      undrivable.push(name);
+      continue;
+    }
+    // The HEADLINE, not the whole note. This is the correction a mutation battery forced: scanning the whole
+    // note meant a tool could state the sent value as fact in its first sentence while a `describeConfirmation`
+    // paragraph mentioned the stored one further down, and this sweep called that fine. Reverting
+    // `reai_create_asset` to echo its account number survived, because its own warning paragraph named the
+    // sentinel. So the sweep was measuring "does the note mention the record at all" — not the defect.
+    //
+    // The headline is what an agent acts on, and the defect is a headline asserting something the response
+    // contradicted. A headline may still NAME the sent value when it also marks it unconfirmed, which is what
+    // the honest tools do — hence the SENT marker exemption rather than a bare containment test.
+    const headline = note.split("\n\n")[0] ?? "";
+    for (const [field, value] of sent) {
+      const asSent = String(value);
+      if (asSent.length < 2) continue; // too short to find reliably in prose
+      const verdict = judgeHeadline(headline, note, asSent, String(record[field]));
+      if (verdict === "echo") echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`);
+      else if (verdict === "read") reads.push(`${name}.${field}`);
+    }
+  }
+
+  assert.deepEqual(
+    echoes,
+    [],
+    `these notes stated a value the response contradicted:\n  ${echoes.join("\n  ")}`,
+  );
+  // A floor on what the sweep actually observed. Without it, a change that made every note stop mentioning
+  // its fields would empty `echoes` and pass while measuring nothing — the sweep would be green and blind.
+  assert.ok(
+    reads.length >= 10,
+    `only ${reads.length} field(s) were seen reported FROM the response; that number should not fall. If a ` +
+      `tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+  );
+  assert.deepEqual(
+    undrivable.sort(),
+    [...NOT_ESTABLISHED].sort(),
+    `the tools this sweep cannot drive no longer match NOT_ESTABLISHED. Nothing may be skipped silently: ` +
+      `either teach the sampler the shape, or list it there deliberately.`,
+  );
 });

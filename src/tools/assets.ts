@@ -157,16 +157,37 @@ const createAsset = defineTool({
   },
   handler: async (args, ctx) => {
     const { tenantId, ...body } = args;
-    const res = await ctx.client.request<{ id?: number }>({
+    const res = await ctx.client.request({
       method: "POST",
       path: "/api/assets",
       body,
       tenantId: requireTenantId(tenantId, ctx),
     });
+    // The ACCOUNT from the response. Found by driving every unexamined tool with a response whose fields
+    // disagreed with the request: this one quoted `args.accountNumber`, and it is the field that decides which
+    // balance-sheet account carries the asset. `AssetRes` returns it, this tool is declared irreversible, and
+    // the account cannot be changed afterwards through any endpoint this server exposes.
+    const record = isRecord(res.data) ? res.data : undefined;
+    const storedAccount = record?.accountNumber;
     return ok(res.data, {
-      note:
-        `Registered asset ${res.data?.id ?? "?"} on account ${args.accountNumber}. No voucher was ` +
-        `posted by this call — book the acquisition separately if it is not already in the ledger.`,
+      note: [
+        `Registered asset ${record?.id ?? "?"} on account ` +
+          (storedAccount === undefined || storedAccount === null
+            ? `${JSON.stringify(args.accountNumber)} as SENT — ` +
+              (record === undefined
+                ? `the response came back as ${describeShape(res.data)}`
+                : `the response does not carry accountNumber`) +
+              `, so which account carries it is unconfirmed`
+            : `${String(storedAccount)}, read back from the response`) +
+          `. No voucher was posted by this call — book the acquisition separately if it is not already in ` +
+          `the ledger.`,
+        ...describeConfirmation(
+          confirmAgainstResponse({ accountNumber: args.accountNumber, name: args.name }, record, {
+            wholeRecord: true,
+          }),
+          `asset ${record?.id ?? "?"}`,
+        ),
+      ].join("\n\n"),
     });
   },
 });

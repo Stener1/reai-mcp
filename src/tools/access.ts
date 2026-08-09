@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  asArray,
   defineTool,
   ok,
   okList,
@@ -118,7 +119,7 @@ function holdsOwnerAccess(
   // The permissions decide it, not the role name — a direct grant can lift a narrow role, and a
   // narrowed role does not become owner-equivalent by keeping its title.
   if (own.size > 0) return [...yardstick.ownerPermissions].every((p) => own.has(p));
-  return (user.roleCodes ?? []).some((r) => yardstick.codes.has(r));
+  return asArray(user.roleCodes).some((r) => yardstick.codes.has(r));
 }
 
 /** How much of the company a permission list reaches, by prefix. */
@@ -197,7 +198,7 @@ const listUsers = defineTool({
               .slice(0, SHOWN)
               .map(
                 (u) =>
-                  `${u.email ?? "?"} as ${(u.roleCodes ?? []).join(", ") || "no role"}` +
+                  `${u.email ?? "?"} as ${asArray(u.roleCodes).join(", ") || "no role"}` +
                   `${u.expiresAt ? ` until ${u.expiresAt}` : ""}`,
               )
               .join("; ") +
@@ -238,7 +239,7 @@ const getUser = defineTool({
       tenantId,
     });
     const user = res.data ?? {};
-    const roles = user.roleCodes ?? [];
+    const roles = asArray(user.roleCodes);
     const yardstick = await ownerEquivalentRoles(ctx, tenantId);
     const notes = [
       `${user.email ?? `User ${args.id}`}${user.fullName ? ` (${user.fullName})` : ""}: status ` +
@@ -258,10 +259,10 @@ const getUser = defineTool({
           `compared against was unreadable. Do not read that as "no".`,
       );
     }
-    if ((user.directPermissionCodes ?? []).length > 0) {
+    if (asArray(user.directPermissionCodes).length > 0) {
       notes.push(
         `${user.directPermissionCodes?.length} permission(s) are granted DIRECTLY rather than by ` +
-          `role: ${(user.directPermissionCodes ?? []).join(", ")}. Their role alone does not ` +
+          `role: ${asArray(user.directPermissionCodes).join(", ")}. Their role alone does not ` +
           `describe what they can do.`,
       );
     }
