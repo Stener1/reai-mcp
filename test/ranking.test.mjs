@@ -263,3 +263,103 @@ test("an empty query still returns something", () => {
   // Stopwords only — every term is filtered out, which must not throw.
   assert.doesNotThrow(() => searchOperations({ query: "how do I what is the", limit: 5 }));
 });
+
+/**
+ * A hyphenated term could never be a token, because FIELD_TOKENS splits on the hyphen.
+ *
+ * Every PHRASE_SYNONYMS replacement spelled with a hyphen was therefore scoring as a fraction of itself,
+ * and unevenly — whether a term got 0.6 or 0.2 depended on whether its first segment happened to be four
+ * characters long. So PHRASE_WEIGHT = 2.6 was largely illusory for exactly the mappings written to be
+ * high-confidence statements about the user's words.
+ *
+ * Found by Codex on PR #118, from the other end: "periodisering av mva-melding" returned ten voucher
+ * operations and nothing from the vat-return family, even though `mva-melding` names it outright. Codex
+ * proposed weakening the `periodisering -> voucher` synonym. The synonym was not too strong — the named
+ * resource could not score. Measured: POST /api/vat-returns scored 1.45 for "mva-melding" while
+ * GET /api/vouchers scored 21 for "periodisering".
+ */
+test("a hyphenated term matches as a token when every part is present", () => {
+  const strength = (haystack, term) => matchStrength(haystack, fieldTokens(haystack), term);
+  // The two that were worst hit, and the reason: "vat" is three characters, so the >= 4 prefix branch that
+  // rescued "opening-balances" to 0.6 could not fire at all and they fell to the 0.2 substring floor.
+  assert.equal(strength("/api/vat-returns", "vat-returns"), 1);
+  assert.equal(strength("/api/vat-codes", "vat-codes"), 1);
+  assert.equal(strength("/api/opening-balances", "opening-balances"), 1);
+  assert.equal(strength("/api/chart-of-accounts", "chart-of-accounts"), 1);
+  // Requiring EVERY part is what keeps this precise rather than merely generous. The old substring rule gave
+  // "vat-returns" partial credit on any path containing the raw string; a missing part now scores nothing,
+  // so a term cannot leak onto a sibling resource.
+  assert.equal(strength("/api/vat-codes", "vat-returns"), 0);
+  // A hyphenated term is ALL OR NOTHING, which is the second half of the fix and not a detail. Letting one
+  // fall through to the prefix branch gave "bank-transactions" 0.6 against /api/company-banks — `bank` is a
+  // token there and the term starts with it — and with write intent narrowing to one method and
+  // /api/bank-transactions having no DELETE, that fraction was enough to answer "delete bank transactions"
+  // with DELETE /api/company-banks/{id}. First result, an offer to delete a bank ACCOUNT, for a query about
+  // transactions. Measured on this branch before the clause existed: a regression this change would have
+  // introduced, so it is asserted here rather than described.
+  assert.equal(strength("/api/company-banks", "bank-transactions"), 0);
+  assert.equal(strength("/api/bank-transactions", "bank-transactions"), 1);
+  // Unhyphenated terms are untouched by the new branch. 1 rather than the 0.75 first written here: fieldTokens
+  // adds a singular for every plural, so "voucher" is a real token of /api/vouchers and always matched
+  // exactly — the inflection branch was never involved.
+  assert.equal(strength("/api/vouchers", "voucher"), 1);
+  // And a hyphenated PREFIX of a path scores 1 too, which follows from the rule as defined rather than
+  // contradicting it: both parts of "chart-of" are present. Recorded because it shows the rule is
+  // all-parts-present and not adjacency — no term in the table has this shape, but the next one might.
+  assert.equal(strength("/api/chart-of-accounts", "chart-of"), 1);
+});
+
+test("a query that names a resource outranks a synonym pointing elsewhere", () => {
+  // Codex's two cases from PR #118, asserted on the family rather than one operation: the point is that the
+  // named family is reachable at all, which it was not — zero vat-return operations appeared in the top ten.
+  const top = (q, n = 3) => searchOperations({ query: q, limit: n }).map((h) => `${h.method} ${h.path}`);
+  assert.match(top("periodisering av mva-melding")[0], /\/api\/vat-returns/);
+  assert.match(top("periodisering skattemelding")[0], /\/api\/tax-returns/);
+  // And the synonym still works on its own, so this is a fix rather than a removal: `periodisering` alone
+  // has no resource of its own in this API and an accrual is booked as a voucher.
+  assert.match(top("periodisering")[0], /\/api\/vouchers/);
+});
+
+test("a bank account, a bank transaction and a bank reconciliation are three different things", () => {
+  const top = (q) => searchOperations({ query: q, limit: 3 }).map((h) => `${h.method} ${h.path}`);
+  // The English spelling was broken on main and is fixed here: `bankkonto` reached /api/company-banks through
+  // compound decomposition, but "bank accounts" tokenised into `bank` + `account` and `account` pulled the
+  // CHART OF ACCOUNTS — a ledger account, not a bank account. Consumed as a phrase, so `account` is gone
+  // before it can score.
+  for (const query of ["bank account", "bank accounts", "our bank accounts", "bankkonto"]) {
+    assert.equal(top(query)[0], "GET /api/company-banks", `"${query}" -> ${top(query).join(", ")}`);
+  }
+  // Narrow enough that the neighbours still reach themselves.
+  assert.match(top("bank transactions")[0], /\/api\/bank-transactions/);
+  assert.equal(top("bank reconciliations")[0], "GET /api/bank-reconciliations/{bankAccountId}");
+  // There is no DELETE on /api/bank-transactions, so a destructive phrasing has no right answer — and the
+  // wrong answer that matters is offering to delete a company bank ACCOUNT instead. Both verbs must reach
+  // the resource the query names. An earlier revision of this branch failed exactly here, in English only,
+  // because `slett` and `delete` differ in whether they narrow the search to one method.
+  for (const query of ["delete bank transactions", "slett bank transactions"]) {
+    assert.equal(top(query)[0], "GET /api/bank-transactions/{id}", `"${query}" -> ${top(query)[0]}`);
+  }
+  // The manual reconciliation is a THIRD resource and keeps its own operations: the phrase rule for
+  // "bank reconciliations" matched inside "manual bank reconciliations" until it was given a lookbehind.
+  for (const query of ["manual bank reconciliations", "vis manual bank reconciliations"]) {
+    assert.match(top(query)[0], /\/api\/manual-reconciliations/, `"${query}" -> ${top(query)[0]}`);
+  }
+});
+
+test("the a-melding still finds the filing, with room to spare", () => {
+  // The property is asserted in discovery-heldout.test.mjs; what is pinned here is the MARGIN, because the
+  // hyphen fix briefly inverted it. Once "salary-payments" scored 1 against the whole family, the collection
+  // overtook POST /api/salary-payments/{id}/complete, and the phrase replacement had to name the nested
+  // operation explicitly to say which one it meant.
+  //
+  // On the old scoring this led by 0.28 points (26.12 to 25.84) — a safety property deciding which document
+  // gets filed with Skatteetaten, resting on a quarter of a point. It is a wider gap now, and this test fails
+  // if it narrows to less than a tenth of the winning score.
+  const hits = searchOperations({ query: "a-melding", limit: 3 });
+  assert.equal(`${hits[0].method} ${hits[0].path}`, "POST /api/salary-payments/{id}/complete");
+  const margin = hits[0].score - hits[1].score;
+  assert.ok(
+    margin > hits[0].score * 0.1,
+    `the filing leads by ${margin.toFixed(2)} of ${hits[0].score.toFixed(2)} — too close to call`,
+  );
+});

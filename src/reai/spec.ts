@@ -960,12 +960,41 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   // became "a" + "melding", and `melding` maps to return/returns — so the payroll filing that goes
   // to Skatteetaten ranked the TAX RETURN first. Measured; it is the sharpest instance because the
   // two are different filings to the same authority.
-  // "salary-payments complete" and NOT "amelding": the literal word only matches
-  // GET /amelding/{id}/feedback-raw, which reads a submission's raw feedback rather than filing
-  // one, and it took the top slot away from the operation that does the filing.
-  [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments complete"],
+  // NOT "amelding": the literal word only matches GET /amelding/{id}/feedback-raw, which reads a
+  // submission's raw feedback rather than filing one, and it took the top slot away from the operation
+  // that does the filing.
+  //
+  // "salary-payments-complete complete" -- the hyphenated term names the exact nested operation, and the
+  // bare word stays because it is what discriminates. Once hyphenated terms began matching as tokens,
+  // "salary-payments" scored 1 against the whole family and the COLLECTION overtook the filing, which is
+  // the inversion this entry exists to prevent. Measured, all four candidates:
+  //
+  //     salary-payments complete            collection 40.40, filing 33.70   inverted
+  //     salary-payments-complete            collection 22.34, filing 13.68   inverted
+  //     salary-payments-id-complete         collection 22.34, filing 13.68   inverted
+  //     salary-payments-complete complete   filing 30.99, collection 22.34   correct, by 8.65
+  //
+  // Worth recording that this is now SAFER than before the hyphen fix, not merely restored: on the old
+  // scoring the filing led the collection by 0.28 points (26.12 to 25.84). A safety property that decides
+  // which document gets filed with Skatteetaten was resting on a quarter of a point.
+  [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete complete"],
   [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
   [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
+  // "bank account" is the English for what Norwegian writes as one word, and the two spellings behaved
+  // completely differently. `bankkonto` reached /api/company-banks through compound decomposition, but the
+  // spaced form tokenised into `bank` + `account`, and `account` pulled the CHART OF ACCOUNTS: "bank
+  // accounts" and "our bank accounts" returned GET /api/chart-of-accounts/accounts and no company-bank
+  // operation at all, on main, before any of this. A ledger account and a bank account are different things.
+  // Consumed, which is the whole point -- annotating would leave `account` in the text to go on scoring the
+  // chart. Narrow enough not to touch "bank transactions" or "bank reconciliations", which name other
+  // resources and must keep reaching them.
+  [/\bbank\s+accounts?\b/g, "company-banks"],
+  [/\bbank\s+transactions?\b/g, "bank-transactions"],
+  // Negative lookbehind on "manual": /api/manual-reconciliations is a DIFFERENT resource, and without this
+  // the rule matched inside "manual bank reconciliations" and consumed it, sending every phrasing of the
+  // manual one to /api/bank-reconciliations. Caught by sweeping the spec's own path segments, which is where
+  // a name like this one shows up whether or not anyone thought to write it as a test query.
+  [/(?<!manual\s)\bbank\s+reconciliations?\b/g, "bank-reconciliations"],
 ];
 
 const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
@@ -999,6 +1028,13 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   employees: ["employee"],
   department: ["department"],
   reminder: ["reminders", "dunning"],
+  // Kept as the pair, after measuring the alternative. `bank` is ITSELF a token of /api/company-banks, so
+  // once hyphenated terms began matching properly the two values double-counted and company-banks started
+  // beating resources the query named outright. Dropping "company-banks" fixed that and cost far more than
+  // it bought: every `<verb> bank` query -- "vis bank", "list bank", "get bank", "hent bank", "opprett bank"
+  // -- left /api/company-banks, 18 plausible queries regressed to buy 9. The fix belongs on the other side,
+  // in PHRASE_SYNONYMS, where each of the three bank resources now asserts its own spaced English spelling
+  // at PHRASE_WEIGHT so this generic synonym cannot override a resource the user named.
   bank: ["bank", "company-banks"],
   melding: ["return", "returns"],
   owes: ["ledger", "unpaid", "customer"],
@@ -1625,6 +1661,37 @@ function expandQuery(query: string): { terms: Array<{ term: string; weight: numb
  */
 export function matchStrength(haystack: string, haystackTokens: ReadonlySet<string>, term: string): number {
   if (haystackTokens.has(term)) return 1;
+  // A HYPHENATED term can never be a token, because FIELD_TOKENS splits on the hyphen. Every such term was
+  // therefore scoring as a fraction of itself, and unevenly — which is what made PHRASE_WEIGHT largely
+  // illusory:
+  //
+  //     vat-returns       0.2   bare substring: "vat" is 3 chars, so the >=4 prefix branch cannot fire
+  //     vat-codes         0.2   same
+  //     opening-balances  0.6   "opening" is >=4, so it caught the prefix branch by luck
+  //     salary-payments   0.6   same
+  //
+  // Measured consequence, and the reason this is a correctness fix rather than tuning: "mva-melding" maps
+  // through PHRASE_SYNONYMS to "vat-returns" at weight 2.6 and scored POST /api/vat-returns at 1.45, while
+  // the single synonym `periodisering -> voucher` scored GET /api/vouchers at 21. So "periodisering av
+  // mva-melding" returned ten voucher operations and NOTHING from the family the query names outright.
+  // Codex found that on PR #118 and proposed weakening the voucher synonym; the named resource being
+  // unable to score was the actual cause.
+  //
+  // All parts present, rather than adjacency: the parts of these terms are path segments, and requiring
+  // every one of them is already specific enough that "vat-returns" does not match /api/vat-codes — where
+  // the old 0.2 substring rule was happy to give it partial credit on any path containing the raw string.
+  // ALL OR NOTHING for a hyphenated term, deliberately: it either names this operation's compound or it does
+  // not. Letting one fall through to the prefix and substring branches below is what leaked a term onto a
+  // SIBLING resource — "bank-transactions" scored 0.6 against /api/company-banks purely because `bank` is a
+  // token there and the term starts with it. With write intent narrowing candidates to one method and
+  // /api/bank-transactions having no DELETE at all, that fraction was enough to make "delete bank
+  // transactions" answer DELETE /api/company-banks/{id}: an offer to delete a bank ACCOUNT, first result, for
+  // a query about transactions. Measured on this branch before this clause existed, so it is a regression
+  // this change would have introduced rather than one it inherited.
+  if (term.includes("-")) {
+    const parts = term.split("-").filter((p) => p.length > 1);
+    if (parts.length > 1) return parts.every((p) => haystackTokens.has(p)) ? 1 : 0;
+  }
   for (const token of haystackTokens) {
     // Plural and inflected forms: "department" in "departments". Restricted to
     // reasonably long terms so short fragments do not sweep up everything.
