@@ -9,6 +9,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The four tools that still stated an outcome from the request, and the reason the tripwire could not see
+  them.** #143 fixed thirteen read-merge-write tools and recorded four more it could not reach. All four now
+  report from the record, and the guard that missed them has been rebuilt around a population it derives rather
+  than one an author maintains.
+  - `reai_set_asset_depreciation` said an asset *"now depreciates linear over 60 month(s)"* from `args`, while
+    `AssetRes` carries both `depreciationMethod` and `usefulLifeInMonths` and the PUT returns it. This tool is
+    declared **irreversible** — it sets the schedule future depreciation postings follow — and that sentence is
+    one an agent acts on without checking.
+  - `reai_rename_warehouse` and `reai_rename_sub_account` echoed the name they were given. A rename is the worst
+    case for that: `reai_create_customer` already documents this API storing a name **title-cased**, so the
+    stored name is exactly what a caller cannot assume. Both now state what came back, and warn when it differs.
+  - `reai_update_lead` reported `email`/`phone` as *"carried over unchanged"* with the value from the
+    **request**. Its post-write re-read covered only the fields the caller named, by design, so the carried half
+    of a REPLACEMENT was unverified — the same class as #143 one mechanism over, a re-read rather than a
+    response. A carried value the API dropped is now a **failure** (`isError`), not a footnote; the calls line
+    says *"sent to preserve it"* rather than asserting the outcome; and `State now:` prints the contact fields,
+    which is why a destroyed carry previously left no trace anywhere in the note.
+  - **The tripwire's population is now derived from the spec.** It was gated on `apiPaths` containing a `GET`,
+    which is what a read-merge-write tool looks like — and none of these three declares one, which is precisely
+    why they survived five rediscoveries. A tool now qualifies when a write endpoint of its own answers with a
+    schema carrying a field its `inputSchema` accepts: if the response can answer the question, quoting the
+    request is a choice. That finds **39** tools, of which 4 are proven and **35 are recorded as not examined**.
+    - Identity fields are excluded. An echoed `id` or `orgNumber` went out in the path and comes back unchanged
+      whatever the API did with the payload, so it cannot confirm anything.
+    - The 35 is a **ratchet** — it may fall and must never rise. Being on it is a statement that nobody has
+      checked whether that tool quotes the request or the record, not that it is fine. Most are `create` tools,
+      where the question is softer rather than absent.
+    - Mutation-verified by failing test name: removing a classified tool, naming a test that does not exist,
+      parking a new name on the list without moving the number, and demoting a required title to a comment are
+      each caught — as is reverting a fixed tool to echoing `args`, which fails its own behavioural tests.
+  - **A pre-existing test asserted the old behaviour and passed for the wrong reason.** `assets.test.mjs` fed
+    the depreciation tool a response of `{ id: 42 }` — carrying neither field — and still matched
+    *"depreciates manual over 36 month(s)"*, because the note quoted `args`. Its title, *"the note says what it
+    now is"*, was the unfounded claim. The fixture now answers as `AssetRes` does, which is what makes the
+    assertion mean *read from the record*.
+
 - **`reai_update_offer`: the offers half of the same gap.** #138 curated the order update and left this one
   deliberately uncurated, because the test tenant had no offers to measure. One throwaway offer later it is
   measured — and the parity claim #138 made was wrong in three ways, corrected there and here.
