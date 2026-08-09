@@ -35,6 +35,13 @@ All notable changes to `reai-mcp`. Format loosely follows
     docs for the claim in every form it has taken — while deliberately skipping lines that quote the old wording
     in order to correct it, because forbidding the record of a mistake is the opposite of what this repo wants.
     It fails against `main`.
+  - **The first version of that guard caught three of the four and its comment claimed all four.** The README's
+    wording carries the claim by IMPLICATION rather than denial — a field the document "types as plain strings"
+    is one whose members it does not give — so no pattern looking for "does not", "never" or "silent" could
+    match it. Found by Codex. Two patterns were added, and the check now also runs against the **rendered**
+    quirk notes and tool descriptions rather than only source lines: a description is concatenated from a dozen
+    literals, so a claim split across two of them matches no single line. Verified load-bearing — with only that
+    one wording restored, the guard still fails.
 
 ### Investigated and deliberately not changed
 
