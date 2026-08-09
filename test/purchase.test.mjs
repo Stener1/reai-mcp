@@ -72,3 +72,38 @@ test("a supplier document stored as the kind it was sent reports no discrepancy"
   assert.doesNotMatch(text, /NOT the/);
   assert.match(text, /it cannot be deleted outright/, "the standing caveat survives the rewrite");
 });
+
+test("omitting documentType does not raise a false opposite-sign alarm", async () => {
+  // reai_create_supplier_invoice: `documentType` is OPTIONAL and defaults to "invoice" — the request body
+  // already writes `args.documentType ?? "invoice"`. Comparing the stored kind against `args.documentType`
+  // reported "NOT the invoice this call sent" on every call that omitted the field and got exactly what it
+  // asked for. A false alarm about the SIGN of a ledger posting, on an irreversible tool.
+  const { documentType, ...withoutKind } = INVOICE;
+  const { text } = await run("reai_create_supplier_invoice", withoutKind, {
+    id: 7,
+    documentType: "invoice",
+  });
+  assert.match(text, /Supplier invoice registered, read back from the response/);
+  assert.doesNotMatch(text, /NOT the/, `omitting the field is asking for an invoice: ${text}`);
+  assert.doesNotMatch(text, /opposite sign/);
+});
+
+test("a stored kind this tool does not recognise is not called an invoice", async () => {
+  // reai_create_supplier_invoice: the label mapped anything that was not literally `credit_note` to "invoice",
+  // so a stored "CREDIT_NOTE" — a spelling this API could plausibly return, in a file whose whole premise is
+  // that it rewrites what it stores — was reported as an invoice.
+  for (const spelling of ["CREDIT_NOTE", "creditNote", "zz_unknown"]) {
+    const { text } = await run("reai_create_supplier_invoice", INVOICE, { id: 7, documentType: spelling });
+    if (spelling === "zz_unknown") {
+      assert.match(text, /a value this tool does not recognise as either an invoice or a credit note/);
+      assert.match(text, /Check it before relying on the sign/);
+    } else {
+      assert.match(text, /Supplier credit note registered, read back from the response/, `${spelling}: ${text}`);
+    }
+    assert.doesNotMatch(
+      text,
+      /^Supplier invoice registered, read back/,
+      `${spelling} must not be reported as an invoice`,
+    );
+  }
+});

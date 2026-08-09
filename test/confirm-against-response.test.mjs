@@ -895,6 +895,7 @@ test("no candidate tool states a sent value the response contradicted", async ()
   const reads = [];
   const unmeasurable = [];
   const tooShort = [];
+  const silent = [];
   const undrivable = [];
   for (const name of CANDIDATES) {
     // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
@@ -981,6 +982,7 @@ test("no candidate tool states a sent value the response contradicted", async ()
     const runs = [await attempt(false), await attempt(true)].filter(Boolean);
     if (runs.length === 0) { undrivable.push(name); continue; }
 
+    let judged = 0;
     for (const { note, sent, record, rendered } of runs) {
     // The HEADLINE, not the whole note. This is the correction a mutation battery forced: scanning the whole
     // note meant a tool could state the sent value as fact in its first sentence while a `describeConfirmation`
@@ -1008,10 +1010,11 @@ test("no candidate tool states a sent value the response contradicted", async ()
         continue;
       }
       const verdict = judgeHeadline(headline, note, asSent, String(record[field]));
-      if (verdict === "echo") echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`);
-      else if (verdict === "read") reads.push(`${name}.${field}`);
+      if (verdict === "echo") { echoes.push(`${name}.${field} (${tool.risk}) headline said ${asSent}`); judged += 1; }
+      else if (verdict === "read") { reads.push(`${name}.${field}`); judged += 1; }
     }
     }
+    if (judged === 0) silent.push(name);
   }
 
   assert.deepEqual(
@@ -1021,10 +1024,52 @@ test("no candidate tool states a sent value the response contradicted", async ()
   );
   // A floor on what the sweep actually observed. Without it, a change that made every note stop mentioning
   // its fields would empty `echoes` and pass while measuring nothing — the sweep would be green and blind.
+  // DEDUPED. Driving each tool twice pushes the same field twice whenever the two runs produce the same note,
+  // which is 10 of 27 tools — review measured `reads.length` at 52 against 29 distinct fields, so the stated
+  // floor of 10 was being met by 5 real ones.
+  //
+  // Stated honestly: a floor CANNOT pin its own de-duplication. Reverting to the raw count makes the check more
+  // permissive, and no floor value catches that — 52 clears any threshold 29 clears. The assertion below records
+  // that duplicates are real, so the reason for the `Set` is visible in the file rather than only in this
+  // comment, but it is not a guard and is not claimed as one.
+  const distinctReads = new Set(reads);
   assert.ok(
-    reads.length >= 10,
-    `only ${reads.length} field(s) were seen reported FROM the response; that number should not fall. If a ` +
-      `tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+    reads.length > distinctReads.size,
+    `no duplicate reads were seen, so either a tool stopped producing identical notes across the two drive ` +
+      `modes or the two-attempt loop is gone — the de-duplication above exists because of those duplicates`,
+  );
+  assert.ok(
+    distinctReads.size >= 25,
+    `only ${distinctReads.size} DISTINCT field(s) were seen reported FROM the response; that number should not ` +
+      `fall. If a tool stopped naming what the record said, this sweep has quietly stopped covering it.`,
+  );
+
+  // Tools that mentioned NEITHER value for every field they were measured on. Nothing is wrong with that — a
+  // note that makes no claim cannot make a false one — but it is not evidence either, and the previous version
+  // let such a tool move off NOT_ESTABLISHED and read as covered. `reai_create_customer_contact` was recovered
+  // by the two-attempt drive and contributes exactly nothing; that is now visible instead of implied.
+  assert.deepEqual(
+    [...new Set(silent)].sort(),
+    [
+      // MEASURED. `reai_create_supplier_invoice` is here because its only comparable field is `documentType`,
+      // which is a RENDERED value the sweep skips — it is covered by test/purchase.test.mjs instead, which is
+      // exactly what the rendered-field proofs are for.
+      "reai_book_bank_transactions",
+      "reai_create_customer_contact",
+      "reai_create_department",
+      "reai_create_product",
+      "reai_create_reconciliation_rule",
+      "reai_create_supplier_invoice",
+      "reai_credit_invoice",
+      "reai_match_bank_transactions",
+      "reai_update_customer",
+      "reai_update_department",
+      "reai_update_employee",
+      "reai_update_expense",
+      "reai_update_supplier",
+    ],
+    `the set of tools whose notes name NEITHER the sent nor the stored value has changed. They are not echoing, ` +
+      `but they are not evidence of anything either: ${[...new Set(silent)].sort().join(", ")}`,
   );
   assert.deepEqual(
     tooShort,
@@ -1035,10 +1080,23 @@ test("no candidate tool states a sent value the response contradicted", async ()
   );
   // Named, not counted away. A rendered value is a real hole in this sweep — the tool could echo and look
   // identical — so each one is either covered by a hand-written test or it is not covered at all.
-  // The proofs are CHECKED, with the same anchoring as the two lists above — the file must import the tool's own
-  // module, the test must open with the named title, name the tool outside comments, assert something, and
-  // assert on stored-versus-sent. Without this the map is prose, which is the failure this file was built to
-  // stop: an entry naming a test that does not exist reads as coverage.
+  // The proofs are CHECKED. Not "the same way the census entries are" — that claim was in the changelog and
+  // review showed it false in three ways, so the differences are closed here and the remaining limits are
+  // stated rather than glossed:
+  //
+  //   - a duplicate-title guard, which this list needs more than the census does, because two fields legitimately
+  //     point at ONE test and a third pointing at it by accident would look like coverage;
+  //   - `{ skip: true }` and `{ todo: true }` are rejected. A textual `test("<title>"` check cannot tell a
+  //     skipped test from a running one, and review disarmed a proof by marking it skipped: the file reported
+  //     "2 pass / 1 skipped" and this test stayed green;
+  //   - string literals are stripped before the tool name and the marker are looked for. Review passed a
+  //     two-line stub whose only mention of either was inside an assertion message.
+  //
+  // What it still cannot do is establish that a test proves anything. It raises the cost of a fake to the point
+  // where the real test is cheaper, which is the same honest limit the census's own comment records.
+  const stripStrings = (text) =>
+    text.replace(/`(?:[^`\\]|\\.)*`/g, "``").replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
+  const seenProofs = new Map();
   for (const [field, proof] of Object.entries(RENDERED_FIELDS_WITH_PROOF)) {
     if (proof === null) continue; // an explicit "nothing covers this", which is a claim about coverage, not proof
     const [file, title] = proof;
@@ -1046,6 +1104,15 @@ test("no candidate tool states a sent value the response contradicted", async ()
     assert.ok(existsSync(join(repo, file)), `${field} names ${file}, which does not exist`);
     const body = readFileSync(join(repo, file), "utf8");
     assert.ok(body.includes(`test("${title}"`), `${field} claims a test titled "${title}" in ${file}; none opens with it`);
+    // A skipped or todo test satisfies a textual existence check and runs nothing.
+    const opener = body.slice(body.indexOf(`test("${title}"`), body.indexOf(`test("${title}"`) + title.length + 80);
+    assert.ok(
+      !/\bskip\s*:\s*true|\btodo\s*:\s*true|test\.skip|test\.todo/.test(opener),
+      `${field} names "${title}", which is skipped or todo — it proves nothing while looking like coverage`,
+    );
+    const owners = seenProofs.get(`${file}::${title}`) ?? [];
+    owners.push(field);
+    seenProofs.set(`${file}::${title}`, owners);
     const module = toolModules.get(toolName);
     assert.ok(module !== undefined, `could not find where ${toolName} is defined under src/tools`);
     // Either the file imports the tool's module directly, or it IS that module's test file by name. The first
@@ -1060,13 +1127,27 @@ test("no candidate tool states a sent value the response contradicted", async ()
     );
     const from = body.indexOf(`test("${title}"`);
     const next = body.indexOf("\ntest(", from + 1);
-    const code = stripComments(body.slice(from, next === -1 ? body.length : next));
-    assert.ok(code.includes(toolName), `the test "${title}" mentions ${toolName} only in a comment`);
+    const raw = stripComments(body.slice(from, next === -1 ? body.length : next));
+    // The tool name must appear as an IDENTIFIER or as a whole string — `tool("reai_x")` counts, which is how
+    // most of these tests reach their tool; a name buried in an assertion message does not. Stripping every
+    // string literal was too blunt and rejected the legitimate form; the first version of the check, which
+    // allowed any occurrence, accepted a two-line stub whose only mention was inside a message.
+    const namedProperly =
+      stripStrings(raw).includes(toolName) ||
+      new RegExp(`(["'\`])${toolName}\\1`).test(raw);
+    assert.ok(namedProperly, `the test "${title}" mentions ${toolName} only inside prose, not as the tool it drives`);
+    const code = stripStrings(raw);
     assert.ok(/assert\.(match|equal|deepEqual|ok|doesNotMatch|notEqual)\(/.test(code), `"${title}" asserts nothing`);
+    // `record` is gone from this list: it matches "recorded", which nearly every create-tool test contains.
     assert.ok(
-      /read back|stored|SENT|record/.test(code),
+      /read back|stored|SENT|carried|DESTROYED/.test(raw),
       `"${title}" never asserts on what the response said versus what was sent`,
     );
+  }
+  // Two fields may share one test deliberately; a THIRD sharing it is almost always a mistake, and a shared
+  // test deleted would silently uncover every field pointing at it.
+  for (const [key, owners] of seenProofs) {
+    assert.ok(owners.length <= 2, `${owners.length} fields point at one test (${key}): ${owners.join(", ")}`);
   }
 
   assert.deepEqual(
