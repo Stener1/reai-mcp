@@ -78,12 +78,32 @@ function zodEnum(schema) {
 /**
  * Spec enum fields with no top-level argument of that name.
  *
- * All twelve belong to `reai_update_agreement`, which takes a free-form `changes` record and checks it against
- * `findOperation("PUT", …).body.fields` AT RUNTIME — the source says why: "a copy would rot the moment one
- * changes". So these cannot drift from the document by construction, and there is nothing for a comparison to
- * do. They are listed rather than skipped so that a thirteenth, on a tool with no such runtime check, fails.
+ * These belong to the two agreement tools that take a free-form record of the template's own fields and check it
+ * against `findOperation(…).body.fields` AT RUNTIME — the source says why: "a copy would rot the moment one
+ * changes". So they cannot drift from the document by construction, and there is nothing for a comparison to do.
+ * They are listed rather than skipped so that one on a tool with no such check fails.
+ *
+ * The listing used to be a bare set of names, which is a promise the test could not check: adding a name was
+ * enough to exempt a tool that validated nothing. Each entry now carries a call that MUST be refused — the
+ * prover below runs it against a stub client and requires both the refusal and that no request was issued.
  */
-const VALIDATED_AT_RUNTIME = new Set(["reai_update_agreement"]);
+const VALIDATED_AT_RUNTIME = {
+  reai_update_agreement: {
+    args: { id: 290, changes: { leaseDurationType: "ZZ-not-a-member" } },
+    // Reads the agreement first, so the stub has to answer with a mergeable lease for the check to be reached.
+    responses: () => ({
+      agreementId: 290,
+      templateType: "rent_agreement",
+      rentAgreement: { landlordName: "ZZ", monthlyRent: 12000 },
+    }),
+    reads: 1,
+  },
+  reai_create_agreement: {
+    args: { templateType: "rent_agreement", terms: { leaseDurationType: "ZZ-not-a-member" } },
+    responses: () => ({ agreementId: 601, templateType: "rent_agreement", rentAgreement: {} }),
+    reads: 0,
+  },
+};
 
 function enumPairs() {
   const compared = [];
@@ -142,7 +162,7 @@ test("every enum a tool declares matches the members the document declares", () 
   assert.deepEqual(notEnum, [], `enum-named arguments not typed as enums: ${notEnum.join(", ")}`);
 
   // Every unmatched field must belong to a tool that checks the document at runtime instead.
-  const unexplained = noArgument.filter((key) => !VALIDATED_AT_RUNTIME.has(key.split(".")[0]));
+  const unexplained = noArgument.filter((key) => !Object.hasOwn(VALIDATED_AT_RUNTIME, key.split(".")[0]));
   assert.deepEqual(
     unexplained,
     [],
@@ -152,6 +172,43 @@ test("every enum a tool declares matches the members the document declares", () 
   // And the truncated ones are named, so the skip is visible rather than silent.
   for (const key of truncated) {
     assert.match(key, /directPermissionCodes$/, `unexpected truncated enum skipped: ${key}`);
+  }
+});
+
+test("every tool exempted as validating at runtime actually refuses a bad enum value", async () => {
+  // The exemption above is the only way an enum field escapes comparison, so it must be earned rather than
+  // asserted. A tool that names itself here and checks nothing would otherwise pass a bad value straight
+  // through to the API — which is exactly the 400-after-the-round-trip the checks exist to remove.
+  const exempted = Object.keys(VALIDATED_AT_RUNTIME);
+  assert.ok(exempted.length > 0, "the exemption list is empty; delete it rather than leaving it unproven");
+
+  for (const [name, { args, responses, reads }] of Object.entries(VALIDATED_AT_RUNTIME)) {
+    const tool = registeredTools.find((t) => t.name === name);
+    assert.ok(tool, `${name} is exempted here but is not a registered tool`);
+
+    const calls = [];
+    const result = await tool.handler(
+      { tenantId: 2783, ...args },
+      {
+        client: {
+          request: async (req) => {
+            calls.push(req);
+            return { data: responses(req, calls.length), status: 200 };
+          },
+          deepLink: () => "link",
+        },
+        config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
+        session: {},
+      },
+    );
+
+    assert.equal(result.isError, true, `${name} accepted a value the document does not declare`);
+    // The refusal has to land BEFORE the write, not after it. Counting reads separately is the point:
+    // a tool that reads first is fine, one that wrote and then complained is not.
+    assert.equal(calls.length, reads, `${name} issued ${calls.length} request(s), expected ${reads}`);
+    for (const call of calls) {
+      assert.equal(call.method, "GET", `${name} issued a ${call.method} before refusing`);
+    }
   }
 });
 

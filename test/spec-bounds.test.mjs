@@ -420,14 +420,16 @@ test("no tool accepts an argument the API's schema rejects", () => {
  * Operations this sweep cannot see, named so the gap is recorded rather than silent.
  *
  * DELIBERATELY_LOOSER is for a tool argument that maps to a body field of the same name; it
- * cannot express this case, and its own "is it still loose?" check rejects the entry — the
- * agreement tool takes a passthrough `changes` record, so there is no per-field schema for the
- * sweep to compare and all five template PUTs are skipped entirely.
+ * cannot express this case, and its own "is it still loose?" check rejects the entry — the two
+ * agreement tools take a passthrough record (`changes` to update, `terms` to create), so there is
+ * no per-field schema for the sweep to compare and the template PUTs and POSTs are skipped
+ * entirely.
  *
  * That is a deliberate trade: the five templates carry 78 / 31 / 23 / 20 / 17 fields, and
  * restating them as Zod would be a copy of the document that rots. The part that bites — 14
  * documented enums whose members are lowercase snake_case — is checked at call time from the
- * spec index instead, which test/agreements.test.mjs exercises for every one of the lease's.
+ * spec index instead, which test/agreements.test.mjs exercises for every one of them on every
+ * template, for both tools.
  *
  * If this list grows, the reason should be as good.
  */
@@ -439,9 +441,10 @@ test("the operations this sweep skips are the ones we know about", () => {
     const exposes = Object.keys(constraints).some((field) => resolveInput(tool.inputSchema, field));
     if (!exposes && Object.keys(constraints).length > 0) seen.add(`${tool.name}: ${method} ${path}`);
   }
-  // Six: four agreement templates plus the two single-concern employee tools. The purchase
-  // template declares no constraints at all, so there is nothing for this sweep to skip on it —
-  // measured rather than assumed, since the first version of this list had five and said so.
+  // Ten: four agreement templates on each of the two passthrough agreement tools, plus the two
+  // single-concern employee tools. The purchase template declares no constraints at all, so there
+  // is nothing for this sweep to skip on it — measured rather than assumed, since the first
+  // version of this list had five and said so, and the same holds for its POST.
   const expected = [
     // Both take PATCH /api/employees/{id} and expose exactly ONE concern each — the salary
     // account, and the employment lines. The constrained fields on that endpoint are `name`
@@ -450,6 +453,12 @@ test("the operations this sweep skips are the ones we know about", () => {
     // code. So there is nothing here for the sweep to bound. reai_create_employee and
     // reai_update_employee DO expose both and are checked normally.
     "reai_add_employment_line: PATCH /api/employees/{id}",
+    // Creating takes the same passthrough record as updating, so the same four templates are
+    // invisible to the sweep for the same reason. purchase-agreement is absent from both.
+    "reai_create_agreement: POST /api/agreements/accounting-services",
+    "reai_create_agreement: POST /api/agreements/employee-contract",
+    "reai_create_agreement: POST /api/agreements/rent-agreement",
+    "reai_create_agreement: POST /api/agreements/service-agreement",
     "reai_set_employee_bank_account: PATCH /api/employees/{id}",
     "reai_update_agreement: PUT /api/agreements/accounting-services/{id}",
     "reai_update_agreement: PUT /api/agreements/employee-contract/{id}",

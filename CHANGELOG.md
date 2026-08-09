@@ -9,6 +9,45 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_create_agreement`: the agreements toolset could change and delete a contract but not make one.**
+  All five `PUT /api/agreements/{template}/{id}` endpoints were curated; all five `POST` creation endpoints
+  were not, by an explicit decision recorded in `docs/tools.md`. Two things overturned that decision.
+  - The stated objection was that the bodies run to 78 fields for a lease. That only argues against a tool
+    declaring each field as an argument — this one takes a free-form `terms` record, exactly as
+    `reai_update_agreement` takes `changes`, so the field count costs nothing.
+  - The other premise was that `reai_request` is the route. That assumed discovery points there, and it does
+    not. Measured: **create agreement**, **opprett avtale** and **create lease agreement** all answer with
+
+    ```
+    19.000  POST /api/agreements/{id}/sign-request     irreversible / external
+    16.000  POST /api/agreements/accounting-services   reversible / none
+    16.000  POST /api/agreements/employee-contract     reversible / none
+    16.000  POST /api/agreements/purchase-agreement    reversible / none
+    ```
+
+    An agent asking to create an agreement was pointed first at asking a counterparty to sign one — an
+    irreversible external send — with the three safe creation endpoints tied for fourth. No curated tool
+    covered any of the six, so ranking was the only route an agent had.
+  - Verified live on 2783, created and deleted: `POST /api/agreements/rent-agreement` answered `201` with
+    `agreementId` and the wrapper carrying all 78 keys under `rentAgreement`; the declared terms came back
+    exactly as sent; an **undeclared field name was silently dropped**, absent from the sub-object and from
+    the top level alike, which is the premise of the warning above and was measured rather than assumed;
+    `DELETE` answered `204`, the record then read `404`, and the tenant's agreement list was empty as before.
+  - A quirk that describes a trap also does not prevent it. `POST {}` answers 201 with every term null and
+    `GET /pdf` renders that, so the tool refuses an empty `terms` and names the deliberate blank-draft route
+    instead. It checks all 14 documented enum members before writing, reports any term the template does not
+    declare — a misspelt field is simply absent from a finished contract — and compares what the API stored
+    against what was sent.
+  - **173 tools**: 166 across thirteen accounting domains, plus 7 always-on.
+
+- **The runtime-validation exemption in `test/spec-validation.test.mjs` now has to earn itself.** Twelve spec
+  enum fields are exempted from member comparison because their tool validates against the document at
+  runtime, and the exemption was a bare set of names — adding a name was enough to exempt a tool that checked
+  nothing. Each entry now carries a call that must be refused, and the test runs it against a stub client and
+  requires both the refusal and that no write was issued. Mutation-tested: gutting the enum loop while leaving
+  the exemption in place fails it.
+
+
 - **`reai_create_voucher` now pre-checks `companyBankId`, the way it already pre-checked `subAccountId`.**
   The deferred half of #132, and the reviewer there was right that it is the smaller, better fix: it closes
   the gap rather than describing it.

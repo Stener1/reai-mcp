@@ -255,6 +255,165 @@ const getAgreement = defineTool({
   },
 });
 
+const createAgreement = defineTool({
+  name: "reai_create_agreement",
+  title: "Create an agreement from a template",
+  description:
+    "Create a new agreement — a lease, employment contract, accounting-services, service or " +
+    "purchase agreement — as an unsigned draft.\n\n" +
+    "Nothing is sent to anyone. This writes the contract form and ReAI generates the document; " +
+    "asking for a signature is a separate operation (POST /api/agreements/{id}/sign-request) " +
+    "that transmits to a counterparty, and this tool does not touch it. Worth saying because " +
+    "endpoint search ranks that signing call ABOVE these five for a query like \"create " +
+    "agreement\": it is the wrong answer to that question, and an irreversible external send.\n\n" +
+    "`terms` are the chosen template's own field names. Read them from reai_describe_endpoint on " +
+    "POST /api/agreements/{template}, which also DECLARES the enums — 14 fields across four of " +
+    "the five carry one, purchase_agreement none. The members are lowercase snake_case, which is " +
+    "not what a Norwegian contract form suggests: leaseDurationType is indefinite | " +
+    "fixed_standard | fixed_special_reason, depositType is deposit | guarantee. Values are " +
+    "checked against those declarations before anything is written.\n\n" +
+    "`terms` must carry something. No field is marked required in any of the five request " +
+    "schemas, so POST {} answers 201 — with every term null, and GET /pdf renders that too. The " +
+    "result is a document that looks like a contract and says nothing, which is not a useful " +
+    "thing to have created by accident. If a blank draft is genuinely what you want, " +
+    "reai_request will POST an empty body.\n\n" +
+    "A field name the template does not declare is reported. Measured: an undeclared name is " +
+    "accepted with a 201 and then SILENTLY DROPPED — it comes back nowhere in the response, not " +
+    "under the template and not at the top level — so a misspelt term is simply absent from the " +
+    "finished contract with nothing to show it. Reported rather than refused, because the spec " +
+    "can lag the API. What was stored is also compared against what you sent.\n\n" +
+    "Reversible: reai_delete_agreement removes a draft. What the API does NOT check is worth " +
+    "knowing — a deposit of 9 999 999 against a rent of 10 000 is accepted, and so is a " +
+    "four-month fixed term with no reason. Norwegian tenancy law caps a deposit at six months' " +
+    "rent (husleieloven § 3-5); this server does not enforce it, because the template also " +
+    "covers storage and other non-residential lets.",
+  risk: "reversible",
+  apiPaths: [
+    ["POST", "/api/agreements/rent-agreement"],
+    ["POST", "/api/agreements/employee-contract"],
+    ["POST", "/api/agreements/accounting-services"],
+    ["POST", "/api/agreements/service-agreement"],
+    ["POST", "/api/agreements/purchase-agreement"],
+  ],
+  inputSchema: {
+    templateType: z
+      .enum(["rent_agreement", "employee_contract", "accounting_services", "service_agreement", "purchase_agreement"])
+      .describe(
+        "Which contract template to use. This picks the endpoint, and an agreement can only ever " +
+          "be edited through the template it was created with.",
+      ),
+    terms: z
+      .record(z.unknown())
+      .describe(
+        "The contract terms, as the template's own field names. Must not be empty — an empty " +
+          "body is accepted by the API and produces a contract with every term null.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const tenantId = requireTenantId(args.tenantId, ctx);
+    // z.enum already restricts this to the five keys, so the lookup cannot miss — unlike the
+    // update path, where the template comes from the API's own record and may be unknown.
+    const segment = TEMPLATE_PATHS[args.templateType] as string;
+    const terms = (args.terms ?? {}) as Record<string, unknown>;
+    const termKeys = Object.keys(terms);
+
+    if (termKeys.length === 0) {
+      return fail(
+        `No terms were given, so nothing was created. This API marks no field required, so it ` +
+          `would have answered 201 with an agreement in which every term is null — and GET ` +
+          `/api/agreements/{id}/pdf renders that, producing a document that looks like a ` +
+          `contract and states nothing.\n\n` +
+          `Pass the terms as \`terms\`; reai_describe_endpoint on POST /api/agreements/${segment} ` +
+          `lists the field names this template accepts. If a blank draft really is what you ` +
+          `want, reai_request POST /api/agreements/${segment} with {} will create one.`,
+      );
+    }
+
+    // The documented enums, checked locally, read from the spec index rather than restated here —
+    // a copy would rot the moment one changes. Same mechanism as reai_update_agreement, against
+    // the POST body instead of the PUT.
+    const operation = findOperation("POST", `/api/agreements/${segment}`);
+    const declared = operation?.body?.fields ?? {};
+    const rejected: string[] = [];
+    for (const [name, value] of Object.entries(terms)) {
+      const spec = declared[name];
+      const members = typeof spec === "string" ? /^enum\(([^)]*)\)/.exec(spec)?.[1] : undefined;
+      if (members === undefined || value === null || value === undefined) continue;
+      const allowed = members.split("|");
+      if (!allowed.includes(String(value))) {
+        rejected.push(`${name}: ${JSON.stringify(value)} is not one of ${allowed.join(" | ")}`);
+      }
+    }
+    if (rejected.length > 0) {
+      return fail(
+        `Nothing was created — ${rejected.length === 1 ? "a value is" : "values are"} not among ` +
+          `the ones this field accepts:\n  ${rejected.join("\n  ")}\n\n` +
+          `The members are lowercase snake_case. The API would reject these too, so this is the ` +
+          `same answer sooner.`,
+      );
+    }
+
+    // Own properties only: `k in declared` walks the prototype chain, so a term named `toString`
+    // or `constructor` would look declared and skip the warning. Skipped entirely when the spec
+    // lists no fields for this template, because then every name would look undeclared.
+    const undeclared =
+      Object.keys(declared).length > 0 ? termKeys.filter((k) => !Object.hasOwn(declared, k)) : [];
+
+    const res = await ctx.client.request<AgreementRes>({
+      method: "POST",
+      path: `/api/agreements/${segment}`,
+      body: terms,
+      tenantId,
+    });
+
+    // Read the response through the key this template writes to, not by unwrapping again: a
+    // response whose templateType is absent can be scanned onto a different sub-object, which
+    // then reports every term as "stored undefined" and reads as though the create did not take.
+    const subKey = TEMPLATE_SUBOBJECTS[args.templateType] as string;
+    const storedValue = res.data?.[subKey];
+    const stored =
+      storedValue && typeof storedValue === "object" && !Array.isArray(storedValue)
+        ? (storedValue as Record<string, unknown>)
+        : {};
+    const id = res.data?.agreementId;
+
+    const notes = [
+      `Created a ${args.templateType} agreement${id === undefined ? "" : ` (agreementId ${id})`} ` +
+        `with ${termKeys.length} term(s) sent. It is an unsigned draft: nothing has been sent to ` +
+        `anyone, and reai_delete_agreement removes it while it stays a draft.`,
+    ];
+
+    const notApplied = termKeys.filter(
+      (k) => JSON.stringify(stored[k]) !== JSON.stringify(terms[k]),
+    );
+    if (Object.keys(stored).length > 0 && notApplied.length > 0) {
+      notes.push(
+        `WARNING: ${notApplied.join(", ")} did not come back with the value sent — ` +
+          notApplied
+            .map((k) => `${k}: sent ${JSON.stringify(terms[k])}, stored ${JSON.stringify(stored[k])}`)
+            .join("; ") +
+          `. A term the template does not carry is dropped silently — measured — so check these before ` +
+          `treating the contract as complete.`,
+      );
+    }
+    if (undeclared.length > 0) {
+      notes.push(
+        `Note: ${undeclared.join(", ")} ${undeclared.length === 1 ? "is" : "are"} not declared in ` +
+          `this template's request schema. reai_describe_endpoint on POST ` +
+          `/api/agreements/${segment} lists the names it does accept.`,
+      );
+    }
+    if (Object.keys(stored).length > 0 && populatedCount(stored) < 3) {
+      notes.push(
+        `The created agreement carries very few terms. GET /api/agreements/${id ?? "{id}"}/pdf ` +
+          `will still render a document, so a near-empty contract does not announce itself.`,
+      );
+    }
+    return ok(res.data, { note: notes.join("\n\n") });
+  },
+});
+
 const updateAgreement = defineTool({
   name: "reai_update_agreement",
   title: "Change terms on an agreement",
@@ -547,6 +706,7 @@ const deleteAgreement = defineTool({
 export const agreementTools: ToolDef[] = [
   listAgreements,
   getAgreement,
+  createAgreement,
   updateAgreement,
   listAgreementSigners,
   deleteAgreement,

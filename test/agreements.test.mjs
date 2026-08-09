@@ -432,7 +432,7 @@ test("a signed agreement is not deleted, because that behaviour was never establ
 // ---------------------------------------------------------------------------
 
 test("every agreement tool is inside the sweeps and none transmits", () => {
-  assert.equal(agreementTools.length, 5);
+  assert.equal(agreementTools.length, 6);
   for (const t of agreementTools) {
     assert.ok(registeredTools.includes(t), `${t.name} must be inside the invariant sweeps`);
     assert.ok(!t.transmits, `${t.name} must not leave the tenant`);
@@ -627,4 +627,142 @@ test("no agent-facing text claims the agreement enums are undocumented", async (
     assert.doesNotMatch(served, re, "a quirk served to agents says the enums are undocumented");
     assert.doesNotMatch(descriptions, re, "a tool description says the enums are undocumented");
   }
+});
+
+/**
+ * `reai_create_agreement`.
+ *
+ * The toolset could update and delete an agreement but not make one, so the only route to the five
+ * POST endpoints was `reai_request` — and endpoint search answers "create agreement" with
+ * `POST /api/agreements/{id}/sign-request`, an irreversible EXTERNAL send, ranked above all five
+ * creation calls. The gap is why the wrong answer was the reachable one.
+ */
+
+/** The five templates and the sub-object each response carries its terms in. */
+const TEMPLATES = {
+  rent_agreement: { segment: "rent-agreement", sub: "rentAgreement" },
+  employee_contract: { segment: "employee-contract", sub: "employeeContract" },
+  accounting_services: { segment: "accounting-services", sub: "accountingServices" },
+  service_agreement: { segment: "service-agreement", sub: "serviceAgreement" },
+  purchase_agreement: { segment: "purchase-agreement", sub: "purchaseAgreement" },
+};
+
+/** A create response: the wrapper, with the created terms echoed under the template's own key. */
+const created = (templateType, fields, overrides = {}) => ({
+  agreementId: 601,
+  templateType,
+  signStatus: "draft",
+  ...Object.fromEntries(Object.values(TEMPLATES).map(({ sub }) => [sub, null])),
+  [TEMPLATES[templateType].sub]: fields,
+  ...overrides,
+});
+
+test("creating with no terms is refused, and nothing is sent", async () => {
+  // The API marks no field required, so POST {} answers 201 with every term null — and the PDF
+  // renders that. An agent that lost the terms would otherwise create a contract saying nothing.
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: {} },
+    () => created("rent_agreement", {}),
+  );
+  assert.equal(result.isError, true);
+  assert.deepEqual(calls, [], "a refusal must not reach the API");
+  assert.match(text, /every term is null/);
+  assert.match(text, /reai_request/, "the deliberate blank-draft route is named");
+});
+
+test("every documented enum is checked on every template, before anything is created", async () => {
+  const { findOperation } = await import("../dist/reai/spec.js");
+  let checked = 0;
+  for (const [templateType, { segment }] of Object.entries(TEMPLATES)) {
+    const fields = findOperation("POST", `/api/agreements/${segment}`)?.body?.fields ?? {};
+    for (const [name, declared] of Object.entries(fields)) {
+      if (typeof declared !== "string" || !declared.startsWith("enum(")) continue;
+      checked += 1;
+      const { calls, result } = await run(
+        "reai_create_agreement",
+        { templateType, terms: { [name]: "ZZ-not-a-member" } },
+        () => created(templateType, {}),
+      );
+      assert.equal(result.isError, true, `${templateType}.${name} (${declared}) must be checked`);
+      assert.deepEqual(calls, [], `${templateType}.${name} refused but still called the API`);
+    }
+  }
+  // The document declares 14 across four templates; purchase_agreement carries none. A refresh that
+  // drops them all would otherwise leave this test asserting nothing.
+  assert.equal(checked, 14, `expected the 14 documented enums, checked ${checked}`);
+});
+
+test("a legitimate value posts to the template's own path, with the terms as the body", async () => {
+  const terms = { employmentType: "permanent", salaryType: "monthly", employeeName: "ZZ Ansatt" };
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms },
+    () => created("employee_contract", terms),
+  );
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, 1, "creating reads nothing first");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].path, "/api/agreements/employee-contract");
+  assert.deepEqual(calls[0].body, terms, "the terms are the body, unwrapped");
+  assert.match(text, /agreementId 601/);
+  assert.match(text, /unsigned draft/, "an agent must not read this as having sent anything");
+});
+
+test("a term the template does not declare is reported, not silently dropped", async () => {
+  // A misspelt field name is accepted by the API and simply missing from the finished contract.
+  const { calls, result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, mnthlyRnt: 999, tenantName: "ZZ" } },
+    (req) => created("rent_agreement", { monthlyRent: 12000, tenantName: "ZZ" }),
+  );
+  assert.notEqual(result.isError, true, "the spec can lag the API, so this warns rather than refuses");
+  assert.equal(calls.length, 1);
+  assert.match(text, /mnthlyRnt/);
+  assert.match(text, /not declared in/);
+});
+
+test("a term the API did not store is reported against what was sent", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, tenantName: "ZZ Leietaker" } },
+    () => created("rent_agreement", { monthlyRent: null, tenantName: "ZZ Leietaker" }),
+  );
+  assert.match(text, /WARNING/);
+  assert.match(text, /monthlyRent: sent 12000, stored null/);
+});
+
+test("a near-empty created contract says so, because the PDF will render anyway", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "purchase_agreement", terms: { sellerName: "ZZ Selger" } },
+    () => created("purchase_agreement", { sellerName: "ZZ Selger" }),
+  );
+  assert.match(text, /very few terms/);
+});
+
+test("a term named after an Object prototype member is treated as a term, not as declared", async () => {
+  // `k in declared` walks the prototype chain, so `toString` looked like a declared field and
+  // skipped the warning. Object.hasOwn is why this reports it.
+  const { result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "purchase_agreement", terms: { toString: "ZZ", constructor: "ZZ" } },
+    () => created("purchase_agreement", {}),
+  );
+  assert.notEqual(result.isError, true);
+  assert.match(text, /toString/);
+  assert.match(text, /constructor/);
+});
+
+test("creating is reversible and transmits nothing, unlike the sign-request it outranks", async () => {
+  const create = tool("reai_create_agreement");
+  assert.equal(create.risk, "reversible");
+  const { classifyTransmission } = await import("../dist/policy.js");
+  for (const [method, path] of create.apiPaths) {
+    assert.equal(classifyRequest(method, path), "reversible", `${method} ${path}`);
+    assert.equal(classifyTransmission(method, path), "none", `${method} ${path}`);
+  }
+  // The five it covers are exactly the five templates, and none of them is a signing call.
+  assert.equal(create.apiPaths.length, 5);
+  for (const [, path] of create.apiPaths) assert.doesNotMatch(path, /sign/);
 });
