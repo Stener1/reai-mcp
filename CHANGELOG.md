@@ -9,6 +9,30 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`reai_update_offer`: the offers half of the same gap.** #138 curated the order update and left this one
+  deliberately uncurated, because the test tenant had no offers to measure. One throwaway offer later it is
+  measured — and the parity claim #138 made was wrong in three ways, corrected there and here.
+  - Same trap: `PUT /api/offers/{id}` is a full replacement, the lines come back under **`lines`** and must be
+    sent as **`offerLines`**, and each returned line carries **seven** fields the PUT does not declare (`id`,
+    `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`) against four on an
+    order.
+  - Offer lines are stricter in **exactly one field, not two**: `vatCode` is required here and genuinely
+    optional on an order line — but `itemName` is required on BOTH, and an order line without it is refused
+    with `400 "Produkt er obligatorisk for alle ordrelinjer."`. The first version of this entry read the
+    spec's `required` list as measured behaviour, which `offer-lines-stricter` had already re-measured and
+    corrected on the same day. `issueDate` is genuinely not required here, though it is on an order.
+  - **It runs in the default write mode where the order tool needs `full`**, and that is a measured difference
+    rather than a looser rule. Everything `OfferReq` accepts, `OfferRes` returns, including a
+    `deliveryAddress` whose request and response shapes are property-for-property identical. So this tool
+    carries every field and `omittedReplacementFields` returns nothing for the body it sends, where a partial
+    body omits six. The order tool omits `invoiceEmail` because no order response returns it, which is exactly
+    why it sits at `full`.
+  - Same guards as the order tool, for the reasons a review found there: `readableRecord` on the base, a
+    pre-check of the fields the PUT requires, nullable `comment`/`internalComment`/`email`/`projectId`/
+    `issueDate` so a field can be edited to nothing, a null line element refused rather than thrown, and the
+    lost-update window disclosed.
+  - **175 tools**: 168 across thirteen accounting domains, plus 7 always-on.
+
 - **`reai_update_order`: the sales toolset could create and delete an order but not change one.** Found by
   auditing every family that has curated tools for the writes it still leaves to the escape hatch. That sweep
   found no safe-uncovered/risky-covered inversions left — the agreements case was the one, closed by #136 —

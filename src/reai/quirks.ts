@@ -556,7 +556,8 @@ export const QUIRKS: readonly Quirk[] = [
       "`invoiceEmail` is the one that cannot be recovered — the PUT accepts it and no order response returns " +
       "it, so a replacement silently clears an order-specific invoice address and nothing reads back to " +
       "prove it. Offers are luckier: everything OfferReq accepts, OfferRes returns.\n\n" +
-      "reai_update_order does all of this. Measured on order 4105 and offer 81 on a test tenant.",
+      "reai_update_order and reai_update_offer do all of this, each for its own endpoint. Measured on order " +
+      "4105 and offer 81 on a test tenant.",
   },
   {
     id: "days-until-due-mandatory",

@@ -80,6 +80,7 @@ On a [bound remote connection](self-hosting.md#one-tenant-per-authorization) `re
 | `reai_create_product` · `reai_delete_product` | Create a product (no variants or price — see the tool's note); delete archives it once used | reversible |
 | `reai_create_order` · `reai_delete_order` | Create an order with lines. Sends nothing to the customer; delete works until it is invoiced | reversible |
 | `reai_create_offer` · `reai_delete_offer` | Create an offer. Lines require `itemName` **and** `vatCode`; an offer is a draft, so delete removes it outright | reversible |
+| `reai_update_offer` | Change an offer **without losing its lines** — same response/request mismatch as orders, but everything is carryable, so it runs in the default write mode. See the note below | reversible |
 | `reai_create_invoice_from_order` | Issue an invoice from an order | **irreversible** |
 | `reai_credit_invoice` | Credit note — the correct way to undo an invoice | **irreversible** |
 | `reai_register_invoice_payment` | Record a customer payment | **irreversible** |
@@ -343,7 +344,15 @@ Smaller things it handles, each because a review found the version that did not:
 
 Like every read-merge-write here, it leaves a **lost-update window**: an edit made in the ReAI UI or by another client between the read and the write is silently reverted, lines included. There is no ETag, `If-Match` or version field, so it is stated rather than papered over.
 
-`PUT /api/offers/{id}` has the same rename and the same three-way mismatch, and is still uncurated — but the parity is not exact, and the differences were measured on offer 81 rather than assumed. `OfferReq` requires `currencyCode`, `customerId`, `daysUntilDue` and `offerLines`, but **not** `issueDate`. Its optional set differs: offers carry `email` and a writable `deliveryAddress` and have no `buyerReference`, `externalReference`, `invoiceEmail` or `sendEhf`. Per line it is *stricter* — `itemName` and `vatCode` are required, which `offer-lines-stricter` records — and **seven** returned fields are not accepted rather than four: `id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`. Every field `OfferReq` accepts is returned by `OfferRes`, so an offer merge would be losslessly carryable, which is the one way offers are easier than orders.
+`reai_update_offer` exists for the same reason `reai_update_order` does: `PUT /api/offers/{id}` is a full replacement whose response does not have the shape the request wants. The lines come back under **`lines`** and must be sent as **`offerLines`** — which is required, so a body echoing `lines` back has no lines at all — and each returned line carries **seven** fields the PUT does not declare (`id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`), five of them computed. `projectId`, `issueDate`, `comment`, `internalComment`, `email` and `deliveryAddress` are optional, so a replacement that omits them empties them.
+
+Two differences from orders. Offer lines are stricter in **exactly one field, not two**: `vatCode` is required here and genuinely optional on an order line — but `itemName` is required on **both**, and an order line without it is refused with `400 "Produkt er obligatorisk for alle ordrelinjer."`. That was re-measured on 2026-08-09 and is recorded in `offer-lines-stricter`; an earlier version of this page read the spec's `required` list as measured behaviour and got it wrong. And `issueDate` is genuinely **not** required here though it is on an order.
+
+And it runs in the **default** write mode where the order tool needs `full`. That is a real difference, not a looser rule: everything `OfferReq` accepts, `OfferRes` returns — including `email` and a `deliveryAddress` whose request and response shapes are property-for-property identical — so this tool carries every field and its replacement omits nothing. Verified: `omittedReplacementFields` returns no fields for the body it sends, where a partial body omits six. An order update cannot do that, because `invoiceEmail` is accepted and never returned, so that tool omits a field the replacement-omission gate refuses by default and sits at `full` rather than becoming the soft route around it.
+
+Like every read-merge-write here it leaves a **lost-update window**: an edit made between the read and the write is silently reverted, lines included, and there is no ETag or version field to prevent it.
+
+`PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `vatCode` is (`itemName` is required on both), seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
 
 ## Payroll
 | Tool | Purpose | Risk |
@@ -471,7 +480,7 @@ Projects are the obvious omission here, and deliberate: the Project module is di
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count on this page and in the README is the default 174, and `REAI_ENABLE_UI=1` registers a 175th tool.
+It sits outside the default surface rather than inside it — every count on this page and in the README is the default 175, and `REAI_ENABLE_UI=1` registers a 176th tool.
 
 `reai_reconcile_ui` returns the unmatched bank transactions and unmatched ledger postings for a month side by side, so a person can pick which ones pair. It is off unless `REAI_ENABLE_UI=1`.
 

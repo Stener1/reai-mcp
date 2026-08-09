@@ -302,3 +302,14 @@ test("the link comes from the API's own URL when it returns one", async () => {
   const link = JSON.stringify(result);
   assert.match(link, /https:\/\/app\.reai\.no\/orders\/4105/, "the API's own URL must win over a guess");
 });
+
+test("an unreadable existing line does not block the replacement that is meant to fix it", async () => {
+  // The refusal for a null line names "pass orderLines explicitly" as the way past it — and the mapper ran
+  // unconditionally, so `line[f]` on null threw a TypeError and that recovery path never reached the PUT.
+  // Found by Codex on the offer sibling; the same bug was here.
+  const lines = [{ itemName: "ZZ new", quantity: 1, unitPrice: 250, vatCode: "0" }];
+  const { calls, result } = await run({ id: 4105, orderLines: lines }, () => order({ lines: [null] }));
+  assert.notEqual(result.isError, true, "supplying replacements must work even when the old lines are unreadable");
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+  assert.deepEqual(calls[1].body.orderLines, lines);
+});

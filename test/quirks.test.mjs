@@ -4,7 +4,7 @@ import { QUIRKS, quirksFor, findQuirks } from "../dist/reai/quirks.js";
 import { getSpecIndex } from "../dist/reai/spec.js";
 
 /**
- * The point of this registry is that quirks reach the 137 operations no curated
+ * The point of this registry is that quirks reach the 135 operations no curated
  * tool covers. These tests keep it honest: a quirk pointing at a path that no
  * longer exists is worse than no quirk, because it looks authoritative.
  */

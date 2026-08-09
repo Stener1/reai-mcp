@@ -213,6 +213,7 @@ async function main() {
   const created = {
     agreementId: undefined,
     orderId: undefined,
+    offerId: undefined,
     creditorId: undefined,
     doomedBankId: undefined,
     warehouseId: undefined,
@@ -542,6 +543,23 @@ async function main() {
     // handler with allowExternalSend false, including the scoping (a comment edit still works) and
     // the three ways to disarm.
 
+    // A customer to hang an order and an offer on.
+    //
+    // This was written as `created.customerId`, which was never a key of `created` nor assigned anywhere —
+    // so `reai_create_order` was called with `customerId: undefined`, zod refused it, and every assertion in
+    // both sections was skipped while the run still reported success. The #138 claim that the order edit was
+    // "now reproducible" here was therefore false. Resolved from the tenant rather than created, so there is
+    // nothing extra to clean up.
+    const customerRows = listOf(await client.callTool({ name: "reai_list_customers", arguments: { tenantId } }));
+    const billableCustomerId = Array.isArray(customerRows) ? customerRows[0]?.id : undefined;
+    report(
+      "a customer exists to bill",
+      Number.isInteger(billableCustomerId),
+      Number.isInteger(billableCustomerId)
+        ? `customerId=${billableCustomerId}`
+        : "no customer on this tenant — the order and offer sections below cannot run",
+    );
+
     // --- 4y. Order terms, on real data ---------------------------------------
     //
     // The PUT behind this is a full replacement whose RESPONSE does not match its REQUEST: lines come back
@@ -552,7 +570,7 @@ async function main() {
     const orderMade = await client.callTool({
       name: "reai_create_order",
       arguments: {
-        customerId: created.customerId,
+        customerId: billableCustomerId,
         comment: `${STAMP} customer-visible`,
         internalComment: `${STAMP} internal`,
         buyerReference: `${STAMP}-REF`,
@@ -570,9 +588,12 @@ async function main() {
     );
 
     if (created.orderId) {
+      // Deliberately not a fixed 30: create resolves daysUntilDue from the customer, so a hardcoded value
+      // that happened to match it would make the "took effect" check pass without the tool doing anything.
+      const newTerms = (orderRec?.daysUntilDue ?? 14) === 30 ? 45 : 30;
       const edited = await client.callTool({
         name: "reai_update_order",
-        arguments: { id: created.orderId, daysUntilDue: 30 },
+        arguments: { id: created.orderId, daysUntilDue: newTerms },
       });
       const after = edited.isError ? undefined : jsonOf(edited);
       const lines = after?.lines ?? [];
@@ -590,8 +611,8 @@ async function main() {
       );
       report(
         "the change itself took effect",
-        after?.daysUntilDue === 30,
-        `daysUntilDue=${JSON.stringify(after?.daysUntilDue)}`,
+        after?.daysUntilDue === newTerms,
+        `daysUntilDue=${JSON.stringify(after?.daysUntilDue)}, asked for ${newTerms}`,
       );
       // The unpreservable field, stated on every update whether or not it was passed.
       report(
@@ -609,10 +630,78 @@ async function main() {
           body: { daysUntilDue: 45 },
         },
       });
+      // NOT isError: the replacement-omission gate answers through okText, so a correct refusal leaves
+      // isError unset — asserting on it recorded a failure on the expected safe path and would have made
+      // the whole live run exit 1. The gate's own words are what to check.
+      const rawText = textOf(rawAttempt);
       report(
         "reai_request PUT with a partial body is refused, not silently applied",
-        rawAttempt.isError === true,
-        textOf(rawAttempt).slice(0, 200),
+        /leaves out 6 of its 12/.test(rawText) && /invoiceEmail/.test(rawText) && /Nothing was sent/.test(rawText),
+        rawText.slice(0, 200),
+      );
+    }
+
+    // --- 4x. Offer terms, on real data ---------------------------------------
+    //
+    // Same replacement trap as the order above, with SEVEN unaccepted line fields instead of four. Kept here
+    // rather than in a scratch script for the reason a review made of #138: otherwise "the lines survive" is
+    // unreproducible.
+    console.log("\n  Offer terms (the underlying PUT replaces the record):");
+    const offerMade = await client.callTool({
+      name: "reai_create_offer",
+      arguments: {
+        customerId: billableCustomerId,
+        comment: `${STAMP} offer comment`,
+        internalComment: `${STAMP} offer internal`,
+        // itemName AND vatCode are required on an offer line, unlike an order line. vatCode 0 because the
+        // allowed set is tenant-specific and a tenant that is not VAT-registered accepts only 0.
+        offerLines: [{ itemName: `${STAMP} offer line`, quantity: 2, unitPrice: 300, vatCode: "0" }],
+      },
+    });
+    const offerRec = offerMade.isError ? undefined : jsonOf(offerMade);
+    if (Number.isInteger(offerRec?.id)) created.offerId = offerRec.id;
+    report(
+      "an offer exists to edit",
+      Number.isInteger(created.offerId),
+      created.offerId ? `offerId=${created.offerId}` : textOf(offerMade).slice(0, 180),
+    );
+
+    if (created.offerId) {
+      // Deliberately not a fixed 30: create resolves daysUntilDue from the customer, so a hardcoded value
+      // that happened to match it would make the "took effect" check pass without the tool doing anything.
+      const newTerms = (offerRec?.daysUntilDue ?? 14) === 30 ? 45 : 30;
+      const edited = await client.callTool({
+        name: "reai_update_offer",
+        arguments: { id: created.offerId, daysUntilDue: newTerms },
+      });
+      const after = edited.isError ? undefined : jsonOf(edited);
+      const lines = after?.lines ?? [];
+      report(
+        "changing one field leaves the offer lines intact",
+        lines.length === 1 && lines[0]?.quantity === 2 && lines[0]?.unitPrice === 300,
+        edited.isError ? textOf(edited).slice(0, 200) : `${lines.length} line(s), quantity=${lines[0]?.quantity}, unitPrice=${lines[0]?.unitPrice}`,
+      );
+      report(
+        "and does not empty the optional fields a partial PUT would drop",
+        after?.comment === `${STAMP} offer comment` && after?.internalComment === `${STAMP} offer internal`,
+        `comment=${JSON.stringify(after?.comment)} internal=${JSON.stringify(after?.internalComment)}`,
+      );
+      report("the change itself took effect", after?.daysUntilDue === newTerms, `daysUntilDue=${JSON.stringify(after?.daysUntilDue)}, asked for ${newTerms}`);
+      // The control: the same replacement through the escape hatch is refused for omitting the six optional
+      // fields this tool carries — which is why the curated tool can run in the DEFAULT mode and the raw one
+      // cannot.
+      const rawAttempt = await client.callTool({
+        name: "reai_request",
+        arguments: { method: "PUT", path: `/api/offers/${created.offerId}`, body: { daysUntilDue: 45 } },
+      });
+      // NOT isError: the replacement-omission gate answers through okText, so a correct refusal leaves
+      // isError unset — asserting on it recorded a failure on the expected safe path and would have made
+      // the whole live run exit 1. The gate's own words are what to check.
+      const rawText = textOf(rawAttempt);
+      report(
+        "reai_request PUT with a partial offer body is refused, not silently applied",
+        /leaves out 6 of its 10/.test(rawText) && /email/.test(rawText) && /Nothing was sent/.test(rawText),
+        rawText.slice(0, 200),
       );
     }
 
@@ -1964,6 +2053,13 @@ async function main() {
     }
     // Before the product and the customer it references: deleting a referenced record answers
     // 500 "Referenced record is not accessible", which is how a previous run stranded four orders.
+    if (created.offerId) {
+      await attempt(
+        "test offer deleted",
+        () => client.callTool({ name: "reai_delete_offer", arguments: { id: created.offerId } }),
+        (r) => firstLineOf(textOf(r)),
+      );
+    }
     if (created.orderId) {
       await attempt(
         "test order deleted",
