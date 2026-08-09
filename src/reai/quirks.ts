@@ -245,8 +245,14 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "validation",
     statuses: [400],
     note:
-      "startDate and endDate are required, even where the schema does not mark them so. Omitting " +
-      'them returns 400 "startDate is required".',
+      "startDate and endDate are required on the COLLECTION endpoints here, and omitting them returns " +
+      '400 "startDate is required". The schema DOES mark them required — measured 2026-08-09 across all ' +
+      "eleven collections — so this is not a schema gap; an earlier version of this note claimed it was, " +
+      "which was false. What is worth knowing is that the range is validated EARLY, so a request missing " +
+      "it tells you nothing about whether its other parameters would have been accepted. " +
+      "It does NOT apply to the single-resource and grouping endpoints this quirk also matches: " +
+      "GET /api/vouchers/{id}, /api/postings/groups and /api/postings/groups/{postingGroupId} take no " +
+      "date range and answer 200 without one.",
   },
   {
     id: "timesheets-need-project-module",
@@ -256,10 +262,15 @@ export const QUIRKS: readonly Quirk[] = [
     statuses: [400, 403],
     note:
       "Unreachable on a tenant without the Project module, in a way no schema can express: " +
-      "projectId is a REQUIRED query parameter, and supplying it returns 400 " +
-      '"projectId cannot be used when the Project module is disabled". Required and rejected at ' +
-      "the same time, so no request succeeds. On that exact message, stop — the module is off and " +
-      "no combination of parameters helps. Say so instead of retrying.",
+      "projectId is a REQUIRED query parameter, and a request that supplies it AND a full date range " +
+      'returns 400 "projectId cannot be used when the Project module is disabled". Required and ' +
+      "rejected at the same time, so no request succeeds. On that exact message, stop — the module is " +
+      "off and no combination of parameters helps. Say so instead of retrying. " +
+      "Validation is ordered projectId, then startDate, then endDate, then the module check (measured " +
+      "2026-08-09), so a partial request answers about the parameter it is missing and says nothing " +
+      "about the module: bare gives \"projectId is required\", projectId alone gives \"startDate is " +
+      'required", and projectId+startDate gives "endDate is required". Do not read those as the module ' +
+      "being available.",
   },
   {
     id: "empty-state-is-404",

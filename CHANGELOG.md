@@ -21,11 +21,51 @@ All notable changes to `reai-mcp`. Format loosely follows
     figure instead of asserting it. The exact numbers are 122 total, 2 named before, 8 now, 114 unnamed.
   - Covers the **8 a GET can answer**, and prints `of 122` so a pass is not mistaken for coverage. Everything
     is a read, which is what makes it safe against tenant 2634's real books — no write guard, no
-    `REAI_WRITE_TEST_TENANTS`, and `test/quirk-drift.test.mjs` asserts that through `classifyRequest` rather
-    than by grepping method names.
+    `REAI_WRITE_TEST_TENANTS`.
+  - **The read-only guarantee was claimed before it was enforced, and that was the most serious thing in this
+    PR.** The first version said the property was asserted "through `classifyRequest` rather than by grepping
+    method names". The opposite was true: `classifyRequest("GET", …)` returns `read` for every path by an
+    early return in `policy.ts`, so the assertion could not fail, and the real checks were greps. Review
+    defeated them in one line — keep `method: "GET"`, add `...EXTRA` after it — and the audit issued genuine
+    POSTs to `/api/vouchers` and `/api/opening-balances` with all nine guard tests green. Now the helper
+    builds its `init`, **checks it at runtime** and throws on any non-GET before the socket opens; the test
+    also requires a literal method, forbids a top-level spread, and uses `classifyRequest` only for what it
+    can honestly show — that these paths are `irreversible` under a write verb. Verified by re-running the
+    exploit: the test fails and the audit refuses to send.
+  - **Coverage is a census, not a pass mark.** `match: "descendants"` means these 8 quirks are served on **56
+    operations** (`module-gating` alone reaches 34), and a second version of the coverage test compared
+    `probes` against the 3-entry `paths` list and called that complete — so `date-range-required` was still
+    asserted, unprobed, on `GET /api/vouchers/{id}` and `/api/postings/groups`, where it is **false**. The
+    guard now asks `quirkMatches` the same question the server asks: 16 probed, 16 sampled via a declared
+    family representative, 3 excepted where the claim does not hold, 21 non-GET and unreachable by a read-only
+    audit. An exception must be named in the note, since an agent describing that operation still receives the
+    quirk.
   - **Result: 7 unchanged, 0 drifted, 1 conditional.** Every quoted string in those seven was verified
-    verbatim against the live API, including the two details `empty-state-is-404` quotes and all three lead
+    verbatim against the live API, including both details `empty-state-is-404` quotes and all three lead
     wrappers `leads-paginated-object` enumerates.
+  - **Two quirks were corrected because the audit's premise turned out to be wrong about them** — the first
+    real output of building it. `date-range-required` told agents the dates are required "even where the
+    schema does not mark them so"; the schema marks both required on all eleven collections and
+    `test/spec.test.mjs` already asserted it for `/api/vouchers`. It also over-reached onto three operations
+    that answer 200 with no date range. `timesheets-need-project-module` said "supplying it returns" the
+    module error, which only happens once a full date range is supplied too. Both notes now say what was
+    measured, and the date-range case checks the **schema half against the pinned spec**, so that clause
+    cannot rot the way it did.
+  - Five more defects review found in the probes themselves, each fixed: `detailOf` turned an empty body into
+    the string `"{}"`, which made `module-gating`'s empty-body-403 branch — the exception its own note
+    documents — **dead code**; `module-gating` and `empty-state-is-404` reported DRIFT on a 500 or a
+    permission 403, converting an outage or a documented tenant state into "the quirk is wrong";
+    `person-role-matches-shape` read only `detail`, so a `fieldErrors` entry naming `linkedinSlug` would have
+    passed; the timesheets probe read error text without first requiring the documented 400; and
+    `/api/annual-accounts/2025` was pinned to a year tenant 2634 will plausibly file, which would have
+    silently cost the case a probe (now 1997, which cannot be filed).
+  - **Exit contract, corrected twice.** An unexpected INCONCLUSIVE exits 3. `conditional:` excuses only a
+    declared precondition — a first version excused *every* inconclusive outcome from a case carrying the
+    field, including a 500 from `/api/me`, and its "reason must name a precondition" check matched against the
+    whole case body rather than the reason, so 24 letters of `a` passed. And the cap of one conditional made
+    the audit exit 3 on any tenant with the Project, Leads or Warehouse module in the opposite state; several
+    of these claims are *about* a module being off. The control is now quality, not scarcity: a case may not be
+    conditional in every branch, so it must still be able to verify something somewhere.
   - **A false DRIFT was nearly shipped against a correct quirk, and the fix is a general rule.**
     `timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
     disabled"`. `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
@@ -40,13 +80,25 @@ All notable changes to `reai-mcp`. Format loosely follows
     **prefix** (not an endpoint — it 404s `"No static resource"`, which I first misread as a dead path in the
     quirk), and `/api/annual-accounts/{year}` is **templated**. Measured on the way: the claim holds on all
     five `/api/ledger/*` endpoints and on `/api/postings`. Coverage is now **15 endpoints**, not 8.
-  - Guards, and the fact that they were **verified by defeating them**: eleven mutations — a marker no longer
-    in the note, a nonexistent quirk id, a removed drift branch, a drift branch left only in a comment, a
-    parameterised HTTP method, the shallow timesheets probe, an exact key comparison downgraded to
-    `includes`, a `conditional:` reason too vague to mean anything, a dropped declared path, `probes` padded
-    with an unrelated path, and a `check()` that ignores `this.probes` — each fails the build, and every file
-    was byte-identical afterwards. The commented-out case is there because that exact trick defeated two
-    assertions in `storage-drift.test.mjs` during #116's review.
+  - Guards, **verified by defeating them: eighteen mutations, eight of which review found rather than me.**
+    Mine: a marker absent from the note, a nonexistent quirk id, a removed drift branch, a drift branch left
+    only in a whole-line comment, a parameterised HTTP method, the shallow timesheets probe, an exact key
+    comparison downgraded to `includes`, a short `conditional:` reason, a dropped declared path, `probes`
+    padded with an unrelated path, and a `check()` that ignores `this.probes` — including the case where one
+    of *two* such loops is hardcoded, which the presence check missed. Review's: the `...EXTRA` method
+    override, a drift branch left in a **trailing** comment (my stripper only dropped whole-line ones), a 9th
+    case opened as `  { quirk:` on one line so the extractor absorbed it and both the count floor and the
+    conditional cap fell to whitespace, `sameKeys(got, got)`, a catch-all `/[\s\S]*/` regex, a long-but-vague
+    conditional reason, a marker split into a 13-character fragment, and an exception for a path the note
+    never mentions. Each fails the build; every file byte-identical afterwards.
+  - **What these guards still cannot do, since two rounds of prose here overclaimed it.** `canDrift` is a text
+    search: it sees a drift branch, not whether anything reaches one, and review neutered two cases with the
+    branch intact. The specific tautologies that produce that are now rejected, but reachability is not
+    decidable here. And the marker binding is `includes`, blind to direction — a note can be rewritten to
+    assert the OPPOSITE while keeping its marker, and the live run does not read `note` at all, only the
+    audit's own paraphrase. So nothing in this repository is an authority on a note's meaning. The one place
+    that is genuinely checked end-to-end is the date-range **schema** claim, which is compared against the
+    pinned spec; that is the pattern worth copying, not the marker.
   - Shape claims compare the **whole wrapper**: `keys.includes("items")` passes on a wrapper that has grown
     three paging fields, and these claims are specifically about which fields are present.
   - An unexpected INCONCLUSIVE exits **3**, matching `audit-storage.mjs`. One case is unanswerable by
