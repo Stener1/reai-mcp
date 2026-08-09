@@ -226,7 +226,8 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "gotcha",
     statuses: [403],
     note:
-      'A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
+      'Measured on tenant 2634: GET /api/projects answers 403 with detail "Project module is disabled" — ' +
+      'verbatim. A 403 here is usually a disabled MODULE, not a permission problem — the detail reads like ' +
       '"Project module is disabled". Do not go hunting for missing roles; the feature is off for ' +
       "this tenant. /api/share-investments is the exception worth knowing: when it refuses it does so " +
       "with an ENTIRELY EMPTY body and no content-type, so there is no detail to read. Treat a bare 403 " +
@@ -2098,32 +2099,26 @@ export const QUIRKS: readonly Quirk[] = [
       "to be read back from the lead's convertedCustomerId.",
   },
   {
-    id: "projects-403-means-module-disabled",
-    paths: ["/api/projects"],
-    match: "descendants",
-    kind: "gotcha",
-    note:
-      "A 403 here is NOT a permissions problem. Measured on tenant 2634: GET /api/projects answers 403 with " +
-      'detail "Project module is disabled" — the module is off for the company, and no role, scope or token ' +
-      "would change that. An agent reading 403 as insufficient access will retry, escalate, or tell the user to " +
-      "grant permissions, none of which helps. Read the `detail` field before concluding anything about access: " +
-      "this API uses 403 for a feature flag as well as for authorisation. Enabling the module is a settings " +
-      "change in the ReAI UI, not an API call.",
-  },
-  {
-    id: "attachments-have-no-list-endpoint",
+    id: "attachments-listed-per-owner-not-globally",
     // Keyed to the POST, because the registry's own guard refuses a quirk whose operation does not exist — and
-    // the operation this describes is precisely the one that does not. The collection endpoint is where a caller
-    // looking for a list will end up, so that is where the note belongs.
+    // the GET on this collection is precisely the one that does not.
     paths: ["/api/attachments"],
     methods: ["POST"],
     kind: "workflow",
     note:
-      "There is no way to enumerate attachments. Measured: GET /api/attachments answers 405 Method Not Allowed " +
-      "— only POST exists on the collection — so an attachment can be fetched by id and nothing else. Ids have " +
-      "to come from something that references them: a document's `attachmentId`, or the `usedBy` array on an " +
-      "attachment you already have. Measured too: GET /api/attachments/0 answers 400 because the id must be " +
-      "positive, while a valid-but-absent id answers 404, so those two mean different things.",
+      "There is no GLOBAL attachment list — measured, GET /api/attachments answers 405 Method Not Allowed, " +
+      "because only POST exists on this collection. But attachments ARE enumerable per owner, and that is " +
+      "where ids come from: GET /api/orders/{id}/attachments and GET /api/supplier-invoices/{id}/attachments " +
+      "both return arrays of AttachmentRes. Measured on 2634, supplier invoice 5830 returned one " +
+      "(faktura_2026_10009.pdf, 1.7 MB).\n\n" +
+      "Two differences between the two routes are worth knowing. The scoped list leaves `usedBy` NULL, while " +
+      "GET /api/attachments/{id} fills it in — the same attachment read by id came back with " +
+      '`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]` — so to learn what else references a file you must ' +
+      "fetch it by id. And `contentUrl` on the scoped row points at the OWNER path " +
+      "(/api/supplier-invoices/5830/attachments/19780/content), not at /api/attachments/{id}/content.\n\n" +
+      "Also measured: GET /api/attachments/0 answers 400 because the id must be positive, while a " +
+      "valid-but-absent id answers 404, so those two mean different things. And the /ehf parse endpoint " +
+      'answers 400 "Attachment is not a valid EHF XML" on a PDF rather than returning an empty document.',
   },
   {
     id: "paging-parameters-are-ignored-not-refused",

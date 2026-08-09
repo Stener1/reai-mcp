@@ -53,7 +53,24 @@ All notable changes to `reai-mcp`. Format loosely follows
     manual pass had missed. Its limits are recorded: it catches the `N quirks` phrasing, not the interlocking
     bare numbers in the audit header, and a floor cannot pin its own loosening.
 
-- **Three quirks, all measured on 2634 this iteration.**
+- **Codex caught both new quirks making claims that were wrong or duplicated.**
+  - **The projects quirk was a duplicate, and worse than the original.** A `module-gating` quirk already covered
+    `/api/projects` descendants and correctly restricted itself to `statuses: [403]`. Mine had no status
+    restriction, so it appended a 403 explanation to a 404 for an unknown project, and to successful project
+    writes. Deleted; its one contribution — the verbatim `"Project module is disabled"` detail, measured — is
+    folded into the existing note, which said only "usually".
+  - **"There is no way to enumerate attachments" was false.** `GET /api/orders/{id}/attachments` and
+    `GET /api/supplier-invoices/{id}/attachments` both exist and return arrays of `AttachmentRes` — verified
+    live: supplier invoice 5830 on 2634 returned one, `faktura_2026_10009.pdf`. Only the GLOBAL collection cannot
+    be listed. The corrected note points at the scoped routes, which is where an agent actually finds ids.
+  - Two further facts came out of following the correction, both measured on the attachment it produced: **the
+    scoped list leaves `usedBy` null while `GET /api/attachments/{id}` fills it in**
+    (`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`), so learning what else references a file requires the
+    by-id fetch; and `contentUrl` on a scoped row points at the OWNER path, not at `/api/attachments/{id}/content`.
+  - The quirk count went 127 → **126** with the duplicate gone, and the new count guard forced all four files
+    into agreement in one pass — which is what it is for.
+
+- **Two quirks, both measured on 2634 this iteration.**
   - **`GET /api/projects` answers 403 with `"Project module is disabled"`** — a 403 that is a feature flag, not
     authorisation. An agent reading it as insufficient access will retry, escalate, or ask the user for
     permissions, none of which helps. The `detail` field is what distinguishes them.
