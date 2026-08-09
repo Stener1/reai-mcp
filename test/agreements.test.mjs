@@ -500,3 +500,78 @@ test("a lease's payment destinations escalate from INSIDE the changes object", a
   assert.equal(curatedArgsEscalate(paths, { id: 7, changes: { monthlyRent: 12000 } }), undefined);
   assert.equal(inPaymentRoutingScope("/api/agreements/rent-agreement/7", "PUT"), true);
 });
+
+/**
+ * The agreement enums ARE declared, and four places said they were not.
+ *
+ * `src/tools/agreements.ts` already carried the correction in its file header — "The enums ARE
+ * documented — an earlier version of this comment said otherwise … there are 14 such fields across
+ * the five templates". The correction had been applied to that comment and to nowhere a reader or an
+ * agent could see it:
+ *
+ *   src/reai/quirks.ts       "enums the document does not list"     <- served by reai_describe_endpoint
+ *   src/tools/agreements.ts  "enums that the spec does not list"    <- the tool description
+ *   docs/tools.md            "enums the spec never lists"
+ *   README.md                "the enums the spec types as plain strings"
+ *
+ * The quirk is the one that mattered: an agent told the document does not list the members will not
+ * call reai_describe_endpoint to get them, and will guess — which the header records as having
+ * produced 400s ("The rejected values were simply wrong guesses").
+ */
+test("the spec declares every agreement enum, and nothing says otherwise", async () => {
+  const { findOperation } = await import("../dist/reai/spec.js");
+  const segments = [
+    "accounting-services",
+    "employee-contract",
+    "rent-agreement",
+    "service-agreement",
+    "purchase-agreement",
+  ];
+  const declared = [];
+  for (const segment of segments) {
+    const fields = findOperation("POST", `/api/agreements/${segment}`)?.body?.fields ?? {};
+    for (const [name, type] of Object.entries(fields)) {
+      if (typeof type === "string" && type.startsWith("enum(")) declared.push(`${segment}.${name}`);
+    }
+  }
+  // The figure the docs now state. Asserted so a spec refresh that drops the declarations makes the
+  // prose stale HERE, rather than leaving four documents quietly wrong again.
+  assert.equal(declared.length, 14, `enum fields declared: ${declared.join(", ")}`);
+  // And the two the prose names by hand have to be among them, with the members it quotes.
+  const lease = findOperation("POST", "/api/agreements/rent-agreement")?.body?.fields ?? {};
+  assert.match(String(lease.leaseDurationType), /^enum\(indefinite\|fixed_standard\|fixed_special_reason\)/);
+  assert.match(String(lease.depositType), /^enum\(deposit\|guarantee\)/);
+});
+
+test("no agent-facing text claims the agreement enums are undocumented", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { QUIRKS } = await import("../dist/reai/quirks.js");
+  // The claim in every form it has taken, plus the shape a future rewrite would most likely use.
+  const false_claims = [
+    /enums?[^.]{0,40}(the )?(document|spec|schema)[^.]{0,20}(does not|never|doesn't)\s+(list|document|declare)/i,
+    /(document|spec)[^.]{0,30}(is )?silent[^.]{0,20}enum/i,
+  ];
+  const sources = [
+    ["src/reai/quirks.ts", readFileSync("src/reai/quirks.ts", "utf8")],
+    ["src/tools/agreements.ts", readFileSync("src/tools/agreements.ts", "utf8")],
+    ["docs/tools.md", readFileSync("docs/tools.md", "utf8")],
+    ["README.md", readFileSync("README.md", "utf8")],
+  ];
+  const offenders = [];
+  for (const [file, text] of sources) {
+    // The file header in agreements.ts QUOTES the old wording in order to correct it, so the check
+    // runs on lines that are not part of that correction. Without this the guard would forbid
+    // recording the mistake, which is the opposite of what this repository wants.
+    for (const line of text.split("\n")) {
+      if (/an earlier version|said otherwise|for a while|used to say|WAS wrong|no longer claims/i.test(line)) continue;
+      if (false_claims.some((re) => re.test(line))) offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `these still say the enums are undocumented:\n  ${offenders.join("\n  ")}`);
+  // And the same for the quirk notes as SERVED, not as written — the string an agent receives.
+  const served = QUIRKS.filter((q) => (q.paths ?? []).some((p) => /agreement/.test(p)))
+    .map((q) => q.note ?? "")
+    .join("\n");
+  assert.ok(served.length > 0, "there should be agreement quirks to check");
+  for (const re of false_claims) assert.doesNotMatch(served, re);
+});

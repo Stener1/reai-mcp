@@ -1161,10 +1161,12 @@ export const QUIRKS: readonly Quirk[] = [
     note:
       "No field is required in any of the five agreement schemas, so POST {} answers 201 and " +
       "creates a draft in which every term is null — and the PDF renders for it. A 201 here is " +
-      "not evidence that a usable contract exists; count the populated fields. Some values the " +
-      "schema types as plain strings are validated as enums the document does not list, and the " +
-      "API names the allowed set in its 400: leaseDurationType is indefinite | fixed_standard | " +
-      "fixed_special_reason, depositType is deposit | guarantee. Norwegian tenancy law caps a " +
+      "not evidence that a usable contract exists; count the populated fields. Fourteen fields " +
+      "across the five templates are ENUMS and the document declares every member, so read them " +
+      "from this endpoint rather than guessing: the members are lowercase snake_case, which is " +
+      "not what the Norwegian contract form suggests. leaseDurationType is indefinite | " +
+      "fixed_standard | fixed_special_reason and depositType is deposit | guarantee. Norwegian " +
+      "tenancy law caps a " +
       "deposit at six months' rent and wants a statutory reason for a fixed term under three " +
       "years; neither is enforced — a deposit of 9 999 999 against a rent of 10 000 was accepted, " +
       "as was a four-month fixed_standard lease with no reason.",

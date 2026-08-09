@@ -364,7 +364,7 @@ The sharp edge here fails silently. `variantId` is optional in the schema and re
 | `reai_update_agreement` | Change terms **without destroying the rest** — see the note below the table | **irreversible** |
 | `reai_delete_agreement` | Remove an agreement and its document. Answers `204`, no outcome field, no archive branch | reversible |
 
-`PUT` on an agreement is a **full replacement**: measured on a live lease, a body carrying only the landlord's name left `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the house rules all null — while `GET /pdf` still returned `200`, producing a document that looks like a contract with nothing in it. `reai_update_agreement` reads, merges and writes the whole thing back. That, the enums the spec types as plain strings, and why the five create endpoints are deliberately not curated: [docs/tools.md](docs/tools.md#agreements).
+`PUT` on an agreement is a **full replacement**: measured on a live lease, a body carrying only the landlord's name left `monthlyRent`, `tenantName`, `depositAmount`, `depositAccountNumber` and the house rules all null — while `GET /pdf` still returned `200`, producing a document that looks like a contract with nothing in it. `reai_update_agreement` reads, merges and writes the whole thing back. That, the fourteen enum fields the spec declares members for, and why the five create endpoints are deliberately not curated: [docs/tools.md](docs/tools.md#agreements).
 
 ### Renaming something must not erase where money goes
 | Tool | Purpose | Risk |

@@ -9,6 +9,51 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **Four places told agents the agreement enums are undocumented. The spec declares all fourteen.** The source
+  file already carried the correction — "The enums ARE documented — an earlier version of this comment said
+  otherwise … there are 14 such fields across the five templates" — and it had been applied to that comment and
+  to nowhere a reader or an agent could see:
+
+  ```
+  src/reai/quirks.ts       "enums the document does not list"    <- served by reai_describe_endpoint
+  src/tools/agreements.ts  "enums that the spec does not list"   <- the tool description
+  docs/tools.md            "enums the spec never lists"
+  README.md                "the enums the spec types as plain strings"
+  ```
+
+  - **The quirk is the one that mattered.** An agent told the document does not list the members will not call
+    `reai_describe_endpoint` to get them, and will guess — which the file header records as exactly what
+    happened: "The rejected values were simply wrong guesses." All four now say the members are declared, that
+    they are lowercase snake_case, and that they can be read from the endpoint.
+  - Verified rather than asserted: **14 enum fields across the five POST templates**, every member named in the
+    document — `clientEntityType`, `pricingModel`, `billingFrequency`, `employmentType`, `salaryType`,
+    `rentObjectType`, `electricityTerms`, `waterTerms`, `leaseDurationType`, `shortFixedTermReasonType`,
+    `depositType`, `issuerRole` and two more. The count matches the one the header states.
+  - Two tests guard it. One asserts the spec really does declare fourteen, with the two members the prose quotes
+    by hand, so a spec refresh that drops them makes the prose stale *there* rather than leaving four documents
+    quietly wrong again. The other scans the quirk notes as **served**, the tool descriptions, the README and the
+    docs for the claim in every form it has taken — while deliberately skipping lines that quote the old wording
+    in order to correct it, because forbidding the record of a mistake is the opposite of what this repo wants.
+    It fails against `main`.
+
+### Investigated and deliberately not changed
+
+- **A curated create for agreements was written and then reverted.** 143 public operations had no curated tool
+  and the five agreement creates were among them, so this looked like a capability gap — an agent could amend a
+  lease but not start one. It is not: `docs/tools.md` already records the decision and the reason, that the
+  bodies "run to 78 fields for a lease … that the spec documents properly", `reai_describe_endpoint` shows them,
+  and every trap reaches a `reai_request` caller as a quirk. My justification, that the toolset was unusable
+  from scratch, was simply wrong. Re-litigating a documented decision without new evidence is not an
+  improvement, and the tool was removed before it was committed.
+- **The 143 figure also overstates the gap.** Most of the eleven uncovered Leads operations are `{id}` duplicates
+  of `org/{orgNumber}` paths already covered — alternate addressing for one capability, counted twice. The real
+  Leads gap is three capabilities, not eleven.
+- **`opprett postings` ranks `POST /api/postings/customer/close`**, a close operation for a create query.
+  Adding `postings` to the synonym table was measured and does not fix it: the word matches
+  `/api/postings/customer/close` literally, so an injected `voucher` cannot outweigh it — unlike `postering`,
+  which reaches `POST /api/vouchers` because it matches no path. The real fix is the param-less action demotion
+  that #122 deferred, which needs its own design.
+
 - **An action the query never asked for could outrank the resource it did name** (#122). `/api/salary-payments` is the
   collection and `/api/salary-payments/{id}/complete` is the action that **files payroll with Skatteetaten**.
   Measured on `main`:
@@ -43,11 +88,15 @@ All notable changes to `reai-mcp`. Format loosely follows
   - **`familyOf` was taking the first two path segments**, so a parameter counted as one and ten nonsense
     families appeared — `/salary/{id}`, `/amelding/{id}`, `/attachments/{id}`. The same action scored differently
     depending on where it lived. It now stops at the first parameter. Found by the independent review.
-  - **Not a general safety property, and not claimed as one.** Actions with no path parameter are untouched, and
-    that includes `POST /api/peppol/messages/sendsbdh` and `POST /api/invoices/reminders/bulk`, both of which
-    transmit outside the tenant. The review is right that those are the dangerous class; covering them needs its
-    own change and its own measurement. Nor is `POST /api/invoices/{id}/reminders/forgive` ranking above the
-    reminder-creation endpoint fixed — that is rank 1 on `main` too, pre-existing rather than introduced.
+  - **Not a general safety property, and not claimed as one.** Actions with no path parameter are untouched.
+    Two were named here as uncovered dangers, and one of those was **wrong**: `POST /api/peppol/messages/sendsbdh`
+    is `internal: true`, so search never returns it unless a caller asks for internal operations — I repeated the
+    review's concern without checking the flag. `POST /api/invoices/reminders/bulk` is public and does transmit,
+    but no reminder query ranks it first: measured over 190 phrasings, the reminders GET wins every one.
+    `POST /api/subscriptions/generate-due` also transmits and sits at rank 2 behind the correct per-subscription
+    generate. So the param-less hole is real and currently not reachable at rank 1 by any query measured. Nor is
+    `POST /api/invoices/{id}/reminders/forgive` ranking above the reminder-creation endpoint fixed — that is
+    rank 1 on `main` too, pre-existing rather than introduced.
   - Measured over **12,193 queries**, this time including **every endpoint's own summary** as a query, which is
     the dimension the review used to find the worst case: **205 rank-1 changes, no empty result sets, no write
     newly at rank 1, one write demoted.** Six queries lost main's rank-1 answer from the default limit of 25 —
