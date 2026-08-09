@@ -8,9 +8,14 @@
  * rejected on a supplier phone, and that foreign numbers are stored as sent), and PR #123 corrected four
  * places claiming the agreement enums are undocumented when the document declares all fourteen.
  *
- * Two live audits already existed, covering **2 of the 122 quirks** between them — `audit-messages.mjs`
- * checks 9 refusal strings, `audit-storage.mjs` 17 storage claims. Eighty-four quirks assert measured API
- * behaviour and were checked by nothing.
+ * Two live audits already existed, and between them they named **2 of the 122 quirks**:
+ * `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. That 2, and the 122, are exact.
+ *
+ * How many of the remaining 120 assert something an API call could check is NOT exact, and the number is
+ * deliberately not quoted here. A keyword sweep over `note` prose returns 86 or 95 depending on the word
+ * list, which makes it a lower bound dressed as a measurement — the false precision `storage-drift` was
+ * corrected for, and which its census script prints rather than asserts for the same reason. The exact,
+ * checkable statement is the one that matters: 2 were named, this adds 8, and 114 remain unnamed.
  *
  * This closes the read-only part of that gap. Every request below is a GET, so it runs against any tenant
  * the token reaches, which is why there is no write guard and no `REAI_WRITE_TEST_TENANTS`: nothing here

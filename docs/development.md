@@ -236,10 +236,15 @@ target that is irreversible or transmitting is now named whatever the previous m
 ### `audit-quirks.mjs`: the 122 claims nobody was checking
 
 The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 122 of
-them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, **2 were
-named in a live audit** — 86 assert measured API behaviour, and 84 of those were verified by nothing. Both
-defects that motivated the other audits were in this channel: the `+47` phone claim (PR #115) and the four
+them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, the two
+audits named **2 of them** — `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both
+defects that motivated those audits were in this channel: the `+47` phone claim (PR #115) and the four
 places calling the agreement enums undocumented (PR #123).
+
+Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
+95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
+`audit:census` exists to print rather than assert. 122 total, 2 named before, 8 now, 114 unnamed are the
+figures that can be checked.
 
 This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there

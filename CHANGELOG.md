@@ -11,9 +11,14 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 - **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
   The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
-  `reai_api_notes`, and were **named in a live audit twice out of 122** — 86 assert measured API behaviour,
-  84 of those verified by nothing. Both defects that motivated the other audits were in this channel: the
-  `+47` phone claim (#115) and the four places calling the agreement enums undocumented (#123).
+  `reai_api_notes`, and between them those audits named **2 of the 122** —
+  `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both defects that motivated them
+  were in this channel: the `+47` phone claim (#115) and the four places calling the agreement enums
+  undocumented (#123).
+  - **A first version of this entry said "86 assert measured API behaviour, 84 verified by nothing", and
+    that precision was fake.** It is a keyword sweep over prose, and re-deriving it with a different word
+    list gives 95/93. Same lesson `storage-drift` already recorded, which is why `audit:census` prints its
+    figure instead of asserting it. The exact numbers are 122 total, 2 named before, 8 now, 114 unnamed.
   - Covers the **8 a GET can answer**, and prints `of 122` so a pass is not mistaken for coverage. Everything
     is a read, which is what makes it safe against tenant 2634's real books — no write guard, no
     `REAI_WRITE_TEST_TENANTS`, and `test/quirk-drift.test.mjs` asserts that through `classifyRequest` rather
