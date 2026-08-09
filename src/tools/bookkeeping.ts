@@ -42,8 +42,16 @@ const listAccounts = defineTool({
     "SEARCH the tenant's chart of accounts (kontoplan) — a search, not a listing. Returns account " +
     "numbers, names and types. Use it to find the right account number before booking a voucher.\n\n" +
     "**Called with no arguments it returns 20 accounts, and the chart has hundreds.** Measured " +
-    "2026-08-09: 20 rows from a 399-account chart, and `limit` is capped at 100, so no single call can " +
-    "return the whole thing. An account being ABSENT from a result is therefore not evidence that it " +
+    "2026-08-09: 20 rows from a 399-account chart, and `limit` is capped at 100. There is no paging " +
+    "either — the endpoint declares only query, limit, accountNumberPrefix and filterRestricted, and " +
+    "`offset` and `page` are accepted-and-ignored, still answering 100 — so this endpoint cannot reach " +
+    "the rest of the chart at all.\n\n" +
+    "The COMPLETE chart is a different endpoint: `GET /api/chart-of-accounts` returns all 399 in one " +
+    "response, with a `generalSubAccounts` array this search does not carry. No curated tool exposes it " +
+    "yet, so reach it with reai_request if you genuinely need every account — but prefer narrowing here " +
+    "first, because the full response is several hundred rows each carrying a paragraph of Norwegian " +
+    "guidance.\n\n" +
+    "An account being ABSENT from a result is therefore not evidence that it " +
     "is absent from the chart — narrow with `query` or `accountNumberPrefix` and ask again before " +
     "concluding an account does not exist. An earlier version of this text said \"every posting must " +
     "reference an account that exists in this list\", which invited exactly that wrong inference.\n\n" +

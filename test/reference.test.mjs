@@ -436,6 +436,17 @@ test("the accounts search says it is a search, and that absence is not evidence"
     "and the retraction itself should stay, so the change is legible",
   );
 
+  // The endpoint cannot page, and the complete chart lives elsewhere. Saying "no single call can return
+  // the whole thing" without that would read as "the whole chart is unobtainable", which is false —
+  // GET /api/chart-of-accounts returns all 399, and no curated tool exposes it.
+  assert.match(t.description, /no paging/, "the absence of paging must be stated, not implied");
+  assert.match(
+    t.description,
+    /COMPLETE chart is a different endpoint/,
+    "and the route that does return everything must be named",
+  );
+  assert.match(t.description, /reai_request/, "with the honest fallback for reaching it");
+
   // The two conditionally-mandatory dimensions this endpoint cannot reveal, and where to get them.
   assert.match(t.description, /subAccountId/);
   assert.match(t.description, /companyBankId/);
