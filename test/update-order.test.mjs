@@ -158,6 +158,7 @@ test("an order with no readable lines is refused rather than having its contents
 });
 
 test("a value stored differently from what was sent is flagged", async () => {
+  // reai_update_order: named in test/confirm-against-response.test.mjs as the proof for this tool.
   const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) => (n === 1 ? order() : order({ daysUntilDue: 14 })));
   assert.match(text, /IGNORED by the API/);
   assert.match(text, /daysUntilDue \(sent 30, still 14\)/);

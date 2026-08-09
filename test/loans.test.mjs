@@ -921,6 +921,7 @@ test('clearing with "" is not reported as the API discarding the value', async (
 });
 
 test("a rename whose replacement drops the carried account is the case this tool exists for, and warns", async () => {
+  // reai_update_creditor: this is the case named in test/confirm-against-response.test.mjs as its proof.
   // Gated on `given` before, so the hazard the tool was written to catch produced no warning at all — while
   // the first paragraph still said the account was "written back unchanged".
   const { text } = await updateCreditor({ id: 7, name: "New" }, creditor("15031234567"), creditor(null));

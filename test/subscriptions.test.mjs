@@ -714,6 +714,7 @@ test("disarming is not itself gated as a transmission — you can turn the dange
 });
 
 test("a CARRIED arming value the response contradicts is warned about — no `given` gate", async () => {
+  // reai_update_subscription: named in test/confirm-against-response.test.mjs as the proof for this tool.
   // The defect #141 found and fixed in reai_update_creditor, reintroduced here in the same shape: gating on
   // the caller having NAMED the field blinds the check to a replacement changing a value it merely carried.
   // Measured before the fix: the write sent sendEhf: false, the response returned true, and the tool narrated

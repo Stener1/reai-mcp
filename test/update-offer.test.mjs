@@ -280,6 +280,7 @@ test("moving an offer to another customer says whose payment terms it kept", asy
 });
 
 test("a value stored differently from what was sent is flagged", async () => {
+  // reai_update_offer: named in test/confirm-against-response.test.mjs as the proof for this tool.
   const { text } = await run({ id: 81, daysUntilDue: 30 }, (req, n) => (n === 1 ? offer() : offer({ daysUntilDue: 14 })));
   assert.match(text, /IGNORED by the API/);
   assert.match(text, /daysUntilDue \(sent 30, still 14\)/);

@@ -502,7 +502,12 @@ const updateSalaryLine = defineTool({
     const storedLine = returnedLines.find((l: { id?: unknown }) => l?.id === wageSpecId) as
       | Record<string, unknown>
       | undefined;
-    const confirmation = confirmAgainstResponse(body, storedLine);
+    // wholeRecord, because `storedLine` IS the whole line — SalaryWageSpecRes carries all five fields this
+    // sends. Without it a carried comment the replacing PUT dropped read as "the response did not answer",
+    // while the headline said the line was read back FROM the response. That is the same contradiction the
+    // address tools were fixed for, at the one site I did not check, and payroll is where I argued it matters
+    // most.
+    const confirmation = confirmAgainstResponse(body, storedLine, { wholeRecord: true });
     const notes = [
       (storedLine
         ? `Line ${wageSpecId} in run ${id} is now ${storedLine.quantity} × ${storedLine.rate} as ` +
@@ -515,7 +520,9 @@ const updateSalaryLine = defineTool({
               `is what was SENT, not what is stored`) +
           ` — read it back with reai_get_salary_run.`) +
         ` Run total: ${res.data?.payableAmount ?? "?"} payable, ${res.data?.totalTaxDeducted ?? "?"} withheld.`,
-      ...describeConfirmation(confirmation, `line ${wageSpecId}`),
+      // Only when there was a line to compare against; otherwise the fallback sentence above already says the
+      // figures are what was sent, and this would repeat it field by field.
+      ...(storedLine ? describeConfirmation(confirmation, `line ${wageSpecId}`) : []),
     ];
     if (kept.length > 0) {
       notes.push(

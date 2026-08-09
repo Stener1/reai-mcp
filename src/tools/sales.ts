@@ -386,11 +386,18 @@ const setCustomerAddress = defineTool({
     // And `merged`, not `given`: the carried parts are the whole reason this reads first, and #140's measured
     // harm on this endpoint was a CARRIED postalCode being wiped. Checking only the caller's own fields would
     // have excluded exactly the field that was lost — the `given` gate this repo has now been bitten by twice.
-    const confirmation = confirmAgainstResponse(
-      merged,
-      readableRecord(res.data, kind === "delivery" ? "deliveryAddress" : "address").record,
-      { wholeRecord: true },
-    );
+    // `readableRecord` answers `{ record: {} }` for a nested field that is missing OR null, which is right for
+    // the pre-write GET (no address yet is a legitimate base) and wrong here: a write response carrying
+    // `address: null` means the whole address is GONE, and an empty base made that read as "could not be
+    // confirmed" — the same soft sentence a bare string would get. Distinguished, and the problem string is
+    // used rather than discarded.
+    const written = readableRecord(res.data, kind === "delivery" ? "deliveryAddress" : "address");
+    const wiped =
+      !!res.data &&
+      typeof res.data === "object" &&
+      !Array.isArray(res.data) &&
+      (res.data as Record<string, unknown>)[kind === "delivery" ? "deliveryAddress" : "address"] === null;
+    const confirmation = confirmAgainstResponse(merged, wiped ? {} : written.record, { wholeRecord: true });
     const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? `${kind ?? "postal"} address updated.`, {
       note:
@@ -399,7 +406,15 @@ const setCustomerAddress = defineTool({
           ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
             `unchanged, because this endpoint replaces rather than patches.`
           : `. Nothing else was set on it beforehand.`) +
-        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``),
+        (wiped
+          ? `\n\nWARNING: the response came back with no ${kind ?? "postal"} address at all — every part is ` +
+            `gone, not just the ones you changed. Read the customer back before relying on it.`
+          : ``) +
+        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``) +
+        (!wiped && written.problem !== undefined
+          ? `\n\nThe response could not be read as an address (${written.problem}), so nothing above about ` +
+            `what is stored is confirmed.`
+          : ``),
     });
   },
 });
@@ -955,24 +970,22 @@ function appliedChanges(
   after: Record<string, unknown> | undefined,
   skip: readonly string[],
 ): { took: string[]; ignored: string[] } {
-  const took: string[] = [];
-  const ignored: string[] = [];
-  for (const [key, sent] of asked) {
-    if (skip.includes(key)) {
-      took.push(key);
-      continue;
-    }
-    const stored = after?.[key];
-    // The response does not carry it, so nothing can be concluded — reported as taken rather than doubted.
-    if (after === undefined || !Object.hasOwn(after, key)) {
-      took.push(key);
-      continue;
-    }
-    const same = JSON.stringify(stored) === JSON.stringify(sent);
-    const emptiedToNull = sent === "" && stored === null;
-    (same || emptiedToNull ? took : ignored).push(key);
-  }
-  return { took, ignored };
+  // A thin adapter over confirmAgainstResponse, which is the point: this was a near-duplicate with the
+  // OPPOSITE semantics sitting in the same file as the migrated sites, while the order and offer tools were
+  // certified as verifying against the response. Measured before this change: a PUT answering with NO BODY
+  // produced a bare "Changed comment", the very class the shared docstring calls costliest; and `projectId`
+  // sent 7 against a stored "7" produced both a false "Changed NOTHING" and a false "IGNORED by the API".
+  //
+  // wholeRecord, because both endpoints answer with the record. `skip` carries the line fields, whose shapes
+  // differ between request and response and which each tool checks separately by count.
+  const sent = Object.fromEntries(asked);
+  const { confirmed, contradicted, unanswered } = confirmAgainstResponse(sent, after, { skip, wholeRecord: true });
+  return {
+    took: [...confirmed, ...skip.filter((k) => Object.hasOwn(sent, k))],
+    // Unanswered counts as not-applied here: these tools' notes say "IGNORED by the API", and a response that
+    // cannot confirm a change is not grounds for claiming it. The previous version counted it as applied.
+    ignored: [...contradicted.map((c) => c.field), ...unanswered],
+  };
 }
 
 /**

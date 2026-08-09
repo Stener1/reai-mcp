@@ -831,12 +831,21 @@ export function confirmAgainstResponse(
     if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(t)) return undefined;
     const n = Number(t);
     if (!Number.isFinite(n) || Math.abs(n) > Number.MAX_SAFE_INTEGER) return undefined;
+    // A real round trip. The first attempt re-parsed the string, which of course produced the same float and so
+    // rejected nothing: a 400-digit decimal confirmed against 0, and "1.00000000000000002" against 1. Those
+    // did not SURVIVE parsing — they only landed on the same float — so they are not the same number.
+    // Canonicalising the sent spelling instead keeps the one exception worth keeping, a trailing-zero
+    // difference like "3.0" against 3, where nothing is lost either way.
+    const canonical = t.includes(".") ? t.replace(/0+$/, "").replace(/\.$/, "") : t;
+    if (String(n) !== canonical) return undefined;
     return n;
   };
   const same = (a: unknown, b: unknown): boolean => {
-    // The API stores an empty string back as null. That is it doing what was asked, not refusing it.
-    if (a === "" && b === null) return true;
-    if (b === "" && a === null) return true;
+    // Trimmed FIRST, or the two documented rules do not compose: `" "` vs `""` confirmed and `""` vs null
+    // confirmed, but `" "` vs null contradicted. Reachable on any address part, which accepts any string while
+    // the API normalises whitespace to null.
+    const blank = (v: unknown) => v === null || v === "" || (typeof v === "string" && v.trim() === "");
+    if (blank(a) && blank(b)) return true;
     // Before the both-strings comparison, or "3.0" against "3" contradicted while 3 against "3" did not.
     const [na, nb] = [numeric(a), numeric(b)];
     if (na !== undefined && nb !== undefined) return na === nb;
@@ -850,7 +859,9 @@ export function confirmAgainstResponse(
       continue;
     }
     if (after[field] === null) {
-      if (value === null || value === "") {
+      // The same blank class same() uses. Keying this on `=== ""` meant `" "` against a stored null reported
+      // "unanswered" while `""` against it confirmed — the null branch runs first, so same() never saw it.
+      if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) {
         // Both mean absent, so the outcome is what was asked for.
         result.confirmed.push(field);
       } else if (opts.wholeRecord) {
@@ -874,7 +885,9 @@ export function confirmAgainstResponse(
 }
 
 /**
- * The standard paragraphs for a confirmation, so five tools cannot phrase the same finding five ways.
+ * The standard paragraphs for a confirmation, so tools cannot phrase the same finding several ways. Six of
+ * the eleven certified merge tools use it; five still hand-roll their wording, which is worth saying rather
+ * than claiming the consolidation is complete.
  *
  * `subject` names the record ("order OR-4105"). Returns nothing when there is nothing to report, so a caller
  * can spread it into a notes array unconditionally.

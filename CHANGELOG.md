@@ -130,6 +130,27 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Still not enforced: the population comes from author-written `apiPaths`, so a tool that reads then replaces
     without declaring the GET escapes both this and `test/merge-tools.test.mjs`, which derives its population
     the same way. The two are circular.
+  - A re-review of the branch then found the same class at the one site I had not checked, plus two more:
+    `reai_update_salary_line` omitted the `wholeRecord` flag, so a carried comment the PUT dropped read as
+    *"the response did not answer"* while the headline said the line was read back FROM the response — payroll,
+    and the site I had argued matters most. `readableRecord` answers `{ record: {} }` for a nested field that is
+    missing OR null, so an address the write had WIPED ENTIRELY got the same soft "could not be confirmed" as an
+    unreadable response; the two are distinguished now, with the discarded `problem` string used. And the
+    numeric round trip the comment claimed was never performed — a 400-digit decimal confirmed against `0`
+    because the code re-parsed the string instead of canonicalising it.
+  - **`reai_update_order` and `reai_update_offer` were certified as verifying while using a near-duplicate
+    helper with the OPPOSITE semantics**, 560 lines from a migrated site in the same file. Measured: a PUT
+    answering with no body produced a bare "Changed comment" — the costliest class by this helper's own
+    docstring — and `projectId` sent as `7` against a stored `"7"` produced both a false "Changed NOTHING" and a
+    false "IGNORED by the API". `appliedChanges` now delegates to the shared helper, which makes six of the
+    eleven certified tools route through it. Five still hand-roll their wording, which is worth saying rather
+    than claiming the consolidation is complete.
+  - **The tripwire was still defeatable three ways** after the first hardening, all reproduced by the review: a
+    title that appears only in a comment or an assertion message; two entries naming the SAME title, so
+    deleting one test left the other satisfying both; and a named test whose body proves nothing about the tool.
+    It now anchors on the `test("` that opens the title, requires each entry's test to be distinct, and requires
+    that test to mention the tool it certifies — which caught four certifying tests that drove their tool
+    through a local helper without naming it.
   - **Three instances outside the thirteen, found by the review and NOT fixed here**, all invisible for that
     reason: `reai_set_asset_depreciation` (`src/tools/assets.ts:201`, declared irreversible, echoes
     `args.depreciationMethod` and `args.usefulLifeInMonths` while `AssetRes` carries both),

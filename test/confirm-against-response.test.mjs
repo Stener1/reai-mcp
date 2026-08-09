@@ -12,6 +12,11 @@ import { confirmAgainstResponse, describeConfirmation } from "../dist/tools/regi
  *
  * The remaining four are covered here. `reai_update_creditor` (#141) and `reai_update_subscription` (#142)
  * have their own, richer tests in loans/subscriptions.
+ *
+ * How far the consolidation actually got, since claiming "one place" would be the same overstatement this file
+ * exists to catch: SIX of the eleven certified tools route through `confirmAgainstResponse` — the four here
+ * plus order and offer, whose near-duplicate helper with the opposite semantics now delegates to it. Creditor,
+ * company bank, subscription, agreement and employee bank account still hand-roll their own wording.
  */
 
 const tool = (name) => {
@@ -192,7 +197,7 @@ test("reai_set_customer_address checks the CARRIED parts, not only what the call
   assert.match(text, /WARNING: postalCode \(sent "0150", the address came back with null\)/);
 });
 
-test("reai_set_supplier_address checks the parts against the nested response", async () => {
+test("reai_set_supplier_address checks the supplier parts against the nested response", async () => {
   const { text } = await run(
     "reai_set_supplier_address",
     { id: 5, city: "Bergen" },
@@ -212,20 +217,20 @@ test("reai_set_supplier_address checks the parts against the nested response", a
  * requires the tool to say so. The test is named, so the claim is checkable rather than asserted.
  */
 const VERIFIES_AGAINST_RESPONSE = {
-  reai_update_salary_line: ["test/confirm-against-response.test.mjs", "reports the amounts from the response, not from args"],
-  reai_update_share_investment: ["test/confirm-against-response.test.mjs", "checks its fields against the response"],
-  reai_set_customer_address: ["test/confirm-against-response.test.mjs", "checks the parts against the nested response"],
-  reai_set_supplier_address: ["test/confirm-against-response.test.mjs", "checks the parts against the nested response"],
-  reai_update_creditor: ["test/loans.test.mjs", "a rename whose replacement drops the carried account"],
-  reai_update_company_bank: ["test/loans.test.mjs", "does not call a bodyless response an empty account"],
-  reai_update_subscription: ["test/subscriptions.test.mjs", "a CARRIED arming value the response contradicts"],
+  reai_update_salary_line: ["test/confirm-against-response.test.mjs", "reai_update_salary_line reports the amounts from the response, not from args"],
+  reai_update_share_investment: ["test/confirm-against-response.test.mjs", "reai_update_share_investment checks its fields against the response"],
+  reai_set_customer_address: ["test/confirm-against-response.test.mjs", "reai_set_customer_address checks the parts against the nested response"],
+  reai_set_supplier_address: ["test/confirm-against-response.test.mjs", "reai_set_supplier_address checks the supplier parts against the nested response"],
+  reai_update_creditor: ["test/loans.test.mjs", "a rename whose replacement drops the carried account is the case this tool exists for, and warns"],
+  reai_update_company_bank: ["test/loans.test.mjs", "reai_update_company_bank does not call a bodyless response an empty account"],
+  reai_update_subscription: ["test/subscriptions.test.mjs", "a CARRIED arming value the response contradicts is warned about — no `given` gate"],
   reai_update_order: ["test/update-order.test.mjs", "a value stored differently from what was sent is flagged"],
   reai_update_offer: ["test/update-offer.test.mjs", "a value stored differently from what was sent is flagged"],
-  reai_update_agreement: ["test/agreements.test.mjs", "a value the API silently did not store is reported"],
+  reai_update_agreement: ["test/agreements.test.mjs", "a value the API silently did not store is reported, not assumed"],
   // Proven twice, and the strongest example in the repo — it compares digit-normalised and refuses. An earlier
   // version of this file listed it as UNVERIFIED with a reason that was wrong on both clauses, which is the
   // error class this whole list exists to prevent, occurring inside the list.
-  reai_set_employee_bank_account: ["test/employees.test.mjs", "a stored account that does not match what was sent is flagged"],
+  reai_set_employee_bank_account: ["test/employees.test.mjs", "a stored account that does not match what was sent is flagged, not celebrated"],
 };
 
 /**
@@ -233,7 +238,7 @@ const VERIFIES_AGAINST_RESPONSE = {
  * response — not that it is fine.
  */
 const UNVERIFIED = {
-  reai_update_loan: "reads missingInterestAccounts off the response, and now reports the stored relatedParty — but no test drives a disagreement",
+  reai_update_loan: "relatedParty and the interest accounts ARE checked against the response, and test/loans.test.mjs drives a relatedParty disagreement — but the rest of its fields are not, so it is not certified here",
   reai_add_employment_line: "checks the line COUNT against the response and that is tested; the per-field content of the added line is not",
 };
 
@@ -253,12 +258,30 @@ test("every merge tool is classified, so a new one cannot slip in unexamined", a
   const { fileURLToPath } = await import("node:url");
   const { join, dirname } = await import("node:path");
   const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  // Three ways the substring version was still defeatable, all reproduced by a review: the title could live in
+  // a COMMENT or an assertion message; two entries could name the SAME title so deleting one test left the
+  // other satisfying both; and the named test could have a body that proves nothing. Anchored on the `test("`
+  // that opens it, required to be distinct per entry, and required to mention the tool it certifies.
+  const seenTitles = new Set();
   for (const [name, [file, title]] of Object.entries(VERIFIES_AGAINST_RESPONSE)) {
     assert.ok(existsSync(join(repo, file)), `${name} names ${file}, which does not exist`);
     const body = readFileSync(join(repo, file), "utf8");
+    const opener = `test("${title}"`;
     assert.ok(
-      body.includes(title),
-      `${name} claims to be proven by a test titled "${title}" in ${file}, and no such title is there`,
+      body.includes(opener),
+      `${name} claims a test titled "${title}" in ${file}. No test OPENS with that title there — a mention ` +
+        `in a comment or an assertion message does not count.`,
+    );
+    const key = `${file}::${title}`;
+    assert.ok(!seenTitles.has(key), `two entries name the same test (${key}); deleting it would leave both green`);
+    seenTitles.add(key);
+    // The named test must at least be about this tool. Cheap, and it kills a body that proves nothing about it.
+    const from = body.indexOf(opener);
+    const next = body.indexOf('\ntest(', from + 1);
+    const testBody = body.slice(from, next === -1 ? body.length : next);
+    assert.ok(
+      testBody.includes(name) || testBody.includes(name.replace(/^reai_/, "")),
+      `the test "${title}" never mentions ${name}, so it cannot be what proves it`,
     );
   }
 
@@ -301,4 +324,56 @@ test("the salary fallback distinguishes no lines from no matching line", async (
     { id: 9, employees: [{ id: 1, wageSpecs: [{ id: 99, quantity: 3, rate: 500 }] }] },
   );
   assert.match(mismatched.text, /carried 1 line\(s\) but none with id 77/);
+});
+
+test("reai_update_salary_line treats a dropped carried comment as a contradiction, not a silence", async () => {
+  // The blocking finding of the re-review: this site omitted `wholeRecord`, so a carried comment the replacing
+  // PUT dropped read as "the response did not answer" while the headline said the line was read back FROM the
+  // response. Payroll is where I argued this matters most, and it was the one site I had not checked.
+  const runRec = (comment) => ({
+    id: 9, payableAmount: 1000, totalTaxDeducted: 200,
+    employees: [{ id: 1, wageSpecs: [{ id: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500, comment }] }],
+  });
+  const { text } = await run(
+    "reai_update_salary_line",
+    { id: 9, wageSpecId: 77, specificationCode: "HOURLY_WAGE", quantity: 3, rate: 500, comment: "ZZ note" },
+    runRec("ZZ note"),
+    runRec(null),
+  );
+  assert.match(text, /WARNING: comment \(sent "ZZ note", line 77 came back with null\)/);
+  assert.doesNotMatch(text, /did not answer for comment/, "the response answered — with null");
+});
+
+test("reai_set_customer_address distinguishes a wiped address from an unreadable response", async () => {
+  // readableRecord answers `{ record: {} }` for a nested field that is missing OR null. The second means the
+  // whole address is gone, and an empty base made that read as the same soft "could not be confirmed" a bare
+  // string gets — two responses meaning entirely different things.
+  const parts = { addressPart1: "Gata 1", city: "Oslo", postalCode: "0150", countryCode: "NO" };
+  const wiped = await run("reai_set_customer_address", { id: 5, city: "Bergen" }, { id: 5, address: parts }, { id: 5, address: null });
+  assert.match(wiped.text, /no postal address at all — every part is gone/);
+  const unreadable = await run("reai_set_customer_address", { id: 5, city: "Bergen" }, { id: 5, address: parts }, "Updated.");
+  assert.match(unreadable.text, /could not be confirmed/);
+  assert.doesNotMatch(unreadable.text, /every part is gone/, "an unreadable response is not evidence of a wipe");
+});
+
+test("the order and offer tools no longer count an unanswered field as applied", async () => {
+  // appliedChanges was a near-duplicate with the OPPOSITE semantics, in the same file as the migrated sites,
+  // while both tools were certified as verifying against the response. A bodyless PUT produced a bare
+  // "Changed comment".
+  const { registeredTools: tools } = await import("../dist/server.js");
+  const order = tools.find((t) => t.name === "reai_update_order");
+  const rec = (over = {}) => ({
+    id: 4105, number: "OR-4105", currencyCode: "NOK", customerId: 1, daysUntilDue: 14, issueDate: "2026-08-09",
+    comment: "ZZ C", sendEhf: false, invoiceId: null,
+    lines: [{ id: 1, itemName: "x", quantity: 1, unitPrice: 5, vatCode: "0" }], ...over,
+  });
+  for (const [label, after] of [["no body", undefined], ["omits the field", rec({ comment: undefined })]]) {
+    const queue = [{ data: rec(), status: 200 }, { data: after, status: 200 }];
+    const result = await order.handler(
+      { id: 4105, comment: "NEW", tenantId: 2783 },
+      { client: { request: async () => queue.shift(), deepLink: () => "l" }, config: { writeMode: "full", tenantId: 2783 }, session: {} },
+    );
+    const text = result.content.find((c) => c.type === "text").text;
+    assert.match(text, /Changed NOTHING/, `${label}: an unconfirmable change must not be claimed`);
+  }
 });
