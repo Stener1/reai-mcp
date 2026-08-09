@@ -186,6 +186,13 @@ function auditCases() {
       // Operations the claim deliberately does NOT hold for, and families represented by one concrete probe.
       exceptions: arrayField(chunk, "exceptions"),
       samples: arrayField(chunk, "samples"),
+      // path -> reason. Served but unanswerable by a GET, which is NOT the same as the claim being false
+      // there; conflating the two would force a note to assert something untrue.
+      unmeasured: Object.fromEntries(
+        [...(/unmeasured:\s*\{([\s\S]*?)\n {4}\}/.exec(chunk)?.[1] ?? "").matchAll(
+          /"([^"]+)":\s*\n?\s*"([^"]+)"/g,
+        )].map(([, k, v]) => [k, v]),
+      ),
       chunk,
     }))
     .filter((c) => c.quirk);
@@ -198,8 +205,8 @@ test("every quirk probe names a real quirk, and binds to text that still PREDICT
   // one-character edit here.
   assert.equal(
     cases.length,
-    8,
-    `expected 8 quirk cases, extracted ${cases.length} — either a case was added without updating this ` +
+    16,
+    `expected 16 quirk cases, extracted ${cases.length} — either a case was added without updating this ` +
       `number, or the extraction has stopped matching`,
   );
 
@@ -347,7 +354,7 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
       ...[...src.matchAll(/get\(\s*[`"](\/api\/[^`"?]*)/g)].map(([, v]) => v),
     ]),
   ];
-  assert.ok(paths.length >= 15, `only ${paths.length} requests extracted — the extraction has stopped matching`);
+  assert.ok(paths.length >= 24, `only ${paths.length} requests extracted — the extraction has stopped matching`);
   // NOT `classifyRequest("GET", …)`. Review showed that assertion could not fail: policy.ts returns "read"
   // for every GET by an early return, so it was a tautology dressed as a policy check, and the PR claimed it
   // proved read-only. What classifyRequest can honestly establish is the STAKES — that these very paths are
@@ -523,7 +530,7 @@ test("an unverifiable claim fails the run unless it says WHY it cannot be verifi
   for (const c of conditional) {
     assert.match(
       c.chunk,
-      /return \[\s*\n?\s*"ok"|\?\s*\["ok"/,
+      /\[\s*\n?\s*"ok"/,
       `${c.quirk} declares itself conditional but has no branch that can report OK, so it can never verify ` +
         `anything on any tenant`,
     );
@@ -593,6 +600,7 @@ test("every case probes every OPERATION its quirk is served on, or names why not
     const skipped = served.length - gettable.length;
     let probed = 0;
     let sampled = 0;
+    let unmeasured = 0;
     for (const op of gettable) {
       // Exact, or a template the probe instantiates (/api/annual-accounts/{year} needs a concrete year).
       const exact = c.probes.some((probe) => probe === op.path || instantiates(probe, op.path));
@@ -607,11 +615,38 @@ test("every case probes every OPERATION its quirk is served on, or names why not
       }
 
       if (c.exceptions.some((ex) => ex === op.path)) continue;
-      gaps.push(`${c.quirk} is served on GET ${op.path}, which is neither probed, sampled nor excepted`);
+      if (op.path in c.unmeasured) {
+        unmeasured += 1;
+        continue;
+      }
+      gaps.push(
+        `${c.quirk} is served on GET ${op.path}, which is neither probed, sampled, excepted nor declared ` +
+          `unmeasured`,
+      );
     }
     census.push(
       `${c.quirk}: ${served.length} served, ${probed} probed, ${sampled} sampled, ` +
-        `${c.exceptions.length} excepted, ${skipped} non-GET`,
+        `${c.exceptions.length} excepted, ${unmeasured} unmeasured, ${skipped} non-GET`,
+    );
+
+    // `unmeasured` is the third hatch, so it gets the same treatment as the other two: a reason that says
+    // what is missing, and it may not swallow the whole case. `exceptions` earned its note requirement by
+    // asserting the claim is false somewhere; this one asserts only that a GET cannot reach it, which is a
+    // statement about the audit rather than about the API, so the reason lives in the script and not in a
+    // note an agent reads.
+    for (const [path, why] of Object.entries(c.unmeasured)) {
+      assert.ok(
+        gettable.some((op) => op.path === path),
+        `${c.quirk} declares ${path} unmeasured, but the quirk is not served on that GET operation`,
+      );
+      assert.ok(
+        why.length >= 20 && /needs|requires|cannot|write/i.test(why),
+        `${c.quirk}'s reason for not measuring ${path} must say what is missing, got ${JSON.stringify(why)}`,
+      );
+    }
+    assert.ok(
+      Object.keys(c.unmeasured).length < Math.max(gettable.length, 1),
+      `${c.quirk} declares every one of its GET operations unmeasured, so the case verifies nothing`,
     );
   }
   assert.deepEqual(gaps, [], `quirks asserted to agents on operations the audit never checks:\n${gaps.join("\n")}`);

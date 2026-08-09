@@ -585,6 +585,302 @@ const CASES = [
         : ["drift", `X-Tenant-Id: ${bogus} returned ${JSON.stringify(got)} rather than only ${only}`];
     },
   },
+  {
+    quirk: "leads-are-the-company-register-not-your-records",
+    claim: "pageSize caps at 200, and the over-cap 400 names the field in fieldErrors",
+    marker: "Read fieldErrors before concluding a validation failure is opaque",
+    // Not /api/leads/null: this quirk is served only on /api/leads, so verifying the addressing claim here
+    // would attribute the result to a claim the agent never receives at that operation. It is checked by
+    // lead-detail-nests-what-the-search-flattens, which IS served on /api/leads/{id}. Same mis-attribution
+    // the reverse-coverage check caught for the third lead wrapper in #128.
+    probes: ["/api/leads"],
+    conditional: "needs the Leads module ENABLED; where it is off every probe here is a 403",
+    async check() {
+      const capped = await get("/api/leads?pageSize=200");
+      if (capped.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
+      if (capped.status !== 200) return ["inconclusive", `pageSize=200 answered ${capped.status}`];
+
+      const over = await get("/api/leads?pageSize=500");
+      if (over.status !== 400) return ["drift", `pageSize=500 answered ${over.status}, so 200 is no longer the cap`];
+      // The corrected half. The note used to say this 400 "names no field"; it names it in fieldErrors, and
+      // an agent told otherwise never looks there. So the probe reads exactly that.
+      const named = (over.body?.fieldErrors ?? []).some((e) => e.field === "pageSize");
+      if (!named) {
+        return [
+          "drift",
+          `the over-cap 400 no longer names pageSize in fieldErrors: ${JSON.stringify(over.body?.fieldErrors)}`,
+        ];
+      }
+      // And the contrast the note draws, because "read fieldErrors" is only useful advice if it is sometimes
+      // empty — which is what /api/leads/person-role-matches does, and what its own quirk claims.
+      const bare = await get("/api/leads/person-role-matches");
+      const contrast = Array.isArray(bare.body?.fieldErrors) && bare.body.fieldErrors.length === 0;
+
+      return [
+        "ok",
+        `cap 200 ok, 500 -> 400 naming pageSize in fieldErrors` +
+          `${contrast ? " (and empty on person-role-matches, as the note contrasts)" : ""}`,
+      ];
+    },
+  },
+  {
+    quirk: "leads-unsaved-rows-have-no-id",
+    claim: "leadFilter selects saved/unsaved/all, and an unsaved row's id is null",
+    marker: "A row's `id` is null only while the lead is UNSAVED",
+    probes: ["/api/leads"],
+    conditional: "needs the Leads module ENABLED; where it is off there are no rows to inspect",
+    async check() {
+      const accepted = {};
+      for (const f of ["all", "saved", "unsaved"]) {
+        const r = await get(`/api/leads?leadFilter=${f}&pageSize=5`);
+        if (r.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
+        if (r.status !== 200) return ["drift", `leadFilter=${f} answered ${r.status}, but the note offers it`];
+        accepted[f] = (r.body?.items ?? []).length;
+      }
+      // The filter has to be a real filter: a value outside the three must be refused, or "filter with
+      // leadFilter=saved|unsaved|all" is describing something that ignores its input.
+      const bogus = await get("/api/leads?leadFilter=definitely-not-a-filter");
+      if (bogus.status !== 400) {
+        return ["drift", `an unknown leadFilter answered ${bogus.status}, so the parameter is not validated`];
+      }
+      const unsaved = await get("/api/leads?leadFilter=unsaved&pageSize=10");
+      const rows = unsaved.body?.items ?? [];
+      if (rows.length === 0) {
+        return ["conditional", "no unsaved rows on this tenant, so the null-id claim has nothing to read"];
+      }
+      const withId = rows.filter((r) => r.id !== null);
+      return withId.length === 0
+        ? ["ok", `leadFilter all/saved/unsaved = ${accepted.all}/${accepted.saved}/${accepted.unsaved} rows; all ${rows.length} unsaved rows have id null`]
+        : ["drift", `${withId.length} of ${rows.length} UNSAVED rows carry an id, e.g. ${withId[0].id}`];
+    },
+  },
+  {
+    quirk: "lead-detail-nests-what-the-search-flattens",
+    claim: "the detail nests lead state under `lead`; a search row flattens id and status to the top",
+    marker: "code that reads `id` at the top level of a detail response gets undefined",
+    probes: ["/api/leads/org/{orgNumber}", "/api/leads/null"],
+    conditional: "needs the Leads module ENABLED; where it is off there is no row to look one up from",
+    async check() {
+      const list = await get("/api/leads?pageSize=1");
+      if (list.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
+      const row = (list.body?.items ?? [])[0];
+      if (!row) return ["conditional", "no lead rows on this tenant, so there is nothing to compare"];
+
+      // The ROW half: flattened.
+      const flat = ["id", "status"].filter((k) => k in row);
+      if (flat.length !== 2) {
+        return ["drift", `a search row no longer carries id and status at the top level (has: ${flat.join(", ") || "neither"})`];
+      }
+      if ("lead" in row) return ["drift", "a search row now nests a `lead` object too, so the contrast is gone"];
+
+      // The DETAIL half: nested, and present-but-null rather than omitted for an untouched company.
+      const detail = await get(`/api/leads/org/${row.orgNumber}`);
+      if (detail.status !== 200) return ["inconclusive", `the org lookup answered ${detail.status}`];
+      if ("id" in (detail.body ?? {})) {
+        return ["drift", "the detail response now carries `id` at the top level, so reading it no longer misleads"];
+      }
+      if (!detail.body || typeof detail.body.lead !== "object" || detail.body.lead === null) {
+        return ["drift", `the detail response has no \`lead\` object: ${Object.keys(detail.body ?? {}).slice(0, 8).join(", ")}`];
+      }
+      const leadKeys = Object.keys(detail.body.lead);
+      for (const k of ["id", "status", "notes", "convertedCustomerId"]) {
+        if (!leadKeys.includes(k)) return ["drift", `lead.${k} is gone; lead has ${leadKeys.join(", ")}`];
+      }
+      if (!Array.isArray(detail.body.contactEvents)) {
+        return ["drift", `contactEvents is ${JSON.stringify(detail.body.contactEvents)}, not an array`];
+      }
+      // And the path that cannot address an untouched company at all.
+      const nullId = await get("/api/leads/null");
+      if (nullId.status !== 400) return ["drift", `GET /api/leads/null answered ${nullId.status}, not the documented 400`];
+      return [
+        "ok",
+        `row flattens {id, status}; detail nests lead { ${leadKeys.slice(0, 5).join(", ")}… } with contactEvents ` +
+          `[${detail.body.contactEvents.length}]; /api/leads/null still 400`,
+      ];
+    },
+  },
+  {
+    quirk: "archived-records-need-an-explicit-filter-to-see",
+    claim: "archived=true reveals archived records and includeArchived=true does NOT",
+    marker: "`includeArchived=true` is NOT it and returns nothing",
+    probes: ["/api/customers", "/api/suppliers"],
+    conditional: "needs at least one ARCHIVED customer or supplier on the tenant; 2634 has none",
+    async check() {
+      const seen = [];
+      let observed = 0;
+      for (const path of this.probes) {
+        const plain = await get(path);
+        const archived = await get(`${path}?archived=true`);
+        const include = await get(`${path}?includeArchived=true`);
+        for (const [label, r] of [["plain", plain], ["archived=true", archived], ["includeArchived=true", include]]) {
+          if (r.status !== 200) return ["inconclusive", `${path} ${label} answered ${r.status}`];
+        }
+        const n = (r) => (Array.isArray(r.body) ? r.body.length : (r.body?.items ?? []).length);
+        if (n(archived) === 0) {
+          seen.push(`${path}: nothing archived here`);
+          continue;
+        }
+        observed += 1;
+        // The whole point: the wrong parameter is silently empty rather than an error, which is why
+        // "the customer is gone" gets believed.
+        if (n(include) !== 0) {
+          return ["drift", `${path}?includeArchived=true now returns ${n(include)} rows, so it IS a filter after all`];
+        }
+        if (n(plain) >= n(archived)) {
+          return [
+            "drift",
+            `${path} plain returns ${n(plain)} and archived=true ${n(archived)} — the plain list no longer hides them`,
+          ];
+        }
+        seen.push(`${path}: plain ${n(plain)}, archived=true ${n(archived)}, includeArchived=true ${n(include)}`);
+      }
+      return observed === 0
+        ? ["conditional", `no archived records on this tenant: ${seen.join("; ")}`]
+        : ["ok", seen.join(" | ")];
+    },
+  },
+  {
+    quirk: "expense-status-never-says-booked-or-reversed",
+    claim: "the status filter rejects `reversed`, so reversed expenses cannot be listed by status",
+    marker: "?status=reversed cannot be used to find them",
+    probes: ["/api/expenses"],
+    // GET /api/expenses/{id} carries the other half of this claim — that a booked expense still reads
+    // "approved" and only voucherId distinguishes it, and that a reversed one is still returned by id. Both
+    // need an expense to exist, and creating one is a write. Declared rather than quietly skipped.
+    unmeasured: {
+      "/api/expenses/{id}": "needs an expense to exist; both test tenants have none and creating one is a write",
+    },
+    async check() {
+      // The documented values must be accepted...
+      for (const v of ["open", "for_approval", "approved"]) {
+        const r = await get(`/api/expenses?status=${v}`);
+        if (r.status !== 200) return ["drift", `status=${v} answered ${r.status}, but the note lists it as valid`];
+      }
+      // ...and the one the note says cannot be used must still be refused, by name.
+      const reversed = await get("/api/expenses?status=reversed");
+      if (reversed.status === 200) {
+        return ["drift", "status=reversed is accepted now, so reversed expenses CAN be listed and the note is stale"];
+      }
+      if (reversed.status !== 400) return ["inconclusive", `status=reversed answered ${reversed.status}`];
+      const detail = detailOf(reversed);
+      return /failed to convert 'status' with value: 'reversed'/i.test(detail)
+        ? ["ok", `open/for_approval/approved accepted; reversed refused with 400 "${detail}"`]
+        : ["drift", `status=reversed is refused, but with "${detail.slice(0, 80)}" rather than the documented message`];
+    },
+  },
+  {
+    quirk: "manual-reconciliation-404-means-not-manual-not-missing",
+    claim: "month is validated first, then a bank-synced id and a nonexistent id 404 identically",
+    marker: "`month` is required, and it is validated BEFORE the account is looked up",
+    probes: ["/api/manual-reconciliations/{bankAccountId}"],
+    conditional: "needs at least one company bank to compare a real id against a nonexistent one",
+    async check() {
+      const banks = await get("/api/company-banks");
+      if (banks.status !== 200) return ["inconclusive", `/api/company-banks answered ${banks.status}`];
+      const rows = Array.isArray(banks.body) ? banks.body : (banks.body?.items ?? []);
+      if (rows.length === 0) return ["conditional", "no company banks on this tenant, so there is no real id to contrast"];
+
+      // The ordering half, which the note used to omit: bare, the endpoint complains about month and says
+      // nothing about the id at all.
+      const bare = await get(`/api/manual-reconciliations/${rows[0].id}`);
+      if (bare.status !== 400 || !/month is required/i.test(detailOf(bare))) {
+        return [
+          "drift",
+          `without month it answers ${bare.status} "${detailOf(bare).slice(0, 60)}" rather than the documented ` +
+            `400 "month is required" — the validation order has changed`,
+        ];
+      }
+
+      // The ambiguity half. A synced (non-manual) account and an id that cannot exist must be
+      // indistinguishable, because that is the entire warning.
+      const synced = rows.filter((b) => b.providerType && b.providerType !== "manual");
+      if (synced.length === 0) {
+        return ["conditional", "every company bank here is manual, so the not-manual 404 cannot be produced"];
+      }
+      const real = await get(`/api/manual-reconciliations/${synced[0].id}?month=2026-07`);
+      const fake = await get("/api/manual-reconciliations/999999999?month=2026-07");
+      if (real.status !== 404) {
+        return ["drift", `a ${synced[0].providerType} account answered ${real.status}, not the documented 404`];
+      }
+      if (fake.status !== 404) {
+        return ["drift", `a nonexistent id answered ${fake.status}, so the two cases ARE distinguishable now`];
+      }
+      return detailOf(real) === detailOf(fake)
+        ? ["ok", `bare -> 400 "month is required"; ${synced[0].providerType} id and a nonexistent id both 404 "${detailOf(real)}"`]
+        : ["drift", `the two 404s now differ: "${detailOf(real)}" vs "${detailOf(fake)}" — they are distinguishable`];
+    },
+  },
+  {
+    quirk: "supplier-invoices-hide-reversed",
+    claim: "the spec itself says the list returns only non-reversed documents",
+    marker: "the spec says so outright",
+    probes: ["/api/supplier-invoices"],
+    async check() {
+      // A SPEC claim, checked against the pinned document rather than the live API — the same pattern as
+      // date-range-required's schema half, and the only kind of claim this repository verifies end to end.
+      // A live GET cannot show it: a list with no reversed documents in it looks identical either way.
+      const { getSpecIndex } = await import(pathToFileURL(join(process.cwd(), "dist/reai/spec.js")).href);
+      const op = getSpecIndex().operations.find((o) => o.method === "GET" && o.path === "/api/supplier-invoices");
+      if (!op) return ["inconclusive", "/api/supplier-invoices is not in the pinned spec"];
+      const text = `${op.summary ?? ""} ${op.description ?? ""}`;
+      if (!/non-reversed/i.test(text)) {
+        return [
+          "drift",
+          `the spec no longer says "non-reversed" for this endpoint, so the note is citing something it does ` +
+            `not say: "${text.slice(0, 110)}"`,
+        ];
+      }
+      // And the endpoint must still answer, or the note describes something unreachable.
+      const live = await get("/api/supplier-invoices");
+      return live.status === 200
+        ? ["ok", `the spec states it: "${/[^.]*non-reversed[^.]*\./i.exec(text)?.[0]?.trim().slice(0, 90)}"`]
+        : ["inconclusive", `the spec still says non-reversed, but the endpoint answered ${live.status}`];
+    },
+  },
+  {
+    quirk: "array-query-comma-joined",
+    claim: "`include` is the only array query parameter on the agent-facing surface, declared explode=false",
+    marker: "is the only array query parameter in the API and uses style=form, explode=false",
+    probes: ["/api/bank-reconciliations/{bankAccountId}"],
+    conditional: "needs a company bank id to call the reconciliation endpoint with",
+    async check() {
+      const { getSpecIndex } = await import(pathToFileURL(join(process.cwd(), "dist/reai/spec.js")).href);
+      const ops = getSpecIndex().operations;
+      // "the only array query parameter in the API" — scoped to what agents can reach. Three internal
+      // /account/search endpoints also take one (accountNumberPrefix) and do NOT declare explode=false, so
+      // the claim is only true of the exposed surface, and that is what is checked.
+      const arrays = [];
+      for (const op of ops) {
+        if (op.internal) continue;
+        for (const a of op.params ?? []) {
+          if (a.in === "query" && /\[\]$/.test(String(a.type ?? ""))) arrays.push(`${op.method} ${op.path} ?${a.name}`);
+        }
+      }
+      if (arrays.length !== 1 || !arrays[0].endsWith("?include")) {
+        return [
+          "drift",
+          `the agent-facing surface now has ${arrays.length} array query parameters (${arrays.join("; ")}), so ` +
+            `"the only one" is no longer true`,
+        ];
+      }
+
+      const banks = await get("/api/company-banks");
+      const rows = banks.status === 200 ? (Array.isArray(banks.body) ? banks.body : (banks.body?.items ?? [])) : [];
+      if (rows.length === 0) return ["conditional", "no company bank id available to send a comma-joined include to"];
+      const id = rows[0].id;
+      const joined = await get(`/api/bank-reconciliations/${id}?month=2026-07&include=summary,pending_postings`);
+      if (joined.status !== 200) {
+        return ["drift", `a comma-joined include answered ${joined.status} "${detailOf(joined).slice(0, 60)}"`];
+      }
+      // A value outside the enum must still be refused, or "include" is not being parsed at all and the 200
+      // above proves nothing about serialization.
+      const bogus = await get(`/api/bank-reconciliations/${id}?month=2026-07&include=not-a-section`);
+      if (bogus.status !== 400) {
+        return ["drift", `include=not-a-section answered ${bogus.status}, so the parameter is not validated`];
+      }
+      return ["ok", `\`include\` is the only agent-facing array query param; comma-joined accepted, bogus value refused`];
+    },
+  },
 ];
 
 async function main() {
@@ -611,6 +907,12 @@ async function main() {
       (ex) => !(c.samples ?? []).some((pre) => ex === pre || ex.startsWith(`${pre}/`)),
     );
     if (live.length) console.log(`  ${c.quirk}: claim does NOT hold on — ${live.join(", ")}`);
+    // Served, but not answerable by a GET — almost always because the claim needs a record to exist and
+    // creating one is a write. Distinct from an exception, which asserts the claim is FALSE there. Printed
+    // because "8 of 122" already understates coverage, and a silent skip would overstate it.
+    for (const [path, why] of Object.entries(c.unmeasured ?? {})) {
+      console.log(`  ${c.quirk}: NOT measured on ${path} — ${why}`);
+    }
   }
   console.log("");
 

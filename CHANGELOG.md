@@ -9,6 +9,44 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The read-only quirk audit doubles to 16 cases, and found two more false notes.**
+  - `leads-are-the-company-register-not-your-records` claimed the over-cap 400 *"names no field"*. It names it
+    precisely — `fieldErrors: [{ field: "pageSize", message: "must be less than or equal to 200" }]` — so the
+    note pointed agents away from the only part of the body carrying the fix. Corrected, and the note now
+    draws the contrast that makes "read fieldErrors" actionable: it is populated here and **empty** on
+    `/api/leads/person-role-matches`, whose own quirk claims exactly that.
+  - `manual-reconciliation-404-means-not-manual-not-missing` described the ambiguous 404 without mentioning
+    that `month` is required and validated **first**. Following it bare yields 400 `"month is required"` and
+    nothing about the id at all. Third appearance of the validation-order trap in this audit, so the probe
+    sends the full request and the note states the order. The 404 claim itself reproduces exactly: a `ztl`
+    account and a plainly nonexistent id both answer `"Bankkonto ikke funnet."`, which is the whole warning.
+  - Eight new cases, all measured live first: the leads pageSize cap and its `fieldErrors`; `leadFilter`
+    saved/unsaved/all plus refusal of an unknown value; the row-flattens/detail-nests contrast including
+    `contactEvents: []` and a `lead` object present-but-all-null for an untouched company; `archived=true`
+    versus `includeArchived=true`; the expense status filter refusing `reversed` by name; the
+    manual-reconciliation ordering and ambiguity; and two **spec** claims — that the document itself says
+    supplier invoices are "non-reversed", and that `include` is the only array query parameter on the
+    agent-facing surface.
+  - **`array-query-comma-joined` looked false and is not.** There are four array query parameters in the
+    document, not one — but three are `accountNumberPrefix` on internal `/account/search*` operations, and the
+    claim holds for the 321 non-internal operations an agent can reach. The case checks it scoped that way
+    rather than reporting a defect that isn't one. (Measured aside: the API also tolerates a repeated key,
+    though the spec declares `explode=false`.)
+  - **A fourth coverage category, `unmeasured`**, for an operation that is served but that no GET can reach —
+    `GET /api/expenses/{id}` carries the "booked still reads approved" half of its claim, and both test
+    tenants have zero expenses. Using `exceptions` would have forced the note to assert the claim is false
+    there, which is not known. It needs a reason naming what is missing, may not swallow every GET operation
+    of a case, and is printed on every run.
+  - The reverse-coverage check from #128 immediately earned itself again: it caught `/api/leads/null` being
+    probed under a quirk served only on `/api/leads`, and the null-id claim moved to
+    `lead-detail-nests-what-the-search-flattens`, which is served on `/api/leads/{id}`.
+  - Live: **14 unchanged, 0 drifted, 2 conditional** on 2634; the archived-records case is conditional there
+    (no archived records) and **verifies on 2783** — customers 0/2/0 and suppliers 0/69/0 for
+    plain/`archived=true`/`includeArchived=true` — which is what shows it is not vacuous.
+  - Five new ways to defeat the guards, each verified to fail the build: a vague `unmeasured` reason, an
+    `unmeasured` path the quirk is not served on, `unmeasured` swallowing a whole case, a 17th case opened on
+    one line, and the supplier-invoice spec check widened to a catch-all.
+
 - **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
   The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
   `reai_api_notes`, and between them those audits named **2 of the 122** —

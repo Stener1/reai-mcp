@@ -202,7 +202,7 @@ Resist quoting how many of the remaining 120 are "checkable": a keyword sweep ov
 `tenant-header-ignored-single-tenant` is in both sets. An earlier version said 114, which made 2 + 8 + 114 =
 124 out of 122.
 
-This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
+This covers the **16 that a GET can answer**, and the report prints `of 122` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
 is no write guard and no `REAI_WRITE_TEST_TENANTS`.
 
@@ -270,17 +270,34 @@ something somewhere; and a case that returns `"conditional"` without declaring o
 inconclusive by the runner, so the exemption cannot be reached by a branch that merely failed to get an
 answer.
 
-Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634.
+Currently **14 unchanged, 0 drifted, 2 conditional** against tenant 2634, from **16 cases**.
 
-**Coverage is stated as a census, not a pass mark**, because these eight quirks are served on **56
-operations** — `match: "descendants"` expands them well past their path lists, and `module-gating` alone
-reaches 34. Of those: 16 probed, 16 sampled through a declared family representative, 3 excepted as
-operations where the claim does not hold (named in the note, since an agent describing them still receives
-the quirk), and 21 non-GET and therefore unreachable by a read-only audit. The test fails if any served GET
-is none of those, so adding a path to a quirk breaks the build until it is accounted for.
+**Coverage is stated as a census, not a pass mark**, because these quirks are served on far more operations
+than they have ids — `match: "descendants"` expands them past their path lists, and `module-gating` alone
+reaches 34. Every served GET must be one of four things, and the test fails if it is none of them, so adding
+a path to a quirk breaks the build until it is accounted for:
 
-The 114 unprobed quirks are mostly claims about what a write stores or refuses, which needs the test tenant,
-and that is the next slice.
+| | meaning |
+|---|---|
+| **probed** | called directly |
+| **sampled** | represented by a probe beneath a declared family prefix — the prefix must be one of the quirk's own paths **and** must contain a probe |
+| **excepted** | the claim does **not hold** there, and the note must name that exact path, because an agent describing it still receives the quirk |
+| **unmeasured** | served, but no GET can reach the claim — almost always because it needs a record to exist and creating one is a write. Distinct from an exception, which would force a note to assert something untrue. The reason must name what is missing, and a case may not declare every one of its GET operations unmeasured. |
+
+The report prints the samples, exceptions and unmeasured operations on every run, so a reader is not left
+reconstructing coverage from the case list.
+
+The remaining unprobed quirks are mostly claims about what a write stores or refuses, which needs the test
+tenant — **48 of them are attached to a reversible write**, and that is the next slice. Tenant 2783 is
+reachable, so it is no longer blocked.
+
+**Two more false notes surfaced adding these cases**, both corrected in `src/reai/quirks.ts`:
+`leads-are-the-company-register-not-your-records` said the over-cap 400 *"names no field"*, while its
+`fieldErrors` names `pageSize` and carries the fix — advice that pointed agents away from the one useful part
+of the body. And `manual-reconciliation-404-means-not-manual-not-missing` described a 404 without mentioning
+that `month` is required and validated first, so following it bare produces 400 `"month is required"` and
+nothing about the id. The validation-order lesson for a third time; the probe now sends the full request and
+the note states the order.
 
 
 ## What did a ranking change do to every other query?
