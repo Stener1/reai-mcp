@@ -352,7 +352,7 @@ Smaller things it handles, each because a review found the version that did not:
 
 Like every read-merge-write here, it leaves a **lost-update window**: an edit made in the ReAI UI or by another client between the read and the write is silently reverted, lines included. There is no ETag, `If-Match` or version field, so it is stated rather than papered over.
 
-`PUT /api/offers/{id}` has the same rename and the same three-way mismatch, and is still uncurated — but the parity is not exact, and the differences were measured on offer 81 rather than assumed. `OfferReq` requires `currencyCode`, `customerId`, `daysUntilDue` and `offerLines`, but **not** `issueDate`. Its optional set differs: offers carry `email` and a writable `deliveryAddress` and have no `buyerReference`, `externalReference`, `invoiceEmail` or `sendEhf`. Per line it is *stricter* — `itemName` and `vatCode` are required, which `offer-lines-stricter` records — and **seven** returned fields are not accepted rather than four: `id`, `rowNumber`, `vatRate`, `lineTotal`, `lineTotalExclVat`, `lineVat`, `lineDiscount`. Every field `OfferReq` accepts is returned by `OfferRes`, so an offer merge would be losslessly carryable, which is the one way offers are easier than orders.
+`PUT /api/offers/{id}` is now curated too — see `reai_update_offer` under [Sales](#sales). The measured differences from an order are recorded there: `issueDate` is not required, per-line `itemName` and `vatCode` are, seven returned line fields are unaccepted rather than four, and everything `OfferReq` accepts `OfferRes` returns — which is why that tool runs in the default write mode and this one does not.
 
 ## Payroll
 | Tool | Purpose | Risk |

@@ -1157,11 +1157,16 @@ const updateOrder = defineTool({
           `the PUT and guessing at a line would replace the order's contents.`,
       );
     }
-    const mappedLines = (existingLines ?? []).map((line) =>
-      Object.fromEntries(
-        ORDER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
-      ),
-    );
+    // Only when the caller did NOT supply replacements. Mapping unconditionally threw a TypeError on a
+    // record carrying a null line — blocking the very recovery path the refusal above names, since passing
+    // `orderLines` explicitly is how you get past an unreadable one.
+    const mappedLines = changes.orderLines
+      ? undefined
+      : (existingLines ?? []).map((line) =>
+          Object.fromEntries(
+            ORDER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
+          ),
+        );
 
     // The PUT requires these and readableRecord only proves the response LOOKS like an order — it passes on
     // any one recognised key. Sending undefined drops them via JSON.stringify and the API answers a bare 400
@@ -1194,7 +1199,7 @@ const updateOrder = defineTool({
       customerId: order.customerId,
       daysUntilDue: order.daysUntilDue,
       issueDate: order.issueDate,
-      orderLines: mappedLines,
+      orderLines: mappedLines ?? changes.orderLines,
       ...carried,
       // The caller's changes last.
       ...Object.fromEntries(asked),
@@ -1213,7 +1218,7 @@ const updateOrder = defineTool({
     const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
     const notes = [
       `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
-        `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
+        `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
         `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
@@ -1456,6 +1461,8 @@ const updateOffer = defineTool({
   apiPaths: [
     ["GET", "/api/offers/{id}"],
     ["PUT", "/api/offers/{id}"],
+    // Read only when the offer is being MOVED to another customer, to say whose payment terms it now carries.
+    ["GET", "/api/customers/{id}"],
   ],
   inputSchema: {
     id: z.number().int().positive().describe("Offer id, as returned by reai_list_offers."),
@@ -1539,11 +1546,16 @@ const updateOffer = defineTool({
           `replace the offer's contents.`,
       );
     }
-    const mappedLines = (existingLines ?? []).map((line) =>
-      Object.fromEntries(
-        OFFER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
-      ),
-    );
+    // Only when the caller did NOT supply replacements. Mapping unconditionally threw a TypeError on a
+    // record carrying a null line — blocking the very recovery path the refusal above names, since passing
+    // `offerLines` explicitly is how you get past an unreadable one.
+    const mappedLines = changes.offerLines
+      ? undefined
+      : (existingLines ?? []).map((line) =>
+          Object.fromEntries(
+            OFFER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
+          ),
+        );
 
     // EVERY carryable field, UNCONDITIONALLY, with an absent one stated as null.
     //
@@ -1563,7 +1575,7 @@ const updateOffer = defineTool({
       currencyCode: offer.currencyCode,
       customerId: offer.customerId,
       daysUntilDue: offer.daysUntilDue,
-      offerLines: mappedLines,
+      offerLines: mappedLines ?? changes.offerLines,
       ...carried,
       ...Object.fromEntries(asked),
     };
@@ -1579,10 +1591,36 @@ const updateOffer = defineTool({
     const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
     const notes = [
       `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
-        `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
+        `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
         `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    // Moving an offer does NOT move the payment terms: daysUntilDue is required, so the replacement carries
+    // the number the offer already had — which belonged to the previous customer. Same reasoning as the order
+    // tool: changing it silently is a money decision the caller did not ask for, so it is named instead.
+    if (changedKeys.includes("customerId") && changes.daysUntilDue === undefined) {
+      let theirTerms: number | undefined;
+      try {
+        const customer = await ctx.client.request<{ daysUntilDue?: number | null }>({
+          method: "GET",
+          path: `/api/customers/${changes.customerId}`,
+          tenantId: resolved,
+        });
+        theirTerms = customer.data?.daysUntilDue ?? undefined;
+      } catch {
+        theirTerms = undefined;
+      }
+      notes.push(
+        `The offer moved to customer ${changes.customerId} but KEPT payment terms of ${body.daysUntilDue} ` +
+          `days, which came from the offer as it was. ` +
+          (theirTerms === undefined
+            ? `The new customer's own terms could not be read.`
+            : theirTerms === body.daysUntilDue
+              ? `That happens to match the new customer's own terms.`
+              : `The new customer's own terms are ${theirTerms} days — pass daysUntilDue if you want those.`),
+      );
+    }
+
     const after = res.data;
     const notApplied = changedKeys.filter(
       (k) =>

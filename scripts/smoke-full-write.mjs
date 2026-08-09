@@ -610,10 +610,14 @@ async function main() {
           body: { daysUntilDue: 45 },
         },
       });
+      // NOT isError: the replacement-omission gate answers through okText, so a correct refusal leaves
+      // isError unset — asserting on it recorded a failure on the expected safe path and would have made
+      // the whole live run exit 1. The gate's own words are what to check.
+      const rawText = textOf(rawAttempt);
       report(
         "reai_request PUT with a partial body is refused, not silently applied",
-        rawAttempt.isError === true,
-        textOf(rawAttempt).slice(0, 200),
+        /REPLACES the record/.test(rawText) && /Nothing was sent/.test(rawText),
+        rawText.slice(0, 200),
       );
     }
 
@@ -667,10 +671,14 @@ async function main() {
         name: "reai_request",
         arguments: { method: "PUT", path: `/api/offers/${created.offerId}`, body: { daysUntilDue: 45 } },
       });
+      // NOT isError: the replacement-omission gate answers through okText, so a correct refusal leaves
+      // isError unset — asserting on it recorded a failure on the expected safe path and would have made
+      // the whole live run exit 1. The gate's own words are what to check.
+      const rawText = textOf(rawAttempt);
       report(
         "reai_request PUT with a partial offer body is refused, not silently applied",
-        rawAttempt.isError === true,
-        textOf(rawAttempt).slice(0, 200),
+        /REPLACES the record/.test(rawText) && /Nothing was sent/.test(rawText),
+        rawText.slice(0, 200),
       );
     }
 

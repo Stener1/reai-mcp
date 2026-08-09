@@ -207,3 +207,28 @@ test("the body omits nothing even when the RESPONSE omits keys", async () => {
     );
   }
 });
+
+test("an unreadable existing line does not block the replacement that is meant to fix it", async () => {
+  // The refusal for a null line names "pass offerLines explicitly" as the way past it — and the mapper ran
+  // unconditionally, so `line[f]` on null threw a TypeError and that recovery path never reached the PUT.
+  const lines = [{ itemName: "ZZ new", quantity: 1, unitPrice: 250, vatCode: "0" }];
+  const { calls, result } = await run({ id: 81, offerLines: lines }, () => offer({ lines: [null] }));
+  assert.notEqual(result.isError, true, "supplying replacements must work even when the old lines are unreadable");
+  assert.deepEqual(calls.map((c) => c.method), ["GET", "PUT"]);
+  assert.deepEqual(calls[1].body.offerLines, lines);
+});
+
+test("moving an offer to another customer says whose payment terms it kept", async () => {
+  const { calls, text } = await run({ id: 81, customerId: 6000 }, (req, n) => {
+    if (n === 1) return offer();
+    if (req.method === "PUT") return offer({ customerId: 6000 });
+    return { daysUntilDue: 45 };
+  });
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [
+    "GET /api/offers/81",
+    "PUT /api/offers/81",
+    "GET /api/customers/6000",
+  ]);
+  assert.match(text, /KEPT payment terms of 14 days/);
+  assert.match(text, /new customer's own terms are 45 days/);
+});
