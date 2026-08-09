@@ -327,6 +327,10 @@ const createAgreement = defineTool({
     "under the template and not at the top level — so a misspelt term is simply absent from the " +
     "finished contract with nothing to show it. Reported rather than refused, because the spec " +
     "can lag the API. What was stored is also compared against what you sent.\n\n" +
+    "A lease's `rentAccountNumber` and `depositAccountNumber` are payment destinations. Setting them " +
+    "here is ordinary work — creating an arrangement is not diverting an existing one, and a human " +
+    "signs before anybody pays — but reai_update_agreement treats CHANGING them as a payment-routing " +
+    "change, so get them right now rather than editing them later.\n\n" +
     "Reversible: reai_delete_agreement removes a draft. What the API does NOT check is worth " +
     "knowing — a deposit of 9 999 999 against a rent of 10 000 is accepted, and so is a " +
     "four-month fixed term with no reason. Norwegian tenancy law caps a deposit at six months' " +
