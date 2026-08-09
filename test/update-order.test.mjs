@@ -361,3 +361,36 @@ test("the kept-terms note states what the record says, not what was sent", async
   });
   assert.match(text, /KEPT payment terms of 21 days/, "21 is what the record came back with; 14 was sent");
 });
+
+/** Same parse as the offer tests, and for the same reason: a bare /comment carried over/ regex was matching a
+ * one-item list by luck, and would have gone vacuous the moment a second field joined it. */
+const carriedOver = (text) => {
+  const m = /, and ([^\u2014]+?) carried over/.exec(text);
+  return m ? m[1].split(", ").map((s) => s.trim()) : [];
+};
+
+test("a CARRIED field the API dropped is warned about, not listed as carried over", async () => {
+  // reai_update_order: the carried half of the same claim. `appliedChanges` only ever answered for the fields
+  // the caller ASKED to change, so a comment the merge carried and the API then dropped printed
+  // "\u2026and comment carried over" with no warning \u2014 measured against the built handler before the fix.
+  const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? order() : order({ daysUntilDue: 30, comment: null }),
+  );
+  assert.match(text, /WARNING: comment \(carried "ZZ customer-visible", order OR-4105 came back with null\)/);
+  assert.match(text, /LOST unless you set it again/);
+  assert.ok(
+    !carriedOver(text).includes("comment"),
+    `comment must not be listed as carried over one sentence before the warning says it was lost: ${JSON.stringify(carriedOver(text))}`,
+  );
+});
+
+test("a carried field the API DID keep is still named as carried over", async () => {
+  // reai_update_order: the positive control for the test above \u2014 a warning that fires on every update, or a
+  // headline that stopped naming survivors, would both pass it while making the tool worse.
+  const { text } = await run({ id: 4105, daysUntilDue: 30 }, (req, n) =>
+    n === 1 ? order() : order({ daysUntilDue: 30 }),
+  );
+  assert.ok(carriedOver(text).includes("comment"), `comment should be carried: ${JSON.stringify(carriedOver(text))}`);
+  assert.doesNotMatch(text, /WARNING: comment/);
+  assert.doesNotMatch(text, /LOST unless/);
+});

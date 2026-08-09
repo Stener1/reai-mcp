@@ -989,6 +989,46 @@ function appliedChanges(
 }
 
 /**
+ * Did the fields this tool CARRIED to avoid erasing them actually survive the replacement?
+ *
+ * `appliedChanges` answers only for what the caller asked to change. The carried fields are the other half,
+ * and the headline claims them out loud — "…and comment carried over" — while nothing checked the claim.
+ * Measured against the built handler before this: an order whose `comment` came back **null** after the merge
+ * had carried it printed exactly that sentence, with no warning anywhere in the note.
+ *
+ * That is the same class as the `given` gate this PR exists to stop repeating; `asked` is only what it is
+ * called here. It is the worse half, too: the caller never mentioned the field, so a silent loss is the one
+ * outcome they have no reason to go looking for.
+ *
+ * Only contradictions are reported. A carried field the response does not echo is the ordinary case for a
+ * sparse response, and a sentence per unanswered field would bury the one that matters.
+ */
+function carriedSurvival(
+  carried: Readonly<Record<string, unknown>>,
+  after: unknown,
+  subject: string,
+): { survived: string[]; warning?: string } {
+  const { contradicted } = confirmAgainstResponse(carried, after, { wholeRecord: true });
+  const lost = contradicted.map((x) => x.field);
+  return {
+    survived: Object.keys(carried).filter((k) => !lost.includes(k)),
+    warning:
+      contradicted.length > 0
+        ? `WARNING: ${contradicted
+            .map(
+              (x) =>
+                `${x.field} (carried ${JSON.stringify(x.sent)}, ${subject} came back with ${JSON.stringify(x.stored)})`,
+            )
+            .join("; ")}. This tool sent ${lost.length === 1 ? "that" : "those"} to preserve ` +
+          `${lost.length === 1 ? "it" : "them"}, and the record came back without ` +
+          `${lost.length === 1 ? "it" : "them"} — so ${lost.length === 1 ? "it is" : "they are"} LOST ` +
+          `unless you set ${lost.length === 1 ? "it" : "them"} again. You did not mention ` +
+          `${lost.length === 1 ? "it" : "them"}, so nothing else here would have told you.`
+        : undefined,
+  };
+}
+
+/**
  * Fields the order PUT accepts on a line, and the ones a GET adds that it does not.
  *
  * The response and the request disagree, which is the whole reason this tool exists. `GET /api/orders/{id}`
@@ -1288,16 +1328,23 @@ const updateOrder = defineTool({
       tenantId: resolved,
     });
 
+    const after = res.data;
     const changedKeys = asked.map(([k]) => k);
     // Only the fields carried that the caller did NOT also change — otherwise a comment-only edit read
     // "Changed comment … and comment carried over", which is both wrong and confusing.
-    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
+    const carriedOnly = Object.fromEntries(
+      Object.entries(carried).filter(([k]) => !changedKeys.includes(k)),
+    );
+    // Named from what came BACK, not from what was sent: the headline says these were carried over, so a
+    // field the API dropped must not be listed among them one sentence before the warning says it was lost.
+    const carriedCheck = carriedSurvival(carriedOnly, after, `order ${order.number ?? id}`);
     const notes = [
       `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
         `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
-        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `${carriedCheck.survived.length > 0 ? `, and ${carriedCheck.survived.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    if (carriedCheck.warning !== undefined) notes.push(carriedCheck.warning);
     // EVERY update, not only the ones that passed it. The claim "every successful update says so" was in
     // the source comment and false: the word appeared only when the caller supplied the field, which also
     // made the test asserting it pass vacuously.
@@ -1343,7 +1390,6 @@ const updateOrder = defineTool({
       );
     }
 
-    const after = res.data;
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
     const { took, ignored } = appliedChanges(asked, after, ["orderLines"]);
     if (ignored.length > 0) {
@@ -1703,19 +1749,26 @@ const updateOffer = defineTool({
       tenantId: resolved,
     });
 
+    const after = res.data;
     const changedKeys = asked.map(([k]) => k);
     // What was PRESERVED, which is not the same as what the body states. Every carryable field is sent — nulls
     // included, to satisfy the replacement-omission gate — so naming all of them told a caller that six
     // fields were carried over when all six were null and stayed null. Only fields with a value are named.
-    const carriedOnly = Object.keys(carried).filter(
-      (k) => !changedKeys.includes(k) && carried[k] !== null && carried[k] !== undefined,
+    const carriedOnly = Object.fromEntries(
+      Object.entries(carried).filter(
+        ([k, v]) => !changedKeys.includes(k) && v !== null && v !== undefined,
+      ),
     );
+    // Same reason as the order tool: "carried over" is a claim about the record, so it is named from what came
+    // back. A field the API dropped belongs in the warning, not in the list of things preserved.
+    const carriedCheck = carriedSurvival(carriedOnly, after, `offer ${offer.number ?? id}`);
     const notes = [
       `Changed ${changedKeys.join(", ")} on offer ${offer.number ?? id}. ` +
         `${changes.offerLines ? `${changes.offerLines.length} line(s) replaced` : `${(mappedLines ?? []).length} existing line(s) read and sent back unchanged`}` +
-        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `${carriedCheck.survived.length > 0 ? `, and ${carriedCheck.survived.join(", ")} carried over` : ""} — ` +
         `because this API replaces rather than patches.`,
     ];
+    if (carriedCheck.warning !== undefined) notes.push(carriedCheck.warning);
     // Moving an offer does NOT move the payment terms: daysUntilDue is required, so the replacement carries
     // the number the offer already had — which belonged to the previous customer. Same reasoning as the order
     // tool: changing it silently is a money decision the caller did not ask for, so it is named instead.
@@ -1746,7 +1799,6 @@ const updateOffer = defineTool({
       );
     }
 
-    const after = res.data;
     // What the record actually came back with, so the headline cannot claim a change the API discarded.
     const { took, ignored } = appliedChanges(asked, after, ["offerLines"]);
     if (ignored.length > 0) {

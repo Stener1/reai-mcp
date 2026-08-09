@@ -151,6 +151,24 @@ All notable changes to `reai-mcp`. Format loosely follows
     It now anchors on the `test("` that opens the title, requires each entry's test to be distinct, and requires
     that test to mention the tool it certifies — which caught four certifying tests that drove their tool
     through a local helper without naming it.
+  - **The `given` gate a third time, one layer down, found by probing my own fix rather than by a review.**
+    Delegating `appliedChanges` fixed the fields the caller ASKED to change. It is handed `asked`, so the
+    *carried* fields — the other half of a read-merge-write, and the half the headline names out loud — were
+    still never compared. Measured against the built handler: an order whose `comment` came back **null** after
+    the merge had carried it printed *"…and comment carried over"* with no warning anywhere in the note. Same
+    class as the `given` gate at the four call sites; `asked` is only what it is called here. It is the worse
+    half, too, because the caller never mentioned the field and so has no reason to check it.
+    - Both tools now name the carried fields from what came **back**, so a dropped field appears in a `WARNING`
+      that says it is LOST unless set again, instead of in the list of things preserved one sentence earlier.
+    - Four tests, two per tool, and each positive control is load-bearing: mutating the survivor list to empty
+      fails both controls, and turning `wholeRecord` off fails both dropped-carry tests.
+    - **The first version of these tests asserted `/comment carried over/`**, which matched a one-item list by
+      luck for orders and matched *neither* case for offers, where the note names five fields and `comment`
+      falls mid-list — so the offer negative assertion was vacuous. They parse the list now.
+  - **A fourth instance, recorded not fixed: `reai_update_lead`** (`src/tools/leads.ts:582`) reports
+    `email`/`phone` as *"carried over unchanged"* with the value from the **request**. It re-reads the record
+    afterwards, so the data is in hand, but that verification covers only the fields the caller asked for, by
+    design. A different mechanism from this PR's claim, so it goes with the three below.
   - **Three instances outside the thirteen, found by the review and NOT fixed here**, all invisible for that
     reason: `reai_set_asset_depreciation` (`src/tools/assets.ts:201`, declared irreversible, echoes
     `args.depreciationMethod` and `args.usefulLifeInMonths` while `AssetRes` carries both),
