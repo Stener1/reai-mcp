@@ -6,6 +6,7 @@ import {
   isoDate,
   ok,
   okList,
+  readableRecord,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -864,8 +865,8 @@ const createOrder = defineTool({
           "customer's default terms.",
       ),
     issueDate: isoDate.optional().describe("Order date. Defaults to today."),
-    comment: z.string().optional().describe("Comment visible to the customer."),
-    internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer."),
+    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer."),
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
@@ -933,15 +934,40 @@ const ORDER_LINE_REQUEST_FIELDS = [
   "accrualPeriodCount",
 ] as const;
 
-/** The optional top-level fields a partial PUT would silently drop. */
+/**
+ * The optional top-level fields a partial PUT would silently drop, AND that a GET can give back.
+ *
+ * `invoiceEmail` is deliberately absent, and its absence is the sharpest thing about this tool.
+ * `UpdateOrderReq` declares it; `OrderRes` does not — verified against the committed document and against
+ * the live response for order 4105, whose keys do not include it. So an order-specific invoice email cannot
+ * be read, cannot be carried, and is therefore CLEARED by any replacement that does not restate it. Listing
+ * it here would have looked like preservation while preserving nothing. It is an argument instead, and every
+ * successful update says so, because the tool cannot tell whether the order had one.
+ */
 const ORDER_CARRIED_FIELDS = [
   "comment",
   "internalComment",
   "buyerReference",
   "externalReference",
   "projectId",
-  "invoiceEmail",
 ] as const;
+
+/** Keys an order response must share before it is treated as a base to merge into. */
+const ORDER_EXPECTED_KEYS = ["id", "customerId", "currencyCode", "daysUntilDue", "issueDate", "lines"] as const;
+
+/**
+ * A replacement order line.
+ *
+ * `orderLine` — what reai_create_order takes — declares no accrual fields, and zod strips what it does not
+ * declare. So replacing a line through that schema silently dropped `accrualEnabled`, `accrualPeriod` and
+ * `accrualPeriodCount`, changing the accounting schedule of a line the caller only meant to reprice. The
+ * stored-line mapper carries all three, so the two halves of this tool disagreed about what a line is.
+ */
+const orderLineReplacement = orderLine.extend({
+  accrualEnabled: z.boolean().optional().describe("Periodise this line over several months."),
+  accrualPeriod: z.string().optional().describe("First period to accrue from, as the API expects it."),
+  accrualPeriodCount: z.number().int().positive().optional().describe("How many periods to spread across."),
+});
 
 type OrderRes = {
   id?: number;
@@ -974,6 +1000,13 @@ const updateOrder = defineTool({
     "nothing to do with sending — the policy classifies a body carrying sendEhf as an external " +
     "transmission, which is verified — and dropping it would silently change what happens at invoicing " +
     "time. Neither is a choice this tool should make for you: reai_request can do it deliberately.\n\n" +
+    "One field cannot be protected: `invoiceEmail`. The API accepts it on an update but does not return it " +
+    "on a read, so this tool cannot see whether the order has one and cannot carry it. If the order has an " +
+    "order-specific invoice address, RESTATE it — otherwise the update clears it, and nothing in the " +
+    "response will say so.\n\n" +
+    "Like every read-merge-write, this leaves a lost-update window: an edit made in the ReAI UI or by " +
+    "another client between the read and the write is silently reverted, lines included. There is no ETag, " +
+    "If-Match or version field to prevent it, so it is stated rather than papered over.\n\n" +
     "An order that has already been invoiced is refused too. The invoice is the legal document and " +
     "editing the order behind it does not change it; what the API actually does in that case was NOT " +
     "established, because no invoiced order was available to measure. Stated rather than guessed.",
@@ -985,7 +1018,7 @@ const updateOrder = defineTool({
   inputSchema: {
     id: z.number().int().positive().describe("Order id, as returned by reai_list_orders."),
     orderLines: z
-      .array(orderLine)
+      .array(orderLineReplacement)
       .min(1)
       .optional()
       .describe(
@@ -1001,14 +1034,30 @@ const updateOrder = defineTool({
     buyerReference: z
       .string()
       .max(255, "The API caps buyerReference at 255 characters.")
+      .nullable()
       .optional()
-      .describe("The customer's own reference (deres ref)."),
+      .describe("The customer's own reference (deres ref). Pass null to clear it."),
     externalReference: z
       .string()
       .max(100, "The API caps externalReference at 100 characters.")
+      .nullable()
       .optional()
-      .describe("Your reference from an external system."),
-    projectId: z.number().int().optional().describe("Link the order to a project."),
+      .describe("Your reference from an external system. Pass null to clear it."),
+    projectId: z
+      .number()
+      .int()
+      .nullable()
+      .optional()
+      .describe("Link the order to a project, or null to unlink it — `UpdateOrderReq.projectId` is nullable."),
+    invoiceEmail: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "Order-specific delivery address for the eventual invoice. MUST be restated if the order has one: " +
+          "the API accepts it on the way in but does not return it on the way out, so this tool cannot read " +
+          "it and cannot preserve it. Omitting it clears it.",
+      ),
     tenantId: tenantIdArg,
   },
   handler: async (args, ctx) => {
@@ -1027,9 +1076,15 @@ const updateOrder = defineTool({
       path: `/api/orders/${id}`,
       tenantId: resolved,
     });
-    const order = current.data;
+    // Not a truthiness check: `{}` and a response envelope are both truthy, and either would have become a
+    // valid base — the merge would then send the caller's fields alone, which is the destruction this tool
+    // exists to prevent. readableRecord requires the response to share the keys an order actually has.
+    const { record: order, problem } = readableRecord(current.data, undefined, ORDER_EXPECTED_KEYS);
     if (!order) {
-      return fail(`Order ${id} could not be read, so nothing was written. A PUT here REPLACES the order.`);
+      return fail(
+        `Order ${id} could not be read (${problem}), so nothing was written. A PUT here REPLACES the ` +
+          `order, and merging into something that is not an order would send your fields alone.`,
+      );
     }
 
     // bindsToTrue, NOT `=== true`. The backend is Jackson, whose default coercion binds the string "true"

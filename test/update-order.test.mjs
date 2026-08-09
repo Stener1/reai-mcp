@@ -187,3 +187,52 @@ test("a sendEhf that only COERCES to true is still refused", async () => {
     assert.equal("sendEhf" in calls[1].body, false, "sendEhf must never be sent");
   }
 });
+
+test("invoiceEmail is an argument because it can never be read back", async () => {
+  // UpdateOrderReq declares it; OrderRes does not. So it cannot be carried, and listing it among the
+  // carried fields would have looked like preservation while preserving nothing.
+  const { findOperation } = await import("../dist/reai/spec.js");
+  assert.ok(findOperation("PUT", "/api/orders/{id}")?.body?.fields?.invoiceEmail, "the PUT should accept it");
+  const live = order();
+  assert.equal("invoiceEmail" in live, false, "the response does not carry it — that is the whole problem");
+
+  assert.ok(tool().inputSchema.invoiceEmail, "so it must be settable explicitly");
+  const { calls, text } = await run({ id: 4105, invoiceEmail: "zz@example.invalid" }, (req, n) => (n === 1 ? order() : order()));
+  assert.equal(calls[1].body.invoiceEmail, "zz@example.invalid");
+  assert.match(text, /invoiceEmail/, "every update must say it cannot be preserved");
+});
+
+test("a nullable field can actually be cleared", async () => {
+  // `asked` filters undefined, not null, and the schemas accept null — otherwise there is no way to unlink
+  // a project or clear a reference through a tool whose whole purpose is field-level edits.
+  const { calls } = await run(
+    { id: 4105, projectId: null, buyerReference: null },
+    (req, n) => (n === 1 ? order({ projectId: 77, buyerReference: "ZZ-REF" }) : order()),
+  );
+  assert.equal(calls[1].body.projectId, null, "null must reach the body to unlink");
+  assert.equal(calls[1].body.buyerReference, null);
+});
+
+test("replacement lines can carry accrual settings", async () => {
+  // reai_create_order's line schema declares no accrual fields and zod strips what it does not declare, so
+  // replacing a line through it silently dropped the periodisation the stored-line mapper carries.
+  const lines = [{ itemName: "ZZ", quantity: 1, unitPrice: 100, vatCode: "0", accrualEnabled: true, accrualPeriod: "2026-08", accrualPeriodCount: 3 }];
+  const { calls } = await run({ id: 4105, orderLines: lines }, () => order());
+  assert.equal(calls[1].body.orderLines[0].accrualEnabled, true);
+  assert.equal(calls[1].body.orderLines[0].accrualPeriod, "2026-08");
+  assert.equal(calls[1].body.orderLines[0].accrualPeriodCount, 3);
+});
+
+test("a response that is not an order is not accepted as a base to merge into", async () => {
+  for (const shape of [{}, { data: order() }, { content: [] }, "not an object"]) {
+    const { calls, result, text } = await run({ id: 4105, comment: "ZZ" }, () => shape);
+    assert.equal(result.isError, true, `${JSON.stringify(shape).slice(0, 30)} must not be a merge base`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], "nothing may be written");
+    assert.match(text, /could not be read/);
+  }
+});
+
+test("the lost-update window is disclosed rather than papered over", () => {
+  assert.match(tool().description, /lost-update|between the read and the write/i);
+  assert.match(tool().description, /ETag|If-Match|version field/);
+});
