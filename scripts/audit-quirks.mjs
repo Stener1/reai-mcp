@@ -15,7 +15,9 @@
  * deliberately not quoted here. A keyword sweep over `note` prose returns 86 or 95 depending on the word
  * list, which makes it a lower bound dressed as a measurement — the false precision `storage-drift` was
  * corrected for, and which its census script prints rather than asserts for the same reason. The exact,
- * checkable statement is the one that matters: 2 were named, this adds 8, and 114 remain unnamed.
+ * checkable statement is the one that matters: 2 were named before, this file adds 8, and **113** remain
+ * unnamed — not 114, because `tenant-header-ignored-single-tenant` is in both sets. Nine distinct quirks now
+ * have a live case, and 122 - 9 = 113. Review caught the arithmetic making 124 out of 122.
  *
  * This closes the read-only part of that gap. Every request below is a GET, so it runs against any tenant
  * the token reaches, which is why there is no write guard and no `REAI_WRITE_TEST_TENANTS`: nothing here
@@ -79,11 +81,16 @@
  * ## What this cannot reach
  *
  * Write behaviour: what the API stores, normalises or refuses on a POST. `audit-storage.mjs` covers 17 such
- * claims and `audit-messages.mjs` nine refusals. The rest of the 84 stay unchecked, and any needing a write
- * needs the test tenant.
+ * claims and `audit-messages.mjs` nine refusals. The rest stay unchecked, and any needing a write needs the
+ * test tenant. Not "the rest of the 84" — that figure is retracted above as invented precision, and it
+ * survived here for sixty-odd lines after the retraction.
  *
  * Usage:
- *   REAI_USER_API_TOKEN=… node scripts/audit-quirks.mjs --tenant 2634
+ *   REAI_USER_API_TOKEN=… npm run audit:quirks -- --tenant 2634
+ *
+ * Through the npm script, because it rebuilds `dist/` first. Running the file directly reads whatever `dist/`
+ * happens to hold, and a stale one describes a quirk registry `src/` does not — the same false-clean hazard
+ * `sweep:discovery` prepends a build for.
  */
 
 import { pathToFileURL } from "node:url";
@@ -123,6 +130,32 @@ if (!Number.isInteger(tenantId)) {
  * argued about in a test. That matters more than the usual defence-in-depth line, because read-only is the
  * entire reason this file may run against a real company's books.
  */
+/**
+ * Every fetch in this process is checked, not just the one below.
+ *
+ * The guard used to live inside the single request helper, and the test counted `fetch(` occurrences to prove
+ * there was only one. Review added fourteen lines of `node:http` and issued a real POST /api/vouchers and a
+ * DELETE /api/share-investments/1 with all ten tests green and the occurrence count still 1. Counting call
+ * sites cannot establish that no other channel exists.
+ *
+ * So the check moves to the channel itself: any non-GET through globalThis.fetch throws, wherever it is
+ * called from and whenever it is added. The companion test forbids importing node:http/https/net, which is
+ * the remaining way to reach the network without passing through here — a static check, and named as such,
+ * because a determined edit to this file can always add one. What this makes impossible is doing it by
+ * ACCIDENT, which is the realistic failure mode for an audit pointed at a real company's books.
+ */
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const method = String(init?.method ?? (typeof input === "object" && input ? input.method : "GET") ?? "GET");
+  if (method.toUpperCase() !== "GET") {
+    throw new Error(
+      `audit-quirks may only issue GET; a ${method.toUpperCase()} was attempted. This audit runs against ` +
+        `real books and nothing here is permitted to write.`,
+    );
+  }
+  return nativeFetch(input, init);
+};
+
 const request = async (path, { omitTenant = false, tenantOverride } = {}) => {
   const init = {
     method: "GET",
@@ -140,6 +173,10 @@ const request = async (path, { omitTenant = false, tenantOverride } = {}) => {
         `books and nothing here is permitted to write.`,
     );
   }
+  // Frozen, because the check above was check-then-USE: review inserted `init.method = "POST"` on the next
+  // line and every request in the run went out as a POST with all ten tests green. Object.assign and a
+  // defineProperty getter did the same. ESM is strict mode, so a write to a frozen property throws.
+  Object.freeze(init);
   const res = await fetch(baseUrl + path, init);
   let body = null;
   try {
@@ -165,6 +202,12 @@ const detailOf = (r) => {
   return text == null ? "" : String(text);
 };
 
+/** The note's "ENTIRELY EMPTY body" — nothing at all, not merely nothing this code recognises. */
+const isEmptyBody = (body) =>
+  body == null ||
+  body === "" ||
+  (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0);
+
 const keysOf = (body) => (Array.isArray(body) ? ["ARRAY"] : Object.keys(body ?? {}));
 
 /** Set comparison, because these claims enumerate a wrapper exactly and an extra key is drift too. */
@@ -187,14 +230,20 @@ const CASES = [
     marker: 'omitting them returns 400 "startDate is required"',
     probes: ["/api/vouchers", "/api/postings", "/api/ledger/general"],
     // The quirk uses `match: "descendants"`, so it is served on fourteen operations. /api/ledger/general
-    // stands in for the eight-strong ledger family: all five collections were measured directly (asset,
-    // customer, employee, supplier, general — each 400 bare, 200 with the range) and all eight mark both
-    // parameters required in the pinned spec, which the schema half above checks. Disclosed in the report
-    // rather than silently treated as coverage.
+    // stands in for the NINE-operation ledger family — five collections plus four /{id} lookups; an earlier
+    // comment here said eight. All five collections were measured directly (general, customer, supplier,
+    // asset, employee: each 400 bare, 200 with the range) and review measured all four /{id} lookups as 400
+    // bare. The schema half below reads only `this.probes`, so it does NOT check the other six — stated
+    // because the previous version of this comment claimed it did.
     samples: ["/api/ledger"],
-    // Where the claim is FALSE. Measured on 2634: both answer 200 with no date range, because they are
-    // single-resource and grouping endpoints rather than the dated collections. They are named in the note,
-    // which is what an agent describing them actually reads.
+    // Where the claim does not hold. /api/vouchers/{id} and /api/postings/groups were MEASURED answering 200
+    // with no date range. /api/postings/groups/{postingGroupId} declares no date parameters either but could
+    // not be measured — neither test tenant has a posting group, so it 404s — and the note now says that
+    // rather than implying three measurements where there were two.
+    //
+    // Being single-resource is NOT what exempts them: review measured /api/ledger/customer/1 and its asset,
+    // employee and supplier siblings all returning 400 "startDate is required", and an earlier version of
+    // this note told agents the opposite.
     exceptions: ["/api/vouchers/{id}", "/api/postings/groups", "/api/postings/groups/{postingGroupId}"],
     async check() {
       // The SCHEMA half, checked against the pinned spec rather than the live API — because this quirk
@@ -248,17 +297,21 @@ const CASES = [
   },
   {
     quirk: "leads-paginated-object",
-    claim: "the three lead collections return three DIFFERENT wrappers, none of them a bare array",
+    claim: "the two lead page endpoints return DIFFERENT wrappers, and neither is a bare array",
     marker: "{ items, page, hasPrevious, hasNext, latestRegisteredAt }",
     conditional: "needs the Leads module ENABLED; where it is off every wrapper is a 403 instead",
-    probes: ["/api/leads", "/api/leads/person-profiles", "/api/leads/person-role-matches"],
+    // Not /api/leads/person-role-matches, even though this note contrasts with it. The quirk is not SERVED
+    // there — its paths are the two page-object endpoints — so verifying that third wrapper here attributed
+    // the result to a claim the agent never receives at that operation. `person-role-matches-shape` has its
+    // own case, which asserts exactly { matched, companyMatched, items } and the absence of paging fields, so
+    // the contrast is still checked; it is checked where the claim actually lands.
+    probes: ["/api/leads", "/api/leads/person-profiles"],
     async check() {
       // The note enumerates all three, so all three are checked — the hazard it warns about is assuming
       // they share a shape, which a probe of one endpoint cannot see.
       const want = {
         "/api/leads": ["items", "page", "hasPrevious", "hasNext", "latestRegisteredAt"],
         "/api/leads/person-profiles": ["items", "hasMore", "nextStartOrgNo", "limit"],
-        "/api/leads/person-role-matches?linkedinSlug=nobody-xyz": ["matched", "companyMatched", "items"],
       };
       const seen = [];
       for (const [path, expected] of Object.entries(want)) {
@@ -409,8 +462,11 @@ const CASES = [
           const detail = detailOf(r);
           // The documented exception: it refuses with an ENTIRELY EMPTY body, so there is no detail to read
           // and a bare 403 must be accepted as the module being off. This branch was DEAD until detailOf
-          // stopped turning a null body into "{}".
-          if (!detail) {
+          // stopped turning a null body into "{}" — and then it was too WIDE: `!detail` means "no
+          // detail/message/title key", so a real refusal like {"error":"Insufficient permission for user"}
+          // got laundered into "the module is off, as the note documents". For a drift audit a false OK is
+          // the worse direction, so the test is on the BODY being empty, which is what the note claims.
+          if (isEmptyBody(r.body)) {
             gated.push(`${path} 403 with an empty body, as the note documents`);
             continue;
           }
@@ -549,7 +605,12 @@ async function main() {
   // served GET operation is neither probed, sampled nor excepted.
   for (const c of CASES) {
     if (c.samples?.length) console.log(`  ${c.quirk}: families sampled — ${c.samples.join(", ")}`);
-    if (c.exceptions?.length) console.log(`  ${c.quirk}: claim does NOT hold on — ${c.exceptions.join(", ")}`);
+    // Only exceptions that actually remove something are listed. One already covered by a sample removes
+    // nothing, and printing it inflated the coverage figure the PR body quotes.
+    const live = (c.exceptions ?? []).filter(
+      (ex) => !(c.samples ?? []).some((pre) => ex === pre || ex.startsWith(`${pre}/`)),
+    );
+    if (live.length) console.log(`  ${c.quirk}: claim does NOT hold on — ${live.join(", ")}`);
   }
   console.log("");
 

@@ -14,7 +14,8 @@ All notable changes to `reai-mcp`. Format loosely follows
   `reai_api_notes`, and between them those audits named **2 of the 122** —
   `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both defects that motivated them
   were in this channel: the `+47` phone claim (#115) and the four places calling the agreement enums
-  undocumented (#123).
+  undocumented (#123). Nine *distinct* quirks now have a live case, so **113** remain unnamed — an earlier
+  version of this entry said 114, making 2 + 8 + 114 = 124 out of 122.
   - **A first version of this entry said "86 assert measured API behaviour, 84 verified by nothing", and
     that precision was fake.** It is a keyword sweep over prose, and re-deriving it with a different word
     list gives 95/93. Same lesson `storage-drift` already recorded, which is why `audit:census` prints its
@@ -51,6 +52,14 @@ All notable changes to `reai-mcp`. Format loosely follows
     module error, which only happens once a full date range is supplied too. Both notes now say what was
     measured, and the date-range case checks the **schema half against the pinned spec**, so that clause
     cannot rot the way it did.
+  - **My first correction of that note was itself wrong**, and a second review caught it live. It said the
+    claim holds on "the COLLECTION endpoints" and not on "the single-resource" ones — but
+    `/api/ledger/customer/1` and its asset, employee and supplier siblings all return 400 `"startDate is
+    required"`. Being single-resource is not what exempts an operation, and an agent following that sentence
+    would have called a customer ledger bare expecting the 200 it was promised. The note now enumerates the
+    **eleven operations measured to require the range** (including four `/{id}` lookups) and the **two measured
+    not to**. The third exception, `/api/postings/groups/{postingGroupId}`, was listed as measured when it had
+    never been called — neither test tenant has a posting group, so it 404s — and the note says so.
   - Five more defects review found in the probes themselves, each fixed: `detailOf` turned an empty body into
     the string `"{}"`, which made `module-gating`'s empty-body-403 branch — the exception its own note
     documents — **dead code**; `module-gating` and `empty-state-is-404` reported DRIFT on a 500 or a
@@ -59,13 +68,22 @@ All notable changes to `reai-mcp`. Format loosely follows
     passed; the timesheets probe read error text without first requiring the documented 400; and
     `/api/annual-accounts/2025` was pinned to a year tenant 2634 will plausibly file, which would have
     silently cost the case a probe (now 1997, which cannot be filed).
+  - **The `detailOf` fix then over-corrected, turning a false DRIFT into a false OK** — caught by a second
+    review. `!detail` means "no `detail`/`message`/`title` key", not "empty body", so a genuine refusal like
+    `{"error":"Insufficient permission for user"}` was laundered into *"the module is off, as the note
+    documents"*. For a drift audit a false OK is the worse direction. The test is now on the body being empty,
+    which is what the note actually claims; a 403 whose detail exists but does not name a module is still
+    DRIFT, deliberately.
   - **Exit contract, corrected twice.** An unexpected INCONCLUSIVE exits 3. `conditional:` excuses only a
     declared precondition — a first version excused *every* inconclusive outcome from a case carrying the
     field, including a 500 from `/api/me`, and its "reason must name a precondition" check matched against the
     whole case body rather than the reason, so 24 letters of `a` passed. And the cap of one conditional made
     the audit exit 3 on any tenant with the Project, Leads or Warehouse module in the opposite state; several
     of these claims are *about* a module being off. The control is now quality, not scarcity: a case may not be
-    conditional in every branch, so it must still be able to verify something somewhere.
+    conditional in every branch, so it must still verify something somewhere, and the runner downgrades an
+    undeclared `"conditional"` to inconclusive. **Five of the eight cases now declare one**, and the docs no
+    longer claim a cap that was deliberately removed — a first version asserted both the removal and the cap,
+    in the same entry.
   - **A false DRIFT was nearly shipped against a correct quirk, and the fix is a general rule.**
     `timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
     disabled"`. `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
@@ -80,7 +98,16 @@ All notable changes to `reai-mcp`. Format loosely follows
     **prefix** (not an endpoint — it 404s `"No static resource"`, which I first misread as a dead path in the
     quirk), and `/api/annual-accounts/{year}` is **templated**. Measured on the way: the claim holds on all
     five `/api/ledger/*` endpoints and on `/api/postings`. Coverage is now **15 endpoints**, not 8.
-  - Guards, **verified by defeating them: eighteen mutations, eight of which review found rather than me.**
+  - Guards, **verified by defeating them.** The list lives in `docs/development.md` rather than as a headline
+    count, because the count has been wrong twice. A second review added nine more, every one of which now
+    fails the build: `init.method = "POST"` **after** the runtime check (it was check-then-use; the object is
+    now frozen); a decoy `globalThis.fetch` wrapper, and a later reassignment; `import http from "node:http"`,
+    which reached the network while the `fetch(` count still read 1 — so the guard moved onto the channel and
+    imports are now an allowlist; a `samples` prefix absent from the quirk's paths, and one with no probe
+    beneath it; `probes` padded with an unrelated path, restoring the direction the census had dropped;
+    `sameKeys` rewritten as a one-directional subset check, invisible to a name-only assertion, so the helper is
+    now *evaluated* against an extra-key case; and an exception surviving a note that names only its parent
+    collection. Earlier mutations, mine and Codex's:
     Mine: a marker absent from the note, a nonexistent quirk id, a removed drift branch, a drift branch left
     only in a whole-line comment, a parameterised HTTP method, the shallow timesheets probe, an exact key
     comparison downgraded to `includes`, a short `conditional:` reason, a dropped declared path, `probes`

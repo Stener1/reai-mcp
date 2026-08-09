@@ -197,8 +197,10 @@ places calling the agreement enums undocumented (PR #123).
 
 Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. 122 total, 2 named before, 8 now, 114 unnamed are the
-figures that can be checked.
+`audit:census` exists to print rather than assert. The checkable figures: **122** total, **2** named before,
+**8** added here, **113** still unnamed — nine *distinct* quirks now have a live case, because
+`tenant-header-ignored-single-tenant` is in both sets. An earlier version said 114, which made 2 + 8 + 114 =
+124 out of 122.
 
 This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
@@ -239,15 +241,34 @@ verifies — with the same limitation: `includes` is blind to direction, so **th
 authority on whether a claim is true.** The guard adds one thing that file cannot: every case must contain
 a **drift branch**, because a case that can only return OK or INCONCLUSIVE is decoration. Comments are
 stripped before checking, since a commented-out `"drift"` defeated exactly that kind of assertion when
-PR #116 was reviewed. Every way of defeating these guards that has been thought of — eighteen so far, eight of them found by
-review rather than by me — was applied and each fails the build, with the file byte-identical afterwards.
+PR #116 was reviewed. Every way of defeating these guards that has been thought of was applied, and each fails the build with the
+file byte-identical afterwards. The list rather than a headline count, because a count here has been wrong
+twice: marker absent from the note · marker split into a 13-character fragment · nonexistent quirk id · drift
+branch deleted · drift branch left in a whole-line comment · drift branch left in a **trailing** comment ·
+`sameKeys(got, got)` · a catch-all `/[\s\S]*/` · `sameKeys` rewritten as a one-directional subset check ·
+HTTP method turned into a parameter with a `"GET"` default · `...EXTRA` spread over the method ·
+`init.method = "POST"` **after** the check · a decoy `globalThis.fetch` wrapper · reassigning
+`globalThis.fetch` afterwards · importing `node:http` · the shallow timesheets probe · a dropped declared
+path · `probes` padded with an unrelated path · a `check()` ignoring `this.probes` (either of its two loops) ·
+a `samples` prefix absent from the quirk's paths · a `samples` prefix with no probe beneath it · a path added
+to the quirk itself · a note that stops naming an exception · a `conditional:` reason too short · one long but
+vague · a 9th case opened as `  { quirk:` on one line.
 
-An unexpected INCONCLUSIVE exits **3**, as the storage audit does. One case is unanswerable by
+An unexpected INCONCLUSIVE exits **3**, as the storage audit does. Some claims are unanswerable by
 construction rather than by accident — `tenant-header-ignored-single-tenant` needs a token reaching exactly
-one tenant, and this repository's reaches four — and a gate that fails forever is a gate everyone learns to
-ignore. So a case may declare `conditional:` with the missing precondition, and only cases without it
-affect the exit status. The reason must be at least twenty characters and name what is missing, and at most
-one case may use the hatch; both are asserted, because it is the field that suppresses a failure.
+one tenant and this repository's reaches four; `module-gating` and `timesheets-need-project-module` need a
+module to be OFF — and a gate that fails forever is a gate everyone learns to ignore. So a case may declare
+`conditional:` with the missing precondition, and only cases carrying it affect the exit status.
+
+**There is no cap on how many may.** An earlier version of this paragraph said "at most one case may use the
+hatch; both are asserted" — no such assertion existed, and **five of the eight** cases legitimately declare
+one, because several of these claims are *about* a module being off. Capping it made the audit exit 3 on any
+tenant whose modules sit the other way. What is enforced instead: the reason must be twenty characters and
+name its precondition (checked against the reason, not the surrounding case body, which contains "cannot" in
+nearly every case); a case may not be conditional in *every* branch, so it must still be able to verify
+something somewhere; and a case that returns `"conditional"` without declaring one is downgraded to
+inconclusive by the runner, so the exemption cannot be reached by a branch that merely failed to get an
+answer.
 
 Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634.
 

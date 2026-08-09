@@ -131,6 +131,21 @@ function arrayField(chunk, name) {
   return [...body.matchAll(/"([^"]+)"/g)].map(([, v]) => v);
 }
 
+/** The first `{...}` block after `from`, brace-matched, so a decoy declared afterwards cannot satisfy a check. */
+function balancedBlockAfter(src, from) {
+  const open = src.indexOf("{", from);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < src.length; i += 1) {
+    if (src[i] === "{") depth += 1;
+    else if (src[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return src.slice(open, i + 1);
+    }
+  }
+  return null;
+}
+
 /** True when a concrete path instantiates a templated one: /api/annual-accounts/1997 vs /{year}. */
 function instantiates(concrete, templated) {
   if (!templated.includes("{")) return false;
@@ -267,6 +282,56 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
     "the request helper must check the assembled init object at runtime and throw on any non-GET",
   );
   assert.match(src, /const res = await fetch\(baseUrl \+ path, init\)/, "fetch must receive the checked object");
+  // Frozen, because the check was check-then-USE: `init.method = "POST"` on the following line sent every
+  // request as a POST with all ten tests green.
+  assert.match(
+    src,
+    /Object\.freeze\(init\);\n\s*const res = await fetch/,
+    "the init object must be frozen between the check and the fetch, or the check can be undone after it",
+  );
+  // And the channel itself, because counting `fetch(` call sites cannot prove no other channel exists —
+  // review reached the network with fourteen lines of node:http and the count still said 1.
+  // Brace-matched, not a windowed regex. The first version used `[\s\S]{0,400}` after the assignment, so
+  // review's neutering — assign a pass-through, then declare an UNUSED function containing the guard — matched
+  // across the boundary and passed. The guard has to be inside the body actually assigned.
+  const assignments = [...src.matchAll(/globalThis\.fetch\s*=/g)];
+  assert.equal(
+    assignments.length,
+    1,
+    `globalThis.fetch must be assigned exactly once, found ${assignments.length} — a later assignment ` +
+      `replaces the guard`,
+  );
+  // From the ARROW, not from the assignment: the first `{` after `globalThis.fetch =` is the `{}` default in
+  // the parameter list `(input, init = {})`, so matching from there returned an empty block.
+  const arrow = src.indexOf("=>", assignments[0].index);
+  assert.ok(arrow > 0, "the fetch wrapper must be a function expression");
+  const wrapperBody = balancedBlockAfter(src, arrow);
+  assert.ok(wrapperBody, "could not find the body assigned to globalThis.fetch");
+  assert.match(
+    wrapperBody,
+    /method\.toUpperCase\(\) !== "GET"/,
+    "the function assigned to globalThis.fetch must itself reject any non-GET, not delegate to a helper that " +
+      "may not be called",
+  );
+  assert.match(wrapperBody, /throw new Error/, "the wrapper must throw rather than warn");
+  const imports = [...src.matchAll(/^import[^;]*?from\s*"([^"]+)"/gm)].map(([, m]) => m);
+  const allowed = new Set(["node:url", "node:path"]);
+  const forbidden = imports.filter((m) => !allowed.has(m));
+  assert.deepEqual(
+    forbidden,
+    [],
+    `this audit may only import ${[...allowed].join(", ")} — node:http, node:https and node:net reach the ` +
+      `network without passing the fetch wrapper, which is how review issued a POST with every test green`,
+  );
+  // Dynamic imports are used for dist/ modules; they must not be a way back to a network module either.
+  const dynamic = [...src.matchAll(/await import\(([^)]*)\)/g)].map(([, a]) => a);
+  for (const arg of dynamic) {
+    assert.doesNotMatch(
+      arg,
+      /node:(http|https|net|dgram|tls)/,
+      `dynamic import of a network module (${arg.trim()}) bypasses the fetch wrapper`,
+    );
+  }
 
   // Every path it touches, classified. A GET the policy engine thinks is a write would be a bug in one of
   // the two, and either way this audit must not run against 2634.
@@ -374,7 +439,23 @@ test("shape probes compare the whole wrapper, not just the keys they hope for", 
   // `keys.includes("items")` passes on a wrapper that has grown three paging fields, and these claims are
   // specifically about which fields are present — the hazard is an agent assuming the wrong shape.
   const src = auditSource();
-  assert.match(src, /const sameKeys =/, "shape comparison must be exact, not a subset check");
+  // Not `assert.match(src, /const sameKeys =/)`. Review rewrote the helper to a one-directional
+  // `want.every(k => got.includes(k))` — a subset check that passes on a wrapper which has grown three
+  // paging fields — and the name assertion still matched. A name is not a semantics check, which is the exact
+  // vacuous-guard shape this file exists to prevent, so the implementation is exercised instead.
+  const helper = /const sameKeys = ([\s\S]*?);\n/.exec(src)?.[1];
+  assert.ok(helper, "the exact-shape helper must be present");
+  // eslint-disable-next-line no-new-func -- deliberately evaluating the shipped expression, not user input
+  const sameKeys = new Function(`return (${helper});`)();
+  assert.equal(sameKeys(["a", "b"], ["a", "b"]), true, "identical key sets must compare equal");
+  assert.equal(sameKeys(["b", "a"], ["a", "b"]), true, "order must not matter");
+  assert.equal(
+    sameKeys(["a", "b", "page"], ["a", "b"]),
+    false,
+    "an EXTRA key must not compare equal — a subset check passes on a wrapper that has grown paging fields, " +
+      "which is precisely the drift these shape claims are about",
+  );
+  assert.equal(sameKeys(["a"], ["a", "b"]), false, "a missing key must not compare equal");
   for (const quirk of ["leads-paginated-object", "person-role-matches-shape", "warehouse-inventory-object"]) {
     const c = auditCases().find((x) => x.quirk === quirk);
     assert.ok(c, `${quirk} case is missing`);
@@ -478,6 +559,36 @@ test("every case probes every OPERATION its quirk is served on, or names why not
     const served = operations.filter((op) => quirkMatches(q, op.method, op.path));
     assert.ok(served.length > 0, `${c.quirk} is served on no operation at all — is its path list stale?`);
 
+    // `samples` was the ungated hatch, and strictly more powerful than the gated `exceptions`: review
+    // silenced four named gaps by adding "/api/customers" to it, and `samples: ["/api"]` covered every served
+    // GET of every case. Worse, in the shipped shape, dropping /api/ledger/general from `probes` left the
+    // census reporting "2 probed, 9 sampled, 0 gaps" while the audit touched no ledger endpoint at all.
+    //
+    // A sample is a family REPRESENTED BY A PROBE, so it must be a path the quirk actually declares and it
+    // must contain at least one probe. Both conditions are what make "sampled" mean anything.
+    for (const prefix of c.samples) {
+      assert.ok(
+        q.paths.includes(prefix),
+        `${c.quirk} samples ${prefix}, which is not one of the paths the quirk declares (${q.paths.join(", ")})`,
+      );
+      assert.ok(
+        c.probes.some((probe) => probe === prefix || probe.startsWith(`${prefix}/`)),
+        `${c.quirk} samples ${prefix} but probes nothing beneath it, so that family is not sampled — it is ` +
+          `simply unchecked`,
+      );
+    }
+
+    // The reverse direction, which the census dropped. 4c77c66 asserted probes ⊆ q.paths; replacing it with
+    // the served-operations census left padding unchecked, so "/api/customers" could be added to `probes` and
+    // the audit would issue live GETs asserting a claim on an operation the quirk is not served on.
+    for (const probe of c.probes) {
+      assert.ok(
+        served.some((op) => op.method === "GET" && (op.path === probe || instantiates(probe, op.path))),
+        `${c.quirk} probes ${probe}, which is not a GET operation this quirk is served on — the result would ` +
+          `describe something the quirk never claimed`,
+      );
+    }
+
     const gettable = served.filter((op) => op.method === "GET");
     const skipped = served.length - gettable.length;
     let probed = 0;
@@ -494,6 +605,7 @@ test("every case probes every OPERATION its quirk is served on, or names why not
         sampled += 1;
         continue;
       }
+
       if (c.exceptions.some((ex) => ex === op.path)) continue;
       gaps.push(`${c.quirk} is served on GET ${op.path}, which is neither probed, sampled nor excepted`);
     }
@@ -515,11 +627,16 @@ test("an exception must be justified in the note the agent reads", () => {
   for (const c of auditCases()) {
     for (const path of c.exceptions) {
       const note = byId.get(c.quirk).note;
-      const tail = path.split("/").filter((seg) => seg && !seg.startsWith("{")).slice(-2).join("/");
+      // The LITERAL path, templated braces included. The first version also accepted the last two
+      // non-template segments, so `/api/vouchers/{id}` was satisfied by any note mentioning `/api/vouchers` —
+      // and review passed a note asserting the OPPOSITE ("on /api/vouchers the range IS required, for the
+      // collection and for a single voucher alike") while keeping the exception. For one-segment-deep
+      // sub-resources, which is most of them, the tail was the parent collection.
       assert.ok(
-        note.includes(path) || note.includes(tail),
-        `${c.quirk} excepts ${path} from the audit, but its note never mentions it — an agent describing ` +
-          `that operation still receives the quirk, so silence there is misinformation, not a gap in a test`,
+        note.includes(path),
+        `${c.quirk} excepts ${path}, but its note never names that exact path — an agent describing that ` +
+          `operation still receives the quirk, so silence there is misinformation, not a gap in a test. ` +
+          `Write the path literally, ${path}, so a note about the parent cannot stand in for it.`,
       );
     }
   }

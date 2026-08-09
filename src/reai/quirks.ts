@@ -245,14 +245,18 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "validation",
     statuses: [400],
     note:
-      "startDate and endDate are required on the COLLECTION endpoints here, and omitting them returns " +
-      '400 "startDate is required". The schema DOES mark them required — measured 2026-08-09 across all ' +
-      "eleven collections — so this is not a schema gap; an earlier version of this note claimed it was, " +
-      "which was false. What is worth knowing is that the range is validated EARLY, so a request missing " +
-      "it tells you nothing about whether its other parameters would have been accepted. " +
-      "It does NOT apply to the single-resource and grouping endpoints this quirk also matches: " +
-      "GET /api/vouchers/{id}, /api/postings/groups and /api/postings/groups/{postingGroupId} take no " +
-      "date range and answer 200 without one.",
+      'startDate and endDate are required, and omitting them returns 400 "startDate is required". ' +
+      "Measured 2026-08-09 on eleven operations, all of which require it: /api/vouchers, /api/postings, " +
+      "the five /api/ledger collections (general, customer, supplier, asset, employee) and the four " +
+      "/api/ledger/{customer,supplier,asset,employee}/{id} lookups — so a SINGLE-RESOURCE path is not " +
+      "automatically exempt, and a ledger lookup for one customer needs the range just as the list does. " +
+      "The schema also marks both required on all eleven; an earlier version of this note said the schema " +
+      "does NOT mark them, which was false. The range is validated EARLY, so a request missing it tells " +
+      "you nothing about whether its other parameters would have been accepted. " +
+      "Two operations this quirk matches genuinely do NOT take a date range, both measured answering 200 " +
+      "without one: GET /api/vouchers/{id} and GET /api/postings/groups. " +
+      "GET /api/postings/groups/{postingGroupId} declares no date parameters either, but could not be " +
+      "measured — neither test tenant has a posting group, so it answers 404.",
   },
   {
     id: "timesheets-need-project-module",
