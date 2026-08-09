@@ -766,3 +766,76 @@ test("creating is reversible and transmits nothing, unlike the sign-request it o
   assert.equal(create.apiPaths.length, 5);
   for (const [, path] of create.apiPaths) assert.doesNotMatch(path, /sign/);
 });
+
+/**
+ * The preflight compared `String(value)`, which coerces.
+ *
+ * `{ salaryType: ["monthly"] }` stringifies to `"monthly"` and passed a check whose entire purpose is
+ * to answer locally instead of letting the API answer with a bare 400 — so the tool issued a POST the
+ * API rejects, which is the failure it exists to remove. Both agreement tools had it, since the create
+ * tool copied the loop from the update tool.
+ *
+ * The cases have to coerce to a member of the field being tested, or they prove nothing: the first
+ * version of this test sent `["monthly"]` to `leaseDurationType`, whose members are
+ * indefinite | fixed_standard | fixed_special_reason — so it was refused with or without the bug and
+ * only looked like coverage. Each case below carries the member it coerces to, per field.
+ */
+const COERCING = (member) => [
+  ["a single-element array", [member]],
+  ["an object with a toString", { toString: () => member }],
+];
+/** These never coerced to anything valid, so they were already refused. Kept to pin that. */
+const NEVER_VALID = [
+  ["an array of two members", ["monthly", "hourly"]],
+  ["a number", 1],
+  ["a boolean", true],
+  ["an object", { salaryType: "monthly" }],
+];
+
+for (const [label, value] of [...COERCING("monthly"), ...NEVER_VALID]) {
+  test(`creating refuses ${label} where a scalar enum member is declared`, async () => {
+    const { calls, result, text } = await run(
+      "reai_create_agreement",
+      { templateType: "employee_contract", terms: { salaryType: value } },
+      () => created("employee_contract", {}),
+    );
+    assert.equal(result.isError, true, `${label} reached the API`);
+    assert.deepEqual(calls, [], `${label} was refused but a request still went out`);
+    assert.match(text, /salaryType/);
+    assert.match(text, /as a string|not one of|not among/);
+  });
+}
+
+for (const [label, value] of COERCING("indefinite")) {
+  test(`changing terms refuses ${label} too — the same loop, the same bug`, async () => {
+    // `indefinite` IS a leaseDurationType member, so this genuinely exercises the coercion: with
+    // String(value) restored, the array and the toString object both walk through to the PUT.
+    const { calls, result, text } = await run(
+      "reai_update_agreement",
+      { id: 290, changes: { leaseDurationType: value } },
+      () => lease(),
+    );
+    assert.equal(result.isError, true, `${label} reached the API`);
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], `${label} got past the read`);
+    assert.match(text, /leaseDurationType/);
+  });
+}
+
+test("a real string member still passes, and null still clears a term", async () => {
+  const good = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms: { salaryType: "monthly" } },
+    () => created("employee_contract", { salaryType: "monthly" }),
+  );
+  assert.notEqual(good.result.isError, true);
+  assert.equal(good.calls.length, 1);
+
+  // null is passed over as clearing the term deliberately, which is the pre-existing contract.
+  const cleared = await run(
+    "reai_create_agreement",
+    { templateType: "employee_contract", terms: { salaryType: null, employeeName: "ZZ" } },
+    () => created("employee_contract", { salaryType: null, employeeName: "ZZ" }),
+  );
+  assert.notEqual(cleared.result.isError, true);
+  assert.equal(cleared.calls.length, 1);
+});

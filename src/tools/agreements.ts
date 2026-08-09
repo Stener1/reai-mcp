@@ -157,6 +157,51 @@ function unwrapTemplate(res: AgreementRes | undefined): {
 const populatedCount = (fields: Record<string, unknown>): number =>
   Object.values(fields).filter((v) => v !== null && v !== undefined && v !== false && v !== "").length;
 
+/**
+ * Why a value is not one of the members the document declares, or undefined if it is fine.
+ *
+ * Both agreement tools take a passthrough record, so this is the only check standing between a
+ * caller and a bare 400. The first version compared `String(value)`, which coerces: a
+ * single-element array `["monthly"]` stringifies to `"monthly"` and sailed through a preflight
+ * whose entire purpose is to answer locally instead of letting the API answer. So the TYPE is
+ * checked before the membership, and the array encoding (`enum(a|b)[]`) is handled rather than
+ * assumed absent — none of the fourteen agreement enums is an array today, but two elsewhere in
+ * the document are, and a helper that quietly rejected them would be wrong the day one moves.
+ *
+ * `null` and `undefined` are passed over, as clearing a term deliberately. The document marks
+ * every agreement enum nullable except `issuerRole` on the service agreement.
+ */
+function enumViolation(declared: unknown, value: unknown): string | undefined {
+  if (typeof declared !== "string" || !declared.startsWith("enum(")) return undefined;
+  if (value === null || value === undefined) return undefined;
+  const members = /^enum\(([^)]*)\)/.exec(declared)?.[1];
+  if (members === undefined) return undefined;
+  const allowed = members.split("|").filter(Boolean);
+  // The index truncates a long member list to `a|b|+21 more`, and comparing against that literal
+  // would reject every real value. Nothing to check here; the API stays the authority.
+  if (allowed.some((m) => /^\+\d+ more$/.test(m))) return undefined;
+  const isArray = declared.slice(members.length + "enum()".length).includes("[]");
+
+  if (isArray) {
+    if (!Array.isArray(value)) return `expects an array of ${allowed.join(" | ")}, not ${typeName(value)}`;
+    const bad = value.filter((v) => typeof v !== "string" || !allowed.includes(v));
+    return bad.length === 0
+      ? undefined
+      : `${JSON.stringify(bad)} ${bad.length === 1 ? "is" : "are"} not among ${allowed.join(" | ")}`;
+  }
+  if (typeof value !== "string") {
+    return `expects one of ${allowed.join(" | ")} as a string, not ${typeName(value)}`;
+  }
+  return allowed.includes(value) ? undefined : `${JSON.stringify(value)} is not one of ${allowed.join(" | ")}`;
+}
+
+/** Enough of a type name to make a refusal readable, without leaking a whole nested object. */
+function typeName(value: unknown): string {
+  if (Array.isArray(value)) return `an array (${value.length} element(s))`;
+  if (value === null) return "null";
+  return typeof value === "object" ? "an object" : `a ${typeof value} (${JSON.stringify(value)})`;
+}
+
 const listAgreements = defineTool({
   name: "reai_list_agreements",
   title: "List agreements",
@@ -337,13 +382,8 @@ const createAgreement = defineTool({
     const declared = operation?.body?.fields ?? {};
     const rejected: string[] = [];
     for (const [name, value] of Object.entries(terms)) {
-      const spec = declared[name];
-      const members = typeof spec === "string" ? /^enum\(([^)]*)\)/.exec(spec)?.[1] : undefined;
-      if (members === undefined || value === null || value === undefined) continue;
-      const allowed = members.split("|");
-      if (!allowed.includes(String(value))) {
-        rejected.push(`${name}: ${JSON.stringify(value)} is not one of ${allowed.join(" | ")}`);
-      }
+      const why = enumViolation(declared[name], value);
+      if (why !== undefined) rejected.push(`${name}: ${why}`);
     }
     if (rejected.length > 0) {
       return fail(
@@ -532,13 +572,8 @@ const updateAgreement = defineTool({
     const operation = findOperation("PUT", `/api/agreements/${segment}/{id}`);
     const rejected: string[] = [];
     for (const [name, value] of Object.entries(args.changes as Record<string, unknown>)) {
-      const declared = operation?.body?.fields?.[name];
-      const members = typeof declared === "string" ? /^enum\(([^)]*)\)/.exec(declared)?.[1] : undefined;
-      if (members === undefined || value === null || value === undefined) continue;
-      const allowed = members.split("|");
-      if (!allowed.includes(String(value))) {
-        rejected.push(`${name}: ${JSON.stringify(value)} is not one of ${allowed.join(" | ")}`);
-      }
+      const why = enumViolation(operation?.body?.fields?.[name], value);
+      if (why !== undefined) rejected.push(`${name}: ${why}`);
     }
     if (rejected.length > 0) {
       return fail(
