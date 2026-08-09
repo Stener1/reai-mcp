@@ -1375,24 +1375,35 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // destination could be defended; the rest are recorded below because the reasons they failed are worth
   // more than the mappings would have been.
   //
-  // `fordring` is the customer ledger — a receivable IS the kundereskontro. Mapping it to
-  // ["receivable", "ledger"] first put the ASSET ledger on top, because "receivable" appears exactly once
-  // in the whole index (in a rounding-adjustment description) and the asset ledger then won a six-way tie.
-  // The entity has to be named. No `fordringer` entry: lookupForms' `-er` rule derives it, and shipping one
-  // anyway was the dead-plural mistake from the round before this.
+  // `fordring` was the ninth withdrawal, and it took three measured attempts to establish that it had to be.
+  // The read sense is right and valuable: a receivable IS the kundereskontro, and `fordring`, `fordringer`,
+  // "sum fordringer" and "vis fordringer" all returned nothing or /api/tax-returns/{year} before. The token
+  // that delivers it is the problem. "customer" is a RESOURCE NAME, so it drags the whole /api/customers
+  // family in behind it, writes included -- and this API has no POST for a receivable, so a write verb had
+  // nowhere correct to land:
   //
-  // ONE token, not ["ledger", "customer"]. A two-token expansion outscores a single explicitly named
-  // resource, so the wider form made `fordring` win every compound it appeared in: "faktura fordringer"
-  // ranked the customer ledger above /api/invoices, "bilag fordring" above /api/vouchers, "postering
-  // fordringer" above /api/postings. That is the same defect as the withdrawn `kontonummer: ["account"]`
-  // below — a synonym broad enough to displace the endpoint the other word names outright. Measured over
-  // 1170 queries: ["customer"] keeps GET /api/ledger/customer at rank 1 for the bare term, both plurals,
-  // "kundefordringer" and "utestaende fordringer", and returns all three compounds above to the resource
-  // they name. ["ledger"] alone is worse than either — GET /api/ledger/asset wins the bare term.
-  // Still imperfect, and stated rather than hidden: "leverandor fordring" and "ansatt fordring" rank the
-  // customer ledger above the supplier and employee ones, which stay at rank 3. Neither phrase is real
-  // Norwegian for those (a supplier balance is leverandørgjeld, a payable), so it is not worth widening.
-  fordring: ["customer"],
+  //     opprett fordring   (nothing)  ->  POST /api/customers          creating a CUSTOMER
+  //     slett fordringer   (nothing)  ->  DELETE /api/customers/{id}   deleting one
+  //     endre fordring     (nothing)  ->  PATCH /api/customers/{id}
+  //
+  // That is the `kontonummer` defect exactly -- a synonym broad enough to promote a write on the wrong
+  // resource -- reappearing in the one mapping that had survived review. Three attempts to keep the read and
+  // drop the write each produced a DIFFERENT wrong write, which is what settled it:
+  //   1. ["ledger", "customer"] -- two tokens outscore one named resource, so the customer ledger displaced
+  //      /api/invoices, /api/vouchers and /api/postings in any compound containing the word.
+  //   2. narrowed to ["customer"] plus a phrase rule sending write verbs to "invoice" -- a receivable is
+  //      created by issuing one. "opprett fordring" -> POST /api/invoices is right; "endre fordring" then
+  //      landed on PATCH /api/supplier-invoices/{id}, the SUPPLIER side of the books.
+  //   3. split further, write verbs to "credit invoice" -- crediting is how a receivable is actually
+  //      cancelled, and POST /api/invoices/{id}/credit exists. But `slett` maps to delete and the DELETE
+  //      operations outrank it, so "slett fordring" pointed at DELETE of a credit-note APPLICATION, and
+  //      "endre fordring" was never covered at all.
+  //
+  // No entry, and no phrase rule either: with nothing injected, `ansatt`/`leverandor` reach their own
+  // ledgers unaided, which is what they did before any of this. The read value is real and is left on the
+  // table deliberately. Reaching it needs the ranker to be able to name /api/ledger/customer without naming
+  // /api/customers -- a weight or an exact-path term, not another synonym. That is a change to the engine,
+  // not to this table, and it does not belong at the end of a PR about overreaching in this table.
   // The abbreviation of arbeidsgiveravgift, which the unabbreviated word already reached. Before this,
   // `aga` returned seven operations ALL TIED at the bare-substring floor of 0.16, so the top hit was
   // whichever came first in index order. The commit message called that "a confident wrong answer being
