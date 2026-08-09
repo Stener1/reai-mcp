@@ -457,3 +457,36 @@ test("the companyBankId description no longer says the pre-check is missing", ()
   );
   assert.match(desc, /subsidiaryLedger/, "and name where the pairing comes from");
 });
+
+test("the accounts description says to post the BASE number, not the composed one", async () => {
+  // A defect shipped in #132 and caught while reviewing my own pre-check. The description called the
+  // composed `number` ("1920/1337") "the subledger syntax vouchers accept", generalising from
+  // reai_book_bank_transactions, whose `account` field is a different field on a different endpoint and
+  // does take that form. The voucher field does not: the spec's AccountNumber schema reads "Base chart of
+  // accounts number. Use the `number` value returned by GET /api/chart-of-accounts or the `accountNumber`
+  // value returned by GET /api/chart-of-accounts/accounts" — this endpoint's `accountNumber`, not its
+  // `number`. An agent following the old text would have posted "1920/1337" into a field wanting "1920".
+  const { registeredTools } = await import("../dist/server.js");
+  const t = registeredTools.find((x) => x.name === "reai_list_accounts");
+  assert.match(t.description, /Post the `accountNumber`, not the `number`/);
+  assert.doesNotMatch(
+    t.description,
+    /subledger syntax vouchers accept/,
+    "the retracted claim must not come back",
+  );
+  // And it must not name the bank-booking tool to make the point: that tool is in the `bank` toolset while
+  // this one is in `bookkeeping`, so naming it would add a cross-toolset dependency for a historical aside.
+  // My own cross-group invariant from #132 caught that.
+  assert.doesNotMatch(t.description, /reai_book_bank_transactions/);
+
+  // And the spec still says what the correction rests on, so this cannot rot silently.
+  const { readFileSync } = await import("node:fs");
+  const spec = JSON.parse(readFileSync(new URL("../spec/reai-openapi.json", import.meta.url), "utf8"));
+  const accountNumber = spec.components.schemas.AccountNumber;
+  assert.match(
+    accountNumber.description,
+    /Base chart of accounts number/,
+    "the voucher field is documented as the BASE number; if that changes, revisit this description",
+  );
+  assert.match(accountNumber.description, /`accountNumber` value returned by/);
+});

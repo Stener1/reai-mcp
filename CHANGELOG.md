@@ -41,6 +41,20 @@ All notable changes to `reai-mcp`. Format loosely follows
     issuing a burst before the API has been asked at all.
   - Four mutations verified failing: the refusal removed, the exact-match dropped so a neighbouring
     account's bank bleeds in, a failed lookup made to block, and the budget removed.
+- **Fixed a false claim shipped in #132: which of the two account fields a voucher actually takes.** The
+  `reai_list_accounts` description said the composed `number` ("1920/1337") is *"the subledger syntax
+  vouchers accept"*. It is not. The spec's own `AccountNumber` schema — the one `POST /api/vouchers` uses —
+  reads *"Base chart of accounts number. Use the `number` value returned by GET /api/chart-of-accounts or
+  the `accountNumber` value returned by GET /api/chart-of-accounts/accounts"*: this endpoint's
+  `accountNumber`, not this endpoint's `number`. An agent following the old text would have posted
+  `"1920/1337"` into a field wanting `"1920"`.
+  - The claim came from generalising a *different* field on a *different* endpoint, which does take
+    `"accountNumber/subledgerId"`. Found while checking whether the new pre-check had a gap for postings
+    using that syntax — it does not, because the field never accepted it.
+  - The correction deliberately does not name the other tool: it is in the `bank` toolset while this one is
+    in `bookkeeping`, so naming it would add a cross-toolset dependency for a historical aside. The
+    cross-group invariant added in #132 caught that, which is the first time one of these guards has
+    constrained me rather than a hypothetical future edit.
 
 - **`reai_list_accounts` is a search that read like a listing, and told agents to conclude the opposite.**
   - Measured 2026-08-09 against `GET /api/chart-of-accounts/accounts` on a 399-account chart: **no

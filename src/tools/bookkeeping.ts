@@ -44,7 +44,10 @@ const listAccounts = defineTool({
     "  1900        subsidiaryLedger: null                        -> post to \"1900\"\n" +
     '  1920/1337   {type: "bank",    id: 1337, name: "mva"}      -> companyBankId 1337\n' +
     '  1320/6230   {type: "general", id: 6230, name: "Default"}  -> subAccountId 6230\n\n' +
-    "Measured 2026-08-09. `number` is already composed in the subledger syntax vouchers accept, and " +
+    "Measured 2026-08-09. **Post the `accountNumber`, not the `number`.** The composed `number` " +
+    '("1920/1337") identifies the row; a voucher posting wants the BASE number ("1920") with the dimension ' +
+    "passed separately, and the spec's AccountNumber schema says exactly that. Some other endpoints do take " +
+    'an "accountNumber/subledgerId" string in their own account field — this is not one of them. ' +
     "`subsidiaryLedger.id` IS the companyBankId or subAccountId — so this one call usually answers the " +
     "dimension question, and reai_sub_accounts_for_account / reai_list_company_banks are for the full " +
     "record rather than the id. (reai_list_company_banks is in the `bank` toolset, so a server started " +
