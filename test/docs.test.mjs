@@ -340,19 +340,24 @@ test("every stated undocumented-operation count matches the spec index", () => {
   const covered = new Set(allTools.flatMap((t) => (t.apiPaths ?? []).map(([m, p]) => `${m} ${p}`)));
   const bareUncovered = bare.filter((o) => !covered.has(`${o.method} ${o.path}`));
 
+  // Comment leaders stripped and whitespace collapsed BEFORE matching, for the reason the sibling test above
+  // learned the hard way: the claim in src/reai/spec.ts wraps mid-phrase across two `//` lines, so a raw
+  // search skips it — and a pattern that stops matching removes coverage instead of failing.
+  const flatten = (text) =>
+    text.replace(/^[ \t]*(?:\/\/|\*)[ \t]?/gm, "").replace(/[ \t]*\n[ \t]*/g, " ");
   const CORPUS = [
-    ...DOC_FILES.map((f) => [f, readFileSync(join(repo, f), "utf8")]),
-    ["src/reai/spec.ts", readFileSync(join(repo, "src", "reai", "spec.ts"), "utf8")],
+    ...DOC_FILES.map((f) => [f, flatten(readFileSync(join(repo, f), "utf8"))]),
+    ["src/reai/spec.ts", flatten(readFileSync(join(repo, "src", "reai", "spec.ts"), "utf8"))],
   ];
 
   // Each pattern is a way the count is actually phrased. A repetition matching none of them is caught by the
   // floor below rather than passing unnoticed.
+  // Every restatement uses the SAME phrase, "N bare operations", so two patterns cover all of them — the
+  // enumerate-every-phrasing version broke the moment a comment was reworded. The lookahead separates a
+  // DIFFERENT count that shares the words: "60 bare operations no curated tool covers".
   const BARE_CLAIMS = [
     /(\d+) of the (\d+) public operations carry neither a summary nor a description/g,
-    // The lookahead matters: "the 60 bare operations no curated tool covers" is a DIFFERENT count, and without
-    // it this pattern claimed 60 was the bare total and failed on a correct page.
-    /(?:the|all) (\d+) (?:public operations with NO summary|bare operations(?! no curated tool))/g,
-    /across all (\d+), ONE improvement/g,
+    /(\d+) bare operations(?! no curated tool)/g,
   ];
   const found = [];
   for (const [file, text] of CORPUS) {
@@ -370,17 +375,18 @@ test("every stated undocumented-operation count matches the spec index", () => {
     [],
     `${bare.length} of ${ops.length} public operations have no prose. These say otherwise:\n  ${wrong.join("\n  ")}`,
   );
-  // A floor, so deleting a claim — or rewording one out of every pattern above — fails instead of quietly
-  // reducing what this test covers. FIVE today: three in docs/discovery.md, two in the spec.ts comment. The
-  // first version of this said four, from counting by eye rather than measuring; rewording a claim then left
-  // four and passed. Mutation-tested at five.
+  // A floor, so deleting a claim — or rewording one out of both patterns — fails instead of quietly reducing
+  // what this test covers. SEVEN today: five in docs/discovery.md, two in the spec.ts notes. Measured, not
+  // counted by eye: the first version said four when there were five, and at four the rewording mutation
+  // passed — which is the one mutation a floor exists to catch.
   assert.ok(
-    found.length >= 5,
-    `only ${found.length} undocumented-operation claims matched; a repetition was reworded out of every pattern`,
+    found.length >= 7,
+    `only ${found.length} bare-operation claims matched; a repetition was reworded out of both patterns`,
   );
 
   const remaining = [...readFileSync(join(repo, "docs", "discovery.md"), "utf8")
-    .matchAll(/(\d+) bare operations no curated tool covers/g)];
+    // Tolerant of emphasis: the sentence writes it as **60**, which a bare \d+ cannot see.
+    .matchAll(/\*{0,2}(\d+)\*{0,2} bare operations no curated tool covers/g)];
   assert.ok(remaining.length > 0, "docs/discovery.md no longer states how many are left without a tool");
   for (const m of remaining) {
     assert.equal(Number(m[1]), bareUncovered.length, "the stated uncovered-and-undocumented count is wrong");
