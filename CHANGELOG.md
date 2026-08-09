@@ -7,6 +7,39 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **Two invariants that hold the curated tools to what the document says the API accepts.** Both properties
+  already held — this locks them in rather than fixing anything, which is worth saying plainly. They came out of
+  looking for a validation gap that turned out not to exist, and the looking is what belongs in the repository.
+  - **Every enum a tool declares is compared against the members the document declares** — 26 arguments across
+    15 write tools, all in step today. This catches drift in the direction that hurts: a spec refresh that ADDS
+    a member leaves a tool's `z.enum` rejecting a value the API now accepts, and the agent is told the value is
+    invalid by the side that is wrong about it. Nothing else in the suite would notice, because each tool's own
+    tests use values from that tool's own list. Ratcheted at 26 so deleting the arguments is not a way to pass.
+  - **No write tool omits a body property the document marks required** — 20+ operations carry one and none is
+    missing. That failure mode arrives as a 400 after a round-trip rather than locally.
+  - Both are mutation-tested: removing a member from `INSTRUMENT_TYPES` fails the first, and renaming
+    `accountNumber` out of `reai_create_sub_account` fails the second.
+
+### Verified, nothing to change
+
+- **Both live drift audits pass against tenant 2783.** `scripts/audit-messages.mjs` — 9 refusal strings the code
+  matches on, all unchanged. `scripts/audit-storage.mjs` — 17 storage claims, all unchanged, including the
+  phone canonicalisation, the title-casing, the stale-directory override and the wrong postcode. The sweep
+  confirms the tenant is back to the 0 customers and 0 suppliers it started with, and the customer created to
+  refuse against returns 404 afterwards. **26 documented claims, 0 drifted.**
+- **The param-less action hole named in #122 and #123 produces no wrong answer.** `POST
+  /api/subscriptions/generate-due` transmits and ranks first for "generate due" and for its own summary — but
+  in both cases the query NAMES it, which is the correct answer. Across eleven phrasings that do not name it
+  ("abonnement", "opprett abonnement", "forfalte abonnementer", "fakturer abonnementene" and so on) it ranks
+  first for none. Reachable is not the same as wrong, and there is no measured case to fix.
+- **Two of my own audit harnesses were wrong before they were right, which is why the checks above are
+  committed rather than run by hand.** A grep for `enum(` reported `reai_update_agreement` as unvalidated,
+  because the source carries the regex escape `enum\(`. And inferring requiredness from a type string not
+  ending in `?` reported nine tools missing required fields — every one a false positive, since the index
+  carries the document's own `required` list and those tools are verified working live.
+
 ### Fixed
 
 - **Four places told agents the agreement enums are undocumented. The spec declares all fourteen.** The source
