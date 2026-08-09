@@ -9,6 +9,23 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found the two-attempt drive silently discarding half its own work, and the fix for it was inert.**
+  - When a tool has any required overlapping field, the required-only attempt fills `runs` even if the
+    optional-inclusive attempt fails — so every optional field goes unmeasured while the tool reads as covered.
+    That was happening to `reai_create_customer_contact`. Such tools are now recorded by name.
+  - The cause was **my own sampler** generating an invalid email. My first fix looked for a `.email()` check,
+    which this repo does not use — its email fields carry a custom `refine` with their own message — so the fix
+    was **inert: it looked right and changed nothing**. The mutation battery is what revealed that, by showing the
+    change survived its own removal. Detected by field name now, and the tool is fully driven.
+  - **My stated reason for that tool was also false.** I wrote that it "refuses email AND phone together"; driven
+    by hand with a valid email it accepts both and sends. One tool remains partially driven —
+    `reai_create_expense`, which genuinely refuses `perDiems` outside a TRAVEL claim.
+  - `reached` was set by ANY request, so a tool that reads before writing could refuse after the GET and still
+    count as a measured write. Scoped to the tool's own write methods — and recorded as **latent**: no tool in the
+    population reads-then-refuses today, so reverting it fails nothing. It is closed because the class is real,
+    not because anything demonstrates it.
+  - Its third finding (the `reads` floor counting duplicates) was already fixed one commit earlier.
+
 - **Review falsified two claims in the entry below, and found five more defects — three in code written for it.**
   - **"The other eight already report from the record" was wrong.** Of the nine rendered enum fields: two were
     echoing, three report from the record, and **four are never named by their tool's note at all** — which is a

@@ -861,10 +861,24 @@ test("no candidate tool states a sent value the response contradicted", async ()
       }
         if (/date/i.test(key)) return { value: "2026-08-09" };
       const max = checks.find((c) => c.kind === "max")?.value ?? 40;
+      const token = `ZZQ${hashOf(key).toString(36).toUpperCase()}`;
+      // Format honoured, or the value fails validation and the whole ATTEMPT is discarded — which review found
+      // happening silently: unwrapping `email` on reai_create_customer_contact produced a value its refinement
+      // rejected, so the optional-inclusive run failed, the required-only run carried the tool, and every
+      // optional field went unmeasured while the tool read as covered.
+      //
+      // By NAME as well as by check. This repo's email fields use a custom `refine` with its own message, not
+      // `.email()`, so `checks.some(kind === "email")` never fired and the first version of this fix was inert —
+      // it looked right and changed nothing, which the mutation battery is what revealed.
+      if (/e-?mail/i.test(key) || checks.some((c) => c.kind === "email")) {
+        return { value: `${token.toLowerCase()}@zz.invalid` };
+      }
+      if (checks.some((c) => c.kind === "url")) return { value: `https://zz.invalid/${token.toLowerCase()}` };
+      if (checks.some((c) => c.kind === "uuid")) return { value: "00000000-0000-4000-8000-000000000000" };
       // Distinct per field, and deliberately not a word that occurs in prose. `"ZZ probe"` for everything meant
       // one echoed string flagged every string field; an ENUM sampled as `"invoice"` matched the word in
       // "Supplier invoice registered" and was reported as an echo of a field the note never mentioned.
-      return { value: `ZZQ${hashOf(key).toString(36).toUpperCase()}`.slice(0, Math.max(3, Math.min(max, 40))) };
+      return { value: token.slice(0, Math.max(3, Math.min(max, 40))) };
     }
     if (kind === "ZodArray") {
       const inner = pick(def.type, key, depth + 1);
@@ -896,6 +910,7 @@ test("no candidate tool states a sent value the response contradicted", async ()
   const unmeasurable = [];
   const tooShort = [];
   const silent = [];
+  const partiallyDriven = [];
   const undrivable = [];
   for (const name of CANDIDATES) {
     // The hand-certified tools are owned by their own tests, which is stronger evidence than this sweep and
@@ -954,12 +969,25 @@ test("no candidate tool states a sent value the response contradicted", async ()
               ? !value
               : `STORED_${field.toUpperCase()}_${nth}`;
       }
+      // Reached means the WRITE went out, not that any request did. `reached = true` on every call would let a
+      // tool that reads before writing — `reai_adjust_inventory` does — count as measured when it refused after
+      // the GET and never posted, which is the same false positive this check exists to close, one level in.
+      //
+      // Stated plainly: this is LATENT. No tool in the population currently reads-then-refuses, so reverting it
+      // changes no outcome and no test fails. It is here because the class is real and cheap to close, not
+      // because anything demonstrates it today.
+      const writeMethods = new Set(
+        (tool.apiPaths ?? []).filter(([m]) => ["POST", "PUT", "PATCH"].includes(m)).map(([m]) => m),
+      );
       let reached = false;
       let note = "";
       try {
         const result = await tool.handler(parsed.data, {
           client: {
-            request: async () => { reached = true; return { data: record, status: 200 }; },
+            request: async (req) => {
+              if (writeMethods.has(req.method)) reached = true;
+              return { data: record, status: 200 };
+            },
             deepLink: () => "link",
           },
           config: { writeMode: "full", tenantId: 2783, allowExternalSend: false },
@@ -979,8 +1007,17 @@ test("no candidate tool states a sent value the response contradicted", async ()
       return { note, sent, record, rendered };
     };
 
-    const runs = [await attempt(false), await attempt(true)].filter(Boolean);
+    const requiredOnly = await attempt(false);
+    const withOptionals = await attempt(true);
+    const runs = [requiredOnly, withOptionals].filter(Boolean);
     if (runs.length === 0) { undrivable.push(name); continue; }
+    // A tool with answerable OPTIONAL fields whose optional-inclusive run failed is measured on its required
+    // fields only, and the optional ones are unmeasured — silently, until now. Recorded by name: review found
+    // `reai_create_customer_contact` in exactly that state, reading as covered.
+    const optionalOnlyFields = [...answerable].filter((f) => tool.inputSchema?.[f]?.isOptional?.() === true);
+    if (withOptionals === undefined && optionalOnlyFields.length > 0) {
+      partiallyDriven.push(`${name} (optional: ${optionalOnlyFields.join(", ")})`);
+    }
 
     let judged = 0;
     for (const { note, sent, record, rendered } of runs) {
@@ -1049,13 +1086,32 @@ test("no candidate tool states a sent value the response contradicted", async ()
   // let such a tool move off NOT_ESTABLISHED and read as covered. `reai_create_customer_contact` was recovered
   // by the two-attempt drive and contributes exactly nothing; that is now visible instead of implied.
   assert.deepEqual(
+    [...new Set(partiallyDriven)].sort(),
+    [
+      // MEASURED. One entry, not two.
+      //
+      // `reai_create_customer_contact` was here, and my stated reason for it — "refuses email AND phone
+      // together" — was FALSE: driven by hand with a valid email it accepts both and sends. The real cause was
+      // my own sampler generating an invalid email, and the first fix for that was inert because it looked for a
+      // `.email()` check where this repo uses a custom `refine`. It is fully driven now.
+      //
+      // `reai_create_expense` genuinely refuses: "perDiems … only allowed on a TRAVEL claim", so a body with
+      // every optional line collection filled at once is one the tool declines. Listed rather than
+      // asserted-empty, because the consequence is real — its optional fields are unmeasured, and the previous
+      // version let the required-only run carry it as covered with no trace at all.
+      "reai_create_expense (optional: purpose, employeeId, projectId, costs, perDiems, mileageAllowances)",
+    ],
+    `these tools were measured on their REQUIRED fields only, because the optional-inclusive attempt failed to ` +
+      `validate or was refused. Their optional fields are unmeasured while the tool reads as covered: ` +
+      `${[...new Set(partiallyDriven)].join("; ")}`,
+  );
+  assert.deepEqual(
     [...new Set(silent)].sort(),
     [
       // MEASURED. `reai_create_supplier_invoice` is here because its only comparable field is `documentType`,
       // which is a RENDERED value the sweep skips — it is covered by test/purchase.test.mjs instead, which is
       // exactly what the rendered-field proofs are for.
       "reai_book_bank_transactions",
-      "reai_create_customer_contact",
       "reai_create_department",
       "reai_create_product",
       "reai_create_reconciliation_rule",
