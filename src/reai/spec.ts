@@ -186,7 +186,24 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
         let contribution = 0;
         if (rawTerms.length > 1 && text.includes(phrase)) contribution += weight * 3;
         for (const { term, weight: termWeight, fromPhrase } of terms) {
-          const strength = matchStrength(text, tokens, term, fromPhrase);
+          // `fromPhrase && !isProse`: an exact compound names a PATH, so it is matched against the structural
+          // fields only. In a path or an operation id the segments are adjacent by construction; in prose the
+          // words scatter, and requiring merely that all parts appear SOMEWHERE let boilerplate score a full 1:
+          //
+          //     "vat-returns"       vs  GET /api/vat-codes    "returns every vat code supported by reai…"
+          //     "tax-returns"       vs  POST …/wage-specs     "…returns the updated salary payment"
+          //     "chart-of-accounts" vs  GET /api/general-sub-accounts
+          //
+          // A strength of 1 with weight >= 1 enters matchedResourceTerms, so those bought the uncapped coverage
+          // multiplier — exactly what the 0.2-substring guard three lines below was written to stop. Measured:
+          // 35 such matches, every one in a summary or description.
+          //
+          // Requiring ADJACENCY instead was tried and rejected: it breaks the two terms that deliberately name a
+          // nested path — `salary-payments-complete` for /api/salary-payments/{id}/complete — because the
+          // parameter sits between the segments, and it breaks the singular/plural folding that lets
+          // `salary-payment` match /api/salary-payments. Prose is where the false matches are, and prose is
+          // already flagged here.
+          const strength = matchStrength(text, tokens, term, fromPhrase && !isProse);
           if (strength === 0) continue;
           contribution += weight * strength * termWeight;
           // A 0.2 bare-substring hit is noise and must not buy the coverage

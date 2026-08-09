@@ -77,6 +77,40 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **An exact compound was matching prose that merely contained its parts, and buying the coverage multiplier
+  with it.** The all-or-nothing rule from #120 required only that every part of a hyphenated term appear
+  *somewhere* in the haystack. In a path or an operation id the segments are adjacent by construction, so that
+  was the same thing; in prose the words scatter, and boilerplate scored a full 1:
+
+  ```
+  "vat-returns"        vs  GET /api/vat-codes    "returns every vat code supported by reai…"
+  "tax-returns"        vs  POST …/wage-specs     "…returns the updated salary payment"
+  "chart-of-accounts"  vs  GET /api/general-sub-accounts
+  ```
+
+  A strength of 1 with weight ≥ 1 enters `matchedResourceTerms`, so each of those bought the **uncapped
+  coverage multiplier** — precisely what the "a 0.2 bare-substring hit is noise and must not buy the coverage
+  multiplier" guard was written to stop. **35 such matches, every one in a summary or a description.**
+  - Observable rather than theoretical: on `main`, "mva-melding" surfaced `GET /api/vat-codes` at **rank 5**, an
+    unrelated resource reached through the phrase "returns every vat code".
+  - Found by the independent review of PR #120, which reported it against that PR's first commit and said the
+    later scoping would not address it. It did not: `vat-returns` and `tax-returns` *are* phrase replacements, so
+    the opt-in narrowed the blast radius without touching this. The report arrived after #120 had merged and five
+    PRs had shipped on top, so most of it was obsolete — this finding was not.
+  - **Requiring adjacency was the obvious fix and it does not work.** Two terms deliberately name a nested path,
+    where the parameter sits between the segments (`salary-payments-complete` for
+    `/api/salary-payments/{id}/complete`), and the operation-id form writes that as `_id_`; the singular/plural
+    folding also means a term's last part is often not at a word boundary, so `salary-payment` would stop
+    matching `/api/salary-payments`. Both are asserted, so the adjacency attempt cannot return quietly.
+  - The rule is now scoped to the **structural** fields — path, tag, operation id, field names — and prose keeps
+    the ordinary branches. Prose is where every one of the 35 false matches was, and the scorer already flags it.
+  - **Swept with `npm run sweep:discovery`, the tool #126 committed for exactly this.** Across **69,143 queries**:
+    **one** rank-1 change, no answer lost, nothing newly empty. The sweep named it and flagged it as landing on
+    an irreversible, externally-transmitting operation — `generer amelding` moves from
+    `POST /api/subscriptions/{id}/generate` to `POST /api/salary-payments/{id}/complete`, which is right: the
+    a-melding is filed by completing the salary payment, and `main` was answering with subscription invoicing.
+    A line to read rather than a number to accept, which is what that category is for.
+
 - **Three queries this repository's own corpora declared, and could not reach.** Sweeping all **168 declared
   pairs** — three corpora across two files — found three that were not in the top 20 at all. They were
   invisible because the corpora are scored against floors rather than per pair, so three misses sat inside a

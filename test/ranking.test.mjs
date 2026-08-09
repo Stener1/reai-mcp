@@ -724,3 +724,70 @@ test("an action with no better alternative is not pushed out of reach", () => {
   // very thing it guards degraded: an earlier version moved this from rank 8 to 9 and the test said nothing.
   assert.equal(rankOf("aktiver abonnementet igjen", "/api/subscriptions/{id}/activate"), 8);
 });
+
+/**
+ * An exact compound names a PATH, so it is matched against the structural fields only.
+ *
+ * The all-or-nothing rule from PR #120 required merely that every part of a hyphenated term appear SOMEWHERE
+ * in the haystack. In a path or an operation id the segments are adjacent by construction, so that was the same
+ * thing. In prose the words scatter, and boilerplate scored a full 1:
+ *
+ *     "vat-returns"       vs  GET /api/vat-codes             "returns every vat code supported by reai…"
+ *     "tax-returns"       vs  POST …/wage-specs              "…returns the updated salary payment"
+ *     "chart-of-accounts" vs  GET /api/general-sub-accounts
+ *
+ * A strength of 1 with weight >= 1 enters `matchedResourceTerms`, so each of those bought the uncapped coverage
+ * multiplier — exactly what the "a 0.2 bare-substring hit is noise and must not buy the coverage multiplier"
+ * guard was written to stop. Measured: 35 such matches, every one in a summary or a description.
+ *
+ * Found by the independent review of PR #120, which reported it against that PR's first commit and noted the
+ * later scoping did not address it. It did not: `vat-returns` and `tax-returns` ARE phrase replacements, so the
+ * opt-in narrowed the blast radius without touching this.
+ */
+test("an exact compound does not match prose that merely contains its parts", () => {
+  const description = "returns every vat code supported by reai, including its code, rate, and description";
+  const tokens = fieldTokens(description);
+  // Both parts are present, in the wrong order and far apart. Off for prose now.
+  assert.equal(matchStrength(description, tokens, "vat-returns", false), 0);
+
+  // And through the SCORER, which is where the change lives — the two assertions above pass on `main` too,
+  // because they call the primitive with the flag already off. This one does not: on `main`, "mva-melding"
+  // surfaced GET /api/vat-codes at rank 5, on the strength of "returns every vat code…" scoring a full 1 for
+  // the phrase term `vat-returns`. An unrelated resource, reached through boilerplate.
+  const forVatReturn = searchOperations({ query: "mva-melding", limit: 20 }).map((h) => `${h.method} ${h.path}`);
+  assert.equal(forVatReturn[0], "POST /api/vat-returns");
+  assert.ok(
+    !forVatReturn.includes("GET /api/vat-codes"),
+    `the VAT CODES list should not be reachable through prose here: ${forVatReturn.slice(0, 6).join(", ")}`,
+  );
+  // And the structural fields, where the segments are adjacent by construction, still score a full match.
+  assert.equal(matchStrength("/api/vat-returns", fieldTokens("/api/vat-returns"), "vat-returns", true), 1);
+  assert.equal(
+    matchStrength("post_api_vat_returns", fieldTokens("post_api_vat_returns"), "vat-returns", true),
+    1,
+  );
+});
+
+test("requiring adjacency instead was rejected, and these are the cases that reject it", () => {
+  // Recorded because adjacency is the obvious fix and it does not work. Two terms deliberately name a NESTED
+  // path, where the parameter sits between the segments — and the singular/plural folding means a term's last
+  // part is often not at a word boundary in the haystack. Both would break.
+  const nested = "/api/salary-payments/{id}/complete";
+  assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", true), 1);
+  const plural = "/api/salary-payments";
+  assert.equal(matchStrength(plural, fieldTokens(plural), "salary-payment", true), 1);
+  // Which is why the a-melding split still resolves the way PR #121 left it.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(top("a-melding").path, "/api/salary-payments/{id}/complete");
+  assert.equal(top("a-melding feedback").path, "/amelding/{id}/feedback-raw");
+  assert.equal(top("vis amelding").path, "/api/salary-payments");
+});
+
+test("the one query the change moves, moves to the right answer", () => {
+  // A 69,143-query sweep against main reported exactly one rank-1 change, and flagged it as landing on an
+  // irreversible, externally-transmitting operation — which is the sweep doing its job, since that is a line to
+  // read rather than a number to accept. "Generer amelding" means produce the payroll report, and the a-melding
+  // IS filed by completing the salary payment; main answered with subscription invoicing.
+  const top = searchOperations({ query: "generer amelding", limit: 1 })[0];
+  assert.equal(`${top.method} ${top.path}`, "POST /api/salary-payments/{id}/complete");
+});
