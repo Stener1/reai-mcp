@@ -65,11 +65,14 @@ test("a posting to an account with sub-accounts is refused locally, with the cho
     },
     (req) => (req.method === "GET" ? SUBS : { id: 1 }),
   );
-  assert.deepEqual(calls.map((c) => c.method), ["GET"], "no voucher may be sent");
+  // Deduped: the dimension pass now makes two kinds of read (sub-accounts, then the chart per account).
+  // What matters is that NO write went out.
+  assert.deepEqual([...new Set(calls.map((c) => c.method))], ["GET"], "no voucher may be sent");
   assert.equal(result.isError, true);
   assert.match(text, /line 1, account 1320 → subAccountId 6231 \(Default\)/);
   assert.match(text, /even when the only one is called "Default"/);
   assert.match(text, /Nothing was sent/);
+  assert.match(text, /reai_sub_accounts_for_account/, "the sub-account lookup tool must be offered");
 });
 
 test("a posting that supplies one, or is on an account without any, goes through", async () => {
@@ -318,14 +321,36 @@ const BANK_ROWS = [
   { number: "1920/1337", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1337, name: "mva" } },
   { number: "1920/1338", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1338, name: "drift" } },
   { number: "1920/1339", accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 1339, name: "Skatt tilsidesatt - NOK" } },
+  // A row with NO dimension. The live API returns these for a bare account (1900 subsidiaryLedger: null),
+  // and without one here `subsidiaryLedger?.type` could lose its optional chain and nothing would notice —
+  // the mutant throws, the catch eats it, and the check silently disables. Review demonstrated that.
+  { number: "1900", accountNumber: "1900", subsidiaryLedger: null },
+  // And a NON-bank dimension, so the discriminator is tested. Without it, matching any non-null dimension
+  // passes every test while offering subAccountIds and supplier ids AS company bank ids — the worst false
+  // positive in scope, and live-reachable: 2400 carries supplier dimensions on a real tenant.
+  { number: "2400/5802", accountNumber: "2400", subsidiaryLedger: { type: "supplier", id: 5802, name: "A supplier" } },
+  { number: "1300/6229", accountNumber: "1300", subsidiaryLedger: { type: "general", id: 6229, name: "Default" } },
 ];
 
-/** The chart search is a PREFIX search, so the stub must behave like one — see the exact-match test. */
+/**
+ * The chart search is a PREFIX search, and the stub must behave like one AND read the request the way the
+ * tool actually sends it.
+ *
+ * It used to parse a query string out of `req.path`. When the tool moved to the client's `query` option, the
+ * stub silently found nothing, defaulted the prefix to "" and returned EVERY row — so the bank tests kept
+ * passing while testing nothing about filtering. That is why several mutations survived: a renamed or
+ * removed parameter changed a request the stub was not reading. Reading `req.query` is what makes those
+ * mutations visible.
+ */
 const chartResponder = (rows) => (req) => {
   if (req.path === "/api/general-sub-accounts") return [];
   if (req.path.startsWith("/api/chart-of-accounts/accounts")) {
-    const want = decodeURIComponent(new URL(`http://x/${req.path}`).searchParams.get("accountNumberPrefix") ?? "");
-    return rows.filter((r) => r.accountNumber.startsWith(want));
+    const prefix = req.query?.accountNumberPrefix;
+    // No prefix means the tool did not filter — the live endpoint would answer an unrelated page, so the
+    // stub must not quietly behave as though it had.
+    if (prefix === undefined) return rows.slice(0, 1);
+    const limit = Number(req.query?.limit ?? 20);
+    return rows.filter((r) => String(r.accountNumber).startsWith(String(prefix))).slice(0, limit);
   }
   return { id: 1, number: "MV1-2026" };
 };
@@ -431,19 +456,44 @@ test("the bank lookup matches the account EXACTLY, because the search is a prefi
   assert.doesNotMatch(text, /1400/, "a neighbouring account's bank must not be offered for 1920");
 });
 
-test("the lookup is bounded, so a wide voucher does not burst a read per line", async () => {
-  // One read per DISTINCT account lacking a companyBankId. Beyond a small budget the check steps aside
-  // rather than spending a burst of reads before the API has even been asked.
-  const many = [];
-  for (let i = 0; i < 12; i += 1) many.push({ accountNumber: `40${10 + i}`, amount: i % 2 ? -10 : 10, description: "d" });
-  const { calls, result } = await run(
+test("the budget checks the first N and SAYS what it skipped, rather than silently standing down", async () => {
+  // It used to be all-or-nothing: nine distinct accounts meant zero protection AND no mention of it, while
+  // the argument description advertises the check — so an agent could read the absence of a refusal as
+  // evidence no dimension was needed. Review of #133 called that the wrong trade, and it is: partial
+  // coverage plus disclosure beats a cliff nobody is told about.
+  // Balanced, or the debit/credit check returns before the dimension pass ever runs — which is how the
+  // first version of this test reported 0 lookups and looked like a budget bug.
+  const many = [{ accountNumber: "1920", amount: 110, description: "d" }];
+  for (let i = 0; i < 11; i += 1) many.push({ accountNumber: `40${10 + i}`, amount: -10, description: "d" });
+  const { calls, result, text } = await run(
     "reai_create_voucher",
     { date: "2026-08-08", description: "Zz", postings: many },
     chartResponder(BANK_ROWS),
   );
   const lookups = calls.filter((c) => String(c.path).startsWith("/api/chart-of-accounts")).length;
-  assert.equal(lookups, 0, "past the budget the check must step aside, not issue 12 reads");
-  assert.notEqual(result.isError, true, "and must not block the voucher");
+  assert.equal(lookups, 8, "the first eight distinct accounts must still be checked");
+  // 1920 is among them, so the refusal must still fire — and must name what went unchecked.
+  assert.equal(result.isError, true);
+  assert.match(text, /line 1, account 1920 → companyBankId/);
+  assert.match(text, /Not checked/, "the skipped accounts must be disclosed");
+  assert.match(text, /lookup budget/);
+});
+
+test("the budget boundary is exact, so an off-by-one is caught", async () => {
+  // Eight distinct accounts must all be checked; the ninth is the first to be skipped.
+  const eight = [];
+  for (let i = 0; i < 8; i += 1) eight.push({ accountNumber: `50${10 + i}`, amount: i % 2 ? -10 : 10, description: "d" });
+  const atLimit = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: eight },
+    chartResponder(BANK_ROWS),
+  );
+  assert.equal(
+    atLimit.calls.filter((c) => String(c.path).startsWith("/api/chart-of-accounts")).length,
+    8,
+    "exactly at the budget, every account is checked",
+  );
+  assert.doesNotMatch(atLimit.text, /Not checked/, "and nothing is reported as skipped");
 });
 
 test("the companyBankId description no longer says the pre-check is missing", () => {
@@ -489,4 +539,131 @@ test("the accounts description says to post the BASE number, not the composed on
     "the voucher field is documented as the BASE number; if that changes, revisit this description",
   );
   assert.match(accountNumber.description, /`accountNumber` value returned by/);
+});
+
+test("the lookup sends accountNumberPrefix and a limit, through `query` not the path", async () => {
+  // Both halves matter. The parameter name is what makes the search a prefix search rather than a
+  // name-matching one, and the limit is what stops a truncated list being offered as "pick from these".
+  // And it must travel through `query`: an accountNumber containing "/" percent-encodes to %2F, which
+  // hasAmbiguousSegments refuses, so interpolating it into `path` made the client throw and the catch
+  // disable the check for the whole voucher. Review of #133 measured that.
+  const { calls } = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: bankPostings({ companyBankId: 1338 }) },
+    chartResponder(BANK_ROWS),
+  );
+  const lookup = calls.find((c) => String(c.path).startsWith("/api/chart-of-accounts"));
+  assert.ok(lookup, "the chart must be consulted");
+  assert.equal(lookup.path, "/api/chart-of-accounts/accounts", "no query string may be built into the path");
+  assert.equal(lookup.query?.accountNumberPrefix, "3000", "the prefix parameter must be sent by name");
+  assert.ok(Number(lookup.query?.limit) >= 100, "a limit must be sent, or a long list is silently truncated");
+});
+
+test("only a BANK dimension counts — a supplier or general one must not be offered as a bank id", async () => {
+  // The discriminator, which nothing pinned. Matching any non-null dimension passes every other test while
+  // refusing postings to 1300 and 2400 and presenting subAccountIds and SUPPLIER ids as company bank ids.
+  // Both accounts carry real dimensions on a live tenant, so this is not hypothetical.
+  for (const accountNumber of ["2400", "1300"]) {
+    const { result, text, calls } = await run(
+      "reai_create_voucher",
+      {
+        date: "2026-08-08",
+        description: "Zz",
+        postings: [
+          { accountNumber, amount: 100, description: "d", subAccountId: 1 },
+          { accountNumber: "3000", amount: -100, description: "d" },
+        ],
+      },
+      chartResponder(BANK_ROWS),
+    );
+    assert.notEqual(result.isError, true, `${accountNumber} has a non-bank dimension and must not be refused`);
+    assert.ok(calls.some((c) => c.method === "POST"), `the voucher for ${accountNumber} must be sent`);
+    assert.doesNotMatch(text ?? "", /companyBankId/, `${accountNumber}'s dimension is not a bank`);
+  }
+});
+
+test("a row with no dimension at all is handled, not thrown on", async () => {
+  // The live API returns subsidiaryLedger: null for a bare account — the tool's own description shows
+  // "1900 subsidiaryLedger: null". Without such a row in a RESPONSE, dropping the optional chain goes
+  // unnoticed: the mutant throws, the catch swallows it, and the check silently disables.
+  const { result, calls, text } = await run(
+    "reai_create_voucher",
+    {
+      date: "2026-08-08",
+      description: "Zz",
+      postings: [
+        { accountNumber: "1900", amount: 100, description: "d" },
+        { accountNumber: "3000", amount: -100, description: "d" },
+      ],
+    },
+    chartResponder(BANK_ROWS),
+  );
+  assert.notEqual(result.isError, true, "1900 needs no dimension and must go through");
+  assert.ok(calls.some((c) => c.method === "POST"));
+  // And the lookup must have SUCCEEDED, not thrown and been swallowed. Without this the mutation that
+  // drops the optional chain is invisible: the null row throws, the catch eats it, the voucher goes through
+  // and every other assertion still holds. The success note reports an unverified dimension, so its
+  // absence is the evidence that the row was handled.
+  assert.doesNotMatch(text, /NOT verified/, "the null-dimension row must be handled, not error out");
+});
+
+test("a bank posting is reported on ITS line, not always line 1", async () => {
+  const { result, text } = await run(
+    "reai_create_voucher",
+    {
+      date: "2026-08-08",
+      description: "Zz",
+      postings: [
+        { accountNumber: "3000", amount: -100, description: "d" },
+        { accountNumber: "1920", amount: 100, description: "d" },
+      ],
+    },
+    chartResponder(BANK_ROWS),
+  );
+  assert.equal(result.isError, true);
+  assert.match(text, /line 2, account 1920 → companyBankId/, "the line number must follow the posting");
+  assert.doesNotMatch(text, /line 1, account 1920/);
+});
+
+test("a saturated page is not offered as a list to pick from", async () => {
+  // The endpoint caps at 100 and does not order exact matches first. If a response comes back at the cap,
+  // there may be more than were returned — so presenting those ids under "pick from the ids above" is how
+  // an agent books to the WRONG bank, irreversibly. Worse than the bare 400, which named nothing.
+  const many = [];
+  for (let i = 0; i < 100; i += 1) {
+    many.push({ number: `1920/${2000 + i}`, accountNumber: "1920", subsidiaryLedger: { type: "bank", id: 2000 + i, name: `b${i}` } });
+  }
+  const { result, text, calls } = await run(
+    "reai_create_voucher",
+    { date: "2026-08-08", description: "Zz", postings: bankPostings() },
+    chartResponder(many),
+  );
+  assert.notEqual(result.isError, true, "a truncated list must not become a refusal offering ids");
+  assert.ok(calls.some((c) => c.method === "POST"), "the API stays the authority");
+  assert.doesNotMatch(text ?? "", /Pick from the ids above/);
+});
+
+test("a voucher needing BOTH dimensions is refused once, naming both", async () => {
+  // It used to take two round trips: the sub-account block returned before the bank block ran, so a
+  // caller fixed one, resubmitted and was refused again. "Bank pays an invoice" is the commonest voucher
+  // shape there is, so that was the normal path.
+  const { result, text } = await run(
+    "reai_create_voucher",
+    {
+      date: "2026-08-08",
+      description: "Zz",
+      postings: [
+        { accountNumber: "1300", amount: 100, description: "d" },
+        { accountNumber: "1920", amount: -100, description: "d" },
+      ],
+    },
+    (req) => {
+      if (req.path === "/api/general-sub-accounts") return [{ id: 6229, accountNumber: "1300", name: "Default" }];
+      return chartResponder(BANK_ROWS)(req);
+    },
+  );
+  assert.equal(result.isError, true);
+  assert.match(text, /line 1, account 1300 → subAccountId 6229/);
+  assert.match(text, /line 2, account 1920 → companyBankId/);
+  assert.match(text, /2 posting\(s\)/, "both are counted in one refusal");
 });

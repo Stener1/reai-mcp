@@ -258,8 +258,8 @@ const postingInput = z.object({
     .describe(
       "Company bank account id, from reai_list_company_banks. Conditionally REQUIRED in the same way " +
         "subAccountId is: a posting to a bank account in the chart answers " +
-        '400 "Linje 1: Konto 1920 må posteres med bankkonto." without it — measured. This tool does ' +
-        "PRE-CHECKS this the way it pre-checks subAccountId: if a posting is on an account that has bank " +
+        '400 "Linje 1: Konto 1920 må posteres med bankkonto." without it — measured. This tool ' +
+        "PRE-CHECKS it the way it pre-checks subAccountId: if a posting is on an account that has bank " +
         "dimensions and carries no companyBankId, nothing is sent and the refusal names the actual ids to " +
         "choose from. The pairing comes from reai_list_accounts, which returns \"1920/1337\" with " +
         'accountNumber 1920 and subsidiaryLedger {type: "bank", id: 1337} — that id IS the companyBankId. ' +
@@ -449,7 +449,7 @@ const createVoucher = defineTool({
     "This posts to the general ledger and is NOT freely reversible — under Norwegian bookkeeping " +
     "rules a voucher in a closed period cannot be deleted. Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
-apiPaths: [
+  apiPaths: [
     ["GET", "/api/general-sub-accounts"],
     // The bank-dimension pre-read. Declared because `apiPaths` is what tells a consumer, and this
     // repository's own coverage audits, which endpoints a curated tool touches — an undeclared pre-read
@@ -517,7 +517,20 @@ apiPaths: [
     // earlier version of this comment claimed. server.ts turns a thrown ReaiApiError into a plain
     // tool error, so the caller would have received exactly the bare Norwegian message this
     // preflight exists to replace. The catch below supplies the advice instead.
-    const needSubAccount: Array<{ line: number; accountNumber: string; choices: string }> = [];
+    // Both conditionally-mandatory dimensions, checked in ONE pass and reported together.
+    //
+    // They used to be two sequential blocks, and the sub-account one returned first — so a voucher whose
+    // line 1 was on 1320 and line 2 on 1920 got the sub-account refusal, and the bank refusal only on the
+    // NEXT attempt. "Bank pays an invoice" is the commonest voucher shape there is, so that was the normal
+    // path, not an edge. Review of PR #133 measured it.
+    //
+    // A failed lookup does NOT block the write, for either kind. This spec has under-stated requirements
+    // before, and refusing a voucher because a helper read failed would be the check doing harm. The API
+    // stays the authority; the catch after the POST still translates its Norwegian refusal.
+    const missing: Array<{ line: number; accountNumber: string; field: string; choices: string }> = [];
+    const notChecked: string[] = [];
+
+    // Sub-accounts: one read covers every account.
     try {
       const subs = await ctx.client.request<
         Array<{ id?: number; accountNumber?: string; name?: string }>
@@ -532,88 +545,101 @@ apiPaths: [
           if (posting.subAccountId !== undefined) return;
           const choices = byAccount.get(posting.accountNumber);
           if (choices === undefined || choices.length === 0) return;
-          needSubAccount.push({
+          missing.push({
             line: index + 1,
             accountNumber: posting.accountNumber,
+            field: "subAccountId",
             choices: choices.map((c) => `${c.id} (${c.name ?? "?"})`).join(", "),
           });
         });
       }
     } catch {
-      // Left to the API, deliberately — see above.
-    }
-    if (needSubAccount.length > 0) {
-      return fail(
-        `Nothing was sent. ${needSubAccount.length} posting(s) are on an account that requires a ` +
-          `general sub-account (underkonto), and none was given:\n\n` +
-          needSubAccount
-            .map((n) => `  line ${n.line}, account ${n.accountNumber} → subAccountId ${n.choices}`)
-            .join("\n") +
-          `\n\nAn account that has ANY sub-account requires one on every posting, even when the only ` +
-          `one is called "Default" — the API answers 400 "må posteres med underkonto" and names just ` +
-          `the line. Pick from the ids above, or list them with reai_sub_accounts_for_account.`,
-      );
+      notChecked.push("sub-accounts (the lookup failed)");
     }
 
-    // The same courtesy for the OTHER conditionally-mandatory dimension. A posting to a bank account
-    // answers 400 "Linje 1: Konto 1920 må posteres med bankkonto." without a companyBankId, naming the
-    // line and nothing actionable — and this tool used to decline to pre-check it, on the grounds that
-    // "nothing in the company-bank response says which ledger account each bank belongs to". That premise
-    // is true; the conclusion was not. reai_list_accounts pairs them: GET /api/chart-of-accounts/accounts
-    // returns one row per account-plus-dimension, so account 1920 comes back as "1920/1337" carrying
-    // subsidiaryLedger {type: "bank", id: 1337} — and that id IS the companyBankId.
+    // Bank dimensions: one read per distinct account, because the pairing only exists per account.
     //
-    // Only fires on a POSITIVE finding. `accountNumberPrefix` returns nothing both for an account with no
-    // bank dimension and for an account that does not exist (measured: 2783 has 1920 in its chart, zero
-    // company banks, and the prefix search returns 0 rows), so absence proves nothing and must not block.
-    // Exact-match on accountNumber because the search is a prefix search — 1920 would also return 19205 —
-    // and `query` is worse still, matching names too: `query=bank` returns 1920 AND 7770.
-    const needBank: Array<{ line: number; accountNumber: string; choices: string }> = [];
+    // `PAGE_LIMIT` is not decoration. This endpoint returns 20 rows unasked and caps at 100, and it does
+    // NOT order exact matches first — measured, `accountNumberPrefix=2400` gives 20 rows without a limit
+    // and 70 with one, and `accountNumberPrefix=24` returns 2460 BEFORE the 2400/* rows. Without a limit an
+    // account with more than 20 dimensions would have its list silently truncated and then offered under
+    // "pick from the ids above", which is how an agent books to the WRONG bank irreversibly. That would be
+    // worse than the bare 400 this check replaces, since that at least named nothing. Found by review.
+    const PAGE_LIMIT = 100;
     const distinct = [...new Set(args.postings.filter((p) => p.companyBankId === undefined).map((p) => p.accountNumber))];
-    // Bounded: one read per distinct account, and vouchers are a handful of lines. A voucher touching
-    // more accounts than this is not a case worth spending a burst of reads on before even trying.
+    // Partial rather than all-or-nothing, and disclosed either way. A cliff at 8 left a 12-line voucher
+    // with no protection AND no mention of it, while the argument description advertises the check.
     const LOOKUP_BUDGET = 8;
-    if (distinct.length > 0 && distinct.length <= LOOKUP_BUDGET) {
-      const bankDimensions = new Map<string, Array<{ id?: number; name?: string }>>();
-      try {
-        for (const accountNumber of distinct) {
-          const rows = await ctx.client.request<
-            Array<{ accountNumber?: string; subsidiaryLedger?: { type?: string; id?: number; name?: string } | null }>
-          >({
-            method: "GET",
-            path: `/api/chart-of-accounts/accounts?accountNumberPrefix=${encodeURIComponent(accountNumber)}`,
-            tenantId,
-          });
-          if (!Array.isArray(rows.data)) continue;
-          const banks = rows.data
-            .filter((r) => r.accountNumber === accountNumber && r.subsidiaryLedger?.type === "bank")
-            .map((r) => ({ id: r.subsidiaryLedger?.id, name: r.subsidiaryLedger?.name }));
-          if (banks.length > 0) bankDimensions.set(accountNumber, banks);
-        }
-      } catch {
-        // Left to the API, deliberately — same reasoning as the sub-account lookup above. A helper read
-        // that fails must not refuse a voucher the API would have accepted.
-      }
-      args.postings.forEach((posting, index) => {
-        if (posting.companyBankId !== undefined) return;
-        const choices = bankDimensions.get(posting.accountNumber);
-        if (choices === undefined) return;
-        needBank.push({
-          line: index + 1,
-          accountNumber: posting.accountNumber,
-          choices: choices.map((c) => `${c.id} (${c.name ?? "?"})`).join(", "),
-        });
-      });
+    const looked = distinct.slice(0, LOOKUP_BUDGET);
+    if (distinct.length > looked.length) {
+      notChecked.push(
+        `bank dimensions on ${distinct.slice(LOOKUP_BUDGET).join(", ")} (past the ${LOOKUP_BUDGET}-account ` +
+          `lookup budget)`,
+      );
     }
-    if (needBank.length > 0) {
+    const bankDimensions = new Map<string, Array<{ id?: number; name?: string }>>();
+    for (const accountNumber of looked) {
+      // Per account, so one failure does not end the remaining lookups.
+      try {
+        const rows = await ctx.client.request<
+          Array<{ accountNumber?: string; subsidiaryLedger?: { type?: string; id?: number; name?: string } | null }>
+        >({
+          method: "GET",
+          path: "/api/chart-of-accounts/accounts",
+          // Through `query`, never interpolated into `path`. An accountNumber containing "/" — the composed
+          // form this endpoint itself returns as `number` — percent-encodes to %2F, and
+          // hasAmbiguousSegments refuses any path containing one, so the client threw and the bare catch
+          // disabled the check for the WHOLE voucher. Measured by review. Every sibling tool uses `query`.
+          query: { accountNumberPrefix: accountNumber, limit: PAGE_LIMIT },
+          tenantId,
+        });
+        if (!Array.isArray(rows.data)) continue;
+        // Saturated means there may be more than were returned, so the list cannot be presented as
+        // exhaustive. Say nothing rather than offer a truncated set of ids to pick from.
+        if (rows.data.length >= PAGE_LIMIT) {
+          notChecked.push(`bank dimensions on ${accountNumber} (more than ${PAGE_LIMIT} rows; list truncated)`);
+          continue;
+        }
+        const banks = rows.data
+          .filter((r) => r.accountNumber === accountNumber && r.subsidiaryLedger?.type === "bank")
+          .map((r) => ({ id: r.subsidiaryLedger?.id, name: r.subsidiaryLedger?.name }));
+        if (banks.length > 0) bankDimensions.set(accountNumber, banks);
+      } catch {
+        notChecked.push(`bank dimensions on ${accountNumber} (the lookup failed)`);
+      }
+    }
+    args.postings.forEach((posting, index) => {
+      if (posting.companyBankId !== undefined) return;
+      const choices = bankDimensions.get(posting.accountNumber);
+      if (choices === undefined) return;
+      missing.push({
+        line: index + 1,
+        accountNumber: posting.accountNumber,
+        field: "companyBankId",
+        choices: choices.map((c) => `${c.id} (${c.name ?? "?"})`).join(", "),
+      });
+    });
+
+    if (missing.length > 0) {
+      const kinds = [...new Set(missing.map((m) => m.field))];
       return fail(
-        `Nothing was sent. ${needBank.length} posting(s) are on a bank account, which must say WHICH ` +
-          `company bank, and none was given:\n\n` +
-          needBank
-            .map((n) => `  line ${n.line}, account ${n.accountNumber} → companyBankId ${n.choices}`)
+        `Nothing was sent. ${missing.length} posting(s) are on an account that requires a dimension the ` +
+          `posting did not carry:\n\n` +
+          missing
+            .sort((a, b) => a.line - b.line)
+            .map((m) => `  line ${m.line}, account ${m.accountNumber} → ${m.field} ${m.choices}`)
             .join("\n") +
-          `\n\nThe API answers 400 "må posteres med bankkonto" and names only the line. Pick from the ids ` +
-          `above — they are the company bank ids — or list the full records with reai_list_company_banks.`,
+          `\n\nAn account that has ANY general sub-account requires one on every posting, even when the ` +
+          `only one is called "Default"; an account with bank dimensions requires the companyBankId saying ` +
+          `WHICH bank. The API answers 400 "må posteres med underkonto" or "må posteres med bankkonto" and ` +
+          `names only the line. Pick from the ids above` +
+          (kinds.includes("subAccountId") ? `, or list sub-accounts with reai_sub_accounts_for_account` : "") +
+          (kinds.includes("companyBankId") ? `, or the full bank records with reai_list_company_banks` : "") +
+          `.` +
+          (notChecked.length > 0
+            ? `\n\nNot checked, so the API may still refuse for a dimension not listed above: ` +
+              `${notChecked.join("; ")}.`
+            : ""),
       );
     }
 
@@ -680,6 +706,12 @@ apiPaths: [
     return ok(res.data, {
       note:
         `Voucher booked${res.data?.number ? ` as ${res.data.number}` : ""}. ` +
+        // A dimension lookup that failed is reported on SUCCESS as well as on refusal. Otherwise a check
+        // that silently stopped working looks exactly like a check that found nothing — and the argument
+        // descriptions promise the check happens, so silence reads as "no dimension was needed".
+        (notChecked.length > 0
+          ? `Dimensions NOT verified before sending: ${notChecked.join("; ")} — the API accepted it anyway. `
+          : "") +
         `Total debits and credits: ${args.postings.filter((p) => p.amount > 0).reduce((a, p) => a + p.amount, 0)}.`,
       ...(id ? { link: ctx.client.deepLink(`/vouchers/${id}`, tenantId) } : {}),
     });

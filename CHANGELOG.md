@@ -39,8 +39,37 @@ All notable changes to `reai-mcp`. Format loosely follows
     Norwegian refusal.
   - Bounded to one read per distinct account lacking the field, and it steps aside past eight rather than
     issuing a burst before the API has been asked at all.
-  - Four mutations verified failing: the refusal removed, the exact-match dropped so a neighbouring
-    account's bank bleeds in, a failed lookup made to block, and the budget removed.
+  - **An independent review then found nine defects, one a genuine hazard, and six mutations my tests could
+    not see.** The hazard: the lookup sent no `limit`, so it read a 20-row page of a possibly longer answer —
+    measured, `accountNumberPrefix=2400` returns 20 rows unasked and **70** with `limit=100`, and
+    `accountNumberPrefix=24` returns 2460 *before* the 2400/* rows, so ordering is not exact-match-first. An
+    account with more than 20 bank dimensions would have had its list truncated and then offered under "pick
+    from the ids above", which is how an agent books to the **wrong bank, irreversibly** — worse than the bare
+    400 this check replaces, since that named nothing at all. Now sends `limit=100` and, if a response comes
+    back at the cap, says so and offers nothing.
+  - The query string was interpolated into `path` rather than passed as `query`. `hasAmbiguousSegments` refuses
+    any path containing `%2F`, so an `accountNumber` containing "/" — the composed form this very endpoint
+    returns as `number` — made the client throw, and the bare `catch` disabled the check for the **whole
+    voucher**. It was the only call site in `src/tools/` embedding a query string in a path.
+  - The two dimension checks ran sequentially and the sub-account one returned first, so a voucher with a
+    sub-account line *and* a bank line was refused twice, one round trip each. "Bank pays an invoice" is the
+    commonest voucher shape there is, so that was the normal path. They are one pass now, reporting both.
+  - The budget was all-or-nothing and silent: nine distinct accounts meant zero protection and no mention of
+    it, while the argument description advertises the check. It now checks the first eight and **names what it
+    skipped**, in the refusal and in the success note — because a check that silently stopped working
+    otherwise looks exactly like a check that found nothing.
+  - `catch {}` wrapped the whole loop, so one failure ended the lookups for every remaining account. Per
+    account now.
+  - **Six mutations survived my tests**, and the two the PR argued hardest for were the two nothing pinned:
+    the `type === "bank"` discriminator (matching any non-null dimension would have offered sub-account and
+    *supplier* ids as company bank ids — both live on a real tenant) and the request shape itself. Worse, the
+    stub still parsed a query string out of `path` after the tool moved to `query`, so it silently returned
+    every row and the bank tests were passing for the wrong reason. Fixtures now carry a null-dimension row
+    and non-bank dimensions, one test puts the bank posting on line 2, one asserts the request shape, one
+    covers the budget boundary, and one drives a saturated page. Eight mutations verified failing.
+  - Also: a grammar defect shipped in the tool schema — the rendered text read *"This tool does PRE-CHECKS
+    this…"* — which my own test locked in by matching `/PRE-CHECKS/`. And `docs/api-quirks.md` still asserted
+    the premise this PR refutes.
 - **Two undeclared pre-reads, one of them the new pre-check's own.** `apiPaths` is what tells a consumer —
   and this repository's own coverage audits — which endpoints a curated tool touches, so a pre-read missing
   from it understates the tool and hides it from those checks. Codex found the new one;
