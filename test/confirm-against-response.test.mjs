@@ -416,6 +416,10 @@ const READS_BACK_FROM_RESPONSE = {
     "renaming a sub-account states the name the response carries, not the one sent",
   ],
   reai_update_lead: ["test/leads.test.mjs", "reai_update_lead reports a carried contact field the API destroyed"],
+  reai_create_sub_account: [
+    "test/subaccounts.test.mjs",
+    "creating a sub-account states the name the response stored, not the one sent",
+  ],
 };
 
 /**
@@ -429,6 +433,8 @@ const READS_BACK_FROM_RESPONSE = {
  */
 const NOT_ESTABLISHED = [
   "reai_add_share_investment_event",
+  "reai_adjust_inventory",
+  "reai_apply_reconciliation_rules",
   "reai_book_bank_transactions",
   "reai_close_manual_reconciliation",
   "reai_create_agreement",
@@ -442,6 +448,8 @@ const NOT_ESTABLISHED = [
   "reai_create_employee",
   "reai_create_expense",
   "reai_create_invoice_from_order",
+  "reai_create_offer",
+  "reai_create_order",
   "reai_create_loan",
   "reai_create_product",
   "reai_create_reconciliation_rule",
@@ -450,6 +458,7 @@ const NOT_ESTABLISHED = [
   "reai_create_subscription",
   "reai_create_supplier",
   "reai_create_supplier_invoice",
+  "reai_create_voucher",
   "reai_create_warehouse",
   "reai_credit_invoice",
   "reai_match_bank_transactions",
@@ -473,19 +482,37 @@ test("a write tool whose response could answer for it is classified, GET or no G
   const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
   const schemas = spec.components?.schemas ?? {};
 
-  /** The property names of whatever schema a write endpoint answers 200/201 with. */
+  /**
+   * The property names of whatever schema a write endpoint answers SUCCESSFULLY with.
+   *
+   * Every 2xx, not just 200/201. Review found the hole: `reai_apply_reconciliation_rules` posts to an endpoint
+   * documented as **202**, whose record carries `month`, `startDate` and `endDate` — all accepted by that
+   * tool — so it fell out of the census entirely and neither list had to account for it. A guard that skips
+   * the tools it cannot categorise is not a guard.
+   */
   const responseFields = (method, path) => {
     const op = spec.paths?.[path]?.[method.toLowerCase()];
-    const body = JSON.stringify(op?.responses?.["200"] ?? op?.responses?.["201"] ?? {});
-    const ref = /schemas\/([A-Za-z0-9_]+)/.exec(body);
-    return ref ? Object.keys(schemas[ref[1]]?.properties ?? {}) : [];
+    const success = Object.entries(op?.responses ?? {}).filter(([code]) => /^2\d\d$/.test(code));
+    const names = new Set();
+    for (const [, body] of success) {
+      const ref = /schemas\/([A-Za-z0-9_]+)/.exec(JSON.stringify(body ?? {}));
+      if (ref) for (const k of Object.keys(schemas[ref[1]]?.properties ?? {})) names.add(k);
+    }
+    return [...names];
   };
 
   const candidates = registeredTools
     .filter((t) => {
       const paths = t.apiPaths ?? [];
-      // No GET: the other test owns those, and owning them twice would make the two counts fight.
-      if (paths.some(([m]) => m === "GET")) return false;
+      // Exclude only what the OTHER census actually owns — GET *plus* PUT/PATCH — rather than anything that
+      // declares a GET at all. Review found tools falling between the two: `reai_create_order` and
+      // `reai_create_offer` declare their POST plus an ancillary customer GET, so the first census skipped them
+      // for having no PUT/PATCH and this one skipped them for having a GET. Neither list had to account for
+      // them, which is a hole in the thing this file calls a ratchet.
+      const methods = paths.map(([m]) => m);
+      const ownedByMergeCensus =
+        methods.includes("GET") && (methods.includes("PUT") || methods.includes("PATCH"));
+      if (ownedByMergeCensus) return false;
       const accepts = new Set(Object.keys(t.inputSchema ?? {}));
       return paths
         .filter(([m]) => ["PUT", "PATCH", "POST"].includes(m))
@@ -508,12 +535,19 @@ test("a write tool whose response could answer for it is classified, GET or no G
   const stale = [...classified].filter((n) => !candidates.includes(n));
   assert.deepEqual(stale, [], `no longer in this population (renamed, or gained a GET): ${stale.join(", ")}`);
 
-  // The ratchet. This may fall and must never rise: a new tool that quotes its request instead of the record
-  // cannot be parked here without the number moving, which is the visible act the previous version lacked.
+  // The ratchet. It may fall and must never rise for a FIXED population: a new tool that quotes its request
+  // instead of the record cannot be parked here without the number moving, which is the visible act the first
+  // version lacked.
+  //
+  // It moved once, from 35 to 40, and the reason belongs here rather than in a commit message: review found the
+  // census itself too narrow twice over — it read only 200/201 responses, and it excluded any tool declaring a
+  // GET when the other census only owns GET-plus-PUT/PATCH. Widening it made five tools visible that had been
+  // falling between the two lists. Nothing regressed; the guard simply started seeing further. A rise for any
+  // other reason is the thing this asserts against.
   assert.ok(
-    NOT_ESTABLISHED.length <= 35,
+    NOT_ESTABLISHED.length <= 40,
     `NOT_ESTABLISHED grew to ${NOT_ESTABLISHED.length}. A new tool reporting from its request is the thing ` +
-      `this file exists to stop; fix it or justify the increase deliberately.`,
+      `this file exists to stop; fix it, or widen the ceiling only alongside a stated reason like the one above.`,
   );
 
   // Same anchoring as the merge-tool list, for the same reasons: a title in a comment, two entries sharing a

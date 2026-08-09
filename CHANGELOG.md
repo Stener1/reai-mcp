@@ -39,6 +39,27 @@ All notable changes to `reai-mcp`. Format loosely follows
     - Mutation-verified by failing test name: removing a classified tool, naming a test that does not exist,
       parking a new name on the list without moving the number, and demoting a required title to a comment are
       each caught — as is reverting a fixed tool to echoing `args`, which fails its own behavioural tests.
+  - **Codex found the census itself too narrow, twice over, and both holes were real.** It read only `200`/`201`
+    responses, so `reai_apply_reconciliation_rules` — whose POST is documented as **202**, carrying `month`,
+    `startDate` and `endDate`, all of which it accepts — fell out entirely. And it excluded any tool declaring a
+    `GET`, while the merge census only owns GET-*plus*-PUT/PATCH: `reai_create_order` and `reai_create_offer`
+    declare their POST alongside an ancillary customer GET, so each census skipped them for the other's reason.
+    A guard that silently drops the tools it cannot categorise is not a guard.
+    - Widening it made **six** tools visible, not the three named. The ratchet ceiling moved 35 → 40 for that
+      reason and the reason is recorded in the assertion itself: nothing regressed, the census started seeing
+      further. A rise for any other reason is what it now asserts against.
+    - One of the six was a defect: **`reai_create_sub_account` echoed `args.name`** ten lines from the rename it
+      shares a response schema with. It is declared irreversible with no DELETE, so the name it reports is the
+      permanent one. Fixed and certified; the other five are recorded as not examined.
+  - **`reai_update_lead` had the emptiness bug in both directions**, also Codex, and `UpdateLeadContactReq`
+    permits a zero-length email and phone so both values genuinely occur. Keyed on `=== null`, a carried `""`
+    the API normalised to null was reported as **DESTROYED** — a failure over nothing — while a non-empty email
+    erased to `""` fell through to *"stored, but not exactly as sent"*, filing real data loss as a formatting
+    note. The asked half had the mirror bug: a field asked to be cleared that read back `""` was reported as
+    still holding a value. One blank class now, the same one `confirmAgainstResponse` uses.
+    - Both directions are pinned by name. The first attempt to check this reported nothing at all, because
+      `grep … | sed` returns *sed's* exit status, so the `|| echo "SURVIVED"` guard could never fire — the
+      mutation had in fact survived, and the run looked clean.
   - **A pre-existing test asserted the old behaviour and passed for the wrong reason.** `assets.test.mjs` fed
     the depreciation tool a response of `{ id: 42 }` — carrying neither field — and still matched
     *"depreciates manual over 36 month(s)"*, because the note quoted `args`. Its title, *"the note says what it

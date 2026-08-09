@@ -194,10 +194,24 @@ const createSubAccount = defineTool({
       body,
       tenantId: resolved,
     });
+    // The stored name, not `args.name`. Widening the census caught this one ten lines from the rename it was
+    // fixed alongside: the same GeneralSubAccountRes carries `name`, and this tool is declared IRREVERSIBLE
+    // with no DELETE, so the name it reports is the name that is permanent.
+    const storedName = res.data?.name;
     return ok(res.data, {
       note:
-        `Sub-account ${res.data?.id ?? "?"} "${args.name}" created on account ${args.accountNumber}. ` +
+        `Sub-account ${res.data?.id ?? "?"} ${
+          storedName === undefined
+            ? `"${args.name}" (as SENT — the response does not carry the name back)`
+            : JSON.stringify(storedName)
+        } created on account ${args.accountNumber}. ` +
         `There is no DELETE for this resource, so it is permanent.` +
+        describeConfirmation(
+          confirmAgainstResponse({ name: args.name }, res.data, { wholeRecord: true }),
+          `sub-account ${res.data?.id ?? "?"}`,
+        )
+          .map((n) => `\n\n${n}`)
+          .join("") +
         (existing === 0
           ? `\n\nThis is the FIRST sub-account on ${args.accountNumber}, which changes the rules for ` +
             `that account: every posting to it must now name a subAccountId, and anything that ` +

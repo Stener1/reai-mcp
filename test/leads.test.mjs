@@ -830,3 +830,43 @@ test("readLeadState carries every field when a response arrives flattened", asyn
   const call = second.calls.find((c) => c.path.endsWith("/contact"));
   assert.deepEqual(call.body, { email: "new@b.no", phone: "+4740000000" });
 });
+
+test("reai_update_lead treats an empty string and null as one emptiness class", async () => {
+  // reai_update_lead: keying on `=== null` got two cases backwards, both found by review.
+  // UpdateLeadContactReq permits a zero-length email and phone, so both values genuinely occur.
+
+  // (a) a carried "" the API normalises to null is NOT a destroyed value — nothing was at stake.
+  const normalised = fakeLead({ id: 700, email: "", phone: "+4740000000" });
+  const a = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, normalised);
+  assert.notEqual(a.result.isError, true, `a carried "" normalised to null is not a failure: ${a.text}`);
+  assert.doesNotMatch(a.text, /DESTROYED it/);
+
+  // (b) a carried NON-EMPTY value erased to "" IS a destroyed value, not a formatting note. This is the
+  // direction that matters: it used to fall through to "stored, but not exactly as sent".
+  const erased = fakeLead({ id: 700, email: "keep@b.no", phone: "+4740000000" });
+  const inner = erased.client.request;
+  erased.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/contact")) erased.state.email = "";
+    return out;
+  };
+  const b = await runLive("reai_update_lead", { orgNumber: ORG, phone: "41000000" }, erased);
+  assert.equal(b.result.isError, true, `an email erased to "" is data loss: ${b.text}`);
+  assert.match(b.text, /email: not mentioned, so "keep@b\.no" was sent to preserve it .* DESTROYED it/);
+  assert.doesNotMatch(b.text, /not exactly as sent/);
+});
+
+test("reai_update_lead counts a field cleared to an empty string as cleared", async () => {
+  // reai_update_lead: the mirror of the same bug on the ASKED half — a field the caller asked to clear that
+  // reads back "" was reported as still holding a value, which is a failure over a successful clear.
+  const fake = fakeLead({ id: 700, notes: "old notes" });
+  const inner = fake.client.request;
+  fake.client.request = async (req) => {
+    const out = await inner(req);
+    if (req.method === "PUT" && req.path.endsWith("/notes")) fake.state.notes = "";
+    return out;
+  };
+  const { result, text } = await runLive("reai_update_lead", { orgNumber: ORG, notes: null }, fake);
+  assert.notEqual(result.isError, true, `"" is cleared: ${text}`);
+  assert.doesNotMatch(text, /asked to clear it/);
+});

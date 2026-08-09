@@ -610,16 +610,23 @@ const updateLead = defineTool({
     const failures: string[] = [];
     const rewritten: string[] = [];
     const show = (v: unknown) => JSON.stringify(v ?? null);
+    // ONE emptiness class, the same one `confirmAgainstResponse` uses. `UpdateLeadContactReq` permits a
+    // zero-length email and phone, so `""` and `null` both reach here and keying on `=== null` got two cases
+    // backwards: a carried `""` normalised to null read as DESTROYED (a failure over nothing), while a
+    // non-empty email erased to `""` fell through to "stored, but not exactly as sent" — real data loss filed
+    // as a formatting note. Clearing had the mirror bug: a field asked to be cleared that reads `""` was
+    // reported as still holding a value.
+    const blank = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "");
     const check = (key: "status" | "notes" | "email" | "phone" | "followUpAt") => {
       if (!given(key)) return;
       const want = key !== "status" && asksToClear(key) ? null : (args[key] ?? null);
       const got = after.state[key] ?? null;
-      if (want === null) {
-        if (got !== null) failures.push(`${key}: asked to clear it, reads ${show(got)}`);
+      if (blank(want)) {
+        if (!blank(got)) failures.push(`${key}: asked to clear it, reads ${show(got)}`);
         return;
       }
-      if (got === null) {
-        failures.push(`${key}: asked for ${show(want)}, reads null`);
+      if (blank(got)) {
+        failures.push(`${key}: asked for ${show(want)}, reads ${show(got)}`);
         return;
       }
       if (String(want) !== String(got)) rewritten.push(`${key}: sent ${show(want)}, stored ${show(got)}`);
@@ -637,11 +644,11 @@ const updateLead = defineTool({
     for (const key of ["email", "phone"] as const) {
       if (given(key) || !contactWasSent) continue;
       const carried = before.state[key] ?? null;
-      if (carried === null) continue; // nothing was at stake
-      if ((after.state[key] ?? null) === null) {
+      if (blank(carried)) continue; // nothing was at stake
+      if (blank(after.state[key])) {
         failures.push(
-          `${key}: not mentioned, so ${show(carried)} was sent to preserve it — and it reads null now, ` +
-            `so this write DESTROYED it`,
+          `${key}: not mentioned, so ${show(carried)} was sent to preserve it — and it reads ` +
+            `${show(after.state[key] ?? null)} now, so this write DESTROYED it`,
         );
       } else if (String(carried) !== String(after.state[key])) {
         rewritten.push(`${key}: carried ${show(carried)}, stored ${show(after.state[key])}`);
