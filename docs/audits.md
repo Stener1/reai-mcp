@@ -10,7 +10,7 @@ there rather than here, because a result restated in two places goes stale in on
 
 | harness | channel it checks | writes? |
 |---|---|---|
-| [`audit-quirks.mjs`](#audit-quirksmjs-the-122-claims-nobody-was-checking) | the 124 quirks, via the claims a `GET` can answer | no — safe against any tenant |
+| [`audit-quirks.mjs`](#audit-quirksmjs-the-122-claims-nobody-was-checking) | the 127 quirks, via the claims a `GET` can answer | no — safe against any tenant |
 | [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach) | quirks whose claim is that a **write is refused** | only requests built to fail |
 | [`audit-messages.mjs`](#why-audit-messagesmjs-exists-and-what-it-does-not-cover) | the nineteen places in `src/` that read a ReAI error's **text** | only requests built to fail |
 | [`audit-storage.mjs`](#audit-storagemjs-the-half-the-message-audit-cannot-reach) | claims about what the API **accepts, normalises or stores** | yes — customers, deleted in a `finally` |

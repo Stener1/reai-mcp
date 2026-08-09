@@ -107,6 +107,19 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       // one item between the reserved budget and the true cap that meant discarding it
       // entirely while claiming it "exceeds the 24000-character limit" — a 23,026-char
       // item was dropped with 23,769 characters left unused.
+      /**
+       * The advice this note used to give was "use the limit/page parameters", and it was wrong for almost
+       * every tool that can emit it.
+       *
+       * Measured: **102 of 105** curated GET endpoints declare no paging parameter at all, and only three tools
+       * expose one (`reai_list_accounts`, `reai_search_leads`, `reai_search_endpoints`) — so for the rest the
+       * advice named something the agent cannot reach through the tool. Worse, passing it anyway through
+       * `reai_request` does not fail: `GET /api/postings` with `limit=5`, `page=2` and `size=5` each returned
+       * **all 160 rows**, 200, no complaint. An agent that follows the old advice believes it limited a result
+       * it did not limit.
+       *
+       * The three tools that do page say so in their own argument descriptions, which is where a caller looks.
+       */
       const arrayNote = (count: number): string =>
         count === 0
           ? `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
@@ -114,7 +127,9 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
             `result. Fetch the item by id, or use a tool that returns a summary rather than the ` +
             `full record.`
           : `NOTE: response truncated — showing the first ${count} of ${data.length} items, complete. ` +
-            `Narrow the result with date, status or id filters, or use the limit/page parameters.`;
+            `Narrow the result with this tool's own filters, or fetch a single record by id. Most of this ` +
+            `API's list endpoints take NO paging parameter, and the ones that do not IGNORE what they are ` +
+            `sent rather than refusing it.`;
 
       const overhead = parts.reduce((n, part) => n + part.length + 1, 0) + 2;
       let shown = countFittingSerialized(data, BODY_BUDGET);

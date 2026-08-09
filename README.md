@@ -312,7 +312,7 @@ the variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, 
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **124 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **127 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 135 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
@@ -390,7 +390,7 @@ refreshing the pinned OpenAPI snapshot, and the live harnesses — which refuse 
 tenant is named in `REAI_WRITE_TEST_TENANTS`, because a `--tenant` flag is not consent.
 
 Because there is no sandbox, the documented claims are re-checked against live books rather than
-trusted: four audit harnesses ask whether the refusals, the stored values and the 124 quirks still
+trusted: four audit harnesses ask whether the refusals, the stored values and the 127 quirks still
 say what this repository says they say, and each one has found something false.
 [docs/audits.md](docs/audits.md) has what each covers, what it deliberately does not, and what it
 found.

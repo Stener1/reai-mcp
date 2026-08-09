@@ -9,6 +9,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Every list tool told agents to use a paging parameter that does not exist and is silently ignored.** The
+  shared array-truncation note in `okList` ended *"or use the limit/page parameters"*. Measured against the spec
+  and the live API, that was wrong twice over:
+  - **102 of the 105 GET endpoints this server curates declare no paging parameter at all**, and only three tools
+    expose one (`reai_list_accounts`, `reai_search_leads`, `reai_search_endpoints`). For everything else the
+    advice named something a caller cannot reach through the tool.
+  - Passing it anyway does not fail. `GET /api/postings` with `limit=5`, `page=2` and `size=5` each returned
+    **all 160 rows**, 200, no complaint — the dangerous direction, because an agent that follows the advice
+    believes it limited a result it did not limit.
+  - The note now points at the tool's own filters and at fetching by id, and says paging is absent. Guarded by a
+    test that also sweeps every tool's description and argument text, so nothing readable may name a paging
+    parameter the tool does not accept.
+- **Three quirks, all measured on 2634 this iteration.**
+  - **`GET /api/projects` answers 403 with `"Project module is disabled"`** — a 403 that is a feature flag, not
+    authorisation. An agent reading it as insufficient access will retry, escalate, or ask the user for
+    permissions, none of which helps. The `detail` field is what distinguishes them.
+  - **Attachments cannot be enumerated.** `GET /api/attachments` is 405 — only `POST` exists on the collection —
+    so ids must come from a document's `attachmentId` or an attachment's own `usedBy`. Also measured: id `0`
+    answers 400 because it must be positive, while a valid-but-absent id answers 404, so those mean different
+    things. The registry's own guard refused this quirk keyed to the `GET` it describes, because that operation
+    does not exist; it is keyed to the `POST`, which is where a caller looking for a list ends up.
+  - **Paging parameters are ignored rather than refused**, with the measurement above attached to
+    `GET /api/postings`.
+- Two corrections to my own process this iteration, both caught before they shipped: I misread my coverage script
+  and nearly built a **duplicate** `reai_list_postings` — the ledger query is already curated, and the "8
+  uncovered Postings operations" are the settlement and group endpoints. And my first attempt at inserting these
+  quirks spliced them into the middle of `findQuirks`, because I anchored on the file's LAST `];` rather than the
+  one closing the array.
+
 - **Codex found the two-attempt drive silently discarding half its own work, and the fix for it was inert.**
   - When a tool has any required overlapping field, the required-only attempt fills `runs` even if the
     optional-inclusive attempt fails — so every optional field goes unmeasured while the tool reads as covered.

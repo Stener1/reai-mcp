@@ -504,3 +504,50 @@ test("no tool throws on a 200 whose shape is not what its declared type promises
       `either teach sampleFor the shape it needs, or accept the gap deliberately: ${undrivable.join(", ")}`,
   );
 });
+
+test("no truncation note or description promises a paging parameter the tool does not have", async () => {
+  // The shared array-truncation note used to end "or use the limit/page parameters". Measured against the live
+  // API and the spec, that was wrong twice over:
+  //
+  //   - 102 of 105 curated GET endpoints declare NO paging parameter, and only three tools expose one, so for
+  //     almost every tool that can emit the note the advice named something unreachable;
+  //   - passing it anyway does not fail. `GET /api/postings` with `limit=5`, `page=2` and `size=5` each returned
+  //     all 160 rows, 200, no complaint — so an agent that followed the advice would believe it had limited a
+  //     result it had not.
+  //
+  // The property, stated generally so a fourteenth list tool cannot reintroduce it: nothing an agent reads may
+  // name a paging argument unless the tool it is reading actually takes one.
+  const { okList } = await import("../dist/tools/registry.js");
+  const PAGING = ["limit", "page", "size", "offset", "pageSize"];
+
+  const bulky = Array.from({ length: 400 }, (_, i) => ({ id: i, filler: "x".repeat(200) }));
+  const truncated = okList(bulky, { noun: "posting" });
+  const noteText = truncated.content.map((c) => c.text ?? "").join("\n").split("\n\n")[0];
+  assert.match(noteText, /response truncated/, `the fixture must actually truncate: ${noteText}`);
+  assert.doesNotMatch(
+    noteText,
+    /limit\/page|use the limit|use the page/i,
+    `the shared note must not advise a parameter its callers do not have: ${noteText}`,
+  );
+  // And it must still say something USEFUL — removing the advice entirely would pass the check above.
+  assert.match(noteText, /filters|by id/, `it must still say how to narrow the result: ${noteText}`);
+
+  const offenders = [];
+  for (const tool of registeredTools) {
+    const exposes = PAGING.filter((k) => k in (tool.inputSchema ?? {}));
+    if (exposes.length > 0) continue;
+    const readable = [
+      tool.description ?? "",
+      ...Object.values(tool.inputSchema ?? {}).map((schema) => schema?._def?.description ?? ""),
+    ].join(" ");
+    // "limit" as a verb is fine ("limit the result to"); a PARAMETER promise is not.
+    if (/\b(limit|page|pageSize|offset)\s+(parameter|argument)|use the (limit|page)\b|paginat/i.test(readable)) {
+      offenders.push(tool.name);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these tools tell a caller about a paging parameter they do not accept: ${offenders.join(", ")}`,
+  );
+});

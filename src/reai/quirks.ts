@@ -2097,6 +2097,48 @@ export const QUIRKS: readonly Quirk[] = [
       "none. The response body is the company record, not the customer, so the new customer id has " +
       "to be read back from the lead's convertedCustomerId.",
   },
+  {
+    id: "projects-403-means-module-disabled",
+    paths: ["/api/projects"],
+    match: "descendants",
+    kind: "gotcha",
+    note:
+      "A 403 here is NOT a permissions problem. Measured on tenant 2634: GET /api/projects answers 403 with " +
+      'detail "Project module is disabled" — the module is off for the company, and no role, scope or token ' +
+      "would change that. An agent reading 403 as insufficient access will retry, escalate, or tell the user to " +
+      "grant permissions, none of which helps. Read the `detail` field before concluding anything about access: " +
+      "this API uses 403 for a feature flag as well as for authorisation. Enabling the module is a settings " +
+      "change in the ReAI UI, not an API call.",
+  },
+  {
+    id: "attachments-have-no-list-endpoint",
+    // Keyed to the POST, because the registry's own guard refuses a quirk whose operation does not exist — and
+    // the operation this describes is precisely the one that does not. The collection endpoint is where a caller
+    // looking for a list will end up, so that is where the note belongs.
+    paths: ["/api/attachments"],
+    methods: ["POST"],
+    kind: "workflow",
+    note:
+      "There is no way to enumerate attachments. Measured: GET /api/attachments answers 405 Method Not Allowed " +
+      "— only POST exists on the collection — so an attachment can be fetched by id and nothing else. Ids have " +
+      "to come from something that references them: a document's `attachmentId`, or the `usedBy` array on an " +
+      "attachment you already have. Measured too: GET /api/attachments/0 answers 400 because the id must be " +
+      "positive, while a valid-but-absent id answers 404, so those two mean different things.",
+  },
+  {
+    id: "paging-parameters-are-ignored-not-refused",
+    paths: ["/api/postings"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "This endpoint takes no paging parameter, and sending one anyway is NOT an error. Measured on tenant 2634 " +
+      "against 160 postings: limit=5, page=2 and size=5 each returned all 160 rows with a 200 and no complaint. " +
+      "So a caller who adds one believes it narrowed a result it did not narrow — the dangerous direction, " +
+      "because nothing signals the mistake. Narrow with the filters the endpoint documents (accountNumber, " +
+      "voucherId, customerId, supplierId, projectId, employeeId, companyBankId), which do work and combine as " +
+      "AND. 102 of the 105 GET endpoints this server curates declare no paging parameter at all, so treat " +
+      "paging as absent unless the tool you are using takes it as an argument.",
+  },
 ];
 
 /** Normalize for prefix comparison: lowercase, no trailing slash. */
