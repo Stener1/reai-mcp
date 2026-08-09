@@ -367,9 +367,9 @@ On `PUT /api/orders/{id}` and `PUT /api/offers/{id}` there are **two families**,
 | `buyerReference` (order) | **emptied** | **clears** | — |
 | `externalReference` (order) | **emptied** | **clears** | — |
 | `projectId` | **emptied** | — | — |
-| `email` (offer) | — | **kept** | not measured |
-| `issueDate` (offer) | — | **kept**, existing date preserved | n/a |
-| `deliveryAddress` (offer) | — | **kept**, existing object preserved | n/a |
+| `email` — **offers only** | — | **kept** | not measured |
+| `issueDate` — **offers only** | — | **kept**, existing date preserved | on an *order* `issueDate` is **required**, so a null there is a different question and was not measured |
+| `deliveryAddress` — **offers only** | — | **kept**, existing object preserved | `UpdateOrderReq` does not declare this field at all |
 
 The first two behave like `if (value != null) set(value)`; the rest like a plain replacement. An earlier version of this page said a partial PUT "empties those fields" for all six — true for three of them, false for the two comments.
 

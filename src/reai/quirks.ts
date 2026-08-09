@@ -547,14 +547,19 @@ export const QUIRKS: readonly Quirk[] = [
       "A null in the body is accepted with 200 and then SILENTLY IGNORED for some fields — the stored value " +
       "does not change, and nothing in the response says the value you sent was discarded. It is TWO families " +
       "rather than one rule, and OMITTING a field follows the same split, so measured on 2783 field by field:\n\n" +
-      "  comment            omitted KEPT      null KEPT      \"\" CLEARS (stored back as null)\n" +
-      "  internalComment    omitted KEPT      null KEPT      \"\" CLEARS\n" +
-      "  buyerReference     omitted EMPTIED   null CLEARS    (orders)\n" +
-      "  externalReference  omitted EMPTIED   null CLEARS    (orders)\n" +
-      "  projectId          omitted EMPTIED\n" +
-      "  email              null KEPT         (offers)\n" +
-      "  issueDate          null KEPT — the API keeps the existing date\n" +
-      "  deliveryAddress    null KEPT — the API keeps the existing address object\n\n" +
+      "  BOTH endpoints\n" +
+      "    comment            omitted KEPT      null KEPT      \"\" CLEARS (stored back as null)\n" +
+      "    internalComment    omitted KEPT      null KEPT      \"\" CLEARS\n" +
+      "    projectId          omitted EMPTIED\n" +
+      "  ORDERS only\n" +
+      "    buyerReference     omitted EMPTIED   null CLEARS\n" +
+      "    externalReference  omitted EMPTIED   null CLEARS\n" +
+      "  OFFERS only — measured there, and NOT transferable to an order\n" +
+      "    email              null KEPT\n" +
+      "    issueDate          null KEPT, the existing date preserved. On an ORDER issueDate is REQUIRED, so a\n" +
+      "                       null is a different question there and was not measured.\n" +
+      "    deliveryAddress    null KEPT, the existing object preserved. UpdateOrderReq does not declare this\n" +
+      "                       field at all, so it says nothing about orders.\n\n" +
       "So to empty a comment send an EMPTY STRING; a null there is a no-op that answers 200. The first two " +
       "behave like `if (value != null) set(value)`; the rest like a plain replacement. Do not generalise from " +
       "one to the other.\n\n" +
