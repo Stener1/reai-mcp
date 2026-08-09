@@ -184,6 +184,42 @@ internal directory rather than Brønnøysundregistrene — and that one asks the
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.
 
+## What did a ranking change do to every other query?
+
+```bash
+npm run sweep:discovery -- --against main
+npm run sweep:discovery -- --baseline /tmp/some-built-checkout   # faster for several variants
+```
+
+It extracts the revision with `git archive`, builds it, and compares ~19,800 generated queries against what
+HEAD answers. This exists because of a repeated failure rather than a hypothetical: **three PRs in a row added
+a synonym or a phrase rule, swept it, reported the sweep, and had an independent review find an over-match the
+sweep had not covered.**
+
+| PR | what over-matched | the dimension that found it |
+|---|---|---|
+| #120 | `krediter → credit-note` moved "krediter faktura" off the operation that *creates* a credit note onto the one that applies an existing one | the synonym table's own keys, crossed with nouns |
+| #122 | a demotion made "Apply a manual credit note to an invoice" return the DELETE that *unapplies* it | each endpoint's own **summary** as a query |
+| #125 | `inngående + faktura` swallowed "endre inngående faktura"; `faktura + abonnement` erased the invoice family from "vis faktura for abonnementet" | adjective × noun, and noun × noun in both orders |
+
+Each time the harness was rebuilt by hand in a scratch directory, differently and covering less. The
+dimensions are not clever — they are simply the ones that have caught something — so they are committed and
+`test/discovery-sweep.test.mjs` asserts that none of them silently disappears.
+
+Four numbers come back. **Rank-1 changes** is the headline and the least informative alone. **Answer no longer
+reachable** is the baseline's top result absent from the new window — the measure two CHANGELOG entries got
+wrong by counting *empty result sets* instead, which with no score floor in `searchOperations` can never happen
+and so was always zero. **Newly answered** was nothing and is now something. **Writes newly at rank 1** is
+split out by risk, because a query stating no intent to write and handed an irreversible or
+externally-transmitting operation is the failure this repository treats as most serious.
+
+Verified against the defect it was built for: reintroducing #125's unscoped `faktura + abonnement` rule makes
+the sweep report **24 rank-1 changes and 24 lost answers**, naming `fakturagebyr abonnement` and
+`fakturalinjer for abonnement` — exactly the queries the review found and the hand-rolled sweep had missed.
+
+Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
+as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
+
 ## Is the deployment current?
 
 ```bash

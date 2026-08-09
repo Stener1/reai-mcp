@@ -9,6 +9,35 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`npm run sweep:discovery` — the harness that three reviews in a row had to be, because mine kept
+  under-covering.** Committed with its query generation exported and tested, rather than rebuilt by hand in a
+  scratch directory for the fourth time.
+  - The argument is a record, not a hypothetical. Three PRs in a row added a synonym or a phrase rule, swept
+    it, reported the sweep, and had an independent review find an over-match the sweep had not covered:
+    #120's `krediter → credit-note` moved "krediter faktura" off the operation that *creates* a credit note
+    onto the one that applies an existing one, found by crossing the **synonym table's own keys** with nouns;
+    #122's demotion made "Apply a manual credit note to an invoice" return the DELETE that *unapplies* it,
+    found by using each **endpoint's own summary** as a query; #125's `inngående + faktura` swallowed
+    "endre inngående faktura" and `faktura + abonnement` erased the invoice family from "vis faktura for
+    abonnementet", found by crossing **adjectives with nouns** and **nouns with nouns in both orders**.
+  - Each time the harness was rebuilt differently and covered less. The dimensions are not clever — they are
+    the ones that have actually caught something — so `buildQueries` is exported and
+    `test/discovery-sweep.test.mjs` asserts that every one of them, and the specific queries a review had to
+    find, are still generated. ~19,800 queries today, floored well below so a refactor cannot quietly reduce it
+    to a sample.
+  - It reports four things, and the second is the one that has been reported wrongly twice: **answer no longer
+    reachable** means the baseline's top result is absent from the new window. Two CHANGELOG entries said "no
+    answer lost" on the strength of counting *empty result sets* — which, with no score floor in
+    `searchOperations`, can never happen, so the figure was always zero and always meaningless. `compare` keeps
+    a demotion (old answer still in the window) separate from a loss, and a test pins that distinction.
+  - **Writes newly at rank 1 are split out by risk**, using the policy that ships with the new revision, because
+    a query stating no intent to write and handed an irreversible or externally-transmitting operation is the
+    failure this repository treats as most serious.
+  - Verified against the defect it exists for: reintroducing #125's unscoped `faktura + abonnement` rule makes
+    the sweep report **24 rank-1 changes and 24 lost answers**, naming `fakturagebyr abonnement` and
+    `fakturalinjer for abonnement` — exactly the queries the review found and the hand-rolled sweep missed. On
+    this branch, which changes no ranking logic, it reports **0 in every category**.
+
 - **Two invariants that hold the curated tools to what the document says the API accepts.** Both properties
   already held — this locks them in rather than fixing anything, which is worth saying plainly. They came out of
   looking for a validation gap that turned out not to exist, and the looking is what belongs in the repository.
