@@ -854,10 +854,22 @@ const updateCompanyBank = defineTool({
     // only `=== ""` — so a response coming back with bban: null, which is exactly what the
     // creditor measurement produced, emitted no warning at all and the note reported the other
     // fields as "written back unchanged".
-    if (after.bban == null || (typeof after.bban === "string" && after.bban.trim() === "")) {
+    // A response that carried no body at all is NOT evidence of an empty account. `res.data ?? {}` makes an
+    // absent body look like `bban: undefined`, so this announced "the account number is now EMPTY" — about a
+    // payment destination — whenever the API answered without one. The reai_update_creditor fix distinguishes
+    // the two cases and the same distinction belongs here; found by a review of that PR looking for the
+    // inverse of the bug it was fixing.
+    const carriesBban = Object.hasOwn(after, "bban");
+    const bbanEmpty = after.bban == null || (typeof after.bban === "string" && after.bban.trim() === "");
+    if (carriesBban && bbanEmpty) {
       notes.push(
         `WARNING: the account number is now EMPTY. This account cannot be used for payments or ` +
-          `reconciliation until it is set again.`,
+          `reconciliation until it is set again. Confirmed from the response.`,
+      );
+    } else if (!carriesBban) {
+      notes.push(
+        `The response did not carry bban, so whether the account number survived this replacement could ` +
+          `not be confirmed. Read the account back before relying on it for payments.`,
       );
     }
     if (unknown.length > 0) {

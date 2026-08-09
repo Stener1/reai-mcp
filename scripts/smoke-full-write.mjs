@@ -438,6 +438,57 @@ async function main() {
         !renamed.isError && creditor?.bankAccountNumber === "15201353103",
         renamed.isError ? firstLineOf(textOf(renamed)) : `account=${JSON.stringify(creditor?.bankAccountNumber)}`,
       );
+
+      // The three clearing shapes, re-measured rather than trusted to prose. This claim is asserted in the
+      // tool description, docs/tools.md, the quirk registry and the changelog, and this harness's own rule
+      // (further down, on the agreement) is that a claim in those places is re-measured here. It was not, and
+      // that is how #140's "no creditor exists to measure it" became false without anyone noticing.
+      const clearShapes = [
+        ["null", null],
+        ["an empty string", ""],
+      ];
+      for (const [label, value] of clearShapes) {
+        const cleared = await client.callTool({
+          name: "reai_update_creditor",
+          arguments: { id: created.creditorId, bankAccountNumber: value },
+        });
+        const afterClear = jsonOf(
+          await client.callTool({ name: "reai_request", arguments: { method: "GET", path: `/api/creditors/${created.creditorId}` } }),
+        );
+        report(
+          `${label} clears a creditor's repayment account, and the tool confirms it from the response`,
+          !cleared.isError &&
+            (afterClear?.bankAccountNumber ?? null) === null &&
+            /Confirmed from the response/.test(textOf(cleared)) &&
+            !/WARNING/.test(textOf(cleared)),
+          `stored=${JSON.stringify(afterClear?.bankAccountNumber)} note=${firstLineOf(textOf(cleared)).slice(0, 90)}`,
+        );
+        // Put it back, so the next shape starts from a set account and the rename check above stays meaningful
+        // if this block is ever reordered.
+        await client.callTool({
+          name: "reai_update_creditor",
+          arguments: { id: created.creditorId, bankAccountNumber: "15201353103" },
+        });
+      }
+      // And omission, which is what the merge exists to defend against — through the raw call, since the
+      // curated tool always carries the field.
+      const omitted = await client.callTool({
+        name: "reai_request",
+        arguments: {
+          method: "PUT",
+          path: `/api/creditors/${created.creditorId}`,
+          body: { name: `${STAMP} creditor renamed` },
+          clearOmittedFields: true,
+        },
+      });
+      const afterOmit = jsonOf(
+        await client.callTool({ name: "reai_request", arguments: { method: "GET", path: `/api/creditors/${created.creditorId}` } }),
+      );
+      report(
+        "OMITTING the account on a raw PUT empties it — which is why reai_update_creditor merges",
+        !omitted.isError && (afterOmit?.bankAccountNumber ?? null) === null,
+        `stored=${JSON.stringify(afterOmit?.bankAccountNumber)}`,
+      );
     }
 
     // A SECOND, throwaway bank. The first one is used as the payment source further down, and an

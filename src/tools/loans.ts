@@ -188,6 +188,7 @@ const updateCreditor = defineTool({
   description:
     "Rename a creditor, or change the bank account its loan repayments go to. Pass only what you " +
     "want different; the rest is kept.\n\n" +
+    "Measured on the account number, because it is a payment destination and this API does not treat nulls uniformly: on /api/creditors/{id} the field is cleared by a null, by OMITTING it, and by an empty string alike — three throwaway creditors, one per shape, each read back with a separate GET. Omission is why this merges; the measurement confirms the shape the merge already guarded against. The notes report emptiness from the response where the response carries the field, and say so when it does not.\n\n" +
     "This exists because the underlying call replaces rather than patches, and `bankAccountNumber` " +
     "is not required — so `PUT {name}`, which is what a rename looks like, is accepted with a 200 " +
     "and sets the account number to null. Measured on a live tenant. The next repayment has " +
@@ -256,10 +257,67 @@ const updateCreditor = defineTool({
             `back unchanged, because this endpoint replaces rather than patches.`
           : `.`),
     ];
-    if (merged.bankAccountNumber === null || merged.bankAccountNumber === undefined) {
+    // From the RESPONSE, not from what was sent — and comparing emptiness to emptiness.
+    //
+    // The old version announced "This creditor now has NO bank account number" on the strength of `merged`,
+    // so it stated where money no longer goes without checking that the API agreed. reai_update_company_bank,
+    // the sibling tool for the same hazard, has always compared `after.bban` against what it sent.
+    //
+    // The first attempt at this fix copied that comparison and NOT the guard that makes it sound: bankvat
+    // refuses null and "" up front, so a strict `!==` there can never see two spellings of empty. Here both
+    // are legal input, and `""` is documented as a way to clear — so `sent "" / stored null`, which this
+    // tool's own measurement says is the API doing exactly what was asked, fired a WARNING about values being
+    // "silently discarded" AND the confirmation note, saying opposite things. That is the same defect a review
+    // of #140 found in the sales tools, reintroduced inside the fix for it. Hence `emptiness`.
+    const after = res.data ?? {};
+    const carriesAccount = Object.hasOwn(after, "bankAccountNumber");
+    // null, undefined, "" and "   " are one class: no destination. trim() because the sibling records having
+    // shipped without it once ("The first version tested only === \"\"").
+    const emptiness = (v: unknown): string | null =>
+      v === null || v === undefined || String(v).trim() === "" ? null : String(v).trim();
+    const sentAccount = emptiness(merged.bankAccountNumber);
+    const storedAccount = carriesAccount ? emptiness(after.bankAccountNumber) : undefined;
+    const accountBefore = emptiness(record.bankAccountNumber);
+    // Gated on the field being IN PLAY at all, not on the caller having named it. The hazard this tool exists
+    // for is a rename whose replacement drops an account the caller never mentioned — so keying the check on
+    // `given` blinded it to its own reason for existing, while the note above still said the field was
+    // "written back unchanged".
+    const accountInPlay = given.includes("bankAccountNumber") || kept.includes("bankAccountNumber");
+
+    if (carriesAccount && accountInPlay && storedAccount !== sentAccount) {
       notes.push(
-        `This creditor now has NO bank account number, so a loan repayment to it has no ` +
-          `destination. That is what you asked for if you passed null; otherwise it was already empty.`,
+        `WARNING: bankAccountNumber came back as ${JSON.stringify(after.bankAccountNumber)}, which is not the ` +
+          `${JSON.stringify(merged.bankAccountNumber)} this write sent. Either the API changed the value or it ` +
+          `refused it — reformatting is one possibility and discarding is another, and this cannot tell them ` +
+          `apart. Read the creditor back before relying on where repayments go.`,
+      );
+    }
+
+    if (!carriesAccount) {
+      // Say it in BOTH directions. Reporting only the emptying was asymmetric in the dangerous direction:
+      // sending repayments to the WRONG destination is at least as consequential as sending them nowhere.
+      notes.push(
+        `The response did not carry bankAccountNumber, so where repayments go could not be confirmed. This ` +
+          `write ${sentAccount === null ? "sent no account number" : `sent ${JSON.stringify(sentAccount)}`}. ` +
+          `Read the creditor back before relying on it.`,
+      );
+    } else if (storedAccount === null) {
+      notes.push(
+        `This creditor now has NO bank account number, so a loan repayment to it has no destination. ` +
+          `Confirmed from the response. ` +
+          (accountBefore === null
+            ? `It was already empty before this write.`
+            : given.includes("bankAccountNumber")
+              ? `You cleared it — it held ${JSON.stringify(accountBefore)} before.`
+              : `WARNING: this write CARRIED ${JSON.stringify(accountBefore)} and the API did not keep it. ` +
+                `That is the failure this tool exists to prevent, so do not treat the change above as done.`),
+      );
+    } else if (given.includes("bankAccountNumber") && storedAccount !== accountBefore) {
+      // The repoint case, which previously got no line at all — neither confirmation nor caveat.
+      notes.push(
+        `Loan repayments to this creditor now go to ${JSON.stringify(storedAccount)}` +
+          (accountBefore === null ? `.` : `, not ${JSON.stringify(accountBefore)}.`) +
+          ` Confirmed from the response.`,
       );
     }
     if (unknown.length > 0) {
