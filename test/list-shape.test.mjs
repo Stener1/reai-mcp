@@ -520,29 +520,80 @@ test("no truncation note or description promises a paging parameter the tool doe
   const { okList } = await import("../dist/tools/registry.js");
   const PAGING = ["limit", "page", "size", "offset", "pageSize"];
 
+  /**
+   * Does this text promise a paging parameter the reader cannot use?
+   *
+   * The first version was `/\b(limit|page)\s+(parameter|argument)|use the (limit|page)\b|paginat/i` and review
+   * defeated it with the repo's OWN house style: every parameter name in this codebase is written in backticks,
+   * and `` `limit` parameter `` has a backtick where that regex demands whitespace. Eleven of thirteen realistic
+   * phrasings bypassed it — ``pass `limit` to cap the rows``, `accepts offset and limit for paging`,
+   * `use limit=50`, `the limit param`, `results are paged 50 at a time`. It caught essentially only the one
+   * literal phrasing that had just been deleted.
+   *
+   * So: strip the punctuation that decorates parameter names, then look for a paging WORD near paging language.
+   * Per-parameter, because the old check skipped a tool entirely as soon as it exposed any paging key — review
+   * added "use the page parameter and the offset parameter" to `reai_list_accounts`, which takes only `limit`,
+   * and it passed. That is the allowlist-shaped exemption this repo has been bitten by before.
+   */
+  const promisesParam = (text, param) => {
+    const bare = text.replace(/[`'"*]/g, "").toLowerCase();
+    // WARNING about a parameter is the opposite of promising it, and the first version of this check could not
+    // tell them apart: it flagged `reai_list_accounts`, whose description says "there is no paging at all
+    // (offset and page are accepted and ignored)" — a measured warning, and the very fact the new quirk
+    // generalises. A guard that punishes honest text teaches people to delete it.
+    const warns = new RegExp(
+      `(no paging|not supported|unsupported|ignored|has none|takes no|do not|does not|cannot|never)` +
+        `[^.]{0,60}?\\b${param}\\b|\\b${param}\\b[^.]{0,60}?` +
+        `(are ignored|is ignored|accepted and ignored|not supported|has no effect|does nothing)`,
+      "i",
+    );
+    // Known limit, stated rather than contorted around: a genuine false promise in the SAME sentence as an
+    // unrelated "no paging" remark is suppressed. Sixteen realistic phrasings were checked against this and it
+    // gets them all; the contrived overlap is not worth widening the regex and re-flagging honest text.
+    if (warns.test(bare)) return false;
+    const near = new RegExp(
+      `\\b${param}\\b[^.]{0,40}?(parameter|param\\b|argument|arg\\b|=|to (cap|page|limit|walk)|for paging)` +
+        `|\\b(use|pass|supply|send|set|increment|walk)\\b[^.]{0,20}?\\b${param}\\b` +
+        `|\\b${param}\\b[^.]{0,20}?\\b(paging|paged|pagination|next batch|per page)\\b` +
+        `|\\b(paging|paged|pagination)\\b[^.]{0,20}?\\b${param}\\b`,
+      "i",
+    );
+    return near.test(bare);
+  };
+
+  // BOTH arms of the truncation note. Review put the original false advice into the count === 0 arm and this
+  // test passed, because the fixture only drove the other one — half the notes in the function it guards.
   const bulky = Array.from({ length: 400 }, (_, i) => ({ id: i, filler: "x".repeat(200) }));
-  const truncated = okList(bulky, { noun: "posting" });
-  const noteText = truncated.content.map((c) => c.text ?? "").join("\n").split("\n\n")[0];
-  assert.match(noteText, /response truncated/, `the fixture must actually truncate: ${noteText}`);
-  assert.doesNotMatch(
-    noteText,
-    /limit\/page|use the limit|use the page/i,
-    `the shared note must not advise a parameter its callers do not have: ${noteText}`,
-  );
-  // And it must still say something USEFUL — removing the advice entirely would pass the check above.
-  assert.match(noteText, /filters|by id/, `it must still say how to narrow the result: ${noteText}`);
+  const oneHuge = [{ id: 1, blob: "z".repeat(40000) }, { id: 2 }, { id: 3 }];
+  for (const [label, fixture, expected] of [
+    ["truncated", bulky, /response truncated/],
+    ["nothing fits", oneHuge, /nothing is shown/],
+  ]) {
+    const note = okList(fixture, { noun: "posting" }).content
+      .map((c) => c.text ?? "")
+      .join("\n")
+      .split("\n\n")[0];
+    assert.match(note, expected, `the ${label} fixture must drive its own arm: ${note}`);
+    for (const param of PAGING) {
+      assert.ok(
+        !promisesParam(note, param),
+        `the ${label} note promises \`${param}\`, which its callers do not have: ${note}`,
+      );
+    }
+    // And it must still say something USEFUL — deleting the advice entirely would pass the checks above.
+    assert.match(note, /filters|by id/, `the ${label} note must still say what to do instead: ${note}`);
+  }
 
   const offenders = [];
   for (const tool of registeredTools) {
-    const exposes = PAGING.filter((k) => k in (tool.inputSchema ?? {}));
-    if (exposes.length > 0) continue;
+    const exposes = new Set(PAGING.filter((k) => k in (tool.inputSchema ?? {})));
     const readable = [
       tool.description ?? "",
       ...Object.values(tool.inputSchema ?? {}).map((schema) => schema?._def?.description ?? ""),
     ].join(" ");
-    // "limit" as a verb is fine ("limit the result to"); a PARAMETER promise is not.
-    if (/\b(limit|page|pageSize|offset)\s+(parameter|argument)|use the (limit|page)\b|paginat/i.test(readable)) {
-      offenders.push(tool.name);
+    for (const param of PAGING) {
+      // Per parameter: exposing `limit` does not license talking about `page`.
+      if (!exposes.has(param) && promisesParam(readable, param)) offenders.push(`${tool.name}.${param}`);
     }
   }
   assert.deepEqual(
@@ -550,4 +601,9 @@ test("no truncation note or description promises a paging parameter the tool doe
     [],
     `these tools tell a caller about a paging parameter they do not accept: ${offenders.join(", ")}`,
   );
+  // What mutation testing could NOT pin here, said plainly rather than left as an implied guarantee: with zero
+  // offenders today, reverting the per-parameter check to the old skip-the-whole-tool version fails nothing —
+  // an emptiness assertion cannot demonstrate its own strictness. The per-parameter and backtick behaviour was
+  // instead verified directly against seventeen phrasings, including the ones review used to bypass the first
+  // version. The two arms of the truncation note ARE pinned: putting the old advice back in either fails by name.
 });

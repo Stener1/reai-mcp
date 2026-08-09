@@ -12,15 +12,47 @@ All notable changes to `reai-mcp`. Format loosely follows
 - **Every list tool told agents to use a paging parameter that does not exist and is silently ignored.** The
   shared array-truncation note in `okList` ended *"or use the limit/page parameters"*. Measured against the spec
   and the live API, that was wrong twice over:
-  - **102 of the 105 GET endpoints this server curates declare no paging parameter at all**, and only three tools
-    expose one (`reai_list_accounts`, `reai_search_leads`, `reai_search_endpoints`). For everything else the
-    advice named something a caller cannot reach through the tool.
+  - **76 of the 78 distinct GET endpoints this server curates declare no paging parameter.** The two that do —
+    `/api/chart-of-accounts/accounts` (limit) and `/api/leads` (page, pageSize) — both honour it. For everything
+    else the advice named something a caller cannot reach through the tool.
   - Passing it anyway does not fail. `GET /api/postings` with `limit=5`, `page=2` and `size=5` each returned
     **all 160 rows**, 200, no complaint — the dangerous direction, because an agent that follows the advice
     believes it limited a result it did not limit.
   - The note now points at the tool's own filters and at fetching by id, and says paging is absent. Guarded by a
     test that also sweeps every tool's description and argument text, so nothing readable may name a paging
     parameter the tool does not accept.
+- **Review found my own count was wrong in agent-facing text, and five more defects.** Every live measurement
+  held exactly; the arithmetic and the guard did not.
+  - **"102 of 105 GET endpoints" was a count of (tool, path) PAIRS labelled as endpoints.** There are **78
+    distinct** curated GET endpoints, 2 with paging, so the claim is **76 of 78**. Eighteen paths are curated by
+    more than one tool — `/api/customers/{id}` by six. The two halves of that sentence were also computed on
+    different populations that coincidentally both gave three: `reai_search_endpoints` takes a `limit` but
+    declares no `apiPaths` at all, because it searches the local spec index rather than the API. The wrong number
+    had been copied into a **quirk note an agent reads**, which is the part that matters.
+  - **The new guard was defeated by this repo's own house style.** Every parameter name here is written in
+    backticks, and `` `limit` parameter `` has a backtick where the regex demanded whitespace — 11 of 13
+    realistic phrasings bypassed it, including ``pass `limit` to cap the rows``, `use limit=50` and `the limit
+    param`. It strips decoration and looks for paging words near paging language now, verified against seventeen
+    phrasings.
+  - **One paging key exempted a tool from every claim about the others** — the allowlist-shaped exemption this
+    repo has been bitten by before. Adding *"use the page parameter and the offset parameter"* to
+    `reai_list_accounts`, which takes only `limit`, passed. Checked per parameter now.
+  - **Half the notes in the guarded function were never driven.** `arrayNote` is a ternary and the fixture only
+    exercised one arm, so the original false advice could be put back in the `count === 0` branch with the test
+    green. Both arms are driven.
+  - **The strengthened guard immediately caught an honest warning and had to learn the difference.**
+    `reai_list_accounts` says *"there is no paging at all (`offset` and `page` are accepted and ignored)"* — a
+    measurement, and the same fact this PR generalises. A guard that punishes honest text teaches people to
+    delete it, so warning context now suppresses the match.
+  - **The adjacent nested-object note made the same class of false claim**, untouched by the first pass: *"the
+    count fields in the response give the real totals"* points at fields that need not exist — for
+    `{ label, rows: [400 items] }` there are none. It names the "N of M" it already prints instead.
+  - **Five of six places that state the quirk count had drifted.** `scripts/audit-quirks.mjs` still said 124 and
+    `docs/audits.md` disagreed with its own table row, because only the FIRST `N quirks` in the README was
+    guarded. The guard now sweeps the README, every doc and every script — and found a sixth occurrence the
+    manual pass had missed. Its limits are recorded: it catches the `N quirks` phrasing, not the interlocking
+    bare numbers in the audit header, and a floor cannot pin its own loosening.
+
 - **Three quirks, all measured on 2634 this iteration.**
   - **`GET /api/projects` answers 403 with `"Project module is disabled"`** — a 403 that is a feature flag, not
     authorisation. An agent reading it as insufficient access will retry, escalate, or ask the user for

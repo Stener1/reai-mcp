@@ -107,10 +107,39 @@ test("the README's API-surface numbers match the spec index", () => {
   }
 });
 
-test("the README's quirk count matches the registry", () => {
-  const m = /(\d+) quirks/.exec(README);
-  assert.ok(m, "the README should state how many quirks exist");
-  assert.equal(Number(m[1]), QUIRKS.length, `README claims ${m[1]} quirks; there are ${QUIRKS.length}`);
+test("EVERY stated quirk count matches the registry, wherever it is written", () => {
+  // This used to read only the FIRST "N quirks" in the README, and review showed what that costs: the count
+  // appears in six places across the README, docs/api-quirks.md, docs/audits.md and scripts/audit-quirks.mjs,
+  // and one guarded occurrence let the other five drift. A PR that bumped four of them left
+  // scripts/audit-quirks.mjs claiming 124 and docs/audits.md disagreeing with its own table row.
+  //
+  // Prose ABOUT past miscounts is exempt by necessity — docs/audits.md records "2 + 8 + 114 = 124 out of 122"
+  // as a history of getting this wrong twice, and those numbers must not be rewritten to match today's registry.
+  const files = [
+    "README.md",
+    ...readdirSync(join(repo, "docs")).filter((f) => f.endsWith(".md")).map((f) => `docs/${f}`),
+    ...readdirSync(join(repo, "scripts")).filter((f) => f.endsWith(".mjs")).map((f) => `scripts/${f}`),
+  ];
+  const wrong = [];
+  let found = 0;
+  for (const file of files) {
+    const text = readFileSync(join(repo, file), "utf8");
+    for (const line of text.split("\n")) {
+      // A line that is explicitly about the arithmetic having been wrong is history, not a claim.
+      if (/wrong twice|has been wrong|already understates/.test(line)) continue;
+      for (const m of line.matchAll(/\*{0,2}(\d+)\*{0,2} (?:quirks|claims nobody)/g)) {
+        found += 1;
+        if (Number(m[1]) !== QUIRKS.length) wrong.push(`${file}: "${m[0]}" (registry has ${QUIRKS.length})`);
+      }
+    }
+  }
+  // A floor, so the sweep cannot silently stop finding the counts it is meant to check. It cannot pin its own
+  // loosening — while every count is correct, lowering the floor fails nothing — and it only catches the
+  // "N quirks" phrasing. `scripts/audit-quirks.mjs` also carries interlocking BARE numbers ("That 2, and the
+  // 127, are exact", "leaving 110 unnamed") which no generic regex can distinguish from prose, and those remain
+  // unguarded. Recorded rather than implied: this guard closed five of six drifting sites, not all arithmetic.
+  assert.ok(found >= 5, `only ${found} stated counts were found; this guard has stopped covering them`);
+  assert.deepEqual(wrong, [], `stale quirk counts:\n  ${wrong.join("\n  ")}`);
 });
 
 test("every curated tool is documented, in the README or a linked page", () => {

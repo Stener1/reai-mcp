@@ -111,25 +111,35 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
        * The advice this note used to give was "use the limit/page parameters", and it was wrong for almost
        * every tool that can emit it.
        *
-       * Measured: **102 of 105** curated GET endpoints declare no paging parameter at all, and only three tools
-       * expose one (`reai_list_accounts`, `reai_search_leads`, `reai_search_endpoints`) — so for the rest the
-       * advice named something the agent cannot reach through the tool. Worse, passing it anyway through
-       * `reai_request` does not fail: `GET /api/postings` with `limit=5`, `page=2` and `size=5` each returned
-       * **all 160 rows**, 200, no complaint. An agent that follows the old advice believes it limited a result
-       * it did not limit.
+       * Measured: of the **78 distinct** curated GET endpoints, **76** declare no paging parameter. The two that
+       * do — `/api/chart-of-accounts/accounts` (limit) and `/api/leads` (page, pageSize) — both HONOUR it.
        *
-       * The three tools that do page say so in their own argument descriptions, which is where a caller looks.
+       * The first version of this comment said "102 of 105", which was a count of (tool, path) PAIRS labelled as
+       * endpoints: 18 paths are curated by more than one tool, `/api/customers/{id}` by six. Review caught it,
+       * and it mattered because the same wrong number had been copied into an agent-facing quirk note. The two
+       * halves of that sentence were also computed on different populations that coincidentally both gave three:
+       * `reai_search_endpoints` takes a `limit` but declares no `apiPaths` at all — it searches the local spec
+       * index, not the API — so it was never in the endpoint population the sentence claimed to describe.
+       *
+       * Worse than the miscount: passing paging anyway does not fail. `GET /api/postings` with `limit=5`,
+       * `page=2` and `size=5` each returned **all 160 rows**, 200, byte-identical. An agent following the old
+       * advice believes it limited a result it did not limit.
+       *
+       * So the note speaks about THIS tool rather than about the API in general — true, useful, and it cannot go
+       * stale as the endpoint counts move. The two tools that do page say so in their own argument descriptions.
        */
       const arrayNote = (count: number): string =>
         count === 0
-          ? `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
+          ? // Review found this arm uncovered: the original false advice could be put back HERE and the new
+            // guard still passed, because the test's fixture only drove the count > 0 arm. Both are driven now.
+            `NOTE: nothing is shown — the FIRST of ${data.length} item(s) alone exceeds the ` +
             `${MAX_RESULT_CHARS}-character limit, so no whole item fits. This is NOT an empty ` +
             `result. Fetch the item by id, or use a tool that returns a summary rather than the ` +
             `full record.`
           : `NOTE: response truncated — showing the first ${count} of ${data.length} items, complete. ` +
-            `Narrow the result with this tool's own filters, or fetch a single record by id. Most of this ` +
-            `API's list endpoints take NO paging parameter, and the ones that do not IGNORE what they are ` +
-            `sent rather than refusing it.`;
+            `Narrow the result with this tool's own filters, or fetch a single record by id. This tool takes ` +
+            `no paging argument, and a page or limit sent to the API directly is silently ignored rather than ` +
+            `refused — so adding one will not narrow anything.`;
 
       const overhead = parts.reduce((n, part) => n + part.length + 1, 0) + 2;
       let shown = countFittingSerialized(data, BODY_BUDGET);
@@ -184,14 +194,19 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
         .slice(0, TRUNCATION_NOTE_MAX_FIELDS)
         .map((t) => `${t.field} shows ${t.shown} of ${t.total}`)
         .join(", ");
+      // "the count fields in the response give the real totals" was the old wording, and review found it points
+      // at fields that need not exist: for `{ label, rows: [400 items] }` there is no count field anywhere, and
+      // `Object.keys(data).filter(k => /count|total/i.test(k))` is empty. It was also redundant — the "N of M"
+      // this note already prints per shortened list IS the total, so it now names that instead of a field that
+      // may not be there. Same defect class as the paging advice this commit removed, in the adjacent note.
       const rest = trimmed.length - TRUNCATION_NOTE_MAX_FIELDS;
       parts.push(
         `NOTE: response truncated to fit ${MAX_RESULT_CHARS} characters. It is still valid JSON ` +
           `and every value in it is complete — the long lists were shortened, not cut mid-item: ` +
           named +
           (rest > 0 ? `, and ${rest} further list(s) shortened` : "") +
-          `. Every other field is present and whole. Do not read a shortened list as exhaustive; ` +
-          `the count fields in the response give the real totals.`,
+          `. Every other field is present and whole. Do not read a shortened list as exhaustive — the ` +
+          `"N of M" above each shortened list is the real total.`,
       );
     } else {
       // Otherwise drop back to a line boundary and discard the final line, which may

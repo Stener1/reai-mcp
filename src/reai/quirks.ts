@@ -2136,8 +2136,10 @@ export const QUIRKS: readonly Quirk[] = [
       "So a caller who adds one believes it narrowed a result it did not narrow — the dangerous direction, " +
       "because nothing signals the mistake. Narrow with the filters the endpoint documents (accountNumber, " +
       "voucherId, customerId, supplierId, projectId, employeeId, companyBankId), which do work and combine as " +
-      "AND. 102 of the 105 GET endpoints this server curates declare no paging parameter at all, so treat " +
-      "paging as absent unless the tool you are using takes it as an argument.",
+      "AND. Of the 78 distinct GET endpoints this server curates, 76 declare no paging parameter at all — the " +
+      "two that do are /api/chart-of-accounts/accounts (limit) and /api/leads (page, pageSize), and both HONOUR " +
+      "it. So paging is absent here and on nearly everything else, but it is not absent everywhere: check " +
+      "whether the tool you are using takes it as an argument.",
   },
 ];
 
