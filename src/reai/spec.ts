@@ -320,6 +320,46 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
           score *= 0.7;
         }
       }
+      // An ACTION the query never asked for is demoted, however well its path happens to match.
+      //
+      // Measured on main, and the reason this is a safety fix rather than tuning: "opprett salary payments"
+      // ranked POST /api/salary-payments/{id}/complete at 63.8, the operation that FILES payroll with
+      // Skatteetaten, while POST /api/salary-payments — which creates one — sat fifth at 61.3. "opprett
+      // agreements" ranked POST /api/agreements/{id}/sign-request, which sends a signing request to a
+      // counterparty, above all five typed creates. An audit of 804 resource-only queries found 56 ranking an
+      // irreversible nested action first and 24 of those transmitting outside the tenant.
+      //
+      // The margins were 2.5 and 3.0 points, so the cut is deliberately larger than it needs to be for a
+      // transmitting or irreversible action: being handed a government filing for the word "opprett" is the
+      // failure worth over-correcting against. Naming the action exempts it entirely, so "fullfor
+      // lonnskjoring", "godkjenn utlegg" and the bare "a-melding" are untouched.
+      const actions = nestedActionSegments(op.path);
+      if (score > 0 && actions.length > 0 && !namesAction(terms, actions)) {
+        // ONLY the risky ones. A first version also cut reversible actions and ordinary reads by 0.7, and the
+        // held-out corpora caught the cost immediately: corpus two fell from 26 of 28 in the top three to 25,
+        // corpus three from 26 of 27 to 24, an English rank regressed, and GET /api/invoices/{id}/payments fell
+        // to rank 10 for a query about invoice payments. A nested READ is very often the right answer for a
+        // query that never spells out its segment, and there is no safety argument for demoting it.
+        //
+        // What there is a safety argument for is the operation that files, sends or cannot be undone. Those are
+        // the 56 the audit found, and the 24 that leave the tenant.
+        const risk = classifyRequest(op.method, op.path);
+        const transmits = classifyTransmission(op.method, op.path) === "external";
+        if (risk === "irreversible" || transmits) {
+          // Two strengths, because the family condition turned out to cut both ways. Demoting only when a
+          // same-method non-nested operation exists protected "åpne avstemmingen på nytt", whose family has no
+          // collection POST — but it also left POST /salary/{id}/payment-date untouched, and that operation
+          // already outranked POST /api/salary-payments on main (62.48 to 61.3). Removing the filing that had
+          // been masking it simply promoted the next unasked action.
+          //
+          // So: a hard cut where something better exists to take its place, and a mild one where nothing does,
+          // which is enough to lose to a resource-level operation elsewhere without pushing the only sensible
+          // answer out of reach. 0.9 rather than 0.8, measured: 0.8 pushed the reconciliation reopen from
+          // rank 9 to 10 in the ratcheted corpus, and breaking a 1.2-point tie needs nothing like that much.
+          // It is a tie-breaker, not a demotion, and it is described as one.
+          score *= familyOffersNonNested(index, op.path, op.method) ? 0.45 : 0.9;
+        }
+      }
       if (op.deprecated) score -= 3;
     }
 
@@ -1920,6 +1960,81 @@ function expandQuery(query: string): {
  * which is how a receipt-registration endpoint beat `/api/employees`. Ranking a
  * whole-word hit above a fragment is what separates the two.
  */
+/**
+ * Families that offer a NON-NESTED operation with a given method, as "\/api\/x|POST".
+ *
+ * The demotion below only fires when there is something better to promote. Without that condition it punished
+ * a legitimate request whose phrasing simply does not contain the segment word: "åpne avstemmingen på nytt"
+ * asks to REOPEN a reconciliation, never says "reopen", and fell out of the top ten entirely — while
+ * /api/manual-reconciliations has no collection-level POST, so nothing could take its place. Demoting the only
+ * sensible answer is strictly worse than leaving it alone. Caught by the held-out corpus, which is ratcheted
+ * for exactly this.
+ */
+const nonNestedMethods = new WeakMap<SpecIndex, Set<string>>();
+
+function familyOffersNonNested(index: SpecIndex, path: string, method: string): boolean {
+  let known = nonNestedMethods.get(index);
+  if (known === undefined) {
+    known = new Set<string>();
+    for (const op of index.operations) {
+      if (nestedActionSegments(op.path).length > 0) continue;
+      known.add(`${familyOf(op.path)}|${op.method}`);
+    }
+    nonNestedMethods.set(index, known);
+  }
+  return known.has(`${familyOf(path)}|${method}`);
+}
+
+/** The first two path segments, which is the resource family. */
+function familyOf(path: string): string {
+  return `/${path.split("/").filter(Boolean).slice(0, 2).join("/")}`;
+}
+
+/**
+ * Is this operation an action hanging off an item, rather than the collection or the item itself?
+ *
+ * /api/salary-payments          collection
+ * /api/salary-payments/{id}     item
+ * /api/salary-payments/{id}/complete   ACTION — and the one that files payroll with Skatteetaten.
+ */
+function nestedActionSegments(path: string): string[] {
+  const segs = path.split("/").filter(Boolean);
+  const first = segs.findIndex((seg) => seg.startsWith("{"));
+  if (first < 0 || first >= segs.length - 1) return [];
+  return segs.slice(first + 1).filter((seg) => !seg.startsWith("{"));
+}
+
+/**
+ * Did the query ask for this operation's ACTION, as opposed to merely naming its resource?
+ *
+ * Checked against the EXPANDED terms rather than the raw tokens, which is what makes it usable: "godkjenn
+ * utlegg" reaches POST /api/expenses/{id}/approve because `godkjenn` expands to `approve`, and a phrase
+ * replacement counts too — the a-melding filing survives because "salary-payments-complete" carries `complete`
+ * as one of its parts. Raw tokens would have demoted both.
+ */
+function namesAction(terms: ReadonlyArray<{ term: string }>, actions: readonly string[]): boolean {
+  const asked = new Set<string>();
+  for (const { term } of terms) {
+    asked.add(term);
+    for (const part of term.split("-")) if (part.length > 1) asked.add(part);
+  }
+  const named = (word: string) => {
+    if (asked.has(word)) return true;
+    // Plural and singular of the same segment: "contact person" must reach .../contact-persons.
+    if (word.endsWith("s") && asked.has(word.slice(0, -1))) return true;
+    return asked.has(`${word}s`);
+  };
+  // EVERY part of a segment, not any part — the same all-or-nothing rule the hyphenated terms use, and for the
+  // same reason. Accepting any shared part exempted /salary/{id}/payment-date from "opprett salary payments",
+  // because `payment` is a word in both, and once the correct answer's competitor was cut that operation won
+  // outright. "date" was never asked for. Requiring all parts still lets "contact person" reach
+  // .../contact-persons, where both halves are present.
+  return actions.some((action) => {
+    const parts = action.split("-").filter((part) => part.length > 1);
+    return parts.length > 0 && parts.every(named);
+  });
+}
+
 export function matchStrength(
   haystack: string,
   haystackTokens: ReadonlySet<string>,

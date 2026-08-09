@@ -9,6 +9,50 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **An action the query never asked for could outrank the resource it did name.** `/api/salary-payments` is the
+  collection, `/api/salary-payments/{id}` the item, and `/api/salary-payments/{id}/complete` the action that
+  **files payroll with Skatteetaten**. Measured on `main`:
+
+  ```
+  opprett salary payments   POST /api/salary-payments/{id}/complete   63.8   <- files with Skatteetaten
+                            POST /api/salary-payments                 61.3   <- creates one, fifth
+  opprett agreements        POST /api/agreements/{id}/sign-request     41.4   <- sends to a counterparty
+                            POST /api/agreements/employee-contract     38.4
+  ```
+
+  A user asking to create a salary run was handed the operation that files it, and one asking to create an
+  agreement was handed the one that sends a signing request.
+  - Found by auditing **804 resource-only queries** — each collection's own name, with and without a create or
+    read verb, nothing compound: **108 ranked a nested action first, 56 of them irreversible and 24
+    transmitting outside the tenant.** The first count I produced was larger and is not reported, because it
+    included queries whose noun *is* the action (`contact person` reaching `.../contact-persons` is correct).
+  - A nested action is now demoted when the query names none of its action segments — checked against the
+    **expanded** terms, which is what makes it usable rather than blunt: "godkjenn utlegg" reaches
+    `.../approve` because `godkjenn` expands to `approve`, and the a-melding filing survives because the phrase
+    replacement `salary-payments-complete` carries `complete` as one of its parts. Raw tokens would have
+    demoted both.
+  - **Every part of a segment must be named, not any part** — the same all-or-nothing rule the hyphenated terms
+    use. Accepting any shared word exempted `POST /salary/{id}/payment-date` from "opprett salary payments",
+    because `payment` is a word in both, and once the filing above it was cut that operation won outright.
+    "date" was never asked for. Requiring both halves still lets "contact person" reach `.../contact-persons`.
+  - **Only irreversible or externally-transmitting actions are demoted.** A first version also cut ordinary
+    nested reads by 0.7 and the held-out corpora caught the cost within one run: corpus two fell from 26 of 28
+    in the top three to 25, corpus three from 26 of 27 to 24, and `GET /api/invoices/{id}/payments` fell to rank
+    10 for a query about invoice payments. A nested read is very often the right answer for a query that never
+    spells out its segment, and there is no safety argument for demoting it.
+  - **And the cut is only hard where something better exists to replace it.** Demoting an action whose family
+    offers no same-method collection operation promotes nothing: "åpne avstemmingen på nytt" asks to reopen a
+    reconciliation, never contains the word "reopen", and a hard cut dropped it out of the top ten entirely.
+    Where an alternative exists the factor is 0.45; where none does it is 0.9 — a tie-breaker rather than a
+    demotion, and 0.8 was measured and rejected because it moved that reopen from rank 9 to 10.
+  - One test changed rather than the code: `salary run` moved from rank **8 to 4**, because the filing had been
+    ranking above the collection for a query naming neither "complete" nor any filing. Pinned at the new value.
+  - Measured over **20,893 queries**: 464 rank-1 changes, **no query lost its answer**, **269 moved from a
+    nested action to a resource-level operation and none moved the other way**, **no write newly at rank 1 and
+    48 demoted**. The audit's actionable count went from 54 to 48, with irreversible cases from 20 to 14 and
+    externally-transmitting from 16 to 4; what remains is dominated by queries whose noun is the action, which
+    the rule correctly exempts.
+
 - **The ranker knew what a write verb meant and had no notion of a read verb.** A write verb has demoted
   reads since the method heuristic was built — `writeIntent && GET` costs a factor of 0.7 — but nothing did
   the reverse, so a query that says outright it wants to look at something was scored exactly as if it had

@@ -648,3 +648,74 @@ test("widening a synonym to reach a family would displace the families it names"
     assert.equal(top(query).path, "/api/agreements", `"${query}" -> ${top(query).path}`);
   }
 });
+
+/**
+ * An ACTION the query never asked for, however well its path happens to match.
+ *
+ * /api/salary-payments is the collection, /api/salary-payments/{id} the item, and
+ * /api/salary-payments/{id}/complete the action that FILES payroll with Skatteetaten. Measured on main:
+ *
+ *     opprett salary payments   POST /api/salary-payments/{id}/complete   63.8   <- files with Skatteetaten
+ *                               POST /api/salary-payments                 61.3   <- creates one, fifth
+ *     opprett agreements        POST /api/agreements/{id}/sign-request     41.4   <- sends to a counterparty
+ *                               POST /api/agreements/employee-contract     38.4
+ *
+ * Found by auditing 804 resource-only queries: 56 ranked an irreversible nested action first and 24 of those
+ * transmit outside the tenant. Only irreversible or transmitting actions are demoted — a first version also cut
+ * ordinary nested reads and the held-out corpora caught the cost within one run.
+ */
+test("an action the query never named does not outrank the resource it did name", () => {
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const [query, wanted] of [
+    ["opprett salary payments", "POST /api/salary-payments"],
+    ["opprett lonnskjoring", "POST /api/salary-payments"],
+    ["create salary payments", "POST /api/salary-payments"],
+  ]) {
+    assert.equal(`${top(query).method} ${top(query).path}`, wanted, `"${query}"`);
+  }
+  // The agreements family has no generic create, so any of the five typed ones is defensible; what is not
+  // defensible is the operation that sends a signing request to a counterparty.
+  for (const query of ["opprett agreements", "create agreements"]) {
+    assert.doesNotMatch(top(query).path, /sign-request/, `"${query}" -> ${top(query).path}`);
+  }
+});
+
+test("naming the action exempts it, including through a synonym or a phrase", () => {
+  // This is what makes the rule usable rather than blunt, and it is checked against the EXPANDED terms: the
+  // Norwegian verbs never contain the English path segment.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(top("fullfor lonnskjoring").path, "/api/salary-payments/{id}/complete");
+  assert.equal(top("godkjenn utlegg").path, "/api/expenses/{id}/approve");
+  assert.equal(top("krediter faktura").path, "/api/invoices/{id}/credit");
+  assert.match(top("avskriv driftsmiddel").path, /depreciation/);
+  // A phrase replacement counts too: the a-melding filing survives because "salary-payments-complete" carries
+  // `complete` as one of its parts. Raw tokens would have demoted the one operation that filing query means.
+  assert.equal(top("a-melding").path, "/api/salary-payments/{id}/complete");
+  assert.equal(top("send amelding").path, "/api/salary-payments/{id}/complete");
+  // ALL parts of a segment, not any part. Accepting any shared word exempted /salary/{id}/payment-date from
+  // "opprett salary payments" — `payment` is a word in both — and once the filing above it was cut, that
+  // operation won outright. "date" was never asked for.
+  assert.equal(top("opprett salary payments").path, "/api/salary-payments");
+  // And both halves present still reaches a two-word segment.
+  assert.match(top("contact person").path, /contact-persons/);
+  assert.match(top("vis contact persons").path, /contact-persons/);
+});
+
+test("an action with no better alternative is not pushed out of reach", () => {
+  // The condition that stops this becoming a blunt instrument. /api/manual-reconciliations has no
+  // collection-level POST, so demoting .../reopen promotes nothing — and "åpne avstemmingen på nytt" asks to
+  // reopen a reconciliation while never containing the word "reopen". A hard cut dropped it out of the top ten
+  // entirely, which the ratcheted held-out corpus caught.
+  const rankOf = (query, want) =>
+    searchOperations({ query, limit: 10 })
+      .map((h) => h.path)
+      .findIndex((p) => p.startsWith(want));
+  assert.ok(
+    rankOf("åpne avstemmingen på nytt", "/api/manual-reconciliations/{bankAccountId}/reopen") >= 0,
+    "the reconciliation reopen must stay reachable for the phrasing that asks for it",
+  );
+  assert.ok(
+    rankOf("aktiver abonnementet igjen", "/api/subscriptions/{id}/activate") >= 0,
+    "reactivating a subscription must stay reachable",
+  );
+});
