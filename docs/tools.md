@@ -63,6 +63,7 @@ On a [bound remote connection](self-hosting.md#one-tenant-per-authorization) `re
 | `reai_customer_ledger` | Kundereskontro — who owes what; `isOpenPosting` answers "who owes us money" | read |
 | `reai_list_products` | Products and their variants; order lines reference a `variantId` | read |
 | `reai_list_orders` · `reai_get_order` | Orders and their lines | read |
+| `reai_update_order` | Change an order **without losing its lines** — the response and the request disagree about their shape, so a hand-rolled read-modify-write goes wrong three ways. See the note below | reversible |
 | `reai_list_offers` | Offers / quotes (*tilbud*) | read |
 | `reai_list_invoices` · `reai_get_invoice` | Invoices and credit notes; filter `outstanding` + `overdue` | read |
 | `reai_create_customer` · `reai_update_customer` · `reai_set_customer_address` · `reai_delete_customer` | Customer master data. The delete **archives** instead when the customer has transactions, and reports which of the two happened | reversible |
@@ -328,6 +329,14 @@ What the API does **not** check: Norwegian tenancy law caps a deposit at six mon
 
 Each of these wraps a `PUT` that replaces rather than patches, on a record carrying a payment destination the schema does not require — so the body an ordinary rename produces is accepted and empties the account. All three read the record first and merge. The measurements, and why the two account-carrying ones need `REAI_WRITE_MODE=full` even though they are the *safe* way to do the job, are in [docs/safety.md](safety.md#the-three-curated-merge-tools).
 
+`reai_update_order` exists because `PUT /api/orders/{id}` is a full replacement whose response does not match its request. Measured against order 4105 on 2783: the lines come back under **`lines`** and must be sent as **`orderLines`**; each line the GET returns carries `id`, `vatTitle`, `vatRate` and `amounts`, none of which the PUT declares and three of which the API computes; and `comment`, `internalComment`, `buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are optional, so a PUT that omits them keeps the order and empties those fields.
+
+What the API *does* protect is the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and `issueDate` are all required, so a partial PUT is refused with a `400` rather than silently dropping the lines — unlike `reai_update_agreement`, where nothing is required and a partial write erases the contract. That difference is why this tool is `reversible` and that one is `irreversible`.
+
+Two refusals, both deliberate. An order with **`sendEhf` already set** is not updated: a replacement must either send the flag again — which the write policy reads as an external transmission, verified — or omit it, which silently disarms EHF at invoicing time. Both are decisions about whether something leaves the tenant. And an **already-invoiced** order is refused, because the invoice is the legal document and editing the order behind it does not change it; what the API does in that case was **not established**, since no invoiced order was available to measure. `reai_request` does either deliberately.
+
+`PUT /api/offers/{id}` has the same shape — `offerLines` required, and the same optional fields — but there were no offers on the test tenant to measure, so it is deliberately left uncurated rather than curated on an assumption.
+
 ## Payroll
 | Tool | Purpose | Risk |
 |---|---|---|
@@ -454,7 +463,7 @@ Projects are the obvious omission here, and deliberate: the Project module is di
 |---|---|---|
 | `reai_reconcile_ui` | Unmatched bank transactions and unmatched ledger postings for a month, side by side, so a person can pick which ones pair. Off unless `REAI_ENABLE_UI=1` | read |
 
-It sits outside the default surface rather than inside it — every count on this page and in the README is the default 173, and `REAI_ENABLE_UI=1` registers a 174th tool.
+It sits outside the default surface rather than inside it — every count on this page and in the README is the default 174, and `REAI_ENABLE_UI=1` registers a 175th tool.
 
 `reai_reconcile_ui` returns the unmatched bank transactions and unmatched ledger postings for a month side by side, so a person can pick which ones pair. It is off unless `REAI_ENABLE_UI=1`.
 

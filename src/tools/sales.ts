@@ -911,6 +911,212 @@ const createOrder = defineTool({
   },
 });
 
+/**
+ * Fields the order PUT accepts on a line, and the ones a GET adds that it does not.
+ *
+ * The response and the request disagree, which is the whole reason this tool exists. `GET /api/orders/{id}`
+ * returns the lines under **`lines`**; `PUT /api/orders/{id}` requires them under **`orderLines`**. And each
+ * line the GET returns carries four fields the PUT schema does not declare — `id`, `vatTitle`, `vatRate`,
+ * `amounts` — three of which are computed. Measured against the document and against order 4105 on 2783.
+ */
+const ORDER_LINE_REQUEST_FIELDS = [
+  "itemName",
+  "comment",
+  "quantity",
+  "unitPrice",
+  "discount",
+  "vatCode",
+  "variantId",
+  "accrualEnabled",
+  "accrualPeriod",
+  "accrualPeriodCount",
+] as const;
+
+/** The optional top-level fields a partial PUT would silently drop. */
+const ORDER_CARRIED_FIELDS = [
+  "comment",
+  "internalComment",
+  "buyerReference",
+  "externalReference",
+  "projectId",
+  "invoiceEmail",
+] as const;
+
+type OrderRes = {
+  id?: number;
+  number?: string;
+  status?: string;
+  invoiceId?: number | null;
+  sendEhf?: boolean;
+  lines?: Array<Record<string, unknown>>;
+  webUrl?: string;
+} & Record<string, unknown>;
+
+const updateOrder = defineTool({
+  name: "reai_update_order",
+  title: "Change an order without losing its lines",
+  description:
+    "Change one or more fields on an existing order, leaving the rest alone.\n\n" +
+    "`PUT /api/orders/{id}` is a FULL REPLACEMENT, and the response does not have the shape the request " +
+    "wants — so a read-modify-write done by hand goes wrong in three separate ways. The lines come back " +
+    "under `lines` and must be sent as `orderLines`. Each line the GET returns carries `id`, `vatTitle`, " +
+    "`vatRate` and `amounts`, none of which the PUT declares. And `comment`, `internalComment`, " +
+    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional, so a PUT that " +
+    "omits them keeps the order but empties those fields.\n\n" +
+    "The API does protect the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and " +
+    "`issueDate` are REQUIRED, so a partial PUT is refused with a 400 rather than quietly dropping the " +
+    "lines. That is the one thing you cannot break here by accident — everything else in the list above " +
+    "you can. This tool reads the order, maps the lines back into the shape the request wants, carries the " +
+    "optional fields, and applies your changes on top.\n\n" +
+    "`sendEhf` is not offered, matching reai_create_order, and an order that ALREADY has it set is " +
+    "refused rather than updated. Carrying the flag forward would re-arm EHF/Peppol on an edit that had " +
+    "nothing to do with sending — the policy classifies a body carrying sendEhf as an external " +
+    "transmission, which is verified — and dropping it would silently change what happens at invoicing " +
+    "time. Neither is a choice this tool should make for you: reai_request can do it deliberately.\n\n" +
+    "An order that has already been invoiced is refused too. The invoice is the legal document and " +
+    "editing the order behind it does not change it; what the API actually does in that case was NOT " +
+    "established, because no invoiced order was available to measure. Stated rather than guessed.",
+  risk: "reversible",
+  apiPaths: [
+    ["GET", "/api/orders/{id}"],
+    ["PUT", "/api/orders/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Order id, as returned by reai_list_orders."),
+    orderLines: z
+      .array(orderLine)
+      .min(1)
+      .optional()
+      .describe(
+        "Replace the line items. Omit to keep the existing lines exactly as they are — they are read and " +
+          "sent back for you, which is what the underlying PUT requires.",
+      ),
+    customerId: z.number().int().positive().optional().describe("Move the order to a different customer."),
+    currencyCode: CURRENCY.optional(),
+    daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
+    issueDate: isoDate.optional().describe("Order date."),
+    comment: z.string().optional().describe("Comment visible to the customer."),
+    internalComment: z.string().optional().describe("Internal note, not shown to the customer."),
+    buyerReference: z
+      .string()
+      .max(255, "The API caps buyerReference at 255 characters.")
+      .optional()
+      .describe("The customer's own reference (deres ref)."),
+    externalReference: z
+      .string()
+      .max(100, "The API caps externalReference at 100 characters.")
+      .optional()
+      .describe("Your reference from an external system."),
+    projectId: z.number().int().optional().describe("Link the order to a project."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (asked.length === 0) {
+      return fail(
+        `No changes were given, so nothing was written. Passing nothing here would rewrite the order with ` +
+          `its current values, which is a pointless full replacement of a billing record.`,
+      );
+    }
+
+    const current = await ctx.client.request<OrderRes>({
+      method: "GET",
+      path: `/api/orders/${id}`,
+      tenantId: resolved,
+    });
+    const order = current.data;
+    if (!order) {
+      return fail(`Order ${id} could not be read, so nothing was written. A PUT here REPLACES the order.`);
+    }
+
+    if (order.sendEhf === true) {
+      return fail(
+        `Order ${id} has sendEhf set, so this tool will not update it. Nothing was written.\n\n` +
+          `A PUT replaces the record, so the flag must either be sent again — which the write policy reads ` +
+          `as an external transmission, the same as arming the send in the first place — or left out, which ` +
+          `would silently disarm EHF at invoicing time without you asking. Both are decisions about whether ` +
+          `something leaves the tenant, and this tool does not make them.\n\n` +
+          `reai_request PUT /api/orders/${id} will do either, deliberately, under the gates that apply.`,
+      );
+    }
+    if (order.invoiceId !== null && order.invoiceId !== undefined) {
+      return fail(
+        `Order ${id} has already been invoiced (invoiceId ${order.invoiceId}${order.status ? `, status ${order.status}` : ""}), ` +
+          `so nothing was written. The invoice is the legal document and changing the order behind it does ` +
+          `not change the invoice — the remedy for a wrong invoice is a credit note, via ` +
+          `reai_credit_invoice.\n\n` +
+          `What the API itself does to an invoiced order was not established: none was available to ` +
+          `measure. So this refuses rather than finding out on your books. reai_request PUT ` +
+          `/api/orders/${id} will if you have decided to.`,
+      );
+    }
+
+    // The lines, renamed and stripped. Sending `id`, `vatTitle`, `vatRate` or `amounts` back is sending
+    // fields the request schema does not declare, three of which the API computes.
+    const existingLines = Array.isArray(order.lines) ? order.lines : undefined;
+    if (!changes.orderLines && (!existingLines || existingLines.length === 0)) {
+      return fail(
+        `Order ${id} came back with no readable lines, so nothing was written. \`orderLines\` is required ` +
+          `by the PUT, and inventing one would replace the order's contents. Pass \`orderLines\` ` +
+          `explicitly if you mean to set them.`,
+      );
+    }
+    const mappedLines = (existingLines ?? []).map((line) =>
+      Object.fromEntries(
+        ORDER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
+      ),
+    );
+
+    const carried = Object.fromEntries(
+      ORDER_CARRIED_FIELDS.filter((f) => order[f] !== undefined && order[f] !== null).map((f) => [f, order[f]]),
+    );
+
+    const body: Record<string, unknown> = {
+      // Required by the PUT, so they come from the record rather than being left out.
+      currencyCode: order.currencyCode,
+      customerId: order.customerId,
+      daysUntilDue: order.daysUntilDue,
+      issueDate: order.issueDate,
+      orderLines: mappedLines,
+      ...carried,
+      // The caller's changes last.
+      ...Object.fromEntries(asked),
+    };
+
+    const res = await ctx.client.request<OrderRes>({
+      method: "PUT",
+      path: `/api/orders/${id}`,
+      body,
+      tenantId: resolved,
+    });
+
+    const changedKeys = asked.map(([k]) => k);
+    const notes = [
+      `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
+        `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
+        `${Object.keys(carried).length > 0 ? `, and ${Object.keys(carried).join(", ")} carried over` : ""} — ` +
+        `because this API replaces rather than patches.`,
+    ];
+    const after = res.data;
+    const notApplied = changedKeys.filter(
+      (k) => k !== "orderLines" && after?.[k] !== undefined && JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
+    );
+    if (notApplied.length > 0) {
+      notes.push(
+        `WARNING: ${notApplied
+          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
+          .join("; ")}. Check the value is one the API accepts.`,
+      );
+    }
+    return ok(res.data, {
+      note: notes.join("\n\n"),
+      ...(res.data?.webUrl ? { link: res.data.webUrl } : { link: ctx.client.deepLink(`/orders/${id}`, resolved) }),
+    });
+  },
+});
+
 // --- Offers ----------------------------------------------------------------
 
 function describeTermsSource(source: "argument" | "customer" | "fallback"): string {
@@ -1743,6 +1949,7 @@ export const salesTools: ToolDef[] = [
   listOrders,
   getOrder,
   createOrder,
+  updateOrder,
   listOffers,
   createOffer,
   listInvoices,

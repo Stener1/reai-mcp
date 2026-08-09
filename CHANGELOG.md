@@ -7,6 +7,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 > **Nothing has been published to npm yet.** Install from source or run the
 > Docker image. The version below describes what is on `main`.
 
+### Added
+
+- **`reai_update_order`: the sales toolset could create and delete an order but not change one.** Found by
+  auditing every family that has curated tools for writes it still leaves to the escape hatch. `PUT
+  /api/orders/{id}` is a full replacement whose **response does not match its request**, so a hand-rolled
+  read-modify-write goes wrong three ways. Measured against order 4105 on 2783:
+  - the lines come back under **`lines`** and must be sent as **`orderLines`**;
+  - each line the GET returns carries `id`, `vatTitle`, `vatRate` and `amounts` — none declared by the PUT,
+    three of them computed by the API;
+  - `comment`, `internalComment`, `buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are
+    optional, so a PUT that omits them keeps the order and empties those fields.
+- What the API *does* protect is the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and
+  `issueDate` are required, so a partial PUT is refused with a `400` rather than silently dropping the lines.
+  That is the difference from `reai_update_agreement`, where nothing is required and a partial write erases
+  the contract — and it is why this tool is `reversible` and that one is `irreversible`.
+- Two refusals, both deliberate. An order with **`sendEhf` already set** is refused: a replacement must
+  either send the flag again — which the policy classifies as an external transmission, verified by calling
+  `classifyTransmission` with that body — or omit it, which silently disarms EHF at invoicing time. Both are
+  decisions about whether something leaves the tenant, so the tool makes neither. An **already-invoiced**
+  order is refused too; what the API does in that case was **not established**, because no invoiced order
+  was available to measure, and all eight orders on 2783 were `open` with `invoiceId: null`.
+- `PUT /api/offers/{id}` has the same shape and the same gap, but the test tenant had no offers to measure,
+  so it is left uncurated rather than curated on an assumption.
+- **174 tools**: 167 across thirteen accounting domains, plus 7 always-on.
+
 ### Fixed
 
 - **A coercible value bypassed the enum preflight in `reai_update_agreement` and issued the write.** Shipped
