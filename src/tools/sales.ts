@@ -6,6 +6,7 @@ import {
   isoDate,
   ok,
   okList,
+  readableRecord,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -18,6 +19,7 @@ import {
   PHONE_RULE,
   SKIP_REGISTRY_LOOKUP_RULE,
 } from "./registry.js";
+import { bindsToTrue } from "../policy.js";
 import { ReaiApiError } from "../reai/errors.js";
 
 /**
@@ -911,6 +913,369 @@ const createOrder = defineTool({
   },
 });
 
+/**
+ * Fields the order PUT accepts on a line, and the ones a GET adds that it does not.
+ *
+ * The response and the request disagree, which is the whole reason this tool exists. `GET /api/orders/{id}`
+ * returns the lines under **`lines`**; `PUT /api/orders/{id}` requires them under **`orderLines`**. And each
+ * line the GET returns carries four fields the PUT schema does not declare — `id`, `vatTitle`, `vatRate`,
+ * `amounts` — three of which are computed. Measured against the document and against order 4105 on 2783.
+ */
+const ORDER_LINE_REQUEST_FIELDS = [
+  "itemName",
+  "comment",
+  "quantity",
+  "unitPrice",
+  "discount",
+  "vatCode",
+  "variantId",
+  "accrualEnabled",
+  "accrualPeriod",
+  "accrualPeriodCount",
+] as const;
+
+/**
+ * The optional top-level fields a partial PUT would silently drop, AND that a GET can give back.
+ *
+ * `invoiceEmail` is deliberately absent, and its absence is the sharpest thing about this tool.
+ * `UpdateOrderReq` declares it; `OrderRes` does not — verified against the committed document and against
+ * the live response for order 4105, whose keys do not include it. So an order-specific invoice email cannot
+ * be read, cannot be carried, and is therefore CLEARED by any replacement that does not restate it. Listing
+ * it here would have looked like preservation while preserving nothing. It is an argument instead, and every
+ * successful update says so, because the tool cannot tell whether the order had one.
+ */
+const ORDER_CARRIED_FIELDS = [
+  "comment",
+  "internalComment",
+  "buyerReference",
+  "externalReference",
+  "projectId",
+] as const;
+
+/** Keys an order response must share before it is treated as a base to merge into. */
+const ORDER_EXPECTED_KEYS = ["id", "customerId", "currencyCode", "daysUntilDue", "issueDate", "lines"] as const;
+
+/**
+ * A replacement order line.
+ *
+ * `orderLine` — what reai_create_order takes — declares no accrual fields, and zod strips what it does not
+ * declare. So replacing a line through that schema silently dropped `accrualEnabled`, `accrualPeriod` and
+ * `accrualPeriodCount`, changing the accounting schedule of a line the caller only meant to reprice. The
+ * stored-line mapper carries all three, so the two halves of this tool disagreed about what a line is.
+ */
+const orderLineReplacement = orderLine.extend({
+  // The caveat is required of any irreversible tool that books with a VAT code, and it is not theoretical:
+  // measured on 2783, `POST /api/orders` answered 400 "Mva-kode 3 er ikke tillatt. Tillatte koder: 0." —
+  // the allowed set is THIS tenant's, and a company that is not VAT-registered accepts only 0. Sending a
+  // rate a tenant cannot use would invent VAT on a document.
+  vatCode: ORDER_VAT_CODE.optional().describe(
+    'VAT code. Order lines accept ONLY the codes reai_list_vat_codes returns for THIS tenant with ' +
+      'usage="customer-invoice"; anything else is rejected outright with "Mva-kode N er ikke tillatt. ' +
+      'Tillatte koder: …". A tenant that is not VAT-registered accepts only 0 — measured — so do not carry ' +
+      'a rate across from another company.',
+  ),
+  accrualEnabled: z.boolean().optional().describe("Periodise this line over several months."),
+  accrualPeriod: z.string().optional().describe("First period to accrue from, as the API expects it."),
+  accrualPeriodCount: z.number().int().positive().optional().describe("How many periods to spread across."),
+});
+
+type OrderRes = {
+  id?: number;
+  number?: string;
+  status?: string;
+  invoiceId?: number | null;
+  sendEhf?: boolean;
+  lines?: Array<Record<string, unknown>>;
+  webUrl?: string;
+} & Record<string, unknown>;
+
+const updateOrder = defineTool({
+  name: "reai_update_order",
+  title: "Change an order without losing its lines",
+  description:
+    "Change one or more fields on an existing order, leaving the rest alone.\n\n" +
+    "`PUT /api/orders/{id}` is a FULL REPLACEMENT, and the response does not have the shape the request " +
+    "wants — so a read-modify-write done by hand goes wrong in three separate ways. The lines come back " +
+    "under `lines` and must be sent as `orderLines`. Each line the GET returns carries `id`, `vatTitle`, " +
+    "`vatRate` and `amounts`, none of which the PUT declares. And `comment`, `internalComment`, " +
+    "`buyerReference`, `externalReference`, `projectId` and `invoiceEmail` are all optional, so a PUT that " +
+    "omits them keeps the order but empties those fields.\n\n" +
+    "The API does protect the money: `orderLines`, `currencyCode`, `customerId`, `daysUntilDue` and " +
+    "`issueDate` are REQUIRED, so a partial PUT is refused with a 400 rather than quietly dropping the " +
+    "lines. That is the one thing you cannot break here by accident — everything else in the list above " +
+    "you can. This tool reads the order, maps the lines back into the shape the request wants, carries the " +
+    "optional fields, and applies your changes on top.\n\n" +
+    "Needs REAI_WRITE_MODE=full, for the same reason reai_update_agreement does (a tool in the agreements " +
+    "toolset, so a narrowed REAI_TOOLSETS may not include it — reai_search_endpoints and reai_describe_endpoint " +
+    "are always on and reach it either way): not because this tool is " +
+    "dangerous — it is the safe way to do the job — but because the write ladder classifies the operation " +
+    "rather than the care taken over it. A raw PUT that omits any of `projectId`, `internalComment`, " +
+    "`buyerReference`, `externalReference`, `invoiceEmail` or `sendEhf` is already refused in the default " +
+    "mode by the replacement-omission gate. This tool omits `invoiceEmail` unless you pass it, because it " +
+    "cannot read it — so leaving the tool a tier below would have made it the soft route around a gate the " +
+    "escape hatch is subject to.\n\n" +
+    "`sendEhf` is not offered, matching reai_create_order, and an order that ALREADY has it set is " +
+    "refused rather than updated. Carrying the flag forward would re-arm EHF/Peppol on an edit that had " +
+    "nothing to do with sending — the policy classifies a body carrying sendEhf as an external " +
+    "transmission, which is verified — and dropping it would silently change what happens at invoicing " +
+    "time. Neither is a choice this tool should make for you: reai_request can do it deliberately.\n\n" +
+    "One field cannot be protected: `invoiceEmail`. The API accepts it on an update but does not return it " +
+    "on a read, so this tool cannot see whether the order has one and cannot carry it. If the order has an " +
+    "order-specific invoice address, RESTATE it — otherwise the update clears it, and nothing in the " +
+    "response will say so.\n\n" +
+    "Like every read-merge-write, this leaves a lost-update window: an edit made in the ReAI UI or by " +
+    "another client between the read and the write is silently reverted, lines included. There is no ETag, " +
+    "If-Match or version field to prevent it, so it is stated rather than papered over.\n\n" +
+    "An order that CARRIES AN invoiceId is refused too — stated that way deliberately, because that is what " +
+    "the code tests. Whether an invoiceId is set only once an invoice has been issued was not established: " +
+    "a draft invoice, or one later credited, would plausibly leave it set, and the documented order status " +
+    "vocabulary is only open|closed. So the refusal may catch an order you could legitimately still edit. " +
+    "The direction is deliberate — the invoice is the legal document, editing the order behind it does not " +
+    "change it, and the remedy for a wrong invoice is reai_credit_invoice — and reai_request will do it if " +
+    "you have decided to.",
+  risk: "irreversible",
+  apiPaths: [
+    ["GET", "/api/orders/{id}"],
+    ["PUT", "/api/orders/{id}"],
+    // Read only when the order is being MOVED to another customer, to say whose payment terms it now carries.
+    ["GET", "/api/customers/{id}"],
+  ],
+  inputSchema: {
+    id: z.number().int().positive().describe("Order id, as returned by reai_list_orders."),
+    orderLines: z
+      .array(orderLineReplacement)
+      .min(1)
+      .optional()
+      .describe(
+        "Replace the line items. Omit to keep the existing lines exactly as they are — they are read and " +
+          "sent back for you, which is what the underlying PUT requires.",
+      ),
+    customerId: z.number().int().positive().optional().describe("Move the order to a different customer."),
+    currencyCode: CURRENCY.optional(),
+    daysUntilDue: z.number().int().positive().optional().describe("Payment terms in days."),
+    issueDate: isoDate.optional().describe("Order date."),
+    comment: z.string().nullable().optional().describe("Comment visible to the customer. Pass null to clear it."),
+    internalComment: z.string().nullable().optional().describe("Internal note, not shown to the customer. Pass null to clear it."),
+    buyerReference: z
+      .string()
+      .max(255, "The API caps buyerReference at 255 characters.")
+      .nullable()
+      .optional()
+      .describe("The customer's own reference (deres ref). Pass null to clear it."),
+    externalReference: z
+      .string()
+      .max(100, "The API caps externalReference at 100 characters.")
+      .nullable()
+      .optional()
+      .describe("Your reference from an external system. Pass null to clear it."),
+    projectId: z
+      .number()
+      .int()
+      .nullable()
+      .optional()
+      .describe("Link the order to a project, or null to unlink it — `UpdateOrderReq.projectId` is nullable."),
+    invoiceEmail: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "Order-specific delivery address for the eventual invoice. MUST be restated if the order has one: " +
+          "the API accepts it on the way in but does not return it on the way out, so this tool cannot read " +
+          "it and cannot preserve it. Omitting it clears it.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const { tenantId, id, ...changes } = args;
+    const resolved = requireTenantId(tenantId, ctx);
+    const asked = Object.entries(changes).filter(([, v]) => v !== undefined);
+    if (asked.length === 0) {
+      return fail(
+        `No changes were given, so nothing was written. Passing nothing here would rewrite the order with ` +
+          `its current values, which is a pointless full replacement of a billing record.`,
+      );
+    }
+
+    const current = await ctx.client.request<OrderRes>({
+      method: "GET",
+      path: `/api/orders/${id}`,
+      tenantId: resolved,
+    });
+    // Not a truthiness check: `{}` and a response envelope are both truthy, and either would have become a
+    // valid base — the merge would then send the caller's fields alone, which is the destruction this tool
+    // exists to prevent. readableRecord requires the response to share the keys an order actually has.
+    const { record: order, problem } = readableRecord(current.data, undefined, ORDER_EXPECTED_KEYS);
+    if (!order) {
+      return fail(
+        `Order ${id} could not be read (${problem}), so nothing was written. A PUT here REPLACES the ` +
+          `order, and merging into something that is not an order would send your fields alone.`,
+      );
+    }
+
+    // bindsToTrue, NOT `=== true`. The backend is Jackson, whose default coercion binds the string "true"
+    // and the integer 1 to boolean true — the repo already has a recorded case where `{"sendEhf": "true"}`
+    // armed a send the policy scored as sending nothing. A tool READING the flag off a record to decide
+    // whether an edit could re-arm a transmission faces exactly the same ambiguity, and the cost of being
+    // wrong is irrecoverable in one direction and a refused call in the other.
+    if (bindsToTrue(order.sendEhf)) {
+      return fail(
+        `Order ${id} has sendEhf set, so this tool will not update it. Nothing was written.\n\n` +
+          `A PUT replaces the record, so the flag must either be sent again — which the write policy reads ` +
+          `as an external transmission, the same as arming the send in the first place — or left out, which ` +
+          `would silently disarm EHF at invoicing time without you asking. Both are decisions about whether ` +
+          `something leaves the tenant, and this tool does not make them.\n\n` +
+          `reai_request PUT /api/orders/${id} will do either, deliberately, under the gates that apply.`,
+      );
+    }
+    if (order.invoiceId !== null && order.invoiceId !== undefined) {
+      return fail(
+        `Order ${id} has already been invoiced (invoiceId ${order.invoiceId}${order.status ? `, status ${order.status}` : ""}), ` +
+          `so nothing was written. The invoice is the legal document and changing the order behind it does ` +
+          `not change the invoice — the remedy for a wrong invoice is a credit note, via ` +
+          `reai_credit_invoice.\n\n` +
+          `What the API itself does to an invoiced order was not established: none was available to ` +
+          `measure. So this refuses rather than finding out on your books. reai_request PUT ` +
+          `/api/orders/${id} will if you have decided to.`,
+      );
+    }
+
+    // The lines, renamed and stripped. Sending `id`, `vatTitle`, `vatRate` or `amounts` back is sending
+    // fields the request schema does not declare, three of which the API computes.
+    const existingLines = Array.isArray(order.lines) ? order.lines : undefined;
+    if (!changes.orderLines && (!existingLines || existingLines.length === 0)) {
+      return fail(
+        `Order ${id} came back with no readable lines, so nothing was written. \`orderLines\` is required ` +
+          `by the PUT, and inventing one would replace the order's contents. Pass \`orderLines\` ` +
+          `explicitly if you mean to set them.`,
+      );
+    }
+    // Elements, not just the array: `lines: [null]` threw a TypeError out of the handler and surfaced as an
+    // internal error rather than this tool's own refusal.
+    if (!changes.orderLines && (existingLines ?? []).some((line) => !line || typeof line !== "object")) {
+      return fail(
+        `Order ${id} has a line this tool cannot read, so nothing was written. \`orderLines\` is required by ` +
+          `the PUT and guessing at a line would replace the order's contents.`,
+      );
+    }
+    const mappedLines = (existingLines ?? []).map((line) =>
+      Object.fromEntries(
+        ORDER_LINE_REQUEST_FIELDS.filter((f) => line[f] !== undefined).map((f) => [f, line[f]]),
+      ),
+    );
+
+    // The PUT requires these and readableRecord only proves the response LOOKS like an order — it passes on
+    // any one recognised key. Sending undefined drops them via JSON.stringify and the API answers a bare 400
+    // ("Failed to read request", no fieldErrors, nothing naming the field — this repo records that as
+    // days-until-due-mandatory). Same precheck-and-name pattern as companyBankId and subAccountId.
+    const REQUIRED_FROM_RECORD = ["currencyCode", "customerId", "daysUntilDue", "issueDate"] as const;
+    const missingFromRecord = REQUIRED_FROM_RECORD.filter(
+      (f) => (changes as Record<string, unknown>)[f] === undefined && (order[f] === undefined || order[f] === null),
+    );
+    if (missingFromRecord.length > 0) {
+      return fail(
+        `Order ${id} came back without ${missingFromRecord.join(", ")}, which the PUT requires, so nothing ` +
+          `was written. Sending the replacement anyway would have produced a bare 400 naming no field. ` +
+          `Pass ${missingFromRecord.length === 1 ? "it" : "them"} explicitly, or read the order with ` +
+          `reai_get_order to see what it actually carries.`,
+      );
+    }
+
+    // Nulls dropped, and that is a no-op rather than a decision: every field here is nullable in
+    // UpdateOrderReq, and on a FULL REPLACEMENT an omitted nullable field and an explicit null land the same
+    // way. Worth saying, because the alternative reading — that omitting a null changes something — is
+    // exactly what a reader worries about here.
+    const carried = Object.fromEntries(
+      ORDER_CARRIED_FIELDS.filter((f) => order[f] !== undefined && order[f] !== null).map((f) => [f, order[f]]),
+    );
+
+    const body: Record<string, unknown> = {
+      // Required by the PUT, so they come from the record rather than being left out.
+      currencyCode: order.currencyCode,
+      customerId: order.customerId,
+      daysUntilDue: order.daysUntilDue,
+      issueDate: order.issueDate,
+      orderLines: mappedLines,
+      ...carried,
+      // The caller's changes last.
+      ...Object.fromEntries(asked),
+    };
+
+    const res = await ctx.client.request<OrderRes>({
+      method: "PUT",
+      path: `/api/orders/${id}`,
+      body,
+      tenantId: resolved,
+    });
+
+    const changedKeys = asked.map(([k]) => k);
+    // Only the fields carried that the caller did NOT also change — otherwise a comment-only edit read
+    // "Changed comment … and comment carried over", which is both wrong and confusing.
+    const carriedOnly = Object.keys(carried).filter((k) => !changedKeys.includes(k));
+    const notes = [
+      `Changed ${changedKeys.join(", ")} on order ${order.number ?? id}. ` +
+        `${changes.orderLines ? `${changes.orderLines.length} line(s) replaced` : `${mappedLines.length} existing line(s) read and sent back unchanged`}` +
+        `${carriedOnly.length > 0 ? `, and ${carriedOnly.join(", ")} carried over` : ""} — ` +
+        `because this API replaces rather than patches.`,
+    ];
+    // EVERY update, not only the ones that passed it. The claim "every successful update says so" was in
+    // the source comment and false: the word appeared only when the caller supplied the field, which also
+    // made the test asserting it pass vacuously.
+    notes.push(
+      changedKeys.includes("invoiceEmail")
+        ? `invoiceEmail was set to ${JSON.stringify((changes as Record<string, unknown>).invoiceEmail)}. It is ` +
+          `the one field this tool cannot verify: the API accepts it but never returns it, so the value above ` +
+          `is what was sent, not what is stored.`
+        : `NOTE: if this order had an order-specific \`invoiceEmail\`, it is now cleared. The API accepts that ` +
+          `field on an update but does not return it on a read, so this tool cannot tell whether the order ` +
+          `had one and cannot carry it. Pass \`invoiceEmail\` to set it back.`,
+    );
+
+    // Moving an order does NOT move the payment terms: daysUntilDue is required and non-nullable, so the
+    // replacement carries the number the order already had — which belonged to the previous customer.
+    // reai_create_order resolves it from the customer and says which source it used; this one cannot change
+    // it silently (that is a money decision the caller did not ask for), so it names the discrepancy.
+    if (changedKeys.includes("customerId") && changes.daysUntilDue === undefined) {
+      let theirTerms: number | undefined;
+      try {
+        const customer = await ctx.client.request<{ daysUntilDue?: number | null }>({
+          method: "GET",
+          path: `/api/customers/${changes.customerId}`,
+          tenantId: resolved,
+        });
+        theirTerms = customer.data?.daysUntilDue ?? undefined;
+      } catch {
+        // A failed read here must not undo a write that already succeeded.
+        theirTerms = undefined;
+      }
+      notes.push(
+        `The order moved to customer ${changes.customerId} but KEPT payment terms of ${body.daysUntilDue} ` +
+          `days, which came from the order as it was. ` +
+          (theirTerms === undefined
+            ? `The new customer's own terms could not be read.`
+            : theirTerms === body.daysUntilDue
+              ? `That happens to match the new customer's own terms.`
+              : `The new customer's own terms are ${theirTerms} days — pass daysUntilDue if you want those.`),
+      );
+    }
+
+    const after = res.data;
+    const notApplied = changedKeys.filter(
+      (k) => k !== "orderLines" && after?.[k] !== undefined && JSON.stringify(after[k]) !== JSON.stringify((changes as Record<string, unknown>)[k]),
+    );
+    if (notApplied.length > 0) {
+      notes.push(
+        `WARNING: ${notApplied
+          .map((k) => `${k}: sent ${JSON.stringify((changes as Record<string, unknown>)[k])}, stored ${JSON.stringify(after?.[k])}`)
+          .join("; ")}. Check the value is one the API accepts.`,
+      );
+    }
+    return ok(res.data, {
+      note: notes.join("\n\n"),
+      ...(res.data?.webUrl ? { link: res.data.webUrl } : { link: ctx.client.deepLink(`/orders/${id}`, resolved) }),
+    });
+  },
+});
+
 // --- Offers ----------------------------------------------------------------
 
 function describeTermsSource(source: "argument" | "customer" | "fallback"): string {
@@ -1743,6 +2108,7 @@ export const salesTools: ToolDef[] = [
   listOrders,
   getOrder,
   createOrder,
+  updateOrder,
   listOffers,
   createOffer,
   listInvoices,

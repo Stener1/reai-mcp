@@ -420,8 +420,12 @@ function classifyNormalizedPath(method: HttpMethod, normalized: string): Risk {
  * `{"sendEhf": "true"}` armed an external send that the policy scored as sending
  * nothing. Anything ambiguous counts as true, because the cost of being wrong is
  * an irrecoverable transmission in one direction and a refused call in the other.
+ *
+ * Exported because a curated tool that READS a flag off a record faces the same coercion: a tool checking
+ * `record.sendEhf === true` before deciding whether an edit could re-arm a send would be fooled by exactly
+ * the values this exists to catch. reai_update_order uses it for that.
  */
-function bindsToTrue(v: unknown): boolean {
+export function bindsToTrue(v: unknown): boolean {
   if (v === true) return true;
   if (typeof v === "number") return v !== 0;
   if (typeof v === "string") {
