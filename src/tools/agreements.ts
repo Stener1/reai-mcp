@@ -363,9 +363,14 @@ const createAgreement = defineTool({
     const terms = (args.terms ?? {}) as Record<string, unknown>;
     const termKeys = Object.keys(terms);
 
-    if (termKeys.length === 0) {
+    // Counting KEYS let `{ tenantName: null }` through — an all-null body, which is exactly the outcome the
+    // refusal below exists to prevent, defeated by one JSON token. `populatedCount` is not the test: it counts
+    // `false` as unset, so a lease whose only stated term is "no pets" would be refused, and that is a real term.
+    const stated = termKeys.filter((k) => terms[k] !== null && terms[k] !== undefined);
+    if (stated.length === 0) {
       return fail(
-        `No terms were given, so nothing was created. This API marks no field required, so it ` +
+        `${termKeys.length === 0 ? "No terms were given" : `Every term given is null (${termKeys.join(", ")})`}, ` +
+          `so nothing was created. This API marks no field required, so it ` +
           `would have answered 201 with an agreement in which every term is null — and GET ` +
           `/api/agreements/{id}/pdf renders that, producing a document that looks like a ` +
           `contract and states nothing.\n\n` +
@@ -419,13 +424,30 @@ const createAgreement = defineTool({
     const id = res.data?.agreementId;
 
     const notes = [
-      `Created a ${args.templateType} agreement${id === undefined ? "" : ` (agreementId ${id})`} ` +
-        `with ${termKeys.length} term(s) sent. It is an unsigned draft: nothing has been sent to ` +
-        `anyone, and reai_delete_agreement removes it while it stays a draft.`,
+      `Created a ${args.templateType} agreement${id === undefined ? "" : ` (agreementId ${id})`}: ` +
+        `${stated.length} term(s) sent` +
+        // The count an agent is most likely to read as "this is what the contract says", so it reports what came
+        // BACK as well as what went out. They differ whenever the template dropped something.
+        (Object.keys(stored).length > 0 ? `, ${populatedCount(stored)} carried by the record` : "") +
+        `. It is an unsigned draft: nothing has been sent to anyone, and reai_delete_agreement removes it ` +
+        `while it stays a draft.`,
     ];
 
-    const notApplied = termKeys.filter(
-      (k) => JSON.stringify(stored[k]) !== JSON.stringify(terms[k]),
+    // Without this, a response shaped differently than expected makes the two checks below vanish silently and
+    // the caller is told only that something was created — while the description promises the comparison. The
+    // same case in reai_get_agreement says so out loud rather than reporting nothing.
+    if (Object.keys(stored).length === 0) {
+      notes.push(
+        `Could not verify what was stored: the response carries no \`${subKey}\` sub-object, so the terms ` +
+          `could not be compared against what was sent. That is a change in the response shape rather than a ` +
+          `failure to create — read the body below, and reai_get_agreement ${id ?? ""} reads it back.`.trim(),
+      );
+    }
+
+    // Undeclared names are excluded here and reported once, below. Both notes would otherwise fire for the same
+    // field — a WARNING saying it came back undefined, and a Note saying the template never declared it.
+    const notApplied = stated.filter(
+      (k) => !undeclared.includes(k) && JSON.stringify(stored[k]) !== JSON.stringify(terms[k]),
     );
     if (Object.keys(stored).length > 0 && notApplied.length > 0) {
       notes.push(
@@ -444,7 +466,7 @@ const createAgreement = defineTool({
           `/api/agreements/${segment} lists the names it does accept.`,
       );
     }
-    if (Object.keys(stored).length > 0 && populatedCount(stored) < 3) {
+    if (Object.keys(stored).length > 0 && populatedCount(stored) <= 3) {
       notes.push(
         `The created agreement carries very few terms. GET /api/agreements/${id ?? "{id}"}/pdf ` +
           `will still render a document, so a near-empty contract does not announce itself.`,

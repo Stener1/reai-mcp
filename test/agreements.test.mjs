@@ -179,18 +179,42 @@ test("the enum check reads the spec rather than a copy of it", async () => {
   // If it were a hand-written list, a field the document constrains and the list forgot would
   // pass through to a bare 400 — which is the failure the check exists to remove.
   const { findOperation } = await import("../dist/reai/spec.js");
-  const fields = findOperation("PUT", "/api/agreements/rent-agreement/{id}")?.body?.fields ?? {};
-  const enums = Object.entries(fields).filter(([, v]) => typeof v === "string" && v.startsWith("enum("));
-  assert.ok(enums.length >= 6, `expected the lease's documented enums; found ${enums.length}`);
-  // Every one of them must be enforced, not just the two that were measured by hand.
-  for (const [name, declared] of enums) {
-    const { result } = await run(
-      "reai_update_agreement",
-      { id: 290, changes: { [name]: "ZZ-not-a-member" } },
-      () => lease(),
-    );
-    assert.equal(result.isError, true, `${name} (${declared}) must be checked`);
+  // ALL FIVE templates, not just the lease. test/spec-bounds.test.mjs justifies skipping the template PUTs
+  // in its bounds sweep on the grounds that the enums are exercised here "for both tools" — that claim was
+  // false while this only iterated the lease, leaving employmentType, salaryType, clientEntityType,
+  // pricingModel, billingFrequency and issuerRole unexercised on the update path.
+  const SEGMENTS = {
+    rent_agreement: "rent-agreement",
+    employee_contract: "employee-contract",
+    accounting_services: "accounting-services",
+    service_agreement: "service-agreement",
+    purchase_agreement: "purchase-agreement",
+  };
+  const SUBS = {
+    rent_agreement: "rentAgreement",
+    employee_contract: "employeeContract",
+    accounting_services: "accountingServices",
+    service_agreement: "serviceAgreement",
+    purchase_agreement: "purchaseAgreement",
+  };
+  let checked = 0;
+  for (const [templateType, segment] of Object.entries(SEGMENTS)) {
+    const fields = findOperation("PUT", `/api/agreements/${segment}/{id}`)?.body?.fields ?? {};
+    const enums = Object.entries(fields).filter(([, v]) => typeof v === "string" && v.startsWith("enum("));
+    for (const [name, declared] of enums) {
+      checked += 1;
+      const { calls, result } = await run(
+        "reai_update_agreement",
+        { id: 290, changes: { [name]: "ZZ-not-a-member" } },
+        // The record's OWN templateType picks the PUT path, so it has to match the template whose enum is
+        // under test — through the wrong path the field is not declared and nothing would be checked.
+        () => ({ agreementId: 290, templateType, [SUBS[templateType]]: { otherTerms: "ZZ" } }),
+      );
+      assert.equal(result.isError, true, `${templateType}.${name} (${declared}) must be checked`);
+      assert.deepEqual(calls.map((c) => c.method), ["GET"], `${templateType}.${name} wrote anyway`);
+    }
   }
+  assert.equal(checked, 14, `expected the 14 documented enums on the PUT side, checked ${checked}`);
   // ...and a legitimate member passes.
   const good = await run(
     "reai_update_agreement",
@@ -838,4 +862,55 @@ test("a real string member still passes, and null still clears a term", async ()
   );
   assert.notEqual(cleared.result.isError, true);
   assert.equal(cleared.calls.length, 1);
+});
+
+test("terms that are all null are refused — counting keys let an all-null contract through", async () => {
+  // The guard counted Object.keys, so `{ tenantName: null }` satisfied it and produced exactly the
+  // all-null contract its own 90-word refusal exists to prevent. One JSON token defeated it.
+  for (const terms of [{ tenantName: null }, { tenantName: null, monthlyRent: null, landlordName: undefined }]) {
+    const { calls, result, text } = await run(
+      "reai_create_agreement",
+      { templateType: "rent_agreement", terms },
+      () => created("rent_agreement", {}),
+    );
+    assert.equal(result.isError, true, JSON.stringify(terms));
+    assert.deepEqual(calls, [], "a refusal must not reach the API");
+    assert.match(text, /Every term given is null/);
+  }
+});
+
+test("a term stated as false is a real term, not an absent one", async () => {
+  // populatedCount treats false as unset, deliberately, so it is the wrong test for "did you give me
+  // anything" — a lease whose only stated term is "no pets" is stating something.
+  const { calls, result } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { petsAllowed: false } },
+    () => created("rent_agreement", { petsAllowed: false }),
+  );
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, 1);
+});
+
+test("a response with no template sub-object says the comparison could not be made", async () => {
+  // Otherwise both verification notes vanish and the caller is told only that something was created,
+  // while the description promises the terms are checked against what came back.
+  const { result, text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000 } },
+    () => ({ agreementId: 601, templateType: "rent_agreement", monthlyRent: null }),
+  );
+  assert.notEqual(result.isError, true, "the record was created; only the verification is missing");
+  assert.match(text, /Could not verify what was stored/);
+  assert.match(text, /rentAgreement/);
+});
+
+test("an undeclared term is reported once, not twice", async () => {
+  const { text } = await run(
+    "reai_create_agreement",
+    { templateType: "rent_agreement", terms: { monthlyRent: 12000, mnthlyRnt: 999 } },
+    () => created("rent_agreement", { monthlyRent: 12000 }),
+  );
+  assert.match(text, /not declared in/);
+  // It used to appear in the WARNING as "stored undefined" as well, with two overlapping explanations.
+  assert.doesNotMatch(text, /mnthlyRnt: sent/);
 });
