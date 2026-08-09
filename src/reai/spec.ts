@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import type { HttpMethod } from "./client.js";
 import { quirksFor, type Quirk } from "./quirks.js";
-import { classifyRequest } from "../policy.js";
+import { classifyRequest, classifyTransmission } from "../policy.js";
 
 export type SpecParam = {
   name: string;
@@ -144,6 +144,9 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // own comment describes.
       [...(phraseMethods ?? [])].some((m) => m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE"));
 
+  // Only when there is no write intent: a query holding both verbs is a write. See READ_INTENT_VERBS.
+  const readIntent = !wantMethod && !writeIntent && hasReadIntent(opts.query ?? "");
+
   const hits: SearchHit[] = [];
   for (const op of index.operations) {
     if (!opts.includeInternal && op.internal) continue;
@@ -267,6 +270,27 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
       // Boosting the write alone was not enough: "post a voucher" still returned
       // GET /api/vouchers, which simply carried a higher base score.
       if (score > 0 && !wantMethod && writeIntent && op.method === "GET") score *= 0.7;
+      // A GET that reaches OUTSIDE the tenant is demoted under read intent too, and this is not a detail.
+      // Demoting the writes for "vis mva-melding" let GET /vat-return/altinn-sync rise to first place — a
+      // read-shaped operation that actually transmits to Altinn, which is why TRANSMITTING_GETS exists and why
+      // policy.ts classifies it as external. "Vis" does not mean "file something with a tax authority", so the
+      // read penalty has to apply by TRANSMISSION and not only by method. Caught by an assertion of mine that
+      // was wrong about what the vat-return family contains, which is the only reason it was noticed.
+      if (
+        score > 0 &&
+        !wantMethod &&
+        readIntent &&
+        op.method === "GET" &&
+        classifyTransmission(op.method, op.path) === "external" &&
+        // ...unless the query NAMED it. The demotion is about unstated intent, not about hiding an operation
+        // from someone who asked for it — which the test for this already claimed, while asserting it with
+        // "altinn sync", a query that contains no read verb and so could never have exercised the branch.
+        // Without this, "hent altinn", "sok altinn" and "vis altinn" all cut the one operation they name to
+        // 2.38 and left it clinging to rank 1 above unrelated noise. Found by the independent review of #121.
+        !namesOperation(rawTerms, op.path)
+      ) {
+        score *= 0.25;
+      }
       if (score > 0 && !wantMethod && op.method !== "GET") {
         const risk = classifyRequest(op.method, op.path);
         if (writeIntent) {
@@ -276,6 +300,20 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
           // DELETE /api/assets/{id} above POST /api/assets.
           if (impliedMethods) score = impliedMethods.has(op.method) ? score + 2 : score * 0.7;
           else score += 0.5;
+        } else if (readIntent) {
+          // The user SAID they want to look at something. A write is not what they asked for, so the
+          // existing no-intent penalties are deepened rather than a new mechanism added: same shape, same
+          // multiplicative form that cannot be outrun by a high raw score.
+          //
+          // Why these values. POST /api/agreements/rent-agreement scored 27.1 against GET /api/agreements at
+          // 18.0, and 27.1 is already after the 0.7 no-intent penalty — so the raw was ~38.7 and any factor
+          // above 0.465 leaves the create winning. 0.4 clears it with margin; irreversible goes further
+          // because being handed a DELETE for "vis" is the worst version of this.
+          //
+          // Write-vs-write ordering is untouched, which is the property that makes this safe: every non-GET
+          // is scaled by the same factor, so a family with no read at all — /api/vat-returns is entirely
+          // POSTs, and the refund and rounding concepts have no read either — ranks exactly as it did.
+          score *= risk === "irreversible" ? 0.25 : 0.4;
         } else if (risk === "irreversible") {
           score *= 0.4;
         } else {
@@ -733,6 +771,13 @@ function tokenize(query: string): string[] {
  * whose main word was "departments".
  */
 const STOPWORDS = new Set([
+  // "se" is two letters and substring-matches "asset", so every "se <noun>" query carried
+  // GET /api/ledger/asset as noise at 4.0. It always ranked second; the read-intent penalty demoted the
+  // real answer past it and it took first place — "se oreavrunding", "se innsending" and "se utgaende" all
+  // returned the ASSET LEDGER. The penalty exposed it rather than caused it: a word that cannot identify an
+  // endpoint belongs here, which is this list's whole definition. Read intent still sees it, because
+  // intentTokens deliberately does not strip stopwords.
+  "se",
   "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "api", "get", "all",
   // Question and filler words.
   "how", "do", "does", "did", "what", "which", "who", "when", "where", "why",
@@ -874,6 +919,25 @@ function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
  * having none.
  */
 const WRITE_INTENT_VERBS = new Set([
+  // "make" is NOT here, and the reasoning is the point rather than the omission. Codex found on PR #121 that
+  // "how do I make a rent agreement" became a READ once question words carried intent -- `make` is a POST hint
+  // in METHOD_INTENT and absent from this table -- and moved off POST /api/agreements/rent-agreement onto the
+  // agreements collection. That is a regression read intent introduced, and BOTH available fixes were measured
+  // and both surfaced a write on a read question:
+  //
+  //   treat any METHOD_INTENT hint as write intent    "which invoices did we cancel" -> DELETE
+  //                                                    /api/invoices/{id}/manual-credit-note-applications
+  //   add "make" here                                 "which invoices did we make" and "how many invoices did
+  //                                                    we make" -> POST /api/invoices
+  //
+  // The first breaks a case this file already pins as held-out. The second is the same shape one word further
+  // on: `make` is as common in a past-tense question as in an imperative, which is exactly why `lag` is
+  // excluded from METHOD_INTENT a few lines below with the same argument.
+  //
+  // So the regression is accepted and named instead: "how do I make a rent agreement" returns GET
+  // /api/agreements. An unhelpful read for a create question is worse than nothing and better than a write
+  // ranked first for "which invoices did we make". Fixing it properly needs procedural phrasing ("how do I X")
+  // to be recognised as intent in its own right, which is a change of its own.
   "create", "register", "add", "delete", "remove", "update", "edit", "modify",
   "rename", "upload", "pay", "issue", "credit", "reverse", "settle", "file",
   // Safe as exact tokens: "postings" and "submission" tokenize to themselves, so
@@ -899,6 +963,97 @@ const WRITE_INTENT_VERBS = new Set([
 
 function hasWriteIntent(tokens: readonly string[]): boolean {
   return tokens.some((t) => WRITE_INTENT_VERBS.has(t));
+}
+
+/**
+ * Verbs that state an intent to READ, which the ranker had no notion of.
+ *
+ * The asymmetry was the defect. A write verb demotes reads — `writeIntent && GET` costs a factor of 0.7,
+ * and has since the method heuristic was built — but nothing did the reverse, so a query that says outright
+ * that it wants to look at something was scored exactly as if it had said nothing. Measured on `main`:
+ *
+ *     leieavtale       POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *     vis leieavtale   POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *
+ * Identical. `vis` is a VERB_TERM weighted 0.25, so it contributed a little text and nothing at all to the
+ * choice of method, and "show me the lease" answered with the operation that CREATES a rent agreement. An
+ * audit of 5325 read-phrased queries found 104 in the agreements family alone, plus 24 on the a-melding that
+ * the narrow verb list in PR #120 had missed.
+ *
+ * Deliberately NOT the mirror image of WRITE_INTENT_VERBS in one respect: read intent is only consulted when
+ * there is no write intent. A query holding both ("finn kunden og opprett faktura") is a write, because
+ * acting on a wrongly-inferred read merely shows the wrong list, while acting on a wrongly-inferred write
+ * changes the books.
+ *
+ * The question words earn their place separately: "hvor mange", "hva er" and "hvilke" are how the audit's
+ * corpus and the held-out set in ranking.test.mjs phrase a read, and none of them is a verb at all.
+ *
+ * They are also why this is matched against the UNFILTERED query rather than `rawTerms`. `tokenize` strips
+ * STOPWORDS, and eleven of the words below — `hvilke`, `hvilken`, `hvor`, `hva`, `hvem`, `hvorfor`, `get`,
+ * `which`, `what`, `who`, `how` — are stopwords, because carrying no signal about WHICH endpoint is wanted is
+ * exactly what that list is for. Matching on `rawTerms` therefore saw none of them: the first version of this
+ * feature fixed "vis leieavtale" and left "get contract" and "hvilke contract" untouched, and the sentence
+ * above claiming the question words earn their place was false when it was written. `hasWriteIntent` has no
+ * such exposure — no write verb is a stopword, checked rather than assumed.
+ */
+const READ_INTENT_VERBS: ReadonlySet<string> = new Set([
+  // Norwegian read imperatives.
+  "vis", "vise", "se", "list", "liste", "hent", "finn", "finne", "sok", "søk", "soke", "søke",
+  // Question words. Every one of these is a STOPWORD, which is why intent is matched against the unfiltered
+  // query rather than against rawTerms.
+  "hvilke", "hvilken", "hvor", "hva", "hvem", "hvorfor", "hvordan", "naar", "nar",
+  // `hvordan`, `naar`/`nar`, `when`, `where` and `why` were omitted from the first version, so "where are
+  // contracts", "when is contract" and "hvordan er leieavtalen" still ranked a contract-CREATION POST --
+  // the exact failure this feature exists to prevent. Codex, PR #121.
+  // English.
+  "show", "get", "find", "search", "display", "which", "what", "who", "how", "when", "where", "why",
+]);
+
+// DELIBERATELY NOT HERE: `status`, `rapport`, `oversikt`, `report`, `overview`, `summary`, `total`, `many`,
+// `read`, `fetch`, `view`. Each is a domain NOUN as well as a reading word, and treating a noun as an intent
+// signal damaged writes the user had asked for. Measured on the first version of this feature:
+//
+//     send inn rapport   GET /vat-return/altinn-sync  ->  POST .../sign-requests/{signRequestId}/send
+//     send status        PUT /api/leads/{id}/status              17.6 -> 10.0
+//     sett total         POST /invoice/setting/daysUntilDue       2.7 -> 1.7
+//
+// The first settles it: `send` is not in WRITE_INTENT_VERBS, so `rapport` alone made "send inn rapport" a
+// read, cut the external GET it used to return, and handed rank 1 to an operation that SENDS a signing
+// request. A word that is a noun half the time cannot carry intent. `oversikt` and `rapport` still reach the
+// a-melding collection, because the phrase rule below names them explicitly -- a statement about one phrase
+// rather than about every query containing the word. Found by the independent review of PR #121.
+
+/**
+ * Query tokens WITHOUT stopword removal, for intent detection only.
+ *
+ * Deliberately not reused for scoring: the stopwords are stripped there because they match substrings in
+ * unrelated paths, and that reasoning still holds. A word can carry no signal about which endpoint is wanted
+ * while carrying all the signal about whether the user wants to read or to write.
+ */
+function intentTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9æøå]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 1);
+}
+
+/**
+ * Did the query name this operation's own path?
+ *
+ * A literal path segment in the query is the strongest possible statement that the user meant this operation,
+ * and it is what separates "show me the VAT return" from "run the Altinn sync".
+ */
+function namesOperation(tokens: readonly string[], path: string): boolean {
+  const segments = path
+    .toLowerCase()
+    .split(/[^a-z0-9æøå]+/i)
+    .filter((seg) => seg.length > 2 && seg !== "api");
+  return segments.some((seg) => tokens.includes(seg));
+}
+
+function hasReadIntent(query: string): boolean {
+  return intentTokens(query).some((t) => READ_INTENT_VERBS.has(t));
 }
 
 function impliedMethodsFor(tokens: readonly string[]): Set<HttpMethod> | undefined {
@@ -1015,7 +1170,26 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   //
   // `lever`, `send`, `fullfor` and `submit` are deliberately absent: those state filing intent, and for them
   // the filing below is the right answer.
-  [/\b(vis|se|list|hent|apne|apn|open|show|get)\s+(a[-\s]?melding\w*)\b/g, "salary-payments"],
+  // The verb list here was too narrow when it was written in PR #120 and the audit that motivated
+  // READ_INTENT_VERBS found the gap: `finn`, `sok`, `oversikt`, `rapport` and the English `find`/`search`
+  // were missing, so those phrasings still reached the filing. Read intent alone does not rescue them,
+  // because this phrase is consumed and injects a term that only the nested POST matches — with no GET
+  // candidate to promote, penalising the write changes its score and not its rank. The rule has to name
+  // the collection itself. Kept deliberately in step with READ_INTENT_VERBS.
+  // The question words are here as well as the verbs, and one filler word is allowed between them and the
+  // noun: "hvilke amelding", "hva er ameldingen" and "list all amelding" are all reads, and the adjacency
+  // this rule originally required missed every one of them.
+  //
+  // Why this needs a rule at all, when READ_INTENT_VERBS already demotes writes: the phrase is CONSUMED and
+  // injects a term only the nested POST can match, so there is no GET candidate for the penalty to promote —
+  // it changes the score and not the rank. Offering both candidates from the filing rule instead was measured
+  // and rejected: "salary-payments" matches the collection at full strength, so the collection then beat the
+  // filing for every query including "lever amelding" and the bare noun, which is the property the filing
+  // rule exists to protect.
+  [
+    /\b(vis|vise|se|list|liste|hent|finn|finne|sok|søk|soke|søke|hvilke|hvilken|hva|hvem|apne|apn|open|show|get|find|search|display)\s+(?:(?:alle|siste|min|mine|denne|en|et|er|the|my|all|last|latest)\s+)?(a[-\s]?melding\w*)\b/g,
+    "salary-payments",
+  ],
   [/\ba[-\s]?melding(en|er)?\b/g, "salary-payments-complete"],
   [/\bmva[-\s]?melding(en|er)?\b/g, "vat-returns"],
   [/\bmva[-\s]?kode(r|ne)?\b/g, "vat-codes"],
@@ -1064,6 +1238,24 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   inventory: ["warehouse"],
   stock: ["warehouse"],
   contract: ["agreement"],
+  // `kontrakt`/`kontrakter` were added here and then WITHDRAWN, which makes four retractions from this table
+  // for one recurring reason. The gap is real: the English `contract`/`contracts` are present and the Norwegian
+  // was not, so "vis kontrakter" returned nothing at all, and adding it turned 38 empty queries into answers.
+  //
+  // The price was that EVERY operation under /api/agreements matches "agreement", so the word cannot choose
+  // between them and the ranking falls to text. That let it name the wrong write:
+  //
+  //     upload kontrakt    POST /api/attachments  ->  POST /api/agreements/{id}/sign-request
+  //     opprett kontrakt   (nothing)              ->  POST /api/agreements/{id}/sign-request
+  //
+  // The first is the one that settles it. `main` answered an upload with the attachment POST, correctly, and
+  // the synonym replaced that with an operation that SENDS a signing request to a counterparty. Storing a
+  // document and starting a signature round are not the same act. The second merely extends a pre-existing
+  // defect -- "opprett avtale" does the same on main -- but the first is a regression this table would have
+  // introduced. Found by Codex on PR #121.
+  //
+  // Recovering the read value needs the ranker to prefer a collection over a nested action for a bare resource
+  // noun, which is a change to scoring rather than another row here. Same conclusion as `fordring`.
   contracts: ["agreement"],
   signing: ["sign", "agreement"],
   vat: ["vat", "mva"],
@@ -1188,6 +1380,17 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   debitor: ["debtors", "debtor"],
   debitorer: ["debtors", "debtor"],
   leiekontrakt: ["rent-agreement", "agreement", "rent"],
+  // NOT widened to include "agreement", although that would fix a real problem. `husleie` decomposes to
+  // hus + leie and shares no token with "agreement", so GET /api/agreements is not in the result set at all
+  // and "vis husleie" ranks POST /api/agreements/rent-agreement — read intent can only choose between
+  // candidates that exist, and there is nothing there to promote. Adding "agreement" does fix those 18 read
+  // queries, and it was measured and reverted: the third token made `husleie` win every compound it appeared
+  // in, so "husleie mva" ranked the create operation above /api/vat-codes, "husleie bilag" above
+  // /api/vouchers, and 26 pairs in total lost the resource the other word names.
+  //
+  // That is the defect this table has now retracted three synonyms for — `kontonummer`, `fordring`, and this.
+  // A synonym broad enough to reach a family is broad enough to displace one. Its siblings need no help:
+  // `leieavtale` decomposes to leie + avtale, and `leiekontrakt` reaches the family through `kontrakt`.
   husleie: ["rent-agreement", "rent"],
   leieavtale: ["rent-agreement", "agreement", "rent"],
   feriepengegrunnlag: ["salary", "salary-payments", "holiday"],

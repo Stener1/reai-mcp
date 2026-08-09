@@ -458,3 +458,193 @@ test("the a-melding filing cannot be overtaken by the collection", () => {
     `the collection should not compete for a filing query: ${hits.join(", ")}`,
   );
 });
+
+/**
+ * READ intent, which the ranker had no notion of.
+ *
+ * The asymmetry was the defect. A write verb has demoted reads since the method heuristic was built —
+ * `writeIntent && GET` costs a factor of 0.7 — but nothing did the reverse, so a query that says outright
+ * that it wants to look at something scored exactly as if it had said nothing. Measured on `main`:
+ *
+ *     leieavtale       POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *     vis leieavtale   POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+ *
+ * Identical. "Show me the lease" answered with the operation that CREATES a rent agreement.
+ *
+ * Found by auditing 5325 read-phrased queries against the operations they reach, rather than by reading the
+ * code: 183 landed on a write where the family had a GET available. That is now 60, and every one of the
+ * remaining 60 is a concept with no read operation at all — refunds and rounding adjustments exist only as
+ * POSTs, the same category as /api/vat-returns.
+ */
+test("a query that states read intent does not rank a write first", () => {
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const query of [
+    "vis leieavtale",
+    "list contracts",
+    "hent leiekontrakt",
+    "finn arbeidskontrakt",
+    // The question words matter as much as the verbs, and they are the reason intent is matched against the
+    // UNFILTERED query: `hvilke`, `hva`, `hvem`, `hvor`, `get`, `which`, `what`, `who` and `how` are all
+    // STOPWORDS, so `tokenize` strips them. The first version of this feature checked `rawTerms` and
+    // therefore fixed "vis leieavtale" while leaving "get contract" and "hvilke contract" untouched.
+    "get contract",
+    "hvilke contract",
+    "hva er contracts",
+    "which agreements",
+    "what agreements do we have",
+    // The remaining question-word stopwords, added after Codex found them missing on PR #121: "where are
+    // contracts", "when is contract" and "hvordan er leieavtalen" all still ranked a contract-CREATION POST.
+    "where are contracts",
+    "when is contract",
+    "hvordan er leieavtalen",
+    "naar er leieavtalen",
+  ]) {
+    const hit = top(query);
+    assert.ok(hit, `"${query}" returned nothing`);
+    assert.equal(hit.method, "GET", `"${query}" states read intent but ranked ${hit.method} ${hit.path}`);
+  }
+});
+
+test("read intent does not disturb a query that asks to write", () => {
+  // The penalty is only consulted when there is NO write intent, and a query holding both verbs is a write:
+  // acting on a wrongly-inferred read shows the wrong list, while acting on a wrongly-inferred write changes
+  // the books.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const [query, expected] of [
+    ["opprett leieavtale", "POST /api/agreements/rent-agreement"],
+    ["opprett arbeidskontrakt", "POST /api/agreements/employee-contract"],
+    ["opprett faktura", "POST /api/invoices"],
+    ["opprett kunde", "POST /api/customers"],
+    ["slett kunde", "DELETE /api/customers/{id}"],
+    ["opprett bilag", "POST /api/vouchers"],
+  ]) {
+    assert.equal(`${top(query).method} ${top(query).path}`, expected, `"${query}"`);
+  }
+  // A family with no read must rank as before: every non-GET is scaled by the same factor, so the penalty
+  // cannot reorder writes among themselves. /api/vat-returns is entirely POSTs, which the neutral-query test
+  // above already records as the only truthful answer for this family.
+  assert.equal(top("mva-melding").path, "/api/vat-returns");
+
+  // AND the read penalty applies by TRANSMISSION, not only by method. Demoting the writes here first let
+  // GET /vat-return/altinn-sync win — a read-shaped operation that actually transmits to Altinn, which is
+  // exactly why policy.ts keeps TRANSMITTING_GETS and classifies it as external. "Vis" does not mean "file
+  // something with a tax authority". This assertion is the one that caught it, by being wrong about what the
+  // vat-return family contains.
+  //
+  // This assertion is written to FAIL on main, which the first version was not: `top(...).path ===
+  // "/api/vat-returns"` already held there, and the companion check used "altinn sync" — a query with no read
+  // verb, so `readIntent` is false and it is byte-identical to main. The independent review of PR #121 pointed
+  // out that the pair therefore guarded nothing. What can only be true with the fix is that the transmitting
+  // operation is ABSENT from the results a read query gets, and it was rank 1 on main.
+  for (const query of ["vis mva-melding", "hva er mva-meldingen"]) {
+    const paths = searchOperations({ query, limit: 5 }).map((h) => h.path);
+    assert.equal(paths[0], "/api/vat-returns", `"${query}" -> ${paths.join(", ")}`);
+    // Demoted, not removed — and the assertion says so rather than overreaching. It sits at rank 5 here; on
+    // main it was rank 1, so this still fails there, which is the property that was missing before.
+    const rank = paths.indexOf("/vat-return/altinn-sync");
+    assert.ok(rank === -1 || rank >= 3, `"${query}" ranked the Altinn transmission ${rank + 1}: ${paths.join(", ")}`);
+  }
+  // But naming it keeps it at FULL strength: the demotion is about unstated intent, not about hiding an
+  // operation from someone who asked for it. "hent altinn" is the case that matters — it has a read verb, so
+  // the branch really is exercised, and without the guard it was cut from 9.5 to 2.38.
+  for (const query of ["hent altinn", "sok altinn", "vis altinn"]) {
+    const hit = searchOperations({ query, limit: 1 })[0];
+    assert.equal(hit.path, "/vat-return/altinn-sync", `"${query}" -> ${hit.path}`);
+    assert.ok(hit.score > 5, `"${query}" scored ${hit.score}; naming the operation must not demote it`);
+  }
+  assert.equal(top("altinn sync").path, "/vat-return/altinn-sync");
+});
+
+test("a phrase rule must not swallow a meaningful word as filler", () => {
+  // The a-melding read rule allows filler between the verb and the noun, and `(?:\\w+\\s+)?` — any word —
+  // destroyed meaning, because the whole match is replaced. "hent bilag amelding", "finn kunde amelding" and
+  // "vis mva amelding" all scored 40.4, identically, because the middle word was consumed. Four correct
+  // answers lost, and the identical score across four different nouns is what proves the cause.
+  //
+  // Found by the independent review of PR #121, which also made the sharper point: this is the same
+  // displacement the husleie test below guards against in TERM_SYNONYMS, broken in PHRASE_SYNONYMS in the very
+  // same commit. The filler is now a closed set of actual filler words.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  for (const [query, wanted] of [
+    ["hent bilag amelding", "/api/vouchers"],
+    ["vis bilag amelding", "/api/vouchers"],
+    ["finn kunde amelding", "/api/ledger/customer"],
+    ["vis mva amelding", "/api/vat-codes"],
+    ["vis faktura amelding", "/api/invoices"],
+  ]) {
+    assert.equal(top(query).path, wanted, `"${query}" -> ${top(query).path}`);
+  }
+  // Real filler still works, so the rule was narrowed rather than disabled.
+  for (const query of ["vis alle amelding", "hent siste amelding", "vis amelding"]) {
+    assert.equal(top(query).path, "/api/salary-payments", `"${query}" -> ${top(query).path}`);
+  }
+});
+
+test("a two-letter read verb does not become substring noise", () => {
+  // `se` substring-matches "asset", so every "se <noun>" query carried GET /api/ledger/asset at 4.0. It always
+  // ranked second; the read penalty demoted the real answer past it and it took first — "se oreavrunding",
+  // "se innsending" and "se utgaende" all returned the ASSET LEDGER. The penalty exposed the noise rather than
+  // causing it, and the fix is that a word which cannot identify an endpoint is a stopword.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.match(top("se oreavrunding").path, /rounding-adjustment/);
+  assert.match(top("se innsending").path, /tax-returns/);
+  assert.match(top("se utgaende").path, /ending-balance|manual-reconciliations/);
+  // And it still reads as intent, because intentTokens does not strip stopwords.
+  assert.equal(top("se faktura").method, "GET");
+  assert.equal(top("se kunde").method, "GET");
+});
+
+test("the Norwegian word for a contract stays unmapped, and why", () => {
+  // `kontrakt`/`kontrakter` were added and WITHDRAWN — the fourth retraction from TERM_SYNONYMS for the same
+  // recurring reason. The gap is real: the English `contract`/`contracts` are mapped and the Norwegian was not,
+  // so "vis kontrakter" returns nothing, and adding it turned 38 empty queries into answers.
+  //
+  // The price was that every operation under /api/agreements matches "agreement", so the word cannot choose
+  // between them and the ranking falls to text — which named the wrong write:
+  //
+  //     upload kontrakt    POST /api/attachments  ->  POST /api/agreements/{id}/sign-request
+  //
+  // `main` answered an upload with the attachment POST, correctly, and the synonym replaced it with an
+  // operation that SENDS a signing request. Storing a document and starting a signature round are different
+  // acts. Found by Codex on PR #121. Asserted so the temptation is recorded with its price.
+  assert.equal(searchOperations({ query: "upload kontrakt", limit: 1 })[0].path, "/api/attachments");
+  assert.equal(searchOperations({ query: "vis kontrakter", limit: 1 }).length, 0);
+  // The English spelling still works, and the Norwegian compounds reach the family by decomposition.
+  assert.equal(searchOperations({ query: "list contracts", limit: 1 })[0].path, "/api/agreements");
+  assert.equal(searchOperations({ query: "vis leiekontrakt", limit: 1 })[0].path, "/api/agreements");
+});
+
+test("a METHOD_INTENT hint alone is not write intent", () => {
+  // Codex proposed, on PR #121, that any verb implying a writing method should count as write intent. Tried and
+  // REVERTED: the two tables are deliberately asymmetric. METHOD_INTENT holds words that say which method
+  // WITHOUT licensing a write, so "which invoices did we cancel" — already a held-out case in this file —
+  // ranked DELETE /api/invoices/{id}/manual-credit-note-applications first. One unambiguous verb was added
+  // instead.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(top("which invoices did we cancel").method, "GET");
+  // And adding `make` to WRITE_INTENT_VERBS instead was also measured and rejected: it is as common in a
+  // past-tense question as in an imperative, so "which invoices did we make" ranked POST /api/invoices — the
+  // same shape one word further on. Both are asserted, so neither fix can be reintroduced without failing here.
+  assert.equal(top("which invoices did we make").method, "GET");
+  assert.equal(top("how many invoices did we make").method, "GET");
+  // The accepted cost, asserted rather than described: a create question gets the collection. Unhelpful, and
+  // better than a write ranked first for a question about the past.
+  assert.equal(top("how do I make a rent agreement").path, "/api/agreements");
+});
+
+test("widening a synonym to reach a family would displace the families it names", () => {
+  // `husleie` decomposes to hus + leie and shares no token with "agreement", so GET /api/agreements is not a
+  // candidate for "vis husleie" and read intent has nothing to promote — that query still ranks the create.
+  // Adding "agreement" to the synonym fixes those 18 reads and was measured and REVERTED: the third token
+  // made `husleie` win every compound it appeared in, and 26 pairs lost the resource the other word names.
+  // This is the defect this table has now retracted three synonyms for. Asserted so the temptation is
+  // recorded with its price, and so a future widening fails here.
+  const top = (q) => searchOperations({ query: q, limit: 1 })[0];
+  assert.equal(`${top("husleie mva").method} ${top("husleie mva").path}`, "GET /api/vat-codes");
+  assert.equal(`${top("husleie bilag").method} ${top("husleie bilag").path}`, "GET /api/vouchers");
+  assert.equal(top("husleie postering").path, "/api/postings");
+  // The sibling spellings do reach the family, through compound decomposition rather than a wider synonym.
+  for (const query of ["vis leieavtale", "vis leiekontrakt"]) {
+    assert.equal(top(query).path, "/api/agreements", `"${query}" -> ${top(query).path}`);
+  }
+});

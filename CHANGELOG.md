@@ -9,62 +9,107 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
-- **A hyphenated term could never match as a token, so the phrase mappings written to be high-confidence
-  were scoring as a fraction of themselves.** `FIELD_TOKENS` splits on the hyphen, so every hyphenated
-  replacement fell through to a partial-credit branch — and unevenly, because whether it got 0.6 or 0.2
-  depended on whether its first segment happened to be four characters long: `opening-balances` scored 0.6 by
-  luck, `vat-returns` and `vat-codes` scored 0.2 because "vat" is three letters. `PHRASE_WEIGHT = 2.6` was
-  therefore largely illusory for exactly the mappings that exist to override a looser word.
-  - **Found by Codex on PR #118, from the other end.** "periodisering av mva-melding" returned ten voucher
-    operations and *nothing* from the vat-return family, although `mva-melding` names it outright. Codex
-    proposed weakening the `periodisering → voucher` synonym; that reading was wrong and the measurement under
-    it was right — the synonym was not too strong, the named resource could not score. `POST /api/vat-returns`
-    scored **1.45** for "mva-melding" while `GET /api/vouchers` scored **21** for "periodisering". I addressed
-    Codex's other two comments on that PR and missed this one, so it was still live.
-  - A hyphenated term now scores 1 when every part is a token and **0 otherwise** — all or nothing, which
-    stops a term leaking onto a sibling resource. And it is **opt-in, restricted to `PHRASE_SYNONYMS`
-    replacements**. Codex's review of PR #120 caught the first version applying it to every hyphenated term:
-    38 `TERM_SYNONYMS` keys have one, they were tuned under the old scoring, and three moved onto the wrong
-    side-effecting operation — `krediter faktura` went from `POST /api/invoices/{id}/credit`, which creates the
-    credit note asked for, to `.../manual-credit-note-applications`, which applies an existing one, and
-    `opprett diett` went from creating an expense claim to approving one. A phrase replacement is a deliberate
-    statement about the user's words; an ordinary synonym is a hint, and a hint must not name an exact compound.
-  - **"bank accounts" did not reach `/api/company-banks` at all.** `bankkonto` got there through compound
-    decomposition, but the spaced English form tokenised into `bank` + `account` and `account` pulled the
-    CHART OF ACCOUNTS. Each of the three bank resources now claims its own spelling as a consumed phrase, in
-    **rule order** rather than by lookahead — Codex found that a bare `bank accounts?` rule swallowed the noun
-    in "bank account transactions" and "transactions between bank accounts", both of which had correctly
-    reached `/api/bank-transactions` before. `/api/manual-reconciliations` is claimed first for the same
-    reason: the negative lookbehind that guarded it recognised exactly one whitespace character while the
-    phrase it guarded accepted any run, so "manual  bank reconciliation" with two spaces or a tab slipped past
-    while the single-space form routed correctly.
-  - **Reading an a-melding's feedback is no longer answered with the operation that files it.** The filing
-    phrase fired unconditionally, so "a-melding raw feedback" — a read — ranked
-    `POST /api/salary-payments/{id}/complete`, which files payroll with Skatteetaten. Found by Codex. A read
-    verb now keeps it a read as well, which fixes a **pre-existing** defect the same sweep exposed: "vis
-    amelding", "list amelding" and "hent amelding" already returned that POST on `main`, and no test had
-    caught it because no sweep had ever crossed a read verb with this phrase.
-  - **The a-melding filing itself was inverted by the fix and is now protected by construction.** Once
-    `salary-payments` scored 1 against the whole family, `GET /api/salary-payments` overtook the filing. The
-    replacement now names the nested operation, `salary-payments-complete`, and because the collection has no
-    "complete" segment an all-or-nothing term scores it **0** — it cannot compete at all. That replaced an
-    earlier attempt which added a second bare word and was far too strong: a 15,533-query sweep showed 33
-    queries like "amelding lonn" and "apne amelding" moving from a read to the filing. Worth recording that on
-    the **old** scoring the filing led the collection by **0.28 points** (26.12 to 25.84) — a property
-    deciding which document reaches a tax authority was resting on a quarter of a point.
-  - Measured over **16,232 queries**: every path segment spelled hyphenated, spaced and joined; every tag;
-    tags, domain nouns and **every synonym-table key** crossed with 22 read and write verbs. **112 rank-1
-    changes, no query lost its answer, 26 writes demoted from rank 1 and 19 promoted** — one of which is the
-    intended `POST /api/vat-returns` (the only shape that family has) and two of which are "lever a-melding",
-    where filing is what the verb asks for. Crossing the synonym keys was the dimension every earlier sweep in
-    this repository had missed, and it is where all four of Codex's findings lived.
-  - **Not fixed, and stated rather than implied.** "periodisering skattemelding", the second query Codex
-    reported on #118, still returns `/api/vouchers`: `skattemelding` is an ordinary synonym, and promoting it
-    to a phrase entry would boost a family containing `POST /api/tax-returns/{year}/submit`, which transmits
-    to Skatteetaten — that needs its own measurement. Sixteen neutral noun pairs ("a-melding lønn", "a-melding
-    saldo", "a-melding avgift", "a-melding betaling", both spellings and both orders) do now rank the filing
-    where `main` returned the salary-payments collection; the a-melding *is* the payroll report, so it is a
-    defensible reading of those words, but it is a write promoted for a query that states no intent.
+- **The ranker knew what a write verb meant and had no notion of a read verb.** A write verb has demoted
+  reads since the method heuristic was built — `writeIntent && GET` costs a factor of 0.7 — but nothing did
+  the reverse, so a query that says outright it wants to look at something was scored exactly as if it had
+  said nothing:
+
+  ```
+  leieavtale       POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+  vis leieavtale   POST /api/agreements/rent-agreement 27.1   GET /api/agreements 18.0
+  ```
+
+  Identical. "Show me the lease" answered with the operation that **creates a rent agreement**.
+  - Found by auditing **5325 read-phrased queries** against the operations they reach, rather than by reading
+    the code: **183** landed on a write where the family had a GET available. That is now **60**, and every
+    one of the remaining 60 is a concept with no read operation at all — refunds and rounding adjustments
+    exist only as POSTs, the same category as `/api/vat-returns`.
+  - Read intent is consulted **only when there is no write intent**. A query holding both verbs is a write,
+    because acting on a wrongly-inferred read shows the wrong list while acting on a wrongly-inferred write
+    changes the books. Under read intent a non-GET is scaled by 0.4, or 0.25 if `classifyRequest` calls it
+    irreversible — the same multiplicative shape as the existing penalties, deepened rather than replaced.
+    Write-vs-write ordering is untouched, which is what makes it safe: a family with no read at all ranks
+    exactly as before.
+  - **Matched against the unfiltered query, not `rawTerms`.** Eleven of the read words — `hvilke`, `hvilken`,
+    `hvor`, `hva`, `hvem`, `hvorfor`, `get`, `which`, `what`, `who`, `how` — are STOPWORDS, because carrying
+    no signal about *which* endpoint is wanted is exactly what that list is for. The first version checked
+    `rawTerms` and so fixed "vis leieavtale" while leaving "get contract" and "hvilke contract" untouched, and
+    the comment claiming the question words earned their place was false when it was written. `hasWriteIntent`
+    has no such exposure — no write verb is a stopword, checked rather than assumed.
+  - **The penalty had to apply by TRANSMISSION, not only by method.** Demoting the writes for "vis
+    mva-melding" let `GET /vat-return/altinn-sync` rise to first place — a read-shaped operation that actually
+    transmits to Altinn, which is why `policy.ts` keeps `TRANSMITTING_GETS` and classifies it as external.
+    "Vis" does not mean "file something with a tax authority". An externally-transmitting GET is now demoted
+    under read intent too, so that query returns `POST /api/vat-returns`, which the ranking tests already
+    record as the only truthful answer for a family that has no read endpoint. Naming the operation outright
+    still finds it. This surfaced only because an assertion of mine was wrong about what that family contains.
+  - **`kontrakt`/`kontrakter` were missing from the vocabulary** while the English `contract`/`contracts` were
+    present, so "vis kontrakter" returned **nothing at all**. Fixed; 38 queries that previously returned
+    nothing now return something.
+  - **`husleie` was deliberately NOT widened**, and the temptation is recorded with its price. It decomposes
+    to hus + leie and shares no token with "agreement", so `GET /api/agreements` is not a candidate for "vis
+    husleie" and read intent has nothing to promote. Adding "agreement" fixes those 18 reads — and was
+    measured and reverted, because the third token made `husleie` win every compound it appeared in: "husleie
+    mva" ranked the create above `/api/vat-codes`, "husleie bilag" above `/api/vouchers`, 26 pairs in total.
+    That is the defect this table has now retracted three synonyms for, after `kontonummer` and `fordring`.
+  - **The read words are deliberately not the mirror of every reading word.** `status`, `rapport`, `oversikt`,
+    `report`, `overview`, `summary`, `total`, `many`, `read`, `fetch` and `view` are each a domain NOUN as well,
+    and treating a noun as an intent signal damaged writes the user had asked for: "send inn rapport" moved from
+    `GET /vat-return/altinn-sync` to `POST .../sign-requests/{signRequestId}/send`, because `send` is not in
+    `WRITE_INTENT_VERBS` and `rapport` alone made the query a read — handing rank 1 to an operation that sends a
+    signing request. "send status" cut `PUT /api/leads/{id}/status` from 17.6 to 10.0.
+  - **A phrase rule must not swallow a meaningful word as filler.** The a-melding read rule allows filler
+    between the verb and the noun, and `(?:\w+\s+)?` — any word — destroyed meaning, because the whole match
+    is replaced: "hent bilag amelding", "finn kunde amelding" and "vis mva amelding" all scored **40.4**,
+    identically, because `bilag`, `kunde` and `mva` were each consumed. Four correct answers lost, in the same
+    commit that added a test guarding the identical property for `TERM_SYNONYMS`. The filler is now a closed set.
+  - **`se` is now a stopword**, which is the root of a defect the penalty exposed rather than caused. Two
+    letters, and it substring-matches "asset", so every "se <noun>" query carried `GET /api/ledger/asset` at
+    4.0. It always ranked second; demoting the real answer let it take first, so "se oreavrunding", "se
+    innsending" and "se utgaende" all returned the ASSET LEDGER. A word that cannot identify an endpoint
+    belongs in that list by its own definition. Read intent still sees it, because `intentTokens` does not
+    strip stopwords.
+  - **The transmission demotion must not hide an operation the user named.** Without a guard, "hent altinn",
+    "sok altinn" and "vis altinn" cut the one operation they name from 9.5 to 2.38. A literal path segment in
+    the query is the strongest statement that this operation is meant.
+  - Measured over **22,725 queries** — every path segment spelled three ways, every tag, and every
+    synonym-table key crossed with 21 write and 20 read verbs:
+    - **248 rank-1 changes**; **122 writes demoted from rank 1 and 12 promoted**. Ten of the twelve are
+      `kontrakt`/`kontrakter` with an explicit write verb, eight of which returned nothing before; the other two
+      are internal `se <tag>-ctrl` strings where `main` returned the asset-ledger noise.
+    - **38 queries that returned nothing now return something** (the `kontrakt` vocabulary).
+    - **51 queries that returned something now return nothing.** Every one is "se <word matching no
+      operation>", and every one previously returned `GET /api/ledger/asset` — the substring noise itself. Junk
+      replaced by an honest empty result.
+    - The earlier draft of this entry claimed "no query lost its answer". That was true and **uninformative**:
+      there is no score floor, so a multiplicative penalty can never empty a result set. The figures above
+      replace it — writes demoted, answers gained, answers lost, counted separately. Pointed out by the
+      independent review, along with every defect in the four bullets above.
+  - **`kontrakt`/`kontrakter` were added and then WITHDRAWN**, the fourth retraction from this table for one
+    recurring reason. The gap is real — the English `contract`/`contracts` are mapped, the Norwegian was not, so
+    "vis kontrakter" returns nothing — but every operation under `/api/agreements` matches "agreement", so the
+    word cannot choose between them and the ranking falls to text. That named the wrong write:
+    `upload kontrakt` moved from `POST /api/attachments`, which is correct on `main`, to
+    `POST /api/agreements/{id}/sign-request`. Storing a document and starting a signature round are different
+    acts. Found by Codex; the 38 gained answers went with it.
+  - **`when`, `where`, `why`, `hvordan` and `naar` were missing from the read words**, so "where are contracts",
+    "when is contract" and "hvordan er leieavtalen" still ranked a contract-CREATION POST — the exact failure
+    this feature exists to prevent. Codex again.
+  - **A `METHOD_INTENT` hint alone is not write intent, and neither is `make`.** Read intent regressed "how do I
+    make a rent agreement" from `POST /api/agreements/rent-agreement` to the agreements collection, because
+    `make` is a POST hint and not a write verb. Both available fixes were measured and both surfaced a write on
+    a read question: treating any hint as write intent put `DELETE` first for "which invoices did we cancel" — a
+    case this repository already pins as held-out — and adding `make` put `POST /api/invoices` first for "which
+    invoices did we make". The regression is accepted and named instead. An unhelpful read for a create question
+    is better than a write ranked first for a question about the past, and both rejected fixes are now asserted
+    so neither can return quietly.
+  - **Found and not fixed, stated plainly.** "opprett avtale" reaches `POST /api/agreements/{id}/sign-request`,
+    which *sends* a signing request, and `get employee contract` reaches the employee ledger rather than the
+    agreements collection. Both are pre-existing or a partial win: `main` answered "get employee contract" with
+    a POST that CREATES an employment contract, so the read is less wrong and still not right. There is no
+    generic create for an agreement, only five typed ones, and a risk-aware write boost was tried and did not
+    change the outcome because the operation wins on text score. It is gated in practice: `classifyRequest` calls it irreversible,
+    so a deployment in the default `reversible` mode refuses it.
 
 ### Added
 
