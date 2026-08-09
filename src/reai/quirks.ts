@@ -245,8 +245,18 @@ export const QUIRKS: readonly Quirk[] = [
     kind: "validation",
     statuses: [400],
     note:
-      "startDate and endDate are required, even where the schema does not mark them so. Omitting " +
-      'them returns 400 "startDate is required".',
+      'startDate and endDate are required, and omitting them returns 400 "startDate is required". ' +
+      "Measured 2026-08-09 on eleven operations, all of which require it: /api/vouchers, /api/postings, " +
+      "the five /api/ledger collections (general, customer, supplier, asset, employee) and the four " +
+      "/api/ledger/{customer,supplier,asset,employee}/{id} lookups — so a SINGLE-RESOURCE path is not " +
+      "automatically exempt, and a ledger lookup for one customer needs the range just as the list does. " +
+      "The schema also marks both required on all eleven; an earlier version of this note said the schema " +
+      "does NOT mark them, which was false. The range is validated EARLY, so a request missing it tells " +
+      "you nothing about whether its other parameters would have been accepted. " +
+      "Two operations this quirk matches genuinely do NOT take a date range, both measured answering 200 " +
+      "without one: GET /api/vouchers/{id} and GET /api/postings/groups. " +
+      "GET /api/postings/groups/{postingGroupId} declares no date parameters either, but could not be " +
+      "measured — neither test tenant has a posting group, so it answers 404.",
   },
   {
     id: "timesheets-need-project-module",
@@ -256,10 +266,15 @@ export const QUIRKS: readonly Quirk[] = [
     statuses: [400, 403],
     note:
       "Unreachable on a tenant without the Project module, in a way no schema can express: " +
-      "projectId is a REQUIRED query parameter, and supplying it returns 400 " +
-      '"projectId cannot be used when the Project module is disabled". Required and rejected at ' +
-      "the same time, so no request succeeds. On that exact message, stop — the module is off and " +
-      "no combination of parameters helps. Say so instead of retrying.",
+      "projectId is a REQUIRED query parameter, and a request that supplies it AND a full date range " +
+      'returns 400 "projectId cannot be used when the Project module is disabled". Required and ' +
+      "rejected at the same time, so no request succeeds. On that exact message, stop — the module is " +
+      "off and no combination of parameters helps. Say so instead of retrying. " +
+      "Validation is ordered projectId, then startDate, then endDate, then the module check (measured " +
+      "2026-08-09), so a partial request answers about the parameter it is missing and says nothing " +
+      "about the module: bare gives \"projectId is required\", projectId alone gives \"startDate is " +
+      'required", and projectId+startDate gives "endDate is required". Do not read those as the module ' +
+      "being available.",
   },
   {
     id: "empty-state-is-404",

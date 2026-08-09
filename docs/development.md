@@ -73,6 +73,9 @@ REAI_WRITE_TEST_TENANTS=1234 REAI_USER_API_TOKEN=... \
 REAI_WRITE_TEST_TENANTS=2783 REAI_USER_API_TOKEN=... \
   node scripts/audit-storage.mjs --tenant 2783
 
+# Are the QUIRKS still true? Read-only, so this one is safe against any tenant.
+REAI_USER_API_TOKEN=... node scripts/audit-quirks.mjs --tenant 2634
+
 # How many storage claims exist, and how many are probed?
 npm run audit:census
 ```
@@ -184,6 +187,102 @@ internal directory rather than Brønnøysundregistrene — and that one asks the
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.
 
+### `audit-quirks.mjs`: the 122 claims nobody was checking
+
+The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 122 of
+them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, the two
+audits named **2 of them** — `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both
+defects that motivated those audits were in this channel: the `+47` phone claim (PR #115) and the four
+places calling the agreement enums undocumented (PR #123).
+
+Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
+95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
+`audit:census` exists to print rather than assert. The checkable figures: **122** total, **2** named before,
+**8** added here, **113** still unnamed — nine *distinct* quirks now have a live case, because
+`tenant-header-ignored-single-tenant` is in both sets. An earlier version said 114, which made 2 + 8 + 114 =
+124 out of 122.
+
+This covers the **8 that a GET can answer**, and the report prints `of 122` so a pass is not read as
+coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
+is no write guard and no `REAI_WRITE_TEST_TENANTS`.
+
+**How that is enforced, after a first version claimed something false.** The original text said the property
+was asserted "against `classifyRequest` rather than by grepping for method names". It was the reverse:
+`classifyRequest("GET", …)` returns `read` for every path by an early return, so the assertion could not
+fail, and the only live checks were greps — which review defeated in one line by keeping `method: "GET"` and
+adding `...EXTRA` after it, making the audit issue real POSTs to `/api/vouchers` and `/api/opening-balances`
+with every test green. Now the request helper builds its `init` object, **checks it at runtime** and throws
+on any non-GET, so a source edit fails before the socket opens; the test additionally requires the literal
+method and forbids a top-level spread, and uses `classifyRequest` for what it can honestly show — that
+these paths are `irreversible` under a write verb, which is why the runtime guard is there at all.
+
+**Probe the request the note describes, not a shorter one.** This is the lesson worth carrying to the next
+audit, because it produced a false DRIFT against a correct quirk while this script was being written.
+`timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
+disabled"`. Sending `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
+**ordered**, so an under-specified request trips the first validator and never reaches the layer the claim
+is about. The probe now sends the full valid request and a test pins that it does. Generalised: a probe
+that sends less than a valid request measures a different claim than the one it reports on.
+
+**Probe every path the quirk is SERVED for.** The same failure by another route, and this file had it
+twice. A quirk carries a `paths` list and `quirksFor()` serves it for every entry, so verifying
+`date-range-required` on `/api/vouchers` alone left it asserted for `/api/postings` and the nine
+`/api/ledger/*` endpoints on no evidence, and `module-gating` was checked on two of its five. Each case now
+declares `probes`, and the test fails unless they cover every path the quirk declares — so adding a path to
+a quirk in `src/reai/quirks.ts` breaks the build until the audit probes it. Coverage handles both shapes
+`paths` uses: `/api/ledger` is a **prefix** (not an endpoint — it 404s "No static resource"), and
+`/api/annual-accounts/{year}` is **templated**, so only a concrete year can be fetched. Padding `probes`
+with an unrelated path fails too, and a `check()` that ignores `this.probes` fails, so the declared
+coverage is what is actually requested.
+
+Each case names its quirk id, a `marker` phrase from that quirk's `note`, and a `check`. The marker is the
+same binding `storage-drift` uses and has the same narrow job — stop a probe outliving the sentence it
+verifies — with the same limitation: `includes` is blind to direction, so **the live run is the only
+authority on whether a claim is true.** The guard adds one thing that file cannot: every case must contain
+a **drift branch**, because a case that can only return OK or INCONCLUSIVE is decoration. Comments are
+stripped before checking, since a commented-out `"drift"` defeated exactly that kind of assertion when
+PR #116 was reviewed. Every way of defeating these guards that has been thought of was applied, and each fails the build with the
+file byte-identical afterwards. The list rather than a headline count, because a count here has been wrong
+twice: marker absent from the note · marker split into a 13-character fragment · nonexistent quirk id · drift
+branch deleted · drift branch left in a whole-line comment · drift branch left in a **trailing** comment ·
+`sameKeys(got, got)` · a catch-all `/[\s\S]*/` · `sameKeys` rewritten as a one-directional subset check ·
+HTTP method turned into a parameter with a `"GET"` default · `...EXTRA` spread over the method ·
+`init.method = "POST"` **after** the check · a decoy `globalThis.fetch` wrapper · reassigning
+`globalThis.fetch` afterwards · importing `node:http` · the shallow timesheets probe · a dropped declared
+path · `probes` padded with an unrelated path · a `check()` ignoring `this.probes` (either of its two loops) ·
+a `samples` prefix absent from the quirk's paths · a `samples` prefix with no probe beneath it · a path added
+to the quirk itself · a note that stops naming an exception · a `conditional:` reason too short · one long but
+vague · a 9th case opened as `  { quirk:` on one line.
+
+An unexpected INCONCLUSIVE exits **3**, as the storage audit does. Some claims are unanswerable by
+construction rather than by accident — `tenant-header-ignored-single-tenant` needs a token reaching exactly
+one tenant and this repository's reaches four; `module-gating` and `timesheets-need-project-module` need a
+module to be OFF — and a gate that fails forever is a gate everyone learns to ignore. So a case may declare
+`conditional:` with the missing precondition, and only cases carrying it affect the exit status.
+
+**There is no cap on how many may.** An earlier version of this paragraph said "at most one case may use the
+hatch; both are asserted" — no such assertion existed, and **five of the eight** cases legitimately declare
+one, because several of these claims are *about* a module being off. Capping it made the audit exit 3 on any
+tenant whose modules sit the other way. What is enforced instead: the reason must be twenty characters and
+name its precondition (checked against the reason, not the surrounding case body, which contains "cannot" in
+nearly every case); a case may not be conditional in *every* branch, so it must still be able to verify
+something somewhere; and a case that returns `"conditional"` without declaring one is downgraded to
+inconclusive by the runner, so the exemption cannot be reached by a branch that merely failed to get an
+answer.
+
+Currently **7 unchanged, 0 drifted, 1 conditional** against tenant 2634.
+
+**Coverage is stated as a census, not a pass mark**, because these eight quirks are served on **56
+operations** — `match: "descendants"` expands them well past their path lists, and `module-gating` alone
+reaches 34. Of those: 16 probed, 16 sampled through a declared family representative, 3 excepted as
+operations where the claim does not hold (named in the note, since an agent describing them still receives
+the quirk), and 21 non-GET and therefore unreachable by a read-only audit. The test fails if any served GET
+is none of those, so adding a path to a quirk breaks the build until it is accounted for.
+
+The 114 unprobed quirks are mostly claims about what a write stores or refuses, which needs the test tenant,
+and that is the next slice.
+
+
 ## What did a ranking change do to every other query?
 
 ```bash
@@ -228,6 +327,7 @@ them, because `rankOneChanged` printed a count and no query:
 The #122 case is why there is a **risky new answers** category at all: that inversion is write-to-write, which
 `writesPromoted` deliberately excludes, so the defect appeared only inside an unnamed count of 346. A rank-1
 target that is irreversible or transmitting is now named whatever the previous method was.
+
 
 ### What it does not cover, stated rather than discovered later
 

@@ -9,6 +9,134 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
+  The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and
+  `reai_api_notes`, and between them those audits named **2 of the 122** —
+  `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both defects that motivated them
+  were in this channel: the `+47` phone claim (#115) and the four places calling the agreement enums
+  undocumented (#123). Nine *distinct* quirks now have a live case, so **113** remain unnamed — an earlier
+  version of this entry said 114, making 2 + 8 + 114 = 124 out of 122.
+  - **A first version of this entry said "86 assert measured API behaviour, 84 verified by nothing", and
+    that precision was fake.** It is a keyword sweep over prose, and re-deriving it with a different word
+    list gives 95/93. Same lesson `storage-drift` already recorded, which is why `audit:census` prints its
+    figure instead of asserting it. The exact numbers are 122 total, 2 named before, 8 now, 114 unnamed.
+  - Covers the **8 a GET can answer**, and prints `of 122` so a pass is not mistaken for coverage. Everything
+    is a read, which is what makes it safe against tenant 2634's real books — no write guard, no
+    `REAI_WRITE_TEST_TENANTS`.
+  - **The read-only guarantee was claimed before it was enforced, and that was the most serious thing in this
+    PR.** The first version said the property was asserted "through `classifyRequest` rather than by grepping
+    method names". The opposite was true: `classifyRequest("GET", …)` returns `read` for every path by an
+    early return in `policy.ts`, so the assertion could not fail, and the real checks were greps. Review
+    defeated them in one line — keep `method: "GET"`, add `...EXTRA` after it — and the audit issued genuine
+    POSTs to `/api/vouchers` and `/api/opening-balances` with all nine guard tests green. Now the helper
+    builds its `init`, **checks it at runtime** and throws on any non-GET before the socket opens; the test
+    also requires a literal method, forbids a top-level spread, and uses `classifyRequest` only for what it
+    can honestly show — that these paths are `irreversible` under a write verb. Verified by re-running the
+    exploit: the test fails and the audit refuses to send.
+  - **Coverage is a census, not a pass mark.** `match: "descendants"` means these 8 quirks are served on **56
+    operations** (`module-gating` alone reaches 34), and a second version of the coverage test compared
+    `probes` against the 3-entry `paths` list and called that complete — so `date-range-required` was still
+    asserted, unprobed, on `GET /api/vouchers/{id}` and `/api/postings/groups`, where it is **false**. The
+    guard now asks `quirkMatches` the same question the server asks: 16 probed, 16 sampled via a declared
+    family representative, 3 excepted where the claim does not hold, 21 non-GET and unreachable by a read-only
+    audit. An exception must be named in the note, since an agent describing that operation still receives the
+    quirk.
+  - **Result: 7 unchanged, 0 drifted, 1 conditional.** Every quoted string in those seven was verified
+    verbatim against the live API, including both details `empty-state-is-404` quotes and all three lead
+    wrappers `leads-paginated-object` enumerates.
+  - **Two quirks were corrected because the audit's premise turned out to be wrong about them** — the first
+    real output of building it. `date-range-required` told agents the dates are required "even where the
+    schema does not mark them so"; the schema marks both required on all eleven collections and
+    `test/spec.test.mjs` already asserted it for `/api/vouchers`. It also over-reached onto three operations
+    that answer 200 with no date range. `timesheets-need-project-module` said "supplying it returns" the
+    module error, which only happens once a full date range is supplied too. Both notes now say what was
+    measured, and the date-range case checks the **schema half against the pinned spec**, so that clause
+    cannot rot the way it did.
+  - **My first correction of that note was itself wrong**, and a second review caught it live. It said the
+    claim holds on "the COLLECTION endpoints" and not on "the single-resource" ones — but
+    `/api/ledger/customer/1` and its asset, employee and supplier siblings all return 400 `"startDate is
+    required"`. Being single-resource is not what exempts an operation, and an agent following that sentence
+    would have called a customer ledger bare expecting the 200 it was promised. The note now enumerates the
+    **eleven operations measured to require the range** (including four `/{id}` lookups) and the **two measured
+    not to**. The third exception, `/api/postings/groups/{postingGroupId}`, was listed as measured when it had
+    never been called — neither test tenant has a posting group, so it 404s — and the note says so.
+  - Five more defects review found in the probes themselves, each fixed: `detailOf` turned an empty body into
+    the string `"{}"`, which made `module-gating`'s empty-body-403 branch — the exception its own note
+    documents — **dead code**; `module-gating` and `empty-state-is-404` reported DRIFT on a 500 or a
+    permission 403, converting an outage or a documented tenant state into "the quirk is wrong";
+    `person-role-matches-shape` read only `detail`, so a `fieldErrors` entry naming `linkedinSlug` would have
+    passed; the timesheets probe read error text without first requiring the documented 400; and
+    `/api/annual-accounts/2025` was pinned to a year tenant 2634 will plausibly file, which would have
+    silently cost the case a probe (now 1997, which cannot be filed).
+  - **The `detailOf` fix then over-corrected, turning a false DRIFT into a false OK** — caught by a second
+    review. `!detail` means "no `detail`/`message`/`title` key", not "empty body", so a genuine refusal like
+    `{"error":"Insufficient permission for user"}` was laundered into *"the module is off, as the note
+    documents"*. For a drift audit a false OK is the worse direction. The test is now on the body being empty,
+    which is what the note actually claims; a 403 whose detail exists but does not name a module is still
+    DRIFT, deliberately.
+  - **Exit contract, corrected twice.** An unexpected INCONCLUSIVE exits 3. `conditional:` excuses only a
+    declared precondition — a first version excused *every* inconclusive outcome from a case carrying the
+    field, including a 500 from `/api/me`, and its "reason must name a precondition" check matched against the
+    whole case body rather than the reason, so 24 letters of `a` passed. And the cap of one conditional made
+    the audit exit 3 on any tenant with the Project, Leads or Warehouse module in the opposite state; several
+    of these claims are *about* a module being off. The control is now quality, not scarcity: a case may not be
+    conditional in every branch, so it must still verify something somewhere, and the runner downgrades an
+    undeclared `"conditional"` to inconclusive. **Five of the eight cases now declare one**, and the docs no
+    longer claim a cap that was deliberately removed — a first version asserted both the removal and the cap,
+    in the same entry.
+  - **A false DRIFT was nearly shipped against a correct quirk, and the fix is a general rule.**
+    `timesheets-need-project-module` predicts 400 `"projectId cannot be used when the Project module is
+    disabled"`. `GET /api/timesheets?projectId=1` returns 400 `"startDate is required"` — validation is
+    **ordered**, so an under-specified request trips the first validator and never reaches the layer the claim
+    describes. The quirk was right; the probe was shallow. It now sends the full request and a test pins that.
+  - **A second fragment bug, found in my own work after the first review round and fixed structurally.** A
+    quirk carries a `paths` list and `quirksFor()` serves it for every entry, so checking
+    `date-range-required` on `/api/vouchers` alone left it asserted for `/api/postings` and the nine
+    `/api/ledger/*` endpoints on no evidence, and `module-gating` was verified on two of its five paths.
+    Cases now declare `probes` and a test fails unless they cover every path the quirk declares, so adding a
+    path to a quirk breaks the build until it is probed. Both `paths` shapes are handled: `/api/ledger` is a
+    **prefix** (not an endpoint — it 404s `"No static resource"`, which I first misread as a dead path in the
+    quirk), and `/api/annual-accounts/{year}` is **templated**. Measured on the way: the claim holds on all
+    five `/api/ledger/*` endpoints and on `/api/postings`. Coverage is now **15 endpoints**, not 8.
+  - Guards, **verified by defeating them.** The list lives in `docs/development.md` rather than as a headline
+    count, because the count has been wrong twice. A second review added nine more, every one of which now
+    fails the build: `init.method = "POST"` **after** the runtime check (it was check-then-use; the object is
+    now frozen); a decoy `globalThis.fetch` wrapper, and a later reassignment; `import http from "node:http"`,
+    which reached the network while the `fetch(` count still read 1 — so the guard moved onto the channel and
+    imports are now an allowlist; a `samples` prefix absent from the quirk's paths, and one with no probe
+    beneath it; `probes` padded with an unrelated path, restoring the direction the census had dropped;
+    `sameKeys` rewritten as a one-directional subset check, invisible to a name-only assertion, so the helper is
+    now *evaluated* against an extra-key case; and an exception surviving a note that names only its parent
+    collection. Earlier mutations, mine and Codex's:
+    Mine: a marker absent from the note, a nonexistent quirk id, a removed drift branch, a drift branch left
+    only in a whole-line comment, a parameterised HTTP method, the shallow timesheets probe, an exact key
+    comparison downgraded to `includes`, a short `conditional:` reason, a dropped declared path, `probes`
+    padded with an unrelated path, and a `check()` that ignores `this.probes` — including the case where one
+    of *two* such loops is hardcoded, which the presence check missed. Review's: the `...EXTRA` method
+    override, a drift branch left in a **trailing** comment (my stripper only dropped whole-line ones), a 9th
+    case opened as `  { quirk:` on one line so the extractor absorbed it and both the count floor and the
+    conditional cap fell to whitespace, `sameKeys(got, got)`, a catch-all `/[\s\S]*/` regex, a long-but-vague
+    conditional reason, a marker split into a 13-character fragment, and an exception for a path the note
+    never mentions. Each fails the build; every file byte-identical afterwards.
+  - **What these guards still cannot do, since two rounds of prose here overclaimed it.** `canDrift` is a text
+    search: it sees a drift branch, not whether anything reaches one, and review neutered two cases with the
+    branch intact. The specific tautologies that produce that are now rejected, but reachability is not
+    decidable here. And the marker binding is `includes`, blind to direction — a note can be rewritten to
+    assert the OPPOSITE while keeping its marker, and the live run does not read `note` at all, only the
+    audit's own paraphrase. So nothing in this repository is an authority on a note's meaning. The one place
+    that is genuinely checked end-to-end is the date-range **schema** claim, which is compared against the
+    pinned spec; that is the pattern worth copying, not the marker.
+  - Shape claims compare the **whole wrapper**: `keys.includes("items")` passes on a wrapper that has grown
+    three paging fields, and these claims are specifically about which fields are present.
+  - An unexpected INCONCLUSIVE exits **3**, matching `audit-storage.mjs`. One case is unanswerable by
+    construction — `tenant-header-ignored-single-tenant` needs a single-tenant token and ours reaches four — so
+    a case may declare `conditional:` with the missing precondition and be excluded from the exit status. At
+    most one may, and the reason must name what is missing; both asserted, since it is the field that
+    suppresses a failure.
+  - **What this does not touch: 114 quirks.** Mostly claims about what a write stores or refuses, which needs
+    the test tenant. The marker binding has `storage-drift`'s limitation too — `includes` is blind to
+    direction, so the live run remains the only authority on whether a claim is true.
+
 - **`npm run sweep:discovery` — the harness three reviews had to be, because mine kept under-covering.**
   Committed with its query generation exported and tested rather than rebuilt by hand for a fourth time.
   - The argument is a record. Three PRs in a row added a synonym or a phrase rule, swept it, reported the sweep,
