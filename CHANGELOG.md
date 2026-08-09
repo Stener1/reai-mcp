@@ -46,6 +46,29 @@ All notable changes to `reai-mcp`. Format loosely follows
   - Five new ways to defeat the guards, each verified to fail the build: a vague `unmeasured` reason, an
     `unmeasured` path the quirk is not served on, `unmeasured` swallowing a whole case, a 17th case opened on
     one line, and the supplier-invoice spec check widened to a catch-all.
+  - **Codex found thirteen defects in these eight cases, all accepted, and one was a P1 that would have cried
+    wolf on most tenants.** `archived-records-need-an-explicit-filter-to-see` compared list SIZES —
+    `n(plain) >= n(archived)` — so 100 active customers and 2 archived would have reported DRIFT against a
+    correctly-behaving API. The claim is that an archived record is ABSENT from the plain list, which is about
+    which rows, not how many, so it now compares identities.
+  - The rest, each a fragment or a false-DRIFT risk: accepting 200 and rejecting 500 does not establish the cap
+    is 200 (probes 201 now, and asserts the field-error message quotes the limit); the empty-`fieldErrors`
+    contrast was computed and used only to decorate a log line, leaving the sentence the corrected note rests
+    on unaudited; the saved-lead rows were reduced to a count, so a saved row with a null id would have passed
+    while the workflow guidance was broken; the lead-detail case checked that the nested keys EXIST but never
+    that they are null, and took the first row of the default page rather than an untouched one; a non-403
+    failure on `/api/leads` fell through to the "no rows" conditional and would have excused the case during an
+    outage; every non-200 for a valid expense status was reported as DRIFT, including 401s and 5xx; the two
+    reconciliation 404s were compared only to each other, so both messages changing would still have read OK;
+    the supplier-invoice check was a bare `non-reversed` substring, which passes on "returns reversed and
+    non-reversed"; the array-query case sent its probe to whichever company bank came first, though that
+    endpoint is the bank-SYNCED view; and it asserted `explode=false` while checking neither `style` nor
+    `explode`, because the compact spec index drops them — it now reads the pinned OpenAPI document, with
+    `node:fs` added to the import allowlist since it cannot reach the network.
+  - **One was a regression from this PR's own work.** Broadening the "a conditional case must have an OK branch"
+    pattern to accept a ternary's else-arm made it read RAW source, so commenting out a case's only
+    `return ["ok", …]` left the literal in a comment and the guard passed — the exact failure this file strips
+    comments for elsewhere. It reads stripped source now.
 
 - **`node scripts/audit-quirks.mjs` — the 122 quirks were the biggest agent-facing channel with no live check.**
   The two existing audits cover `src/tools/*.ts`. Quirks reach agents through `reai_describe_endpoint` and

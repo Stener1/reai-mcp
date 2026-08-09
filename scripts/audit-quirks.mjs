@@ -95,6 +95,10 @@
 
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
+// node:fs reads the pinned OpenAPI document, whose `style`/`explode` the compact spec index drops. It is on
+// the import allowlist because it cannot reach the network, which is the only thing that allowlist exists to
+// prevent — see the fetch wrapper below.
+import { readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const at = (flag) => {
@@ -600,26 +604,47 @@ const CASES = [
       if (capped.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
       if (capped.status !== 200) return ["inconclusive", `pageSize=200 answered ${capped.status}`];
 
-      const over = await get("/api/leads?pageSize=500");
-      if (over.status !== 400) return ["drift", `pageSize=500 answered ${over.status}, so 200 is no longer the cap`];
+      // 201, not 500. Rejecting 500 is consistent with a cap anywhere from 200 to 499, so it cannot show the
+      // cap IS 200 — and the note tells agents 200 exactly.
+      const over = await get("/api/leads?pageSize=201");
+      if (over.status !== 400) return ["drift", `pageSize=201 was accepted, so 200 is no longer the cap`];
       // The corrected half. The note used to say this 400 "names no field"; it names it in fieldErrors, and
       // an agent told otherwise never looks there. So the probe reads exactly that.
-      const named = (over.body?.fieldErrors ?? []).some((e) => e.field === "pageSize");
+      const named = (over.body?.fieldErrors ?? []).find((e) => e.field === "pageSize");
       if (!named) {
         return [
           "drift",
           `the over-cap 400 no longer names pageSize in fieldErrors: ${JSON.stringify(over.body?.fieldErrors)}`,
         ];
       }
+      // The message too, because the note quotes the limit. A field error saying "must be less than or equal
+      // to 1000" names the field and would have passed while the quoted guidance went stale.
+      if (!/less than or equal to 200/i.test(String(named.message ?? ""))) {
+        return [
+          "drift",
+          `the pageSize field error now reads "${named.message}", so the documented limit of 200 is stale`,
+        ];
+      }
       // And the contrast the note draws, because "read fieldErrors" is only useful advice if it is sometimes
       // empty — which is what /api/leads/person-role-matches does, and what its own quirk claims.
       const bare = await get("/api/leads/person-role-matches");
-      const contrast = Array.isArray(bare.body?.fieldErrors) && bare.body.fieldErrors.length === 0;
+      // Asserted, not decorated. A first version computed this and only used it to add a parenthetical to the
+      // log, so the sentence the note now rests on ("populated here and empty there") was unaudited.
+      if (bare.status !== 400) {
+        return ["inconclusive", `/api/leads/person-role-matches answered ${bare.status}, so the contrast is unreadable`];
+      }
+      if (!Array.isArray(bare.body?.fieldErrors) || bare.body.fieldErrors.length !== 0) {
+        return [
+          "drift",
+          `the note contrasts these two, but person-role-matches now reports ` +
+            `fieldErrors=${JSON.stringify(bare.body?.fieldErrors)} rather than an empty array`,
+        ];
+      }
 
       return [
         "ok",
-        `cap 200 ok, 500 -> 400 naming pageSize in fieldErrors` +
-          `${contrast ? " (and empty on person-role-matches, as the note contrasts)" : ""}`,
+        `cap 200 accepted, 201 -> 400 with fieldErrors "${named.message}"; empty fieldErrors on ` +
+          `person-role-matches, as the note contrasts`,
       ];
     },
   },
@@ -649,9 +674,29 @@ const CASES = [
         return ["conditional", "no unsaved rows on this tenant, so the null-id claim has nothing to read"];
       }
       const withId = rows.filter((r) => r.id !== null);
-      return withId.length === 0
-        ? ["ok", `leadFilter all/saved/unsaved = ${accepted.all}/${accepted.saved}/${accepted.unsaved} rows; all ${rows.length} unsaved rows have id null`]
-        : ["drift", `${withId.length} of ${rows.length} UNSAVED rows carry an id, e.g. ${withId[0].id}`];
+      if (withId.length > 0) {
+        return ["drift", `${withId.length} of ${rows.length} UNSAVED rows carry an id, e.g. ${withId[0].id}`];
+      }
+      // The other half of the claim — "Saved leads DO have an id, and it is the key to the whole workflow".
+      // A first version reduced the saved response to a count and threw the rows away, so a saved row with a
+      // null id would have passed while the workflow guidance was broken.
+      const savedRows = (await get("/api/leads?leadFilter=saved&pageSize=10")).body?.items ?? [];
+      const savedWithout = savedRows.filter((r) => r.id === null);
+      if (savedWithout.length > 0) {
+        return [
+          "drift",
+          `${savedWithout.length} of ${savedRows.length} SAVED rows have id null, so the id is no longer the ` +
+            `handle the note says it is`,
+        ];
+      }
+      const savedNote = savedRows.length
+        ? `all ${savedRows.length} saved rows carry an id`
+        : "no saved rows here, so that half is unread";
+      return [
+        "ok",
+        `leadFilter all/saved/unsaved = ${accepted.all}/${accepted.saved}/${accepted.unsaved}; all ${rows.length} ` +
+          `unsaved rows have id null; ${savedNote}`,
+      ];
     },
   },
   {
@@ -661,10 +706,15 @@ const CASES = [
     probes: ["/api/leads/org/{orgNumber}", "/api/leads/null"],
     conditional: "needs the Leads module ENABLED; where it is off there is no row to look one up from",
     async check() {
-      const list = await get("/api/leads?pageSize=1");
+      const list = await get("/api/leads?leadFilter=unsaved&pageSize=5");
       if (list.status === 403) return ["conditional", "403 — the Leads module is off on this tenant"];
-      const row = (list.body?.items ?? [])[0];
-      if (!row) return ["conditional", "no lead rows on this tenant, so there is nothing to compare"];
+      // A non-403 failure must NOT fall through to the "no rows" conditional: an empty `items` from a 500 or
+      // a 429 would otherwise excuse the case and let the run exit 0 without checking the quirk.
+      if (list.status !== 200) return ["inconclusive", `/api/leads answered ${list.status}`];
+      // Specifically an UNTOUCHED row, because the all-null assertion below is only meaningful for one. The
+      // first version took the first row of the default page and would have read a saved lead's values.
+      const row = (list.body?.items ?? []).find((r) => r.id === null);
+      if (!row) return ["conditional", "no untouched lead rows on this tenant, so there is nothing to compare"];
 
       // The ROW half: flattened.
       const flat = ["id", "status"].filter((k) => k in row);
@@ -683,8 +733,19 @@ const CASES = [
         return ["drift", `the detail response has no \`lead\` object: ${Object.keys(detail.body ?? {}).slice(0, 8).join(", ")}`];
       }
       const leadKeys = Object.keys(detail.body.lead);
-      for (const k of ["id", "status", "notes", "convertedCustomerId"]) {
+      const documented = ["id", "status", "notes", "email", "phone", "followUpAt", "convertedCustomerId", "convertedAt"];
+      for (const k of documented) {
         if (!leadKeys.includes(k)) return ["drift", `lead.${k} is gone; lead has ${leadKeys.join(", ")}`];
+      }
+      // "An untouched company still returns the `lead` object, with every field null, rather than omitting
+      // it." Checking only that the keys EXIST left that sentence unaudited — the values are the claim.
+      const populated = documented.filter((k) => detail.body.lead[k] !== null);
+      if (populated.length > 0) {
+        return [
+          "drift",
+          `this company has no lead state, but lead.${populated.join(", lead.")} came back non-null, so ` +
+            `"every field null" no longer holds`,
+        ];
       }
       if (!Array.isArray(detail.body.contactEvents)) {
         return ["drift", `contactEvents is ${JSON.stringify(detail.body.contactEvents)}, not an array`];
@@ -715,24 +776,33 @@ const CASES = [
         for (const [label, r] of [["plain", plain], ["archived=true", archived], ["includeArchived=true", include]]) {
           if (r.status !== 200) return ["inconclusive", `${path} ${label} answered ${r.status}`];
         }
-        const n = (r) => (Array.isArray(r.body) ? r.body.length : (r.body?.items ?? []).length);
+        const rows = (r) => (Array.isArray(r.body) ? r.body : (r.body?.items ?? []));
+        const ids = (r) => new Set(rows(r).map((x) => x.id));
+        const n = (r) => rows(r).length;
         if (n(archived) === 0) {
           seen.push(`${path}: nothing archived here`);
           continue;
         }
         observed += 1;
-        // The whole point: the wrong parameter is silently empty rather than an error, which is why
-        // "the customer is gone" gets believed.
+        // The wrong parameter is silently empty rather than an error, which is why "the customer is gone"
+        // gets believed.
         if (n(include) !== 0) {
           return ["drift", `${path}?includeArchived=true now returns ${n(include)} rows, so it IS a filter after all`];
         }
-        if (n(plain) >= n(archived)) {
+        // IDENTITIES, not sizes. `n(plain) >= n(archived)` was the comparison, and it reports DRIFT on any
+        // tenant with more active records than archived ones — 100 active and 2 archived would have failed a
+        // correctly-behaving API. The claim is that an archived record is ABSENT from the plain list, which is
+        // a statement about which rows, not how many.
+        const plainIds = ids(plain);
+        const leaked = [...ids(archived)].filter((id) => plainIds.has(id));
+        if (leaked.length > 0) {
           return [
             "drift",
-            `${path} plain returns ${n(plain)} and archived=true ${n(archived)} — the plain list no longer hides them`,
+            `${path}: archived record(s) ${leaked.slice(0, 3).join(", ")} also appear in the plain list, so it ` +
+              `no longer hides them`,
           ];
         }
-        seen.push(`${path}: plain ${n(plain)}, archived=true ${n(archived)}, includeArchived=true ${n(include)}`);
+        seen.push(`${path}: plain ${n(plain)}, archived=true ${n(archived)} (none of them in the plain list), includeArchived=true ${n(include)}`);
       }
       return observed === 0
         ? ["conditional", `no archived records on this tenant: ${seen.join("; ")}`]
@@ -754,7 +824,14 @@ const CASES = [
       // The documented values must be accepted...
       for (const v of ["open", "for_approval", "approved"]) {
         const r = await get(`/api/expenses?status=${v}`);
-        if (r.status !== 200) return ["drift", `status=${v} answered ${r.status}, but the note lists it as valid`];
+        if (r.status === 200) continue;
+        // DRIFT only for a REJECTION of the value. A 401, 429 or 500 says nothing about whether the value is
+        // still valid, and reporting "correct the quirk" for an outage is how a drift audit loses its
+        // credibility.
+        if (r.status === 400) {
+          return ["drift", `status=${v} was rejected with 400 "${detailOf(r).slice(0, 70)}", but the note lists it`];
+        }
+        return ["inconclusive", `status=${v} answered ${r.status}, which says nothing about the value's validity`];
       }
       // ...and the one the note says cannot be used must still be refused, by name.
       const reversed = await get("/api/expenses?status=reversed");
@@ -805,6 +882,13 @@ const CASES = [
       if (fake.status !== 404) {
         return ["drift", `a nonexistent id answered ${fake.status}, so the two cases ARE distinguishable now`];
       }
+      // Equality alone only shows the two responses still match. If BOTH messages changed, the quoted text an
+      // agent reads would be stale and this would still report OK — so the documented detail is asserted too.
+      for (const [label, r] of [[`${synced[0].providerType} account`, real], ["a nonexistent id", fake]]) {
+        if (!/bankkonto ikke funnet/i.test(detailOf(r))) {
+          return ["drift", `${label} now 404s with "${detailOf(r).slice(0, 70)}", not the documented message`];
+        }
+      }
       return detailOf(real) === detailOf(fake)
         ? ["ok", `bare -> 400 "month is required"; ${synced[0].providerType} id and a nonexistent id both 404 "${detailOf(real)}"`]
         : ["drift", `the two 404s now differ: "${detailOf(real)}" vs "${detailOf(fake)}" — they are distinguishable`];
@@ -823,7 +907,17 @@ const CASES = [
       const op = getSpecIndex().operations.find((o) => o.method === "GET" && o.path === "/api/supplier-invoices");
       if (!op) return ["inconclusive", "/api/supplier-invoices is not in the pinned spec"];
       const text = `${op.summary ?? ""} ${op.description ?? ""}`;
-      if (!/non-reversed/i.test(text)) {
+      // "Returns all non-reversed …" — the qualifier has to govern the RETURNED SET. A bare substring test
+      // passes on "returns reversed and non-reversed supplier invoices", which asserts the opposite, and no
+      // live GET could tell the difference.
+      if (/\breversed and non-reversed\b|\bincluding reversed\b|\bboth reversed\b/i.test(text)) {
+        return [
+          "drift",
+          `the spec now describes the list as INCLUDING reversed documents, so the quirk asserts the ` +
+            `opposite: "${text.slice(0, 120)}"`,
+        ];
+      }
+      if (!/returns?\s+(all\s+)?non-reversed/i.test(text)) {
         return [
           "drift",
           `the spec no longer says "non-reversed" for this endpoint, so the note is citing something it does ` +
@@ -864,10 +958,32 @@ const CASES = [
         ];
       }
 
+      // And the DECLARED serialization, which is half the claim. getSpecIndex()'s compact parameter objects
+      // carry name/in/required/type/description only — no style or explode — so a first version asserted
+      // "explode=false" while checking neither. Read from the pinned document instead.
+      const raw = JSON.parse(readFileSync(join(process.cwd(), "spec/reai-openapi.json"), "utf8"));
+      const param = (raw.paths?.["/api/bank-reconciliations/{bankAccountId}"]?.get?.parameters ?? []).find(
+        (a) => a.name === "include",
+      );
+      if (!param) return ["inconclusive", "the pinned document no longer declares an `include` parameter here"];
+      if (param.style !== "form" || param.explode !== false) {
+        return [
+          "drift",
+          `the document now declares include with style=${param.style} explode=${param.explode}, so ` +
+            `comma-joining is no longer what it specifies`,
+        ];
+      }
+
       const banks = await get("/api/company-banks");
       const rows = banks.status === 200 ? (Array.isArray(banks.body) ? banks.body : (banks.body?.items ?? [])) : [];
-      if (rows.length === 0) return ["conditional", "no company bank id available to send a comma-joined include to"];
-      const id = rows[0].id;
+      // A SYNCED account: /api/bank-reconciliations is the synced-account view, and this repository's own
+      // manual-vs-synced-reconciliation quirk says so. Sending it a manual account's id would produce a
+      // refusal that this case would have reported as a serialization failure.
+      const synced = rows.filter((b) => b.providerType && b.providerType !== "manual");
+      if (synced.length === 0) {
+        return ["conditional", "no bank-synced company bank here, so this endpoint has nothing to reconcile"];
+      }
+      const id = synced[0].id;
       const joined = await get(`/api/bank-reconciliations/${id}?month=2026-07&include=summary,pending_postings`);
       if (joined.status !== 200) {
         return ["drift", `a comma-joined include answered ${joined.status} "${detailOf(joined).slice(0, 60)}"`];
@@ -878,7 +994,11 @@ const CASES = [
       if (bogus.status !== 400) {
         return ["drift", `include=not-a-section answered ${bogus.status}, so the parameter is not validated`];
       }
-      return ["ok", `\`include\` is the only agent-facing array query param; comma-joined accepted, bogus value refused`];
+      return [
+        "ok",
+        "`include` is the only agent-facing array query param, declared style=form explode=false; " +
+          "comma-joined accepted, bogus value refused",
+      ];
     },
   },
 ];

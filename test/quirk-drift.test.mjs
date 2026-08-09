@@ -322,7 +322,9 @@ test("the quirk audit is read-only, and it is ENFORCED rather than asserted", ()
   );
   assert.match(wrapperBody, /throw new Error/, "the wrapper must throw rather than warn");
   const imports = [...src.matchAll(/^import[^;]*?from\s*"([^"]+)"/gm)].map(([, m]) => m);
-  const allowed = new Set(["node:url", "node:path"]);
+  // node:fs is permitted: the allowlist exists to keep the audit off any channel that can reach the network,
+  // and reading the pinned OpenAPI document is not one. node:http/https/net remain forbidden.
+  const allowed = new Set(["node:url", "node:path", "node:fs"]);
   const forbidden = imports.filter((m) => !allowed.has(m));
   assert.deepEqual(
     forbidden,
@@ -528,8 +530,11 @@ test("an unverifiable claim fails the run unless it says WHY it cannot be verifi
     "every case is conditional, so a clean run would assert nothing at all",
   );
   for (const c of conditional) {
+    // Against the comment-stripped chunk. Broadening this pattern to accept a ternary's else-arm made it read
+    // RAW source, so commenting out a conditional case's only `return ["ok", …]` left the literal in a comment
+    // and the guard still passed — the exact failure this file strips comments for elsewhere.
     assert.match(
-      c.chunk,
+      stripComments(c.chunk),
       /\[\s*\n?\s*"ok"/,
       `${c.quirk} declares itself conditional but has no branch that can report OK, so it can never verify ` +
         `anything on any tenant`,

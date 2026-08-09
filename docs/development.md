@@ -197,10 +197,13 @@ places calling the agreement enums undocumented (PR #123).
 
 Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. The checkable figures: **122** total, **2** named before,
-**8** added here, **113** still unnamed — nine *distinct* quirks now have a live case, because
-`tenant-header-ignored-single-tenant` is in both sets. An earlier version said 114, which made 2 + 8 + 114 =
-124 out of 122.
+`audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **122** quirks, of which **17** now have a live
+case — 16 here plus `customer-name-title-cased` in `audit-storage.mjs`, with
+`tenant-header-ignored-single-tenant` in both sets — leaving **105** unnamed.
+
+The arithmetic here has been wrong twice, in opposite directions: first 2 + 8 + 114 = 124 out of 122
+(double-counting the tenant-header quirk), then the 8-case accounting left in place beside a 16-case
+audit. Count distinct ids and check the total.
 
 This covers the **16 that a GET can answer**, and the report prints `of 122` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
