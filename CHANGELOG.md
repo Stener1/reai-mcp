@@ -80,6 +80,33 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Fixed
 
+- **The remaining four tools that reported an outcome from what they SENT, fixed together rather than one at a
+  time.** `reai_update_salary_line`, `reai_update_share_investment`, `reai_set_customer_address` and
+  `reai_set_supplier_address`. Doing them separately is what produced the last two PRs, in each of which the
+  fix repeated a mistake an earlier fix had already corrected — the `given` gate that blinds the check to a
+  carried value, and the `""`/`null` comparison that flags a successful clear. So the semantics now live in one
+  place, `confirmAgainstResponse` in `src/tools/registry.ts`, with the measured rules written down where they
+  cannot be re-derived differently per tool:
+  - a field the response OMITS or returns as `null` is UNANSWERED, not confirmed-absent;
+  - `""` sent and `null` stored is CONFIRMED — the API normalising, not refusing;
+  - strings compare trimmed, because a sibling shipped once testing only `=== ""`.
+- **`reai_update_salary_line` was the one whose numbers matter.** It said *"Line N in run M is now
+  `${args.quantity}` × `${args.rate}`"* — payroll figures quoted from the request. The stored line is nested at
+  `employees[].wageSpecs[]` and findable by id, so it now reports what the record says, warns when that differs
+  from what was sent, and says plainly *"that is what was SENT, not what is stored"* when the response does not
+  carry the line.
+- **Both address tools answer with a bare string sometimes**, which the helper reports as unanswered rather
+  than letting a sentence assert the parts were stored. That is the honest outcome for a response that cannot
+  confirm anything.
+- **And a tripwire, because the real failure was serial rediscovery.** Thirteen tools GET then PUT/PATCH.
+  `test/confirm-against-response.test.mjs` requires every one to be classified — either in
+  `VERIFIES_AGAINST_RESPONSE`, naming the test that drives a DISAGREEING response and proves it says so, or in
+  `UNVERIFIED` with why nobody has checked it. Ten are proven; three are named as unproven rather than assumed
+  fine (`reai_update_loan`, `reai_set_employee_bank_account`, `reai_add_employment_line`). A fourteenth merge
+  tool fails the suite until someone decides which side it belongs on, and a stale entry after a rename fails
+  too. Mutation-tested both ways.
+
+
 - **`reai_update_subscription` reported the arming flags from what it SENT, and silence meant disarmed.** The
   worst of the five request-sourced outcome reports #141's review found, and named there as the one to fix
   next: `outputMode`, `automaticBillingGeneration` and `sendEhf` were read off `merged`, so a caller who sent

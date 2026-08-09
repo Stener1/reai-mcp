@@ -752,6 +752,105 @@ export function mergeForReplacement(opts: {
  * base, and the write then sent the caller's fields alone. That is the destruction the merge
  * exists to prevent, with the caller believing they made a small edit.
  */
+/**
+ * Which of a write's requested changes the RESPONSE actually confirms.
+ *
+ * Every read-merge-write tool here reports an outcome, and five of them reported it from what they SENT. That
+ * produced, in order of how much it cost: a subscription whose discarded disarming was met with silence, a
+ * creditor announcing that repayments had no destination without checking, an order claiming a comment was
+ * changed that the API had thrown away, and payroll amounts quoted from the request. Each was found and fixed
+ * separately, and twice the fix repeated a mistake an earlier fix had already corrected — which is the
+ * argument for one helper rather than five careful sites.
+ *
+ * The semantics are the ones that were measured, not the ones that seem obvious:
+ *
+ *   - A field the response OMITS, or returns as `null`, is UNANSWERED — not confirmed-absent. A non-answer
+ *     read as "cleared" is how `sendEhf: null` silently dropped an arming flag out of a sentence containing
+ *     the word "confirmed".
+ *   - `""` sent and `null` stored is CONFIRMED, not a disagreement. The API normalises an empty string to
+ *     null, and comparing them naively flagged every successful clear with "check the value is one the API
+ *     accepts" — on the very path the tool recommends.
+ *   - Strings are compared trimmed, because a sibling tool shipped once testing only `=== ""`.
+ *
+ * `skip` is for fields whose shape differs between request and response and so cannot be compared here —
+ * `orderLines` against `lines`, for instance. Skipping is a claim that something else checks them; the line
+ * counts in the order, offer and subscription tools are checked separately for that reason.
+ */
+export type ResponseConfirmation = {
+  /** Sent and the response agrees. */
+  confirmed: string[];
+  /** Sent and the response disagrees — the case worth a warning. */
+  contradicted: Array<{ field: string; sent: unknown; stored: unknown }>;
+  /** The response neither carries the field nor returns a value for it. */
+  unanswered: string[];
+};
+
+export function confirmAgainstResponse(
+  sent: Readonly<Record<string, unknown>>,
+  response: unknown,
+  opts: { readonly skip?: readonly string[] } = {},
+): ResponseConfirmation {
+  const skip = opts.skip ?? [];
+  const after =
+    response && typeof response === "object" && !Array.isArray(response)
+      ? (response as Record<string, unknown>)
+      : undefined;
+  const result: ResponseConfirmation = { confirmed: [], contradicted: [], unanswered: [] };
+  const same = (a: unknown, b: unknown): boolean => {
+    if (typeof a === "string" && typeof b === "string") return a.trim() === b.trim();
+    // The API stores an empty string back as null. That is it doing what was asked, not refusing it.
+    if (a === "" && b === null) return true;
+    if (b === "" && a === null) return true;
+    return JSON.stringify(a) === JSON.stringify(b);
+  };
+  for (const [field, value] of Object.entries(sent)) {
+    if (skip.includes(field) || value === undefined) continue;
+    if (after === undefined || !Object.hasOwn(after, field) || after[field] === null) {
+      // A null stored against a null sent IS an answer: both mean absent, and the outcome is what was asked.
+      if (after !== undefined && Object.hasOwn(after, field) && after[field] === null && (value === null || value === "")) {
+        result.confirmed.push(field);
+      } else {
+        result.unanswered.push(field);
+      }
+      continue;
+    }
+    if (same(value, after[field])) {
+      result.confirmed.push(field);
+    } else {
+      result.contradicted.push({ field, sent: value, stored: after[field] });
+    }
+  }
+  return result;
+}
+
+/**
+ * The standard paragraphs for a confirmation, so five tools cannot phrase the same finding five ways.
+ *
+ * `subject` names the record ("order OR-4105"). Returns nothing when there is nothing to report, so a caller
+ * can spread it into a notes array unconditionally.
+ */
+export function describeConfirmation(c: ResponseConfirmation, subject: string): string[] {
+  const notes: string[] = [];
+  if (c.contradicted.length > 0) {
+    notes.push(
+      `WARNING: ${c.contradicted
+        .map((x) => `${x.field} (sent ${JSON.stringify(x.sent)}, ${subject} came back with ${JSON.stringify(x.stored)})`)
+        .join("; ")}. This API does not always store what it accepts, so read the record back before relying ` +
+        `on ${c.contradicted.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (c.unanswered.length > 0) {
+    notes.push(
+      `The response did not answer for ${c.unanswered.join(", ")}, so ${
+        c.unanswered.length === 1 ? "that change" : "those changes"
+      } could not be confirmed from it. Read the record back before relying on ${
+        c.unanswered.length === 1 ? "it" : "them"
+      }.`,
+    );
+  }
+  return notes;
+}
+
 export function readableRecord(
   data: unknown,
   field?: string,

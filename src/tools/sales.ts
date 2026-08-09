@@ -7,6 +7,8 @@ import {
   ok,
   okList,
   readableRecord,
+  confirmAgainstResponse,
+  describeConfirmation,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -374,13 +376,18 @@ const setCustomerAddress = defineTool({
       tenantId: resolved,
     });
     const kept = Object.keys(base).filter((k) => !(k in given));
+    // Against the response. `res.data` may be a plain string here, which the helper reports as unanswered —
+    // honest, and better than a sentence asserting the parts were stored when nothing checked.
+    const confirmation = confirmAgainstResponse(given, res.data);
+    const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? `${kind ?? "postal"} address updated.`, {
       note:
         `Changed ${Object.keys(given).join(", ")} on customer ${id}'s ${kind ?? "postal"} address` +
         (kept.length
           ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
             `unchanged, because this endpoint replaces rather than patches.`
-          : `. Nothing else was set on it beforehand.`),
+          : `. Nothing else was set on it beforehand.`) +
+        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``),
     });
   },
 });

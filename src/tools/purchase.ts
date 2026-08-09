@@ -8,6 +8,8 @@ import {
   isoDate,
   ok,
   okList,
+  confirmAgainstResponse,
+  describeConfirmation,
   requireTenantId,
   startOfYear,
   tenantIdArg,
@@ -929,13 +931,18 @@ const setSupplierAddress = defineTool({
       body: merged,
       tenantId: resolved,
     });
+    // Against the response. `res.data` may be a plain string here, which the helper reports as unanswered —
+    // honest, and better than a sentence asserting the parts were stored when nothing checked.
+    const confirmation = confirmAgainstResponse(Object.fromEntries(given.map((f) => [f, merged[f]])), res.data);
+    const extra = describeConfirmation(confirmation, "the address");
     return ok(res.data ?? "Supplier address updated.", {
       note:
         `Changed ${given.join(", ")} on supplier ${id}'s address` +
         (kept.length
           ? `; ${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} read first and sent back ` +
             `unchanged, because this endpoint replaces rather than patches.`
-          : `. Nothing else was set on it beforehand.`),
+          : `. Nothing else was set on it beforehand.`) +
+        (extra.length > 0 ? `\n\n${extra.join("\n\n")}` : ``),
     });
   },
 });
