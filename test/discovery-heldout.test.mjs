@@ -111,7 +111,7 @@ test("at least 38 of the 41 first-corpus queries rank their endpoint in the top 
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 39,
+    hits.length >= 38,
     `only ${hits.length} of ${CASES.length} in the top 3:\n  ` +
       CASES.filter(([q, want]) => {
         const at = rankOf(q, want);
@@ -124,7 +124,7 @@ test("at least 38 of the 41 first-corpus queries rank their endpoint in the top 
 
 test("and at least 39 rank it in the top 10", () => {
   const hits = CASES.filter(([q, want]) => rankOf(q, want) >= 0);
-  assert.ok(hits.length >= 41, `only ${hits.length} of ${CASES.length} in the top 10`);
+  assert.ok(hits.length >= 40, `only ${hits.length} of ${CASES.length} in the top 10`);
 });
 
 // The Norwegian verbs. WRITE_INTENT_VERBS already held four of them while METHOD_INTENT held
@@ -319,8 +319,8 @@ test("the second corpus holds its measured score of 26 in the top 3", () => {
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 27,
-    `${hits.length} of ${FRESH.length} in the top 3; the measured baseline is 27`,
+    hits.length >= 26,
+    `${hits.length} of ${FRESH.length} in the top 3; measured 27, floored one below`,
   );
 });
 
@@ -424,8 +424,8 @@ test("the third corpus holds its measured score of 19 in the top 3", () => {
     return at >= 0 && at < 3;
   });
   assert.ok(
-    hits.length >= 20,
-    `${hits.length} of ${EVERYDAY.length} in the top 3; the measured baseline is 20`,
+    hits.length >= 19,
+    `${hits.length} of ${EVERYDAY.length} in the top 3; measured 20, floored one below`,
   );
 });
 
@@ -437,7 +437,7 @@ test("the third corpus reaches 24 of 27 within the top ten", () => {
   );
   // 24 since the definite-form rules: `sett kunden som inaktiv` came into reach. Ratcheted so the
   // gain cannot quietly disappear.
-  assert.ok(hits.length >= 26, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
+  assert.ok(hits.length >= 25, `only ${hits.length} of ${EVERYDAY.length} in the top 10`);
 });
 
 /**
@@ -445,8 +445,17 @@ test("the third corpus reaches 24 of 27 within the top ten", () => {
  *
  * All 169 declared pairs across both discovery corpora were swept against the live index, and three were not in
  * the top 20 at all — invisible because the corpora are scored against floors rather than per pair, so three
- * misses sat inside a passing count. The floors above are ratcheted to the new figures; these three are pinned
- * individually, because a floor cannot say WHICH pair it lost.
+ * misses sat inside a passing count.
+ *
+ * These three are pinned INDIVIDUALLY, and the floors above deliberately keep one pair of headroom rather than
+ * sitting on the measured value. Two reviews in a row have made the same point about ratchets pinned exactly at
+ * the actual: any unrelated single-pair movement then red-fails CI with a message that cannot say which pair
+ * moved. The pins carry the specific gains, so the floors do not have to.
+ *
+ * One correction on attribution: the CASES floors were 38 and 39 while that corpus already measured 39 and 41
+ * on `main`. Raising them locks in a figure this change did not produce — it came from an earlier
+ * re-measurement, which the file header records — so only the top-10 floor moves, and the gains that ARE this
+ * change's are FRESH 26 to 27 and EVERYDAY 19 to 20 in the top 3 and 24 to 26 in the top 10.
  */
 test("the three pairs this corpus could not reach are reachable", () => {
   const rankOf = (query, want) =>
@@ -470,5 +479,10 @@ test("the three pairs this corpus could not reach are reachable", () => {
   // above it, which is what this repository wants, so the assertion is a bound rather than a position.
   const generateDue = rankOf("lag faktura for abonnementene", "/api/subscriptions/generate-due");
   assert.ok(generateDue >= 0 && generateDue < 10, `generate-due at rank ${generateDue + 1}`);
-  assert.equal(searchOperations({ query: "lag faktura for abonnementene", limit: 1 })[0].method, "GET");
+  // The exact operation, not just the method. Pinning `.method === "GET"` was satisfied by ANY subscriptions
+  // read at rank 1 — and the phrase replacement injects the literal token `subscriptions`, so the ranking could
+  // have degraded to the billing-history endpoint with generate-due at rank 9 and the test would have held.
+  // Found by the independent review of PR #125.
+  const first = searchOperations({ query: "lag faktura for abonnementene", limit: 1 })[0];
+  assert.equal(`${first.method} ${first.path}`, "GET /api/subscriptions");
 });
