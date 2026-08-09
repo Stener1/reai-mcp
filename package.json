@@ -51,7 +51,8 @@
     "audit:messages": "node scripts/audit-messages.mjs",
     "audit:storage": "node scripts/audit-storage.mjs",
     "audit:census": "node scripts/storage-census.mjs",
-    "check:deployed": "node scripts/check-deployed.mjs"
+    "check:deployed": "node scripts/check-deployed.mjs",
+    "sweep:discovery": "npm run build && node scripts/discovery-sweep.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
