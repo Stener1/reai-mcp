@@ -20,6 +20,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { externalReferences } from "./lib/self-contained-html.mjs";
 import { dirname, join } from "node:path";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1092,20 +1093,20 @@ async function main() {
       try {
         const contents = (await client.readResource({ uri })).contents ?? [];
         const body = String(contents[0]?.text ?? contents[0]?.blob ?? "");
-        // ANY src= or href= is disqualifying, not just an http(s) one. `<script src="widget.js">` and
-        // `<img src="/logo.svg">` are equally unfetchable inside the host's sandbox, and the first version of
-        // this check required `https?:` — so a relative asset passed while breaking the view just as
-        // completely. Measured: this template has zero src=, zero href=, no <link>, no <img>, and exactly one
-        // inline <script>, so the strict form is correct rather than merely stricter.
-        const asset = /(?:\bsrc\s*=|\bhref\s*=|<link\b|<img\b)/i.exec(
-          body,
-        )?.[0];
+        // Delegated to scripts/lib/self-contained-html.mjs, which is unit-tested against a table of 24 cases.
+        // This predicate has now been wrong twice in opposite directions — first requiring `https?:` so a
+        // relative asset passed, then matching any src=/href= anywhere so a fragment link, a data: URI and the
+        // string `href=` inside the inline script all FAILED a self-contained document. Both were review
+        // findings, and both survived because the logic lived here, where nothing could test it without a live
+        // server and a hand-mutated template.
+        const external = externalReferences(body);
         report(
           "resources/read returns a self-contained template",
-          body.length > 1000 && /<script/i.test(body) && asset === undefined,
-          asset
-            ? `${body.length} chars but references an external asset: ${asset.trim()}`
-            : `${body.length} chars, inline script, no external assets`,
+          body.length > 1000 && /<script/i.test(body) && external.length === 0,
+          external.length > 0
+            ? `${body.length} chars but needs a fetch: ` +
+              external.map((r) => `<${r.element} ${r.attribute}="${r.url}">`).join(", ")
+            : `${body.length} chars, inline script, nothing to fetch`,
         );
       } catch (err) {
         report(
