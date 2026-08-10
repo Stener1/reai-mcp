@@ -9,6 +9,28 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The lead addressing trap now reaches the calls that write, and a claim I made about it last PR was wrong.**
+  - `/api/leads/{id}/…` and `/api/leads/org/{orgNumber}/…` both exist for `contact`, `contact-events`,
+    `follow-up`, `notes` and `status`. The org form always works; the id form cannot address a company nobody on
+    the tenant has touched, and a row from `GET /api/leads` carries `id: null` for most of them, because the
+    search covers the Norwegian company register rather than the tenant's own records.
+  - That was documented — but only on `GET /api/leads/{id}` and on the search. **It was not on the five
+    sub-resources, which are the calls that WRITE.** Measured on 2783, every probe failing so nothing was
+    created: `PUT /api/leads/null/follow-up`, `/notes`, `/status` and `POST …/contact-events` all answer
+    `400 "Failed to convert 'id' with value: 'null'"`, while `PUT /api/leads/99999999/follow-up` answers
+    `404 "CRM lead with id=99999999 not found"`. The two failures mean different things — no lead yet, versus the
+    wrong lead — and the note says so.
+  - **`/convert` is deliberately not included.** `lead-convert-is-addressable-by-id-only` already covers it and
+    says more. Two overlapping notes on one call is the duplicate-quirk mistake made with `/api/projects` a few
+    changes ago; this time `quirksFor` was checked first, and the test asserts convert carries one note and not
+    both.
+  - **And the correction:** last PR's tie-break change moved these five toward the org route, which I recorded as
+    "arguably worse for an agent holding a lead id". It is not. Every curated lead tool takes `orgNumber`, and
+    `src/tools/leads.ts` gives the measured reason — `GET /api/leads/null` answers 400, so the id form cannot
+    address an unsaved company at all. The change moved discovery toward the addressing this server standardised
+    on. I had characterised my own change pessimistically without checking the convention it was moving toward.
+  - **128 quirks.**
+
 - **Search ranked ties by a locale-dependent comparison, which `scripts/build-spec-index.mjs` refuses and says
   why.** `searchOperations` sorted equal-scoring hits with `a.path.localeCompare(b.path)`; the
   index builder uses codepoint order. Identical queries could therefore rank ties differently between machines,
@@ -47,9 +69,12 @@ All notable changes to `reai-mcp`. Format loosely follows
     69 or 672 depending on the query shape. The conclusion holds; the number was decoration presented as rigour.)
   - **18 rank-1 changes I had not reported**, all one family: five lead sub-resources
     (`follow-up`, `contact-events`, `status`, `contact`, `notes`) now offer the `/api/leads/org/{orgNumber}` route
-    ahead of `/api/leads/{id}`, because `org` sorts before `{`. Arguably worse for an agent holding a lead id
-    rather than an org number, and not covered by any committed sweep. No risk-class inversions at rank 1.
-    Measured over 1435 queries: 396 change order, 86 change their top 3, 18 change rank 1.
+    ahead of `/api/leads/{id}`, because `org` sorts before `{`. Not covered by any committed sweep, and no
+    risk-class inversions at rank 1. Measured over 1435 queries: 396 change order, 86 change their top 3, 18
+    change rank 1.
+    - I called this "arguably worse for an agent holding a lead id", and that was **wrong** — see the next entry.
+      Every curated lead tool takes `orgNumber`, and `src/tools/leads.ts` records why, measured: an unsaved
+      company has no id at all. The change moved discovery toward the route that always works.
   - **A test now pins the actual property**, which nothing did before: search must rank identically under
     `LANG=cs_CZ`, `nb_NO`, `sv_SE` and `lt_LT`, run in child processes so the locale is real. Review had shown a
     genuinely locale-dependent comparator passing all 1203 tests, because the one test that caught the old

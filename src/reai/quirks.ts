@@ -2177,6 +2177,37 @@ export const QUIRKS: readonly Quirk[] = [
       "vouchers have an unlink route. A supplier invoice has none, so a file attached to one cannot be " +
       "detached through the API either.",
   },
+  {
+    id: "lead-sub-resources-need-a-saved-lead-in-the-id-form",
+    paths: [
+      "/api/leads/{id}/contact",
+      "/api/leads/{id}/contact-events",
+      "/api/leads/{id}/follow-up",
+      "/api/leads/{id}/notes",
+      "/api/leads/{id}/status",
+      // NOT /convert. `lead-convert-is-addressable-by-id-only` already covers it, and says more: that the org
+      // form answers 404 "No static resource" and that converting twice is safe. Attaching this one too would
+      // put two overlapping notes on the same call — the duplicate-quirk mistake made with /api/projects a few
+      // changes ago, avoided here by checking `quirksFor` first.
+    ],
+    kind: "workflow",
+    note:
+      "Every one of these has an /api/leads/org/{orgNumber} twin, and the org form is the one to use. " +
+      "The existing addressing note is attached to GET /api/leads/{id} and to the search, but the trap bites " +
+      "hardest here, because these are the calls that WRITE.\n\n" +
+      "A row from GET /api/leads carries `id: null` for any company nobody on this tenant has touched — which " +
+      "is most of them, since the search covers the Norwegian company register rather than the tenant's own " +
+      "records. Substituting that id gives, measured on 2783 on 2026-08-10: " +
+      "400 \"Failed to convert 'id' with value: 'null'\" on /follow-up, /notes, /status and /contact-events " +
+      "alike. A numerically valid but absent id is a DIFFERENT failure — " +
+      "404 \"CRM lead with id=99999999 not found\" — so the two say different things: the first means you have " +
+      "no lead yet, the second means you have the wrong one.\n\n" +
+      "The org form has neither problem: an organisation number is on every row whether the company is saved " +
+      "or not, and writing to it CREATES the lead row (see lead-rows-are-created-by-the-first-write-except-" +
+      "contact for the one exception). This server's curated lead tools all take `orgNumber` for that reason.\n\n" +
+      "/convert is the exception in the other direction — id-only, so it needs a saved lead first — and it has " +
+      "its own note: lead-convert-is-addressable-by-id-only.",
+  },
 ];
 
 /** Normalize for prefix comparison: lowercase, no trailing slash. */

@@ -15,7 +15,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 - **177 tools**: 170 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **127 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **128 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 
@@ -312,7 +312,7 @@ the variables that only matter to a remote deployment — `PORT`, `PUBLIC_URL`, 
 
 Most of what this server knows about ReAI was learned from a rejected request rather than from
 reading the spec. Rather than leave that in commit messages, it lives in
-[`src/reai/quirks.ts`](src/reai/quirks.ts) as **127 quirks keyed to the operations they affect** — so
+[`src/reai/quirks.ts`](src/reai/quirks.ts) as **128 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
 132 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
@@ -390,7 +390,7 @@ refreshing the pinned OpenAPI snapshot, and the live harnesses — which refuse 
 tenant is named in `REAI_WRITE_TEST_TENANTS`, because a `--tenant` flag is not consent.
 
 Because there is no sandbox, the documented claims are re-checked against live books rather than
-trusted: four audit harnesses ask whether the refusals, the stored values and the 127 quirks still
+trusted: four audit harnesses ask whether the refusals, the stored values and the 128 quirks still
 say what this repository says they say, and each one has found something false.
 [docs/audits.md](docs/audits.md) has what each covers, what it deliberately does not, and what it
 found.

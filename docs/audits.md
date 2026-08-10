@@ -10,7 +10,7 @@ there rather than here, because a result restated in two places goes stale in on
 
 | harness | channel it checks | writes? |
 |---|---|---|
-| [`audit-quirks.mjs`](#audit-quirksmjs-the-127-claims-nobody-was-checking) | the 127 quirks, via the claims a `GET` can answer | no — safe against any tenant |
+| [`audit-quirks.mjs`](#audit-quirksmjs-the-128-claims-nobody-was-checking) | the 128 quirks, via the claims a `GET` can answer | no — safe against any tenant |
 | [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach) | quirks whose claim is that a **write is refused** | only requests built to fail |
 | [`audit-messages.mjs`](#why-audit-messagesmjs-exists-and-what-it-does-not-cover) | the nineteen places in `src/` that read a ReAI error's **text** | only requests built to fail |
 | [`audit-storage.mjs`](#audit-storagemjs-the-half-the-message-audit-cannot-reach) | claims about what the API **accepts, normalises or stores** | yes — customers, deleted in a `finally` |
@@ -24,25 +24,25 @@ There is a fifth harness that is not a live audit — the discovery sweep, which
 change did to every *other* query. It lives with the ranking work in
 [docs/discovery.md](discovery.md#what-did-a-ranking-change-do-to-every-other-query).
 
-## `audit-quirks.mjs`: the 127 claims nobody was checking
+## `audit-quirks.mjs`: the 128 claims nobody was checking
 
-The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 127 of
+The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 128 of
 them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, the two
 audits named **2 of them** — `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both
 defects that motivated those audits were in this channel: the `+47` phone claim (PR #115) and the four
 places calling the agreement enums undocumented (PR #123).
 
-Resist quoting how many of the remaining 125 are "checkable": a keyword sweep over `note` prose gives 86 or
+Resist quoting how many of the remaining 126 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **127** quirks, of which **17** now have a live
+`audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **128** quirks, of which **17** now have a live
 case — 16 here plus `customer-name-title-cased` in `audit-storage.mjs`, with
-`tenant-header-ignored-single-tenant` in both sets — leaving **110** unnamed.
+`tenant-header-ignored-single-tenant` in both sets — leaving **111** unnamed.
 
 The arithmetic here has been wrong twice, in opposite directions: first 2 + 8 + 114 = 124 out of 122
 (double-counting the tenant-header quirk), then the 8-case accounting left in place beside a 16-case
 audit. Count distinct ids and check the total.
 
-This covers the **16 that a GET can answer**, and the report prints `of 127` so a pass is not read as
+This covers the **16 that a GET can answer**, and the report prints `of 128` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
 is no write guard and no `REAI_WRITE_TEST_TENANTS`.
 
