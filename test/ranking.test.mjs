@@ -1097,6 +1097,35 @@ test("safer-first does not reorder different resources, and yields to delete int
   assert.ok(sameResource.every((h) => h.path === create[0].path), "expected a single-resource tie here");
   assert.notEqual(create[0].method, "DELETE");
 
+  // BOTH READINGS OF `cancel`, in one test, because they are the whole difficulty. The verb is deliberately
+  // absent from WRITE_INTENT_VERBS so a question about the past works, which means it cannot resolve either way
+  // from the verb alone — the discriminator has to be the rest of the sentence. Two wrong gates preceded the
+  // current one, each found by review:
+  //
+  //   the method hint alone  -> "when did we cancel expenses" ranked DELETE above the tied PATCH
+  //   requiring writeIntent  -> "cancel expenses" pushed its requested DELETE below PATCH, out of a top-3 view
+  //
+  // Measured: the retrospective forms carry the read-intent penalty (writes at 9.59), the imperatives do not
+  // (15.34). So readIntent separates them where neither verb table can, and both directions are asserted here
+  // so a future gate cannot fix one by breaking the other again.
+  for (const [query, wanted] of [
+    ["cancel expenses", "DELETE"],
+    ["please cancel expenses", "DELETE"],
+    ["when did we cancel expenses", "PATCH"],
+    ["which expenses did we cancel", "PATCH"],
+  ]) {
+    const writes = searchOperations({ query, limit: 8 }).filter(
+      (h) => h.path === "/api/expenses/{id}" && h.method !== "GET",
+    );
+    assert.ok(writes.length > 1, `"${query}" no longer returns competing writes on one path — re-anchor this`);
+    assert.equal(writes[0].score, writes[1].score, `"${query}" no longer ties, so the tie-break is not exercised`);
+    assert.equal(
+      writes[0].method,
+      wanted,
+      `"${query}" ranked ${writes[0].method} first among tied writes on /api/expenses/{id}, wanted ${wanted}`,
+    );
+  }
+
   // A RETROSPECTIVE QUESTION must not yield the rule. `cancel` is in the DELETE method group but deliberately
   // absent from WRITE_INTENT_VERBS, so that "which invoices did we cancel" reads as a question about the past.
   // Gating the yield on the method HINT rather than on write intent let exactly that kind of question surface
@@ -1129,6 +1158,10 @@ test("safer-first does not reorder different resources, and yields to delete int
   assert.ok(rule, "saferFirst was renamed or restructured — re-anchor this, do not delete it");
   assert.match(rule, /if \(deleteIntent\) return 0;/, "the delete-intent yield is missing from saferFirst");
   // And the yield itself must require write intent, not just the DELETE hint.
-  assert.match(source, /const deleteIntent =\s*\n?\s*!wantMethod && writeIntent &&/, "deleteIntent no longer requires writeIntent");
+  assert.match(
+    source,
+    /const deleteIntent =\s*\n?\s*!wantMethod && !readIntent &&/,
+    "deleteIntent must gate on the absence of READ intent — writeIntent is false for an imperative cancel too",
+  );
   assert.match(rule, /if \(a\.path !== b\.path\) return 0;/, "the same-path restriction is missing");
 });
