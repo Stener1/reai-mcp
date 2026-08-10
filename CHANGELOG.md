@@ -9,6 +9,72 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found the same two defects independently, and one of its findings implied a third I had missed.** Both
+  were already fixed when it reviewed; it was looking at the previous head.
+  - Its remark about the multipart route led to something neither the note nor the description had said: the two
+    upload routes sit at **different write tiers**. `POST /api/supplier-invoices/{id}/attachments` is classified
+    **irreversible**, so it is refused at the default `REAI_WRITE_MODE=reversible` before the multipart problem
+    is even reached, while `POST /api/attachments` and both link routes are reversible. Added — and asserted
+    against `classifyRequest` rather than restated in prose, so the sentence cannot outlive the classification.
+  - On why the quirk lists four paths instead of using `match: "descendants"`: descendants on
+    `/api/supplier-invoices/{id}/attachments` would also attach the note to `.../{attachmentId}/content`, a
+    plain download that has nothing to do with how a file gets attached.
+
+- **Review found three of my claims false, one of them a quote the API never emits — which I had then pinned as
+  verbatim.** The measurements about *which* route takes what held; almost everything I inferred around them did
+  not.
+  - **The "verbatim" 415 message was fabricated.** The API echoes the `Content-Type` header back *including its
+    boundary and charset* (`multipart/form-data;boundary=----formdata-undici-032389436896;charset=UTF-8`), with a
+    trailing period — so the string I quoted cannot occur, and a test I wrote specifically to catch "a reword of
+    a message the note presents as the API's own words" was guarding a truncation of my own making. The note now
+    says to match the status, not the message, and the test asserts the fabricated form is absent.
+  - **"Both routes validate the owner first, before content type" was backwards.** Measured: a nonexistent order
+    with a VALID multipart body answers **415**, not the owner's 404. I had generalised from one probe against a
+    different route. The real order is content type → owner → attachment id, and a malformed multipart body
+    answers `400 "Failed to parse multipart request"` instead of 415 — three failures meaning three things.
+    - This was also the one sentence in the note that nothing guarded: rewriting it to the truth failed no test.
+      Recorded as evidence in a comment, never asserted.
+  - **The workflow I prescribed cannot be executed through this server, and the repo had already caught that
+    exact error once.** `reai_request` transports its body as JSON and nothing here ever constructs a
+    `FormData`, so neither upload route is reachable — `src/tools/investments.ts` records the same conclusion for
+    a different upload, in a comment about a claim that "was probably false and was not checked". I
+    reintroduced it. The tool now says uploading is impossible here and belongs in the ReAI web UI.
+  - **The quirk missed `/attachments/existing`** — the route the note sends agents to — and `/api/attachments`,
+    the upload route it names. `quirksFor` is exact-match, so an agent following the advice and asking
+    `reai_describe_endpoint` about it saw nothing. Both keyed now.
+  - **A sharper asymmetry one row down, missed:** a supplier invoice is the only owner that takes a file directly
+    and the only one with **no detach route**, and an uploaded attachment cannot be deleted at all
+    (`/api/attachments/{id}` is GET and PATCH only). So step 1 of an upload-then-link workflow is not undoable if
+    step 2 fails. `POST /api/attachments` is classified `reversible`, whose definition is "can be cleanly deleted
+    again" — that is wrong, and is recorded rather than retiered here, since it is a shared classifier and the
+    call is unreachable anyway.
+  - **"Measured on 2783" overstated the supplier-invoice half**: that tenant has zero supplier invoices, so the
+    route split is read off the spec. What is genuinely measured is the 415/404/400 behaviour.
+  - And the interlocking arithmetic in `docs/audits.md` was stale in two places I had edited the same sentence of
+    — so my claim that the count guard "forced all four files into agreement in one pass" was not true of those
+    figures. The guard's own comment already admits bare derived numbers are outside it.
+
+- **How you attach a file depends on which record it hangs off, and the two owners are wired to opposite
+  paths.** Measured on 2783 on 2026-08-10, with every probe failing so nothing was created.
+  - An **order only LINKS** an attachment that already exists: `POST /api/orders/{id}/attachments` takes JSON
+    `{"attachmentId": N}`, and a bad id answers `404 "Attachment not found"` — the proof it parsed the body and
+    looked the attachment up. Sending a **file** there answers
+    `415 "Content-Type 'multipart/form-data' is not supported"`. So attaching a new file to an order is **two
+    calls**: upload with `POST /api/attachments`, then link with the id it returns.
+  - A **supplier invoice takes the file directly** at `POST /api/supplier-invoices/{id}/attachments`
+    (multipart), and its link route is a *different path* — `.../attachments/existing` — carrying the same JSON
+    body an order takes at its plain `/attachments`.
+  - So the same two capabilities are wired to opposite paths, which is what makes it a quirk rather than a
+    footnote: an agent that learns one owner and applies it to the other gets a 415 or a 404, neither of which
+    hints at the right route. `reai_list_attachments` now says so, since that is the tool in hand when someone
+    wants to attach something.
+  - Both routes validate the **owner** first — an unknown order or invoice answers 404 naming it, before
+    content type or attachment id is considered.
+  - This also closed a gap the previous PR left named: the **order branch** of `reai_list_attachments` had never
+    been measured, because 2634 has no orders. On 2783 it returns `[]` with a 200 for an order with no files,
+    and 404 `"No order with id 999999"` for an unknown one — matching what the tool already claimed.
+  - **127 quirks**, and the count guard added two PRs ago forced all four files into agreement in one pass.
+
 - **Codex found a THIRD discovery route and four stale README counts my own fix had walked past.**
   - **The reception inbox carries `attachmentId` on every row**, and `reai_parse_ehf_attachment` has relied on
     that all along. It is the route for a document that has not yet become an order or a supplier invoice —
