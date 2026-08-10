@@ -150,6 +150,8 @@ That ambiguity is also why the delete does not simply report a 404 as "already g
 | `reai_list_supplier_invoices` · `reai_get_supplier_invoice` | Registered supplier invoices and credit notes | read |
 | `reai_list_reception_documents` | The document inbox — incoming invoices and receipts not yet booked | read |
 | `reai_parse_ehf_attachment` | Parse an incoming EHF invoice into structured data | read |
+| `reai_list_attachments` | The files on an order or a supplier invoice — the **only** way to discover an attachment id, since `GET /api/attachments` answers 405. `usedBy` is null on every row here | read |
+| `reai_get_attachment` | One attachment, and the `usedBy` array the scoped list omits — what else references this file, which is the question to ask before deleting it | read |
 | `reai_list_expenses` · `reai_get_expense` | Employee expense claims, incl. per diems and mileage. The detail read also answers "has this been reversed", which the API cannot be asked directly | read |
 | `reai_create_expense` · `reai_update_expense` | Draft a claim and edit it while it is open. The line arrays are each the **complete list** — sending one cost row deletes the others | **irreversible** |
 | `reai_deliver_expense` · `reai_approve_expense` · `reai_unapprove_expense` | Move a claim through open → for_approval → approved. Unapproving refuses while a voucher exists, and says which one to delete | **irreversible** |
@@ -503,6 +505,30 @@ Both **do** document their response, and the live API agrees: `CountryRes` is `{
 **Two 404s that are answers, not failures.** `GET /api/opening-balances` answers `404 "Opening balance not found"` and `GET /api/annual-accounts/{year}` answers `404 "No annual-accounts submission exists"` when there is nothing recorded — measured on both test tenants. A 404 from a collection-shaped path is otherwise indistinguishable from a wrong path, a wrong tenant, or a switched-off module, and this server has watched all three conclusions get drawn from one. Both tools report the real answer, and *only* for the documented message: a 403, a 401 or a 500 still fails, because a tool that calls every error "nothing recorded" will report an outage as a fact about someone's books.
 
 Both 404 conversions turn on the typed error's `status`, not on its message text: a gateway `500` relaying a downstream body can contain "HTTP 404" and the documented phrase together, and a text match would have called that outage an empty set of books. The country and currency lists need **no tenant** — the spec declares no `X-Tenant-Id` for either, so asking what codes exist works immediately after authentication.
+
+### Attachments: finding the document behind a record
+
+Measured on 2634 against supplier invoice 5830 and its attachment 19780 (`faktura_2026_10009.pdf`, 1,784,632 bytes) on 2026-08-10.
+
+There is **no global attachment list** — `GET /api/attachments` answers **405**, because only `POST` exists on that collection. `reai_list_attachments` wraps the two owner-scoped routes: `GET /api/orders/{id}/attachments` and `GET /api/supplier-invoices/{id}/attachments`. An unknown owner answers **404 naming the owner**, so an empty list means the record exists and has no files — a different answer.
+
+**There are three ways to reach an attachment id, and an earlier version of this page claimed this tool was the only one.** It is often not even the right one:
+
+| route | when | how it was established |
+|---|---|---|
+| `reai_list_vouchers` · `reai_get_voucher` | a voucher **embeds** its attachments | measured — six of 58 vouchers on 2634, against one supplier invoice, so vouchers held six of the seven attachments on the tenant |
+| `reai_list_reception_documents` | a document that has **not yet** become an order or invoice — the case this tool structurally cannot reach | from the schema: `attachmentId` is on every reception row, and `reai_parse_ehf_attachment` has always relied on it. Both inboxes were empty on the tenant available, so not measured |
+| `reai_list_attachments` | already attached to an order or a supplier invoice | measured |
+
+There is no `/api/vouchers/{id}/attachments` route (404), which is why `voucher` is not an `ownerType` here; when `usedBy` names one, `reai_get_attachment` points at the voucher read instead.
+
+**The two routes disagree on four fields, not one.** The owner-scoped list leaves `usedBy` null; reading the same attachment by id fills it in (`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`). So "what else points at this file" is a question only `reai_get_attachment` can answer, and it is the one to ask before deleting. `contentUrl` and `downloadUrl` point at the **owner** path rather than `/api/attachments/{id}/content` — both serve the same bytes, verified byte-identical. And **`createdAt` differs by two days** between the routes (`2026-08-07T10:21:49` scoped against `2026-08-05T17:22:28` by id). Which one means "when the document arrived" is **not established**, so neither tool reports it as that. Voucher-embedded rows carry the by-id value, so the drift belongs to the supplier-invoice route rather than to scoped listing in general.
+
+**Neither tool returns the file.** Content is the raw document — `application/pdf`, 1.7 MB for that one — so the tools report the URL and leave fetching to the caller. Two adjacent routes are EHF-only despite their names: `/ehf` **and** `/embedded-files` both answer `400 "Attachment is not a valid EHF XML"` on a PDF, so check `mimeType` before reaching for `reai_parse_ehf_attachment`.
+
+One thing the spec lists that is not an API endpoint at all: `GET /attachments/{id}` and `GET /attachments/{id}/view/{filename}` (no `/api` prefix) are **web routes**. Measured: they answer **302** to `/auth/login?redirect=…`, which lands on the login page — and they ignore an API token entirely, so `Authorization: Bearer` makes no difference. A nonsense path behaves the same way, though not identically: each login page embeds its own `redirect=` parameter, so the bodies differ by a few bytes.
+
+An earlier version of this paragraph said "200, the app shell, identical to a nonsense path", which was wrong on all three counts — `fetch` follows the redirect by default, so the 302 was invisible unless you looked for it. What does hold is the consequence: `reai_request` recognises an HTML response and says so rather than handing it back as data, verified live for both routes.
 
 Writing an opening balance is left to `reai_request` on purpose. It is ledger position, so setting one restates every comparative figure the books produce, and `DELETE /api/opening-balances` is documented as **"delete OR reverse"** — the family this repo has been caught by five times, where a reversal *posts* rather than removes. Neither test tenant has an opening balance to watch those endpoints on, so no curated tool here claims to know what they do.
 

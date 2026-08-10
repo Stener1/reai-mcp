@@ -9,6 +9,83 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found a THIRD discovery route and four stale README counts my own fix had walked past.**
+  - **The reception inbox carries `attachmentId` on every row**, and `reai_parse_ehf_attachment` has relied on
+    that all along. It is the route for a document that has not yet become an order or a supplier invoice —
+    exactly the case `reai_list_attachments` structurally cannot reach, since it takes those two owners and
+    nothing else. So the tool's original "ONLY" was wrong twice over, by two different reviewers. Named now, and
+    marked as read off the SCHEMA rather than measured, because both inboxes were empty on the tenant available.
+  - **Four README counts contradicted the page's own total**: "curated tool (168)", "The other 168 are curated",
+    "inside the 168" and "(unset) → all 175". The guard passed them because it only checked that the real total
+    APPEARS and that nothing exceeds it — every stale value was *below* 177. A reader deciding whether to narrow
+    `REAI_TOOLSETS` got three different answers. The guard now checks the curated total and the `(unset)` row
+    directly, and both stale values fail it.
+  - Its third finding (a non-array `usedBy` reported as an empty list) was already fixed one commit earlier — it
+    reviewed the previous head — and the fix is pinned by name.
+
+- **Review falsified the new tool's central claim and found six more defects.** Every one of the seven live
+  measurements held; the reasoning built on top of them did not.
+  - **"The ONLY way to discover attachment ids" was false, and the tool reaches one of the seven attachments on
+    the tenant it was measured against.** A **voucher embeds its attachments** in its own response, so
+    `reai_list_vouchers` and `reai_get_voucher` already carried them — six of 58 vouchers on 2634, against one
+    supplier invoice. `reai_get_voucher`'s own description has said *"including all its postings and
+    attachments"* the whole time. And `usedBy` returns a third `ownerType`, `VOUCHER`, that the owner map cannot
+    take — so the tool printed *"Referenced by VOUCHER 27967"* and left the caller nowhere to go, since
+    `/api/vouchers/{id}/attachments` is a 404. It now names the voucher route and points at `reai_get_voucher`.
+  - **A non-array `usedBy` was reported as "an empty list, so nothing references this attachment"** — the single
+    sentence the tool tells agents to trust before deleting a file, printed directly above a payload showing the
+    reference. `asArray` collapses any shape to `[]` and the code then described the shape it had not seen. Five
+    outcomes now: no record, field absent, `null`, not-a-list, and a real list.
+  - **`"usedBy came back null"` printed when the field was absent, and when nothing came back at all** —
+    including after the not-a-record branch had already said nothing could be read.
+  - **The list asserted "`usedBy` is null on every row here" without looking at the rows.** A fixed sentence,
+    generalised from one route and one row, with the `order` branch never measured. It is read off the data now,
+    and a zero-row list says nothing about rows that do not exist.
+  - **"The two routes return the same record with one field different" was wrong: `createdAt` disagrees by two
+    days.** I had compared only the field I was looking for. Which value means "when the document arrived" is
+    not established, so neither tool claims it.
+  - **The un-prefixed web route claim was wrong three ways.** Not 200 but **302** to `/auth/login`; not the app
+    shell but the login page; and not identical to a nonsense path, since each page embeds its own `redirect=`.
+    `fetch` follows redirects by default, so the 302 was invisible unless looked for. The consequence I cared
+    about does hold — `reai_request` recognises the HTML and says so.
+  - **"Nine guards … the tool count in four files" was eight guards and two files.** Review counted by reverting
+    the doc edits and running the suite. Overstating the work is the same failure as overstating a measurement.
+  - **The README's headline bullet had said "124 measured API quirks" for three iterations**, and the guard
+    written to stop exactly that drift could not see it — its pattern required `N quirks` with nothing between.
+    Widening it to any intervening words produced false positives on prose where the number belongs to something
+    else (`PR #115 corrected two quirks`), so the modifiers are enumerated and the floor is now the measured
+    count rather than a loose one.
+  - **`asArray` reverting to `?? []` was uncaught for the new field**, because `usedBy` was not in the
+    hostile-shape sweep's list — the allowlist pattern again. Added, and the revert now fails.
+
+- **Two tools for the document behind a record: `reai_list_attachments` and `reai_get_attachment`.** An agent
+  looking at supplier invoice 5830 had no curated way to reach the PDF it came from — 15 of the 16
+  attachment-related operations were uncovered, only the EHF parse was wrapped.
+  - Measured on 2634 against attachment 19780 (`faktura_2026_10009.pdf`, 1,784,632 bytes) on 2026-08-10.
+  - **There is no global list**, so the owner-scoped routes ARE the discovery path: `GET /api/attachments` is
+    405 because only `POST` exists on that collection. An unknown owner answers 404 naming the owner, so an
+    empty list means the record exists with no files — a different answer.
+  - **The scoped list leaves `usedBy` null; the by-id fetch fills it in.** So "what else references this file"
+    is a question only `reai_get_attachment` can answer, and it is the one to ask before deleting. Also
+    measured: `contentUrl` on a scoped row points at the OWNER path, not `/api/attachments/{id}/content`.
+  - **Neither tool returns the file.** Content is the raw document — 1.7 MB of `application/pdf` for that one —
+    so the tools report the URL and leave fetching outside this protocol. And `/ehf` **and** `/embedded-files`
+    are both EHF-only despite the second one's generic name: both answer
+    `400 "Attachment is not a valid EHF XML"` on a PDF.
+  - `GET /attachments/{id}` and `/attachments/{id}/view/{filename}` (no `/api`) are **not API endpoints** — they
+    return the web app's HTML shell with a 200 for any id, without authentication, identical to a nonsense path.
+    `reai_request` already recognises that and says so instead of handing back HTML, which I verified rather
+    than assuming.
+  - **177 tools**: 170 across thirteen accounting domains, plus 7 always-on. **Eight** repo guards fired on the
+    two new tools — the README tool count, the `purchase` subtotal, documentation coverage, the uncovered- and
+    bare-operation counts, the `.env.example` total, a cross-toolset reference, and the argument-naming
+    convention (my getter took `attachmentId`; the convention is `id`, because two spellings make an agent guess
+    and get "Invalid arguments for tool"). Every one was a real inconsistency, not a false alarm.
+    - I first wrote "nine guards … the tool count in four files". Review counted them by reverting the doc edits
+      and running the suite: **eight**, and the total appears in **two** files (`README.md` and
+      `.env.example`) — the count that lives in four is the *uncovered-operation* one, which the same sentence
+      listed separately. Overstating the work is the same failure mode as overstating a measurement.
+
 - **Every list tool told agents to use a paging parameter that does not exist and is silently ignored.** The
   shared array-truncation note in `okList` ended *"or use the limit/page parameters"*. Measured against the spec
   and the live API, that was wrong twice over:

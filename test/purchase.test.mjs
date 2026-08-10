@@ -107,3 +107,158 @@ test("a stored kind this tool does not recognise is not called an invoice", asyn
     );
   }
 });
+
+/** An attachment as the live API returns one, measured on 2634: supplier invoice 5830, attachment 19780. */
+const ATTACHMENT = {
+  id: 19780,
+  filename: "faktura_2026_10009.pdf",
+  mimeType: "application/pdf",
+  createdAt: "2026-08-07T10:21:49.663759Z",
+  size: 1784632,
+  contentUrl: "/api/supplier-invoices/5830/attachments/19780/content",
+  downloadUrl: "/api/supplier-invoices/5830/attachments/19780/content?download=true",
+  usedBy: null,
+};
+
+test("reai_list_attachments reaches the owner-scoped route for each owner type", async () => {
+  // reai_list_attachments: the scoped routes are the ONLY way to discover an attachment id — measured,
+  // GET /api/attachments answers 405 because only POST exists on that collection.
+  const invoice = await run("reai_list_attachments", { ownerType: "supplierInvoice", ownerId: 5830 }, [ATTACHMENT]);
+  assert.equal(invoice.calls[0].path, "/api/supplier-invoices/5830/attachments");
+  assert.match(invoice.text, /1 attachment\(s\) on supplier invoice 5830/);
+
+  const order = await run("reai_list_attachments", { ownerType: "order", ownerId: 4105 }, []);
+  assert.equal(order.calls[0].path, "/api/orders/4105/attachments");
+  assert.match(order.text, /0 attachment\(s\) on order 4105/);
+  // An unknown owner 404s naming the OWNER, so empty means "exists, has none" — a different answer.
+  assert.match(order.text, /An empty list means the record has none/);
+});
+
+test("reai_list_attachments reads usedBy off the rows instead of asserting it", async () => {
+  // reai_list_attachments: the first version stated "usedBy is null on every row here" as a FIXED sentence, and
+  // review drove a populated row straight through it — a claim generalised from one route and one row, with the
+  // `order` branch never measured at all. Three cases, because the sentence has to follow the data.
+  const nulled = await run("reai_list_attachments", { ownerType: "supplierInvoice", ownerId: 5830 }, [ATTACHMENT]);
+  assert.match(nulled.text, /`usedBy` is null on all 1 row\(s\) here/);
+  assert.match(nulled.text, /read an attachment by id with reai_get_attachment/);
+
+  // A populated row must NOT be described as null.
+  const populated = await run("reai_list_attachments", { ownerType: "supplierInvoice", ownerId: 5830 }, [
+    { ...ATTACHMENT, usedBy: [{ ownerType: "SUPPLIER_INVOICE", ownerId: 5830 }] },
+    ATTACHMENT,
+  ]);
+  assert.match(populated.text, /1 of 2 row\(s\) carry a `usedBy`/);
+  assert.doesNotMatch(populated.text, /is null on all/);
+
+  // And a zero-row list must say nothing about rows that do not exist.
+  const empty = await run("reai_list_attachments", { ownerType: "order", ownerId: 4105 }, []);
+  assert.doesNotMatch(empty.text, /usedBy/, `no rows means no claim about rows: ${empty.text}`);
+});
+
+test("reai_get_attachment resolves usedBy into the records that reference the file", async () => {
+  // reai_get_attachment: the by-id route fills usedBy in, which is the whole reason this tool exists next to
+  // the list. Measured on 19780: [{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}].
+  const { text, calls } = await run("reai_get_attachment", { id: 19780 }, {
+    ...ATTACHMENT,
+    usedBy: [{ ownerType: "SUPPLIER_INVOICE", ownerId: 5830 }],
+  });
+  assert.equal(calls[0].path, "/api/attachments/19780");
+  assert.match(text, /faktura_2026_10009\.pdf, application\/pdf, 1784632 bytes, read back from the response/);
+  // A SECOND response, whose filename differs from every literal in this file, so a hardcoded name cannot pass.
+  // The first version of this test used only the fixture's own name, and substituting that name as a literal in
+  // the handler survived the mutation — the sixth time in this line of work that a fixture equal to the value
+  // under test made an assertion unable to tell a read-back from an echo.
+  const other = await run("reai_get_attachment", { id: 19780 }, {
+    ...ATTACHMENT,
+    filename: "kvittering-ZZ-8842.pdf",
+    mimeType: "image/png",
+    size: 4211,
+  });
+  assert.match(other.text, /kvittering-ZZ-8842\.pdf, image\/png, 4211 bytes, read back from the response/);
+  assert.match(text, /Referenced by 1 record\(s\): SUPPLIER_INVOICE 5830\. Deleting the file affects all of them/);
+  // The bytes are deliberately not returned; the note must say where they are.
+  assert.match(text, /bytes are not in this response.*\/api\/attachments\/19780\/content/s);
+});
+
+test("reai_get_attachment does not read a null usedBy as nothing referencing the file", async () => {
+  // reai_get_attachment: null is the API's "not populated" — it is what the scoped list always returns — and
+  // reading it as "nothing uses this" is how a file attached to two records gets deleted.
+  const nulled = await run("reai_get_attachment", { id: 19780 }, ATTACHMENT);
+  assert.match(nulled.text, /`usedBy` came back null, so what references this file is NOT established/);
+  assert.match(nulled.text, /not the same as nothing referencing it/);
+  assert.doesNotMatch(nulled.text, /nothing references this attachment/);
+
+  // An EMPTY array is a different answer, and it is the one that means nothing references it.
+  const empty = await run("reai_get_attachment", { id: 19780 }, { ...ATTACHMENT, usedBy: [] });
+  assert.match(empty.text, /`usedBy` is an empty list, so nothing references this attachment/);
+  assert.doesNotMatch(empty.text, /NOT established/);
+});
+
+test("reai_get_attachment says so when the response is not a record", async () => {
+  const { text } = await run("reai_get_attachment", { id: 19780 }, [ATTACHMENT]);
+  assert.match(text, /came back as an array of 1, so nothing could be read from it/);
+  assert.doesNotMatch(text, /read back from the response/);
+});
+
+test("reai_get_attachment distinguishes absent, null, and a non-list usedBy", async () => {
+  // reai_get_attachment: review collapsed these and found two false sentences. A non-array went through
+  // `asArray` to `[]` and was reported as "an empty list, so nothing references this attachment" — directly
+  // above a payload showing the reference, and it is the one sentence this tool exists to be trusted on.
+  const { usedBy, ...withoutField } = ATTACHMENT;
+  const absent = await run("reai_get_attachment", { id: 19780 }, withoutField);
+  assert.match(absent.text, /carries no `usedBy` field at all, so what references this file is NOT established/);
+
+  const notAList = await run("reai_get_attachment", { id: 19780 }, {
+    ...ATTACHMENT,
+    usedBy: { ownerType: "ORDER", ownerId: 7 },
+  });
+  assert.match(notAList.text, /came back as an object rather than a list/);
+  assert.match(notAList.text, /do not treat this as nothing referencing it/);
+  assert.doesNotMatch(notAList.text, /nothing references this attachment/);
+
+  // And when nothing could be read at all, it must not claim usedBy "came back" anything.
+  const unreadable = await run("reai_get_attachment", { id: 19780 }, "<!DOCTYPE html>");
+  assert.match(unreadable.text, /Nothing could be read, so what references this file is unknown/);
+  assert.doesNotMatch(unreadable.text, /came back null/);
+});
+
+test("reai_get_attachment sends a VOUCHER owner to the tool that can actually reach it", async () => {
+  // reai_get_attachment: measured on 2634 — attachment 18925 is owned by VOUCHER 27967, and there is no
+  // /api/vouchers/{id}/attachments route (404 "No static resource"). So reai_list_attachments cannot follow a
+  // VOUCHER owner, and saying "Referenced by VOUCHER 27967" without saying that leaves the caller stuck.
+  const { text } = await run("reai_get_attachment", { id: 18925 }, {
+    id: 18925,
+    filename: "kvittering.pdf",
+    mimeType: "application/pdf",
+    size: 341986,
+    usedBy: [{ ownerType: "VOUCHER", ownerId: 27967 }],
+  });
+  assert.match(text, /Referenced by 1 record\(s\): VOUCHER 27967/);
+  assert.match(text, /not reachable with reai_list_attachments/);
+  assert.match(text, /Read the voucher with reai_get_voucher; it embeds its attachments/);
+
+  // A supplier-invoice owner must NOT get that pointer.
+  const invoice = await run("reai_get_attachment", { id: 19780 }, {
+    ...ATTACHMENT,
+    usedBy: [{ ownerType: "SUPPLIER_INVOICE", ownerId: 5830 }],
+  });
+  assert.doesNotMatch(invoice.text, /reai_get_voucher/);
+});
+
+test("reai_list_attachments names all three ways to reach an attachment id", async () => {
+  // reai_list_attachments: its first version said "this is the ONLY way to discover attachment ids". Two
+  // reviews found two other routes, and both matter more than this tool for the cases they cover:
+  //
+  //   a VOUCHER embeds its attachments — six of seven attachments on the measured tenant were there;
+  //   the RECEPTION INBOX carries attachmentId — the case this tool structurally cannot reach, because it
+  //   takes an order or a supplier invoice and a document in the inbox is neither yet.
+  //
+  // Pinned because the claim is about what an agent will not find on its own: a tool that says "only" sends
+  // them away from the route that would have worked.
+  const description = tool("reai_list_attachments").description;
+  assert.match(description, /reai_list_vouchers|reai_get_voucher/, "the voucher route must be named");
+  assert.match(description, /reai_list_reception_documents/, "the reception inbox must be named");
+  assert.doesNotMatch(description, /ONLY way/, "the claim this text used to make was false");
+  // And the reception one must be marked as unmeasured, because both inboxes were empty on the tenant used.
+  assert.match(description, /schema rather than\s+"?\s*\+?\s*"?measured/s, "say it is from the schema, not measured");
+});

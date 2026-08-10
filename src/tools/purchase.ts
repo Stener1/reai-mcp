@@ -3,7 +3,11 @@ import { assertTransmitAllowed } from "../policy.js";
 import {
   CURRENCY_CODE,
   COUNTRY_CODE,
+  asArray,
+  asScalar,
   defineTool,
+  describeShape,
+  isRecord,
   fail,
   isoDate,
   ok,
@@ -830,6 +834,220 @@ const parseEhfAttachment = defineTool({
   },
 });
 
+/**
+ * Attachments: the source document behind a record.
+ *
+ * Everything here was measured on tenant 2634 against supplier invoice 5830 and its attachment 19780
+ * (`faktura_2026_10009.pdf`, 1,784,632 bytes), on 2026-08-10.
+ *
+ * ## There is no global list, and the scoped ones are the way in
+ *
+ * `GET /api/attachments` answers **405** — only POST exists on that collection — so an attachment cannot be
+ * found by browsing. Ids come from an owner: `GET /api/orders/{id}/attachments` and
+ * `GET /api/supplier-invoices/{id}/attachments`. That is the whole reason these tools exist; before them an
+ * agent looking at a supplier invoice had no curated way to reach the PDF it came from.
+ *
+ * ## The two routes disagree on FOUR fields, not one
+ *
+ * The owner-scoped list leaves **`usedBy` null**. Reading the same attachment by id fills it in — 19780 came
+ * back `[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`. So "what else references this file" is a question
+ * only `reai_get_attachment` can answer, and it is worth asking before deleting anything.
+ *
+ * `contentUrl` and `downloadUrl` on a scoped row point at the OWNER path
+ * (`/api/supplier-invoices/5830/attachments/19780/content`), not at `/api/attachments/{id}/content`. Both serve
+ * the same bytes — verified byte-identical.
+ *
+ * And **`createdAt` disagrees by two days**: `2026-08-07T10:21:49` from the supplier-invoice route against
+ * `2026-08-05T17:22:28` by id. Review found that; the first version of this comment claimed the two routes
+ * differed in one field, having compared only the field it was looking for. Which of the two is "when the
+ * document arrived" is NOT established — one may be the upload and the other the link — so neither tool
+ * asserts a meaning for it. Voucher-embedded rows carry the same `createdAt` as the by-id read, so the drift
+ * belongs to the supplier-invoice route rather than to scoped listing in general.
+ *
+ * ## Why neither tool returns the file
+ *
+ * The content endpoints return the raw document — `application/pdf`, 1.7 MB for this one. Handing that to a
+ * model as text would be useless at best. These tools report the metadata and say where the bytes are; fetching
+ * or reading them is the caller's job, outside this protocol.
+ */
+const ATTACHMENT_OWNERS = {
+  order: { path: "orders", label: "order" },
+  supplierInvoice: { path: "supplier-invoices", label: "supplier invoice" },
+} as const;
+
+const listAttachments = defineTool({
+  name: "reai_list_attachments",
+  title: "List a record's attachments",
+  description:
+    "List the files attached to an order or a supplier invoice — the scanned invoice, the receipt, the " +
+    "EHF document.\n\n" +
+    "There is no GLOBAL attachment list: measured, GET /api/attachments answers 405, because only POST " +
+    "exists on that collection. This tool is one of THREE ways to reach an id, and often not the right one:\n\n" +
+    "- **A voucher embeds its attachments** in its own response, so reai_list_vouchers and reai_get_voucher " +
+    "already carry them. Measured on 2634: six of 58 vouchers had one, against one supplier invoice — so " +
+    "vouchers held six of the seven attachments on that tenant. There is no /api/vouchers/{id}/attachments " +
+    "route (404), which is why voucher is not an ownerType here.\n" +
+    "- **The reception inbox** carries `attachmentId` on every row — reai_list_reception_documents. That is " +
+    "the route for a document that has NOT yet become an order or a supplier invoice, which is exactly the " +
+    "case this tool cannot reach: it takes those two owners and nothing else. Read off the schema rather than " +
+    "measured, because both inboxes were empty on the tenant available.\n" +
+    "- This tool, for a document already attached to an order or a supplier invoice.\n\n" +
+    "Each row carries filename, mimeType, size and the URL its bytes live at. Two measured caveats worth " +
+    "knowing before you act on the result:\n\n" +
+    "- `usedBy` is NULL here even when the attachment is referenced. Read one by id with " +
+    "reai_get_attachment to learn what else points at it — which is the question to ask before deleting.\n" +
+    "- `contentUrl` and `downloadUrl` point at the OWNER path, not at /api/attachments/{id}/content. Both " +
+    "serve the same bytes.\n" +
+    "- `createdAt` DISAGREES with the by-id read — measured, by two days on the one attachment available. " +
+    "Which one means \"when the document arrived\" is not established, so do not report either as that.\n\n" +
+    "This does not fetch the file. Content is the raw document — measured, application/pdf at 1.7 MB for one " +
+    "supplier invoice — so it is reported as a URL rather than returned.",
+  risk: "read",
+  apiPaths: [
+    ["GET", "/api/orders/{id}/attachments"],
+    ["GET", "/api/supplier-invoices/{id}/attachments"],
+  ],
+  inputSchema: {
+    ownerType: z
+      .enum(["order", "supplierInvoice"])
+      .describe("Which kind of record the attachments hang off."),
+    ownerId: z
+      .number()
+      .int()
+      .positive()
+      .describe(
+        "The order id or supplier invoice id. Supplier invoice ids come from reai_list_supplier_invoices in " +
+          "this toolset; order ids come from reai_list_orders, which is in the `sales` toolset — with " +
+          "REAI_TOOLSETS=purchase alone, reach it through reai_request GET /api/orders.",
+      ),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const owner = ATTACHMENT_OWNERS[args.ownerType];
+    const res = await ctx.client.request<unknown[]>({
+      method: "GET",
+      path: `/api/${owner.path}/${args.ownerId}/attachments`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    // An unknown owner answers 404 naming the OWNER, not an empty list — measured, "Supplier invoice 999999 not
+    // found" — so an empty result here means the record exists and has no files, which is a different answer.
+    // CHECKED, not asserted. The first version stated "usedBy is null on every row here" as a fixed sentence,
+    // and review drove a populated row straight through it — the claim was generalised from one route and one
+    // row, and the `order` branch had never been measured at all. It is now read off what came back, and the
+    // zero-row case says nothing about rows that do not exist.
+    const rows = Array.isArray(res.data) ? res.data : [];
+    const populated = rows.filter((row) => isRecord(row) && row.usedBy != null).length;
+    return okList(res.data, {
+      noun: "attachment",
+      suffix:
+        ` on ${owner.label} ${args.ownerId}. An empty list means the record has none: an unknown ` +
+        `${owner.label} answers 404 rather than returning nothing.` +
+        (rows.length === 0
+          ? ``
+          : populated === 0
+            ? ` \`usedBy\` is null on all ${rows.length} row(s) here, which is what this route does — read an ` +
+              `attachment by id with reai_get_attachment to learn what references it.`
+            : ` ${populated} of ${rows.length} row(s) carry a \`usedBy\`, which this route usually leaves ` +
+              `null — read by id with reai_get_attachment if you need it for the rest.`),
+    });
+  },
+});
+
+const getAttachment = defineTool({
+  name: "reai_get_attachment",
+  title: "Get one attachment, and what references it",
+  description:
+    "Fetch one attachment by id: filename, mimeType, size, and — unlike the owner-scoped list — the " +
+    "`usedBy` array saying what references it. Measured: attachment 19780 came back " +
+    '`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`, while the same attachment in the scoped list had ' +
+    "`usedBy: null`. Ask this before deleting a file that may be attached to more than one record.\n\n" +
+    "Ids come from reai_list_attachments; there is no global attachment list to search (405 on the " +
+    "collection).\n\n" +
+    "Two measured limits. The bytes are not returned — content is the raw document, 1.7 MB of " +
+    "application/pdf for that one — only the URL is. And the /ehf and /embedded-files routes are EHF-only: " +
+    'both answer 400 "Attachment is not a valid EHF XML" on a PDF, so check mimeType before reaching for ' +
+    "reai_parse_ehf_attachment.",
+  risk: "read",
+  apiPaths: [["GET", "/api/attachments/{id}"]],
+  inputSchema: {
+    // `id`, not `attachmentId`: this repo's convention for a single-record getter, enforced by
+    // test/toolsets.test.mjs because two spellings make an agent guess and get "Invalid arguments for tool".
+    id: z.number().int().positive().describe("Attachment id, from reai_list_attachments."),
+    tenantId: tenantIdArg,
+  },
+  handler: async (args, ctx) => {
+    const res = await ctx.client.request<{
+      filename?: unknown;
+      mimeType?: unknown;
+      size?: unknown;
+      usedBy?: unknown;
+    }>({
+      method: "GET",
+      path: `/api/attachments/${args.id}`,
+      tenantId: requireTenantId(args.tenantId, ctx),
+    });
+    const record = isRecord(res.data) ? res.data : undefined;
+    const owners = asArray(record?.usedBy as unknown[] | undefined);
+    const mime = asScalar(record?.mimeType);
+    return ok(res.data, {
+      note: [
+        record === undefined
+          ? `Attachment ${args.id} came back as ${describeShape(res.data)}, so nothing could be ` +
+            `read from it.`
+          : `${asScalar(record.filename) ?? "(no filename)"}` +
+            `${mime === undefined ? "" : `, ${mime}`}` +
+            `${asScalar(record.size) === undefined ? "" : `, ${asScalar(record.size)} bytes`}` +
+            `, read back from the response.`,
+        // FIVE outcomes, not three. Review collapsed them and found two false sentences:
+        //
+        //   no record at all   — this branch used to run anyway and say "usedBy came back null" when nothing
+        //                        came back. An unreadable shape and a missing field call for different
+        //                        sentences, which is what `isRecord`'s own comment says.
+        //   ABSENT             — the field is not in the response. Rendered as `null` by `?? null`, so it read
+        //                        as the API answering null when it had said nothing.
+        //   null               — the API's own "not populated", which is what the scoped list always returns.
+        //   not an array       — `asArray` collapses anything to `[]`, and the code then said "an empty list,
+        //                        so nothing references this attachment" while the payload below showed the
+        //                        reference. That is the one sentence this tool exists to be trusted on.
+        //   an array           — the real answer, empty or not.
+        record === undefined
+          ? `Nothing could be read, so what references this file is unknown.`
+          : !Object.hasOwn(record, "usedBy")
+            ? `The response carries no \`usedBy\` field at all, so what references this file is NOT ` +
+              `established — which is not the same as nothing referencing it.`
+            : record.usedBy === null
+              ? `\`usedBy\` came back null, so what references this file is NOT established — that is also ` +
+                `what the owner-scoped list returns, and it is not the same as nothing referencing it.`
+              : !Array.isArray(record.usedBy)
+                ? `\`usedBy\` came back as ${describeShape(record.usedBy)} rather than a list, so what ` +
+                  `references this file could not be read. The raw value is in the record below — do not treat ` +
+                  `this as nothing referencing it.`
+                : owners.length === 0
+                  ? `\`usedBy\` is an empty list, so nothing references this attachment.`
+                  : `Referenced by ${owners.length} record(s): ${owners
+                      .map((o) =>
+                        isRecord(o)
+                          ? `${asScalar(o.ownerType) ?? "?"} ${asScalar(o.ownerId) ?? "?"}`
+                          : JSON.stringify(o),
+                      )
+                      .join(", ")}. Deleting the file affects all of them.` +
+                    // A VOUCHER owner cannot be reached by this tool's sibling: there is no
+                    // /api/vouchers/{id}/attachments route (measured: 404 "No static resource"). The voucher
+                    // read embeds its attachments instead, so that is where to send the caller.
+                    (owners.some((o) => isRecord(o) && /voucher/i.test(String(asScalar(o.ownerType) ?? "")))
+                      ? ` A VOUCHER owner is not reachable with reai_list_attachments — there is no ` +
+                        `/api/vouchers/{id}/attachments route. Read the voucher with reai_get_voucher; it ` +
+                        `embeds its attachments.`
+                      : ``),
+        `The bytes are not in this response. They are at /api/attachments/${args.id}/content, ` +
+          `served as the raw document` +
+          (mime === undefined ? `` : ` (${mime})`) +
+          `; this server reports the URL rather than returning the file.`,
+      ].join("\n\n"),
+    });
+  },
+});
+
 // --- Expenses --------------------------------------------------------------
 
 const listExpenses = defineTool({
@@ -1060,6 +1278,8 @@ export const purchaseTools: ToolDef[] = [
   paySupplierInvoice,
   listReceptionDocuments,
   parseEhfAttachment,
+  listAttachments,
+  getAttachment,
   listExpenses,
   setSupplierAddress,
 ] as ToolDef[];
