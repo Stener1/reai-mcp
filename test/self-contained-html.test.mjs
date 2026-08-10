@@ -31,6 +31,12 @@ const MUST_PASS = [
   ["an aria-label containing a greater-than", '<button aria-label="a > b">go</button>'],
   ["an empty srcset", '<img srcset="">'],
   ["a data: URI in srcset", '<img srcset="data:image/png;base64,iVBORw0KGgo= 1x">'],
+  // --- Review round 5. Each of these FAILED the previous version. -----------------------------------------
+  ["markup inside a comment", '<!-- <img srcset="example.png 1x"> -->'],
+  ["a script inside a comment", '<!-- <script src="old.js"></script> -->'],
+  ["a hidden input with a src", '<input type="hidden" src="remote.png">'],
+  ["a text input with a src", '<input src="remote.png">'],
+  ["xlink:href ignored because href is present", '<svg><use href="#icon" xlink:href="legacy.svg#icon"/></svg>'],
 ];
 
 const MUST_FAIL = [
@@ -59,6 +65,14 @@ const MUST_FAIL = [
   ["a fragment as a script src", '<script src="#payload"></script>', "script"],
   ["a fragment as an img src", '<img src="#icon">', "img"],
   ["a video poster", '<video poster="thumb.jpg"></video>', "video"],
+  // A candidate URL whose whole name looks like a descriptor is still the URL: position, not shape.
+  ["a srcset URL named 2x", '<img srcset="2x">', "img"],
+  ["a srcset URL named 640w", '<img srcset="640w">', "img"],
+  ["a second srcset candidate", '<img srcset="data:image/png;base64,AAA 1x, other.png 2x">', "img"],
+  // An image-button input DOES load.
+  ["an image-button input", '<input type="image" src="remote.png">', "input"],
+  // xlink:href is consulted when href is absent.
+  ["xlink:href alone pulling a file", '<svg><use xlink:href="sprite.svg#icon"/></svg>', "use"],
 ];
 
 test("a self-contained document is not reported as external", () => {

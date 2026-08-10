@@ -45,10 +45,22 @@ const LOADERS = {
   video: ["src", "poster"],
   audio: ["src"],
   object: ["data"],
+  // `src` on an input loads ONLY in the Image Button state. `<input type="hidden" src="x.png">` is inert, and
+  // the default (absent type) is text, so this is conditional rather than unconditional.
   input: ["src"],
+  // SVG resolves `href` in preference to the deprecated `xlink:href`. When both are present the fallback is
+  // IGNORED, so treating them as two independent loads reports a reference the host never follows.
   use: ["href", "xlink:href"],
   image: ["href", "xlink:href"], // SVG <image>
 };
+
+/** Elements whose loader attributes only apply in a particular state. */
+const CONDITIONAL_LOADERS = {
+  input: (attrs) => (attributeValue(attrs, "type") ?? "").toLowerCase() === "image",
+};
+
+/** Attributes that are only consulted when a preferred attribute is absent. */
+const FALLBACK_FOR = { "xlink:href": "href" };
 
 /**
  * Attributes that legitimately reference the SAME document by fragment.
@@ -72,6 +84,12 @@ const EMBEDDED_SCHEME = /^data:/i;
  * Without this, `href=` written inside the inline script — ordinary for code that builds markup — reads as a
  * reference. The opening tag is preserved so `<script src=…>` is still visible.
  */
+function stripComments(html) {
+  // A comment performs no fetch, so markup inside one is inert. Templates plausibly carry a disabled example
+  // or a note containing markup, and reporting it would fail a self-contained document.
+  return html.replace(/<!--[\s\S]*?-->/g, "");
+}
+
 function blankInlineCode(html) {
   // The attribute run is quote-aware for the SAME reason the tag scan below is: `[^>]*` stops at a `>` inside a
   // quoted value, which truncated the opening tag and then blanked the REST of it as if it were script content.
@@ -108,14 +126,37 @@ function attributeValue(attrs, name) {
  */
 function candidateUrls(attribute, value) {
   if (attribute !== "srcset") return [value];
-  // Split on WHITESPACE, not on commas. A srcset URL cannot contain whitespace, but it certainly can contain a
-  // comma — `srcset="data:image/png;base64,AAA 1x"` — and splitting on commas tore that data URI in half and
-  // then reported its tail as an external reference. Found by this module's own test table, which is the point
-  // of having one. Tokens shaped like a descriptor (`1x`, `2.5x`, `640w`) are descriptors; the rest are URLs.
-  return value
-    .split(/\s+/)
-    .map((token) => token.replace(/,+$/, "").replace(/^,+/, ""))
-    .filter((token) => token !== "" && !/^\d+(?:\.\d+)?[wx]$/i.test(token));
+  return srcsetUrls(value);
+}
+
+/**
+ * URLs in a `srcset`, by position rather than by shape.
+ *
+ * The first token of each candidate IS the URL — even when it looks like a descriptor. Filtering
+ * descriptor-shaped tokens globally, which is what this did first, discarded a candidate URL literally named
+ * `2x` or `640w` and then reported the document as self-contained. Position is the rule; shape is a guess.
+ *
+ * Commas separate candidates, but a `data:` URI contains one, so the URL is read as a non-whitespace run and a
+ * TRAILING comma is what ends a candidate. That keeps `data:image/png;base64,AAA 1x` intact.
+ */
+function srcsetUrls(value) {
+  const urls = [];
+  let rest = String(value);
+  while (rest.length > 0) {
+    rest = rest.replace(/^[\s,]+/, "");
+    if (rest === "") break;
+
+    const token = /^\S+/.exec(rest)?.[0] ?? "";
+    rest = rest.slice(token.length);
+
+    const endedCandidate = token.endsWith(",");
+    const url = token.replace(/,+$/, "");
+    if (url !== "") urls.push(url);
+
+    // Without a trailing comma the descriptor follows, and runs to the next comma.
+    if (!endedCandidate) rest = rest.slice((/^[^,]*/.exec(rest)?.[0] ?? "").length);
+  }
+  return urls;
 }
 
 /**
@@ -126,7 +167,7 @@ function candidateUrls(attribute, value) {
  * "not self-contained" and something actionable.
  */
 export function externalReferences(html) {
-  const scanned = blankInlineCode(String(html));
+  const scanned = blankInlineCode(stripComments(String(html)));
   const found = [];
 
   for (const match of scanned.matchAll(TAG)) {
@@ -135,7 +176,14 @@ export function externalReferences(html) {
     if (attributes === undefined) continue;
 
     const attrs = match[2] ?? "";
+    const applies = CONDITIONAL_LOADERS[element];
+    if (applies !== undefined && !applies(attrs)) continue;
+
     for (const attribute of attributes) {
+      // A fallback attribute is inert when the attribute it stands in for is present.
+      const preferred = FALLBACK_FOR[attribute];
+      if (preferred !== undefined && attributeValue(attrs, preferred) !== undefined) continue;
+
       const raw = attributeValue(attrs, attribute);
       if (raw === undefined || raw === "") continue;
 
