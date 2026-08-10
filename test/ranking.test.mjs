@@ -1067,7 +1067,7 @@ test("a tie never ranks DELETE above a safer method", () => {
  * operations were reordered against what the user asked for, making nothing safer. A tie between different
  * resources says only that both are equally relevant; it licenses no preference about their methods.
  */
-test("safer-first does not reorder different resources, and yields to delete intent", async () => {
+test("safer-first does not reorder different resources, and prefers the safer write on one", async () => {
   // Cross-resource: the ASCII-folded form is the one that ties, so it is the one asserted.
   const folded = searchOperations({ query: "slett bankkonto pa faktura", limit: 5 });
   const tied = folded.filter((h) => h.score === folded[0].score);
@@ -1108,11 +1108,21 @@ test("safer-first does not reorder different resources, and yields to delete int
   // Measured: the retrospective forms carry the read-intent penalty (writes at 9.59), the imperatives do not
   // (15.34). So readIntent separates them where neither verb table can, and both directions are asserted here
   // so a future gate cannot fix one by breaking the other again.
+  // `cancel` is ambiguous BY DESIGN — deliberately absent from WRITE_INTENT_VERBS so a question about the past
+  // works — so every reading of it now prefers the safer write on the same resource. Three gates tried to
+  // separate imperative from retrospective and each failed from a different direction (the method hint alone,
+  // then requiring writeIntent, then requiring !readIntent, which `did` defeats). The fourth attempt would have
+  // been another word on a list.
+  //
+  // The yield is gone instead, because an UNAMBIGUOUS delete request wins on SCORE and never reaches the
+  // tie-break: "delete expenses" 42.1 against PATCH's 26.9, "slett utgift" 15.5 against 9.4. Asserted below.
   for (const [query, wanted] of [
-    ["cancel expenses", "DELETE"],
-    ["please cancel expenses", "DELETE"],
+    ["cancel expenses", "PATCH"],
+    ["please cancel expenses", "PATCH"],
     ["when did we cancel expenses", "PATCH"],
     ["which expenses did we cancel", "PATCH"],
+    ["did we cancel expenses", "PATCH"],
+    ["have we cancelled expenses", "PATCH"],
   ]) {
     const writes = searchOperations({ query, limit: 8 }).filter(
       (h) => h.path === "/api/expenses/{id}" && h.method !== "GET",
@@ -1156,12 +1166,27 @@ test("safer-first does not reorder different resources, and yields to delete int
   const source = readFileSync(new URL("../src/reai/spec.ts", import.meta.url), "utf8");
   const rule = /const saferFirst[\s\S]*?\n  };/.exec(source)?.[0];
   assert.ok(rule, "saferFirst was renamed or restructured — re-anchor this, do not delete it");
-  assert.match(rule, /if \(deleteIntent\) return 0;/, "the delete-intent yield is missing from saferFirst");
+  // The delete-intent yield is deliberately absent — see the doesNotMatch above and the comment block in
+  // src/reai/spec.ts. What must remain is the same-path restriction, which is the guard that has never been
+  // wrong: a tie between DIFFERENT resources licenses no preference about their methods.
   // And the yield itself must require write intent, not just the DELETE hint.
-  assert.match(
+  // The yield is GONE, and must stay gone: it was the sole source of three consecutive wrong answers, and every
+  // explicit delete request wins on score without it. A reintroduced yield would only ever change `cancel`.
+  assert.doesNotMatch(
     source,
-    /const deleteIntent =\s*\n?\s*!wantMethod && !readIntent &&/,
-    "deleteIntent must gate on the absence of READ intent — writeIntent is false for an imperative cancel too",
+    /^\s*if \(deleteIntent\) return 0;/m,
+    "the deleteIntent yield is back; it only ever changed the answer for the deliberately ambiguous `cancel`",
   );
+
+  // An unambiguous delete verb must win on SCORE, not on the tie-break — that is what makes the yield
+  // unnecessary. If this stops holding, the yield question reopens.
+  for (const query of ["delete expenses", "slett utgift", "delete opening balance", "slett åpningsbalanse"]) {
+    const hits = searchOperations({ query, limit: 3 });
+    assert.equal(hits[0].method, "DELETE", `"${query}" should rank DELETE first`);
+    assert.ok(
+      hits[0].score > hits[1].score,
+      `"${query}" ranks DELETE first only via the tie-break, so removing the yield was unsafe`,
+    );
+  }
   assert.match(rule, /if \(a\.path !== b\.path\) return 0;/, "the same-path restriction is missing");
 });

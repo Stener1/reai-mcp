@@ -143,7 +143,11 @@ async function dependenciesOn(key, { tools, quirkPaths, scriptText }) {
   // `call("POST", "/x")`. A probe that assembles its path from variables is not found, and no text scan will
   // find it; the tool and quirk dependencies above are structured data and carry no such caveat.
   const template = (candidate) => candidate.replace(/\/\d+(?=\/|$)/g, "/{id}");
-  for (const [file, text] of Object.entries(scriptText)) {
+  for (const [file, rawText] of Object.entries(scriptText)) {
+    // Comments stripped first: a commented-out probe is not a dependency, and this repo's scripts carry long
+    // explanatory comments that quote paths and methods freely — including records of probes deliberately
+    // REMOVED. Review caught it. Block comments and line comments both, before any matching.
+    const text = rawText.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/[^\n]*$/gm, " ");
     for (const found of text.matchAll(/"(GET|POST|PUT|PATCH|DELETE)"[^"]{0,40}"([^"`]+?)"|`(GET|POST|PUT|PATCH|DELETE) ([^`"]+?)`/g)) {
       const probeMethod = found[1] ?? found[3];
       const probePath = found[2] ?? found[4];
