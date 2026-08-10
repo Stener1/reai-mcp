@@ -593,3 +593,69 @@ test("no gitlink is tracked in git", async () => {
     ".gitignore no longer ignores agent worktrees, which is how a gitlink gets staged",
   );
 });
+
+// docs/audits.md quotes how many quirks have a live audit case. That paragraph has now been wrong three
+// times in three directions — the last a 17/111 split that ignored `audit-quirks-write.mjs`'s six cases —
+// so the numbers are derived here from the case arrays rather than trusted in prose. The trap this closes:
+// counting *mentions* of a quirk id gives 26, because four scripts name an id without probing it, and the
+// two counts are close enough that the wrong one reads as plausible.
+test("docs/audits.md's live-case arithmetic is derived from the audits, not asserted in prose", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { findQuirks } = await import("../dist/reai/quirks.js");
+  const read = (p) => readFileSync(new URL("../" + p, import.meta.url), "utf8");
+
+  // A CASE is an entry that names a quirk as the thing it probes. The two harnesses spell that differently —
+  // `quirk: "id"` in the quirk audits, `source: "id quirk"` in the storage audit, which is a real probe with
+  // its own `run:` and not a mention. Matching only the first spelling undercounted by exactly the one case
+  // the paragraph calls out by name, which is how a too-narrow extractor looks identical to a wrong total.
+  const casesIn = (script) => {
+    const t = read(script);
+    return [
+      ...new Set([
+        ...[...t.matchAll(/quirk:\s*["'`]([a-z0-9-]+)["'`]/g)].map((m) => m[1]),
+        ...[...t.matchAll(/source:\s*["'`]([a-z0-9-]+) quirk["'`]/g)].map((m) => m[1]),
+      ]),
+    ];
+  };
+  const readOnly = casesIn("scripts/audit-quirks.mjs");
+  const write = casesIn("scripts/audit-quirks-write.mjs");
+  const storage = casesIn("scripts/audit-storage.mjs");
+
+  const total = findQuirks("").length;
+  const covered = new Set([...readOnly, ...write, ...storage]);
+  const unnamed = total - covered.size;
+
+  // Every id a case names must be a real quirk, or the count is inflated by a typo.
+  const ids = new Set(findQuirks("").map((q) => q.id));
+  assert.deepEqual(
+    [...covered].filter((id) => !ids.has(id)),
+    [],
+    "an audit names a quirk id that does not exist — a renamed quirk leaves the case orphaned",
+  );
+
+  const audits = read("docs/audits.md");
+  // Scoped to the sentence, not the file: a bare /128/ matches half a dozen other lines, and the
+  // paragraph above it deliberately quotes the WRONG historical figures.
+  const claim = /The checkable figures[^]*?leaving \*\*(\d+)\*\* *\n?unnamed\./.exec(audits)?.[0] ?? "";
+  assert.ok(claim, "the live-case paragraph in docs/audits.md moved or was reworded — re-anchor this test");
+
+  const quoted = [...claim.matchAll(/\*\*(\d+)\*\*/g)].map((m) => Number(m[1]));
+  assert.deepEqual(
+    quoted,
+    [total, covered.size, readOnly.length, write.length, unnamed],
+    `docs/audits.md quotes ${JSON.stringify(quoted)} but the audits give ` +
+      `[total=${total}, covered=${covered.size}, readOnly=${readOnly.length}, write=${write.length}, unnamed=${unnamed}]`,
+  );
+
+  // And pin the mention/case gap that produced the wrong number, so a future count cannot quietly
+  // switch definitions and still pass.
+  const mentions = new Set();
+  for (const f of ["audit-quirks.mjs", "audit-quirks-write.mjs", "audit-storage.mjs", "audit-messages.mjs", "smoke-full-write.mjs"]) {
+    const t = read("scripts/" + f);
+    for (const id of ids) if (t.includes(id)) mentions.add(id);
+  }
+  assert.ok(
+    mentions.size > covered.size,
+    "mentions no longer exceed cases, so the paragraph's warning about the 26 figure is stale",
+  );
+});

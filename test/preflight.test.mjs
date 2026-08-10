@@ -1227,3 +1227,137 @@ test("a status this API does not produce is left alone", async () => {
   );
   assert.doesNotMatch(text, /Known quirk/);
 });
+
+/**
+ * Delivery, not just registration.
+ *
+ * A quirk keyed to `/api/leads/{id}/notes` passes any test written against `quirksFor` while being
+ * undeliverable in practice: `resolveOperation` refuses a non-numeric segment for an integer `{id}`, so
+ * `enrichRequestFailure` bailed at `if (!op) return err;` before `quirksFor` was ever consulted. The note was
+ * therefore attached to the 404 (valid-but-absent id) and NOT to the 400 (`null`) — the failure it is about,
+ * and the one an agent actually causes, since 250 of 250 lead rows on both tenants carry `id: null`.
+ *
+ * These assert through the real reai_request handler and read only `err.message`, because that is what
+ * server.ts turns into the tool error. The first draft of the fix set a `hint` property on a spread copy of
+ * the error: every note was present in the object and none of it reached the agent, and a probe that read
+ * the property directly reported success.
+ */
+test("a wrong-type path segment is diagnosed as a PATH error, on the status it actually produces", async () => {
+  for (const [method, path] of [
+    ["PUT", "/api/leads/null/notes"],
+    ["PUT", "/api/leads/null/follow-up"],
+    ["PUT", "/api/leads/null/status"],
+    ["PUT", "/api/leads/null/contact"],
+    ["POST", "/api/leads/null/contact-events"],
+    ["PATCH", "/api/leads/null"],
+    ["DELETE", "/api/leads/null"],
+  ]) {
+    const text = await callFailing(
+      { method, path, body: { notes: "x" } },
+      { status: 400, detail: "Failed to convert 'id' with value: 'null'" },
+    );
+    assert.match(
+      text,
+      /The PATH is what was rejected, not the body/,
+      `${method} ${path}: the 400 arrived with no path diagnosis`,
+    );
+    // The spec-form path must be named, since that is the only form reai_describe_endpoint answers for.
+    assert.match(text, /\/api\/leads\/\{id\}/, `${method} ${path}: the spec-form path was not named`);
+    assert.match(text, /org\/\{orgNumber\}/, `${method} ${path}: the working alternative was not offered`);
+  }
+});
+
+test("the /contact path is never told to send the org twin directly", async () => {
+  // Review's P1, and the sharpest kind of finding: the advice was worse than the error. On a company with no
+  // lead row, PUT /api/leads/org/{orgNumber}/contact answers 200, echoes the company back and stores neither
+  // email nor phone — measured on 2783 on 2026-08-10. So "use the org form" on a /contact 400 would turn a
+  // loud failure into a silent one. Every other lead path is safe, because the first write creates the row.
+  const contact = await callFailing(
+    { method: "PUT", path: "/api/leads/null/contact", body: { email: "a@b.c" } },
+    { status: 400, detail: "Failed to convert 'id' with value: 'null'" },
+  );
+  assert.match(contact, /NOT by sending this straight to/, "the /contact path was handed the org twin plainly");
+  assert.match(contact, /stores neither email nor phone/, "the silent-loss consequence is not stated");
+  assert.match(contact, /reai_save_lead|POST \/api\/leads/, "no way to actually proceed is named");
+  assert.doesNotMatch(
+    contact,
+    /that form works whether or not the company has been saved/,
+    "the unconditional promise is being made on the one path where it is false",
+  );
+
+  // And the other branch must still make it, or the fix has over-corrected every path into a warning.
+  const notes = await callFailing(
+    { method: "PUT", path: "/api/leads/null/notes", body: { notes: "x" } },
+    { status: 400, detail: "Failed to convert 'id' with value: 'null'" },
+  );
+  assert.match(notes, /the first write CREATES the lead row/, "/notes lost the straightforward org-form advice");
+  assert.doesNotMatch(notes, /stores neither email nor phone/, "the /contact caveat leaked onto /notes");
+});
+
+test("the same diagnosis is generic, not lead-specific", async () => {
+  // Nothing in the mechanism is about leads; it is about integer-declared path parameters. If this ever
+  // becomes lead-only, the note stops reaching every other id-addressed family in the spec.
+  const text = await callFailing(
+    { method: "GET", path: "/api/customers/undefined" },
+    { status: 400, detail: "Failed to convert 'id' with value: 'undefined'" },
+  );
+  assert.match(text, /The PATH is what was rejected/, "a non-lead path got no diagnosis");
+  assert.doesNotMatch(text, /org\/\{orgNumber\}/, "the lead-only alternative leaked onto a customer path");
+});
+
+test("a valid-but-absent lead id gets the addressing quirk on its 404, including on DELETE", async () => {
+  for (const [method, path] of [
+    ["DELETE", "/api/leads/99999999"],
+    ["PATCH", "/api/leads/99999999"],
+    ["PUT", "/api/leads/99999999/notes"],
+  ]) {
+    const text = await callFailing(
+      { method, path, body: { notes: "x" } },
+      { status: 404, detail: "CRM lead with id=99999999 not found" },
+    );
+    // Scoped to the quirk sentence rather than the whole message: a bare /orgNumber/ also matches the
+    // generic 404 hint and the echoed request, which is how this kind of assertion goes vacuous.
+    const note = /Known quirk \[workflow\]: ([^]*?)(?=\nKnown quirk |$)/.exec(text)?.[1] ?? "";
+    assert.match(note, /org\/\{orgNumber\} twin/, `${method} ${path}: the addressing quirk was not delivered`);
+    // Both tenant figures, each tied to its tenant. A bare /250 of 250/ is satisfied by either half, so
+    // falsifying the 2783 count to 249 left it green — the note claimed something it had not measured.
+    assert.match(
+      note,
+      /250 of 250 distinct rows on 2783 AND 250 of 250 on 2634/,
+      `${method} ${path}: the measured id:null rate is missing or has drifted from what was measured`,
+    );
+  }
+});
+
+test("the addressing quirk does not reach reads of the same paths", async () => {
+  // It is scoped with `methods` because it is about calls that write. GET /api/leads/{id} has its own note
+  // and must not collect this one too; no GET exists on the sub-resources at all.
+  const { quirksFor } = await import("../dist/reai/quirks.js");
+  const id = "lead-sub-resources-need-a-saved-lead-in-the-id-form";
+  assert.ok(
+    !quirksFor("GET", "/api/leads/{id}").some((q) => q.id === id),
+    "the write-addressing note is being attached to the detail GET",
+  );
+  for (const [method, path] of [
+    ["DELETE", "/api/leads/{id}"],
+    ["PATCH", "/api/leads/{id}"],
+    ["PUT", "/api/leads/{id}/notes"],
+    ["POST", "/api/leads/{id}/contact-events"],
+  ]) {
+    assert.ok(
+      quirksFor(method, path).some((q) => q.id === id),
+      `${method} ${path} lost the addressing note`,
+    );
+  }
+
+  // /convert is excluded BY HAND, and now that `/api/leads/{id}` itself is keyed, that exclusion is one word
+  // away from being undone: `match: "descendants"` would sweep in POST /api/leads/{id}/convert, which already
+  // carries lead-convert-is-addressable-by-id-only and says more. Two notes on one call is fine when they
+  // differ; these would overlap, which is the duplicate-quirk mistake made once with /api/projects.
+  const convert = quirksFor("POST", "/api/leads/{id}/convert").map((q) => q.id);
+  assert.deepEqual(
+    convert,
+    ["lead-convert-is-addressable-by-id-only"],
+    "/convert should carry only its own note — has this quirk become `descendants`?",
+  );
+});

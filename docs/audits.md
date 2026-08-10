@@ -34,13 +34,17 @@ places calling the agreement enums undocumented (PR #123).
 
 Resist quoting how many of the remaining 126 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **128** quirks, of which **17** now have a live
-case — 16 here plus `customer-name-title-cased` in `audit-storage.mjs`, with
-`tenant-header-ignored-single-tenant` in both sets — leaving **111** unnamed.
+`audit:census` exists to print rather than assert. The checkable figures: **128** quirks, of which **24** now
+have a live case — **16** here, **7** in [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach)
+(whose claims a `GET` cannot reach), and `customer-name-title-cased` in `audit-storage.mjs` — leaving **104**
+unnamed.
 
-The arithmetic here has been wrong twice, in opposite directions: first 2 + 8 + 114 = 124 out of 122
-(double-counting the tenant-header quirk), then the 8-case accounting left in place beside a 16-case
-audit. Count distinct ids and check the total.
+The arithmetic here has been wrong three times, in three directions: first 2 + 8 + 114 = 124 out of 122
+(double-counting the tenant-header quirk), then the 8-case accounting left beside a 16-case audit, then a
+17/111 split that ignored the write audit's six cases entirely. Count distinct ids and check the total — and
+note that counting *mentions* of a quirk id rather than *cases* gives 26, because four scripts name an id in
+prose without probing it. `test/docs.test.mjs` now derives all four numbers from the case arrays themselves,
+so the next edit to either audit fails the build instead of quietly falsifying this paragraph.
 
 This covers the **16 that a GET can answer**, and the report prints `of 128` so a pass is not read as
 coverage. Everything here is a read, which is what makes it safe against tenant 2634's real books — there
