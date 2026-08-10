@@ -1280,7 +1280,18 @@ const PHRASE_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bfixed\s+assets?\b/g, "asset assets"],
   [/\b(recurring|repeating)\b[^.]{0,24}\b(invoice|billing)/g, "subscription"],
   [/\bcredit\s+notes?\b/g, "credit invoice"],
-  [/\bopening\s+balances?\b/g, "opening-balances"],
+  // SINGULAR replacement, and the reason is worth stating because the plural form silently broke this mapping.
+  // A phrase synonym contributes its replacement as a HYPHENATED term, and a hyphenated term is all-or-nothing
+  // by design (see the hyphen opt-in in matchStrength). When the API renamed /api/opening-balances to the
+  // singular on 2026-08-10, `opening-balances` stopped matching that path at all — measured, strength 0 — and
+  // because a matched phrase is CONSUMED, the query's own words were gone too. So
+  // "opening balance when starting in the system" ranked the endpoint FIRST at 40.40 before the rename and
+  // returned it nowhere afterwards.
+  //
+  // The singular is strictly more robust rather than merely current: measured, `opening-balance` scores 1
+  // against BOTH the singular and the plural path, because the token prefix branch covers `balance` -> `balances`
+  // in the direction that still works. A plural replacement can only ever match a plural path.
+  [/\bopening\s+balances?\b/g, "opening-balance"],
   [/\bannual\s+accounts?\b/g, "annual-accounts"],
   [/\bprofit\s+and\s+loss\b/g, "result income statement"],
   [/\btrial\s+balance\b/g, "ledger balance"],
