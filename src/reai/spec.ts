@@ -489,13 +489,22 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   // between them and the alphabet hands over the destructive one. Comparing a DELETE on resource A against a
   // POST on resource B by destructiveness has no justification at all: they are different operations, and an
   // equal score says only that both are equally relevant.
-  // WRITE intent is required, not merely the DELETE method hint. `cancel` sits in the DELETE method group but is
-  // deliberately absent from WRITE_INTENT_VERBS so that retrospective questions work — "which invoices did we
-  // cancel" is a read. Gating on the hint alone therefore let a read question yield this rule: measured,
-  // "when did we cancel expenses" ranked DELETE /api/expenses/{id} above the PATCH tied with it at 9.59. Found
-  // in review of #175. A question about the past should never surface the destructive operation earlier.
+  // Gated on the ABSENCE OF READ INTENT, which is the thing actually being detected.
+  //
+  // `cancel` sits in the DELETE method group but is deliberately absent from WRITE_INTENT_VERBS, so that
+  // "which invoices did we cancel" reads as a question about the past. Two wrong gates preceded this one, each
+  // found by review:
+  //
+  //   the method HINT alone  — a retrospective question yielded the rule, so "when did we cancel expenses"
+  //                            ranked DELETE above the PATCH tied with it at 9.59.
+  //   requiring writeIntent  — an IMPERATIVE cancel does not set it either, so "cancel expenses" had its
+  //                            requested DELETE pushed below PATCH and out of a three-result view entirely.
+  //
+  // `cancel` cannot resolve either way from the verb, so the discriminator has to be the rest of the sentence.
+  // Measured: the retrospective forms carry the read-intent penalty (writes at 9.59) and the imperatives do not
+  // (15.34), so readIntent separates them where neither verb table can.
   const deleteIntent =
-    !wantMethod && writeIntent && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
+    !wantMethod && !readIntent && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
   const saferFirst = (a: SearchHit, b: SearchHit): number => {
     if (deleteIntent) return 0;
     if (a.path !== b.path) return 0;
