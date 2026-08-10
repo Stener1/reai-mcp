@@ -284,6 +284,8 @@ const setCustomerAddress = defineTool({
     ["PUT", "/api/customers/{id}/delivery-address"],
   ],
   idempotent: true,
+  // routes the call: `kind === "delivery"` selects /delivery-address over /address
+  localArgs: ["kind"],
   inputSchema: {
     id: z.number().int().positive().describe("Customer id."),
     kind: z

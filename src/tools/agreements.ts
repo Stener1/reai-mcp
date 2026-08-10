@@ -344,6 +344,8 @@ const createAgreement = defineTool({
     ["POST", "/api/agreements/service-agreement"],
     ["POST", "/api/agreements/purchase-agreement"],
   ],
+  // templateType picks one of five endpoints; terms is spread into that endpoint's own body
+  localArgs: ["templateType", "terms"],
   inputSchema: {
     templateType: z
       .enum(["rent_agreement", "employee_contract", "accounting_services", "service_agreement", "purchase_agreement"])
@@ -517,6 +519,8 @@ const updateAgreement = defineTool({
     ["PUT", "/api/agreements/service-agreement/{id}"],
     ["PUT", "/api/agreements/purchase-agreement/{id}"],
   ],
+  // spread into the body of whichever template endpoint the record's type selects
+  localArgs: ["changes"],
   inputSchema: {
     id: z.number().int().positive().describe("Agreement id — the `agreementId` field."),
     changes: z

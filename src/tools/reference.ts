@@ -117,6 +117,8 @@ const listCountries = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/countries"]],
   idempotent: true,
+  // filtered locally: the endpoint takes no query parameter and returns the list whole
+  localArgs: ["query"],
   inputSchema: {
     query: z
       .string()
@@ -184,6 +186,8 @@ const listCurrencies = defineTool({
   risk: "read",
   apiPaths: [["GET", "/api/currencies"]],
   idempotent: true,
+  // filtered locally: the endpoint takes no query parameter and returns the list whole
+  localArgs: ["query"],
   inputSchema: {
     query: z
       .string()

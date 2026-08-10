@@ -731,6 +731,8 @@ const listReceptionDocuments = defineTool({
     "ledger, so it is classified irreversible and needs REAI_WRITE_MODE=full.",
   risk: "read",
   apiPaths: [["GET", "/api/invoice-reception-documents"], ["GET", "/api/receipt-reception-documents"]],
+  // routes the call: selects the invoice or receipt reception endpoint
+  localArgs: ["kind"],
   inputSchema: {
     kind: z
       .enum(["invoice", "receipt", "both"])
@@ -919,6 +921,8 @@ const listAttachments = defineTool({
     ["GET", "/api/orders/{id}/attachments"],
     ["GET", "/api/supplier-invoices/{id}/attachments"],
   ],
+  // routes the call: selects which owner's attachment endpoint to read
+  localArgs: ["ownerType"],
   inputSchema: {
     ownerType: z
       .enum(["order", "supplierInvoice"])
