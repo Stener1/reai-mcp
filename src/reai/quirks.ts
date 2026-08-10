@@ -1668,7 +1668,15 @@ export const QUIRKS: readonly Quirk[] = [
       "what shows it to be one live snapshot rather than a month-end figure. Reading July that way would report " +
       "a 485.39 shortfall against books that balance.\n\n" +
       "The month-scoped comparable is `actualBankDisplayedBalance`, which equalled the ledger closing balance " +
-      "exactly in both months. Better still, the endpoint answers the question directly: " +
+      "exactly in both months — BUT only when the currencies match. `bankCurrency` and `tenantCurrency` are " +
+      "both in the response, and this repository already refuses the comparison when they differ: " +
+      "src/ui/reconciliation.ts sets `comparable: bankCurrency === tenantCurrency` and the view hides the " +
+      "difference rather than computing one. All three accounts on 2634 are NOK, so the foreign-currency " +
+      "case is unobservable here and one NOK account establishes nothing about it — on a currency account, " +
+      "subtracting a bank figure from a book figure manufactures a discrepancy the size of the exchange " +
+      "rate. Check the two currencies first, and if they differ use `bankInTenantCurrency` to see which " +
+      "side the figures are stated in rather than converting anything yourself.\n\n" +
+      "Better still, the endpoint answers the question directly: " +
       "`pendingDiscrepancy` and `matchedDiscrepancy` were both 0 for July, with matchedTransactionsTotal and " +
       "matchedPostingsTotal both 554.31. Use those rather than subtracting balances yourself.\n\n" +
       "For the CURRENT month a gap between the ledger and the feed is expected rather than a fault — August " +

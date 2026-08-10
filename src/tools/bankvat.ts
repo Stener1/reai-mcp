@@ -203,6 +203,15 @@ const getBankReconciliation = defineTool({
     "This is also the only way to SEE bank transactions — there is no endpoint that lists them. " +
     "Use it to answer 'what still needs reconciling', then match with " +
     "reai_match_bank_transactions or book straight to an account with reai_book_bank_transactions.\n\n" +
+    "DO NOT ANSWER \"does the bank match the books\" BY SUBTRACTING `providerBalance`. It is the feed's CURRENT " +
+    "balance and is not scoped to the month you asked for — measured on account 1338, it read 1039.70 for both " +
+    "2026-07 and 2026-08, with the same lastSyncedAt, while the ledger closed at 554.31 and 1002.36. Using it " +
+    "for July reports a 485.39 shortfall against books that balance. The response answers the question itself: " +
+    "`pendingDiscrepancy` and `matchedDiscrepancy` were both 0 there. The month-scoped balance is " +
+    "`actualBankDisplayedBalance`, and it is only comparable to the ledger when `bankCurrency` equals " +
+    "`tenantCurrency` — the reconciliation view refuses to compute a difference otherwise. For the CURRENT month " +
+    "a gap is expected rather than a fault, and `actualBankCurrentMonth` is the flag that says so. " +
+    "See the quirk provider-balance-is-not-month-scoped.\n\n" +
     "This is the view for BANK-SYNCED accounts. If reai_list_company_banks reports " +
     'providerType "manual" for the account, use reai_request GET ' +
     "/api/manual-reconciliations/{bankAccountId}?month=yyyy-MM instead — a manual account has no " +
