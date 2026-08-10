@@ -244,6 +244,7 @@ export class OAuthProvider {
         serverWriteMode: this.deps.config.writeMode,
         baseUrl: this.deps.config.baseUrl,
       }),
+      parsed.request.redirectUri,
     );
   }
 
@@ -320,6 +321,7 @@ export class OAuthProvider {
           baseUrl: this.deps.config.baseUrl,
           error: "Paste your ReAI API token to continue.",
         }),
+        request.redirectUri,
       );
       return;
     }
@@ -352,6 +354,7 @@ export class OAuthProvider {
           baseUrl: this.deps.config.baseUrl,
           error: detail,
         }),
+        request.redirectUri,
       );
       return;
     }
@@ -382,6 +385,7 @@ export class OAuthProvider {
             "tenant boundary at all, so it is refused rather than issued. Check that the ReAI user " +
             "has access to at least one company.",
         }),
+        request.redirectUri,
       );
       return;
     }
@@ -407,6 +411,7 @@ export class OAuthProvider {
           subject: me.email ?? me.name,
           carriedWriteMode: writeMode,
         }),
+        request.redirectUri,
       );
       return;
     }
@@ -830,12 +835,46 @@ function isLoopback(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
 }
 
-export function sendHtml(res: ServerResponse, status: number, html: string): void {
+/**
+ * `formActionTarget` is the redirect_uri this page's form will end up at, and omitting it breaks the flow in
+ * Safari ONLY.
+ *
+ * The consent form posts to /authorize — same origin, allowed by `form-action 'self'` — and /authorize answers
+ * 302 to the client's redirect_uri on claude.ai. WebKit applies form-action to the REDIRECT of a form submission,
+ * not just its immediate action, so it blocks that hop; Chrome and Firefox check only the action. The visible
+ * symptom is the button spinning briefly and then nothing at all, with no console error and no network failure
+ * — and every non-browser check passes, because curl and `scripts/smoke-http.mjs` follow the 302 themselves.
+ * That is how this shipped: 29/29 end-to-end checks green against a flow no iPhone could complete.
+ *
+ * Pass the request's ALREADY-VALIDATED redirect_uri. It is widened to that one origin rather than to the
+ * configured host allowlist, so a deployment permitting several clients still only ever names the one this
+ * request is actually going to.
+ */
+export function sendHtml(
+  res: ServerResponse,
+  status: number,
+  html: string,
+  formActionTarget?: string,
+): void {
+  let formAction = "'self'";
+  if (formActionTarget) {
+    try {
+      const { origin } = new URL(formActionTarget);
+      // Only http(s). A custom-scheme loopback redirect (native clients use those) is not a form-action
+      // source, and naming it would make the directive unparseable rather than permissive.
+      if (origin !== "null" && /^https?:$/.test(new URL(formActionTarget).protocol)) {
+        formAction = `'self' ${origin}`;
+      }
+    } catch {
+      // A redirect_uri that will not parse cannot be reached anyway; leave the directive at its tightest.
+    }
+  }
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Content-Security-Policy":
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; ` +
+      "frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
   });

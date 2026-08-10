@@ -719,3 +719,72 @@ test("a properly bound grant still refreshes", async () => {
   assert.equal(result.status, 200);
   assert.ok(result.json.access_token);
 });
+
+/**
+ * The consent page's CSP must name the redirect_uri origin, or the flow cannot complete in Safari.
+ *
+ * `form-action 'self'` allowed the POST to /authorize but not the 302 to claude.ai that follows it: WebKit
+ * applies form-action to the redirect of a form submission, Chrome and Firefox only to the action. The symptom
+ * was the Connect button spinning and then nothing — no error, no console message. Every automated check passed,
+ * because curl and scripts/smoke-http.mjs follow the 302 themselves and never enforce a CSP. So this asserts on
+ * the HEADER rather than on the flow: it is the only part of the failure a browserless test can see.
+ */
+test("the consent page's form-action allows the redirect the form ends up at", async () => {
+  const { sendHtml } = await import("../dist/auth/oauth.js");
+
+  const captured = [];
+  const fakeRes = {
+    writeHead(status, headers) {
+      captured.push({ status, headers });
+    },
+    end() {},
+  };
+
+  sendHtml(fakeRes, 200, "<p>x</p>", "https://claude.ai/api/mcp/auth_callback");
+  const csp = captured[0].headers["Content-Security-Policy"];
+  const directive = /form-action ([^;]+)/.exec(csp)?.[1].trim();
+  assert.equal(
+    directive,
+    "'self' https://claude.ai",
+    "the redirect origin is not a form-action source, so WebKit will block the 302",
+  );
+  // The ORIGIN only — a path in a form-action source is ignored by some engines and misleading in all.
+  assert.doesNotMatch(csp, /auth_callback/, "the CSP is carrying a path it cannot enforce");
+
+  // Without a target it stays at its tightest, so pages that never redirect are not widened.
+  captured.length = 0;
+  sendHtml(fakeRes, 200, "<p>x</p>");
+  assert.match(captured[0].headers["Content-Security-Policy"], /form-action 'self';/);
+
+  // A redirect_uri with a custom scheme is not a usable form-action source; naming it would produce a
+  // directive the browser cannot parse, which fails OPEN in some engines rather than closed.
+  captured.length = 0;
+  sendHtml(fakeRes, 200, "<p>x</p>", "myapp://callback");
+  assert.match(
+    captured[0].headers["Content-Security-Policy"],
+    /form-action 'self';/,
+    "a custom-scheme redirect must leave the directive alone",
+  );
+
+  // And a garbage redirect_uri must not throw or widen anything.
+  captured.length = 0;
+  sendHtml(fakeRes, 200, "<p>x</p>", "not a url");
+  assert.match(captured[0].headers["Content-Security-Policy"], /form-action 'self';/);
+});
+
+test("every consent-page render passes its redirect target to sendHtml", async () => {
+  // The header being right is useless if a call site forgets to pass the target — and there are five, one per
+  // step of the flow. A user hitting the tenant-choice step would fail while the first step worked.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/auth/oauth.ts", import.meta.url), "utf8");
+  const renders = src.split("renderConsentPage({").length - 1;
+  assert.ok(renders >= 5, `expected at least 5 consent renders, found ${renders}`);
+
+  // Each sendHtml(...renderConsentPage({...}), <target>) must close with a redirectUri argument.
+  const targets = src.match(/^\s*(?:parsed\.)?request\.redirectUri,$/gm) ?? [];
+  assert.equal(
+    targets.length,
+    renders,
+    `${renders} consent pages are rendered but only ${targets.length} pass a form-action target`,
+  );
+});
