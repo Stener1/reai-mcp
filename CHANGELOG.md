@@ -9,6 +9,53 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **The `reversible` tier's one-line definition was false, and so was my replacement for it.** Two glosses, both
+  wrong, both caught by review:
+  - *"Creates or edits master data that can be cleanly deleted again."* Several records in the tier **archive**
+    instead of deleting once they carry references — which `delete-may-archive` already documents — and **four of
+    the five examples the README gave for this tier are among them.**
+  - *"Additive"*, my replacement, and worse for sounding principled. Measured: **23 of the 88 reversible
+    operations are DELETEs**, which neither create nor edit anything, and **17 of the 24 reversible PUTs can clear
+    a documented field by omitting it**. The comment on agreement templates in the same file makes exactly that
+    argument about a replacing PUT, and 17 such PUTs stay in the tier.
+  - So the definition is now the **exclusion list** the classifier actually implements — nothing touching the
+    ledger, a legal document, money, payroll, an authority filing, or user administration — with no adjective.
+- **Three claims I made in the first attempt at this were false, and the premise was the worst of them.** I said
+  two operations in the tier create something *nothing can remove*. Both are removable:
+  - `DELETE /api/orders/{id}/attachments/{attachmentId}` says, in the pinned spec, *"If the attachment has no
+    other references, **the stored file is deleted**."* So upload → link → unlink removes it, both steps inside
+    the reversible tier. I had read the route's *summary* ("Unlink an attachment") and not its description.
+  - A lead contact event has no individual DELETE, but **`reai_delete_lead` removes it** — and this repo's own
+    tool text says so twice, including *"the only way to remove one"*. I cited that text as support while
+    contradicting it.
+  - `POST /api/documents` is a third upload in the tier that creates an attachment record, which my survey missed
+    entirely: it looked for creates-of-a-named-resource and never considered uploads-as-a-side-effect.
+- **Codex found a SECOND operator-facing statement I had missed, which is the same fix-one-occurrence failure
+  twice in one PR.** The README's write-mode table was not the only place: its **ASCII diagram of the modes** said
+  *"master data that deletes cleanly"*, and `docs/audits.md` asserted customers "delete cleanly" without the
+  reference caveat. The guard now sweeps **every line** of the operator-facing pages for any phrasing of the
+  promise, treating a qualified line as the fix rather than the defect — a targeted check on one row was what let
+  the second one through.
+  - Its other finding (my test proved only that no *dedicated* contact-event DELETE exists, while the source
+    comment claimed nothing could remove them) was already fixed: the whole "nothing can remove" premise is gone,
+    because `reai_delete_lead` does remove them and this repo's own tool text says so.
+
+- **Places the retracted promise still lived, which the first attempt did not reach.** `README.md`'s write-mode
+  table — the most-read statement of the modes, and the one an operator uses to decide what to allow — plus the
+  allowlist comment fourteen lines above the entry it contradicted, and an escalation argument elsewhere in
+  `policy.ts` that *cited the old gloss as its basis* and was orphaned by changing it. All three fixed; the
+  payment-routing argument is stronger resting on the money exclusion than on deletability.
+- **The guard I wrote to protect all this was smugglable, and its bypass was a word the writer picks.** It
+  allowed the false phrase when a retraction-ish word appeared within 110 characters, so review reinstated the
+  promise twice by writing "used to be" nearby. Replaced: it now asserts the exclusion list is present in the
+  defining sentence and that the README row does not promise deletability, which are properties rather than
+  string absences.
+  - Its first version searched the whole `Risk` region for the exclusion words — including this comment's own
+    prose about why the glosses failed — so deleting two exclusions from the definition changed nothing. Mutation
+    testing caught that: the check was reading its own explanation.
+  - `docs/tools.md` also contradicted itself for one PR, advising a caller to check references *before deleting* a
+    file two paragraphs above claiming the file "cannot be deleted at all".
+
 - **Codex found the same two defects independently, and one of its findings implied a third I had missed.** Both
   were already fixed when it reviewed; it was looking at the previous head.
   - Its remark about the multipart route led to something neither the note nor the description had said: the two

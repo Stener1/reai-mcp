@@ -41,7 +41,7 @@ An agent exploring an API by trial and error is therefore genuinely dangerous he
 | Mode | Allows | Use it when |
 |---|---|---|
 | `read-only` | `GET` only | Reporting, analysis, letting an agent answer questions about the books |
-| **`reversible`** (default) | Reads, plus master data that can be cleanly deleted — customers, suppliers, products, departments, offers | Day-to-day agent work |
+| **`reversible`** (default) | Reads, plus master data — customers, suppliers, products, departments, offers. NOT a promise of deletability: several of those **archive** instead once they carry references | Day-to-day agent work |
 | `full` | Everything: ledger postings, invoices, payments, payroll, VAT returns | You are prepared to correct mistakes by hand |
 
 Two properties make this more than a label:
@@ -77,8 +77,8 @@ That asymmetry is the whole reason there are two switches rather than one settin
                      +-------------------------------+----------------------------+
    read-only         | read the books                | + altinn-sync              |
                      +-------------------------------+----------------------------+
-   reversible        | + master data that            | nothing more — 17 of the   |
-   (default)         |   deletes cleanly             |   18 sends are ALSO        |
+   reversible        | + master data (may ARCHIVE    | nothing more — 17 of the   |
+   (default)         |   rather than delete)         |   18 sends are ALSO        |
                      |                               |   irreversible             |
                      +-------------------------------+----------------------------+
    full              | + the ledger, VAT settlement, | + issuing invoices, EHF/   |

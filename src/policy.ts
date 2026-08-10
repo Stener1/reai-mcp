@@ -48,7 +48,28 @@ export function parseWriteMode(raw: string | undefined): WriteMode {
 export type Risk =
   /** Reads nothing but data. Always allowed. */
   | "read"
-  /** Creates or edits master data that can be cleanly deleted again. */
+  /**
+   * Everything this tier is defined by is an EXCLUSION: it does not touch the ledger, issue a legal document,
+   * move money, run payroll, file with an authority, or administer users and tenants. That is what an operator
+   * running at the default mode is agreeing to, and it is what the classifier below actually implements — the
+   * irreversible list is the positive statement, and this is the remainder.
+   *
+   * Two attempts at a shorter phrase have both been wrong, so the exclusion list is the definition rather than a
+   * gloss on one:
+   *
+   *   "master data that can be cleanly deleted again" — false. Several records in this tier ARCHIVE instead of
+   *   deleting when they carry references, which `delete-may-archive` in the quirk registry documents, and four
+   *   of the five examples the README used to give for this tier are among them.
+   *
+   *   "additive" — also false, and worse because it sounded principled. 23 of the 88 reversible operations are
+   *   DELETEs, which neither create nor edit anything, and 17 of the 24 reversible PUTs can clear a documented
+   *   field by omitting it. `POST /api/customers/{id}/sync-brreg` overwrites master data from the registry with
+   *   no undo. The comment on agreement templates below makes exactly this argument about a replacing PUT, and
+   *   17 such PUTs stay in the tier regardless.
+   *
+   * So: no adjective. Reversible means "none of the things the irreversible tier is for", which is narrower than
+   * it sounds and is the only claim the code supports.
+   */
   | "reversible"
   /**
    * Touches the ledger, issues a legal document, moves money, runs payroll,
@@ -125,7 +146,7 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   "/api/reconciliation-rules",
 ];
 
-/** Master data: reference records an agent can safely create and clean up. */
+/** Master data: reference records outside the ledger, legal-document, money and payroll surfaces. */
 const REVERSIBLE_PREFIXES: readonly string[] = [
   "/api/customers",
   "/api/suppliers",
@@ -779,8 +800,10 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
  * in the DEFAULT configuration could repoint a supplier's bank details and the loss
  * would happen later, through a legitimate action by a person.
  *
- * `reversible` is documented as "master data that can be cleanly deleted", and that
- * criterion simply does not describe "redirects a future payment".
+ * `reversible` is defined by exclusion — not the ledger, not a legal document, not money, not payroll, not a
+ * filing, not user administration — and "redirects a future payment" is squarely inside the money exclusion,
+ * whoever presses the button later. (This argument used to cite the tier's old one-line gloss, "master data that
+ * can be cleanly deleted"; that wording was removed for being false, and the argument is stronger without it.)
  *
  * Deliberately path-scoped rather than added to the body-field map: registering the
  * company's OWN bank account (POST /api/company-banks) also carries a swiftCode and

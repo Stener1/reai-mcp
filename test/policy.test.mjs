@@ -1448,3 +1448,98 @@ test("narrowerWriteMode fails closed on a mode it does not recognise", async () 
   assert.equal(narrowerWriteMode("readonly", "full"), "read-only");
   assert.equal(narrowerWriteMode("READ-ONLY", "reversible"), "read-only");
 });
+
+test("the reversible tier is defined by exclusion, and says so wherever an operator reads it", async () => {
+  // Two attempts at a one-line gloss for this tier have both been false, and review caught both:
+  //
+  //   "master data that can be cleanly deleted again" — several records in the tier ARCHIVE instead of deleting
+  //   once they carry references, which `delete-may-archive` documents, and four of the five examples the README
+  //   gave for the tier are among them.
+  //
+  //   "additive" — my replacement, and worse for sounding principled. Measured below: 23 of the reversible
+  //   operations are DELETEs, which neither create nor edit anything.
+  //
+  // So this test asserts the EXCLUSION list rather than policing a phrase. The previous version of it policed a
+  // phrase and review smuggled the false promise back past it twice, by putting "used to be" within its window —
+  // a guard whose bypass is a word the writer chooses is not a guard.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const policy = readFileSync(join(repo, "src", "policy.ts"), "utf8");
+
+  // 1. The DEFINING SENTENCE states the exclusions. Scoped to that sentence, not to the whole `Risk` region:
+  //    the first version searched the region, which includes this comment's own prose about why two glosses
+  //    failed — so deleting two exclusions from the definition itself changed nothing, because the words still
+  //    appeared further down. Mutation testing found that; the region-wide check was reading its own explanation.
+  const region = policy.slice(policy.indexOf("export type Risk ="), policy.indexOf('| "irreversible"'));
+  const sentenceStart = region.indexOf("Everything this tier is defined by is an EXCLUSION");
+  assert.ok(sentenceStart > 0, "the reversible definition should open by saying it is defined by exclusion");
+  const sentence = region
+    .slice(sentenceStart, region.indexOf("That is what an operator", sentenceStart))
+    .replace(/\s*\n\s*\*\s*/g, " ");
+  for (const excluded of ["ledger", "legal document", "money", "payroll", "authority", "users and tenants"]) {
+    assert.ok(
+      sentence.includes(excluded),
+      `the defining sentence should name the ${excluded} exclusion, got: ${sentence}`,
+    );
+  }
+  const definition = region;
+
+  // 2. It must not resurrect either false gloss as its own claim. Checked on the DEFINITION only, not the whole
+  //    file — elsewhere the phrase legitimately appears inside arguments about why it does not hold.
+  assert.doesNotMatch(
+    definition.slice(definition.indexOf('| "reversible"') - 2000, definition.indexOf('| "reversible"')),
+    /tier turns on \*{0,2}additive/i,
+    "the `additive` gloss is back; 23 of the tier's operations are DELETEs",
+  );
+
+  // 3. The README's own table is where an operator actually decides what to allow, and it shipped the deletable
+  //    promise for far longer than the code comment did — the earlier version of this test greped only
+  //    src/policy.ts and could not see it.
+  const readme = readFileSync(join(repo, "README.md"), "utf8");
+  const row = readme.split("\n").find((l) => /^\|\s*\*\*`reversible`\*\*/.test(l));
+  assert.ok(row, "the README should keep a reversible row in its write-mode table");
+  assert.doesNotMatch(row, /that can be cleanly deleted/, `the README row promises deletability: ${row}`);
+  assert.match(row, /archive/i, "the README row should say those records archive instead");
+
+  // EVERY statement, not just the table. Fixing the row alone is what I did first, and both reviewers pointed at
+  // a SECOND place — the ASCII diagram of the modes said "master data that deletes cleanly" — which is the same
+  // fix-one-occurrence failure the docs count guards were built for. Any phrasing of the promise, anywhere the
+  // operator-facing pages describe a mode, now fails.
+  const CLAIMS = /(?:delete|deleted|deletes)\s+cleanly|cleanly\s+(?:delete|deleted|deletable)/i;
+  const offenders = [];
+  for (const [file, text] of [["README.md", readme], ["docs/safety.md", readFileSync(join(repo, "docs", "safety.md"), "utf8")]]) {
+    for (const line of text.split("\n")) {
+      if (!CLAIMS.test(line)) continue;
+      // A line that qualifies the claim is the fix, not the defect.
+      if (/archive|not a promise|do delete cleanly on a tenant|used to|no longer/i.test(line)) continue;
+      offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these operator-facing lines still promise the reversible tier deletes cleanly:\n  ${offenders.join("\n  ")}`,
+  );
+
+  // 4. And the measurement the `additive` gloss died on, so the definition's own claim is checked rather than
+  //    asserted: the tier really does contain DELETEs.
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  let reversibleDeletes = 0;
+  let reversibleTotal = 0;
+  for (const [path, ops] of Object.entries(spec.paths ?? {})) {
+    for (const method of Object.keys(ops)) {
+      if (!["get", "post", "put", "patch", "delete"].includes(method)) continue;
+      if (classifyRequest(method.toUpperCase(), path) !== "reversible") continue;
+      reversibleTotal += 1;
+      if (method === "delete") reversibleDeletes += 1;
+    }
+  }
+  assert.ok(reversibleTotal > 50, `only ${reversibleTotal} reversible operations found; this sweep reads nothing`);
+  assert.ok(
+    reversibleDeletes > 10,
+    `only ${reversibleDeletes} reversible DELETEs — if the tier no longer contains deletes, "additive" may be ` +
+      `defensible after all and this comment should be revisited`,
+  );
+});
