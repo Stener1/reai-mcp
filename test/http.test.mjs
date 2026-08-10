@@ -443,3 +443,47 @@ test("a read-only server refuses the write, not just the tool listing", async ()
     "the write reached the upstream API despite the server running read-only",
   );
 });
+
+/**
+ * A JSON-RPC POST to the bare service URL must reach the MCP endpoint, not the HTML status page.
+ *
+ * The endpoint is /mcp and the deploy script prints it, but the bare URL is the natural thing to paste and it
+ * failed in the most confusing way available: OAuth discovery lives at the ORIGIN, so /.well-known/*, /register,
+ * /authorize and /token all succeed against it, the consent page renders, a token is issued — and then every
+ * MCP POST was answered with the status page and a 200. A client cannot parse HTML as JSON-RPC, so the user saw
+ * "an unknown error has occurred" after an authorization that visibly worked. Reported from a real setup; every
+ * automated check passed because they all use the /mcp URL.
+ */
+test("POST / is the MCP endpoint, and GET / is still the status page", async () => {
+  // GET / is for humans.
+  const page = await fetch(`${base}/`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /text\/html/);
+
+  const rpc = {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+  };
+
+  // POST / is for MCP clients. Unauthenticated, so 401 — the point is that it is the MCP endpoint's answer
+  // and not an HTML page. A 200 with text/html here is the bug.
+  const answers = [];
+  for (const path of ["/", "/mcp"]) {
+    const res = await fetch(base + path, rpc);
+    const body = await res.text();
+    assert.doesNotMatch(
+      body,
+      /<!doctype html>/i,
+      `POST ${path} answered with the HTML status page — a JSON-RPC client cannot read that`,
+    );
+    answers.push({ path, status: res.status, challenge: res.headers.get("www-authenticate") });
+  }
+  assert.equal(answers[0].status, 401, `POST / should require authorization, got ${answers[0].status}`);
+  assert.equal(answers[0].status, answers[1].status, "POST / and POST /mcp must answer alike");
+
+  // The WWW-Authenticate challenge is what points a client at the metadata, so it must be present on both
+  // paths or discovery restarts from nothing.
+  assert.ok(answers[0].challenge, "POST / returned no WWW-Authenticate challenge");
+  assert.equal(answers[0].challenge, answers[1].challenge, "the challenge differs between / and /mcp");
+});
