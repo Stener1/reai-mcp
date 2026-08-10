@@ -1361,3 +1361,62 @@ test("the addressing quirk does not reach reads of the same paths", async () => 
     "/convert should carry only its own note — has this quirk become `descendants`?",
   );
 });
+
+/**
+ * Every tool belongs to exactly one TOOL_GROUP or to alwaysOnTools — nothing floats free.
+ *
+ * This is a structural invariant in its own right (REAI_TOOLSETS cannot enable a tool that is in no group, so
+ * an ungrouped tool would be reachable only in the default configuration), but the immediate reason it is
+ * pinned here is that `scripts/smoke-http.mjs` now derives "which read tools must be visible" per group. A read
+ * tool in no group would never be required by that check — silently, and indistinguishably from success. That
+ * is the same hole as enumerating what to inspect, reintroduced inside the fix for it.
+ */
+test("every tool is in exactly one toolset group, or is always-on", async () => {
+  const { allTools, TOOL_GROUPS, alwaysOnTools } = await import("../dist/server.js");
+
+  const groupOf = new Map();
+  const duplicated = [];
+  for (const [group, tools] of Object.entries(TOOL_GROUPS)) {
+    for (const t of tools) {
+      if (groupOf.has(t.name)) duplicated.push(`${t.name} in both ${groupOf.get(t.name)} and ${group}`);
+      groupOf.set(t.name, group);
+    }
+  }
+  const always = new Set(alwaysOnTools.map((t) => t.name));
+
+  assert.deepEqual(duplicated, [], "a tool appears in two toolset groups, so the group arithmetic double-counts");
+
+  const orphans = allTools.filter((t) => !groupOf.has(t.name) && !always.has(t.name)).map((t) => t.name);
+  assert.deepEqual(
+    orphans,
+    [],
+    "these tools are in no toolset group and are not always-on, so REAI_TOOLSETS cannot enable them and " +
+      "smoke-http's per-group completeness check will never require them",
+  );
+
+  const both = allTools.filter((t) => groupOf.has(t.name) && always.has(t.name)).map((t) => t.name);
+  assert.deepEqual(both, [], "a tool is both grouped and always-on, which counts it twice");
+
+  // The partition must be exhaustive in the other direction too: a group naming a tool that is not in
+  // allTools would make `selectTools` register something the invariants never see.
+  const registry = new Set(allTools.map((t) => t.name));
+  const unknownInGroups = [...groupOf.keys()].filter((n) => !registry.has(n));
+  assert.deepEqual(unknownInGroups, [], "a toolset group names a tool that is not in allTools");
+
+  // And non-vacuous: the sum must actually account for the registry.
+  assert.equal(
+    groupOf.size + always.size,
+    allTools.length,
+    `partition covers ${groupOf.size + always.size} tools but the registry has ${allTools.length}`,
+  );
+
+  // The opt-in UI surface must stay OUT of allTools. smoke-http relies on that separation to recognise the
+  // UI tool as a known name without requiring it to be visible, which is what broke on a default deployment.
+  const { uiTools } = await import("../dist/tools/ui.js");
+  assert.ok(uiTools.length > 0, "uiTools is empty — the separation this asserts has gone vacuous");
+  assert.deepEqual(
+    uiTools.filter((t) => registry.has(t.name)).map((t) => t.name),
+    [],
+    "a UI tool is in allTools, so it would be required to be visible on a deployment that does not enable it",
+  );
+});
