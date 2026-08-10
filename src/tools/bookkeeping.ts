@@ -129,7 +129,13 @@ const listVatCodes = defineTool({
     "narrows it to what the tenant may actually write, and only for order and subscription lines. " +
     "So on a tenant that is not VAT-registered the plain list still shows 25% codes — booking one " +
     "would invent VAT that does not exist. When in doubt, cross-check against " +
-    "usage=\"customer-invoice\" or ask the user.",
+    "usage=\"customer-invoice\" or ask the user.\n\n" +
+    "This is also how a VAT POSITION is answered, because nothing reads one: there is no " +
+    "GET /api/vat-returns — measured, it answers 405 — and the only VAT-return tool FILES a term. Each code " +
+    "here carries a `rate` and a `vatType` of input_vat, output_vat, exempt or outside_scope; " +
+    "reai_general_ledger takes a `vatCode` filter, so summing the ledger per output_vat code and per input_vat " +
+    "code gives the position, and the difference is what the term owes. See the quirk " +
+    "vat-position-has-no-read-endpoint, including what that derivation has and has not been verified against.",
   risk: "read",
   apiPaths: [["GET", "/api/vat-codes"]],
   inputSchema: {

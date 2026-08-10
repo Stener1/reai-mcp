@@ -1716,6 +1716,48 @@ export const QUIRKS: readonly Quirk[] = [
       "elsewhere. Never report a VAT return as filed after calling this.",
   },
   {
+    id: "some-spec-paths-are-web-routes-not-api",
+    paths: ["/vat-return/altinn-sync", "/amelding/{id}/feedback-raw"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "These are the WEB APPLICATION's own routes, not API endpoints, and an API token cannot call them. " +
+      "Measured 2026-08-11: both answer 302 with " +
+      "location: https://app.reai.no/auth/login?redirect=… — they want a browser session cookie, so the token " +
+      "this server holds does not authenticate them at all. Nothing is returned to parse.\n\n" +
+      "They matter because they surface in search. `reai_search_endpoints` ranked /vat-return/altinn-sync third " +
+      "for \"vat position for the term\" — the one question with no read endpoint at all, so an agent is most " +
+      "likely to reach for it exactly there. See vat-position-has-no-read-endpoint for what does answer it.\n\n" +
+      "Do NOT generalise this to every path outside /api/. Measured: /kassasystem/mobile/terminal answers 405 " +
+      "on a GET, so it is a real API route that simply does not take one, while /invoice/payment/{id}/company-bank, " +
+      "/payments/{id}/payment-date, /lead/{id}/owner and /product/filter-search all answer 302 on a GET. That " +
+      "makes the namespace MIXED and a prefix rule wrong. The four 302s are only evidence about GET: whether " +
+      "their POST is reachable with a token is unverified, because probing it means making a real " +
+      "payment-routing or lead-ownership call.",
+  },
+  {
+    id: "vat-position-has-no-read-endpoint",
+    paths: ["/api/vat-returns", "/api/vat-returns/complete-manually", "/api/vat-returns/reopen"],
+    kind: "workflow",
+    note:
+      "There is NO endpoint that reads a VAT return or a VAT position. Every route here is a POST, and " +
+      "GET /api/vat-returns does not exist — measured 2026-08-11, it answers " +
+      "405 \"Method 'GET' is not supported.\" The two GET routes the spec lists under VAT, " +
+      "/vat-return/altinn-sync and /vat/search, are not JSON APIs: both answer 302, they are the web UI's own " +
+      "routes. So an agent asked \"what is our VAT for this term\" will find only a tool that FILES one, which " +
+      "is irreversible and hidden unless the write mode allows it.\n\n" +
+      "The answer is derived from the ledger instead. Every posting carries a `vatCode`, and " +
+      "GET /api/ledger/general accepts `vatCode` as a filter — measured on 2634: vatCode=0 returns all 160 " +
+      "postings, vatCode=1 returns none, so the filter discriminates rather than being ignored. " +
+      "GET /api/vat-codes gives each code its `rate` and a `vatType` of input_vat, output_vat, exempt or " +
+      "outside_scope. Summing the ledger per output_vat code and per input_vat code is the position; the " +
+      "difference is what the term owes.\n\n" +
+      "What is NOT verified, stated because it matters: neither tenant available for measurement has any VAT " +
+      "activity at all — every posting on 2634 carries vatCode 0 and there are no 27xx accounts — so the " +
+      "derivation above is verified as far as the filter reaching the API and discriminating, and no further. " +
+      "The arithmetic of a real term has not been checked against a real return.",
+  },
+  {
     id: "vat-return-query-params",
     paths: ["/api/vat-returns"],
     methods: ["POST"],
