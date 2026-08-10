@@ -39,6 +39,19 @@ if (!token) {
 let passed = 0;
 let failed = 0;
 
+let skipped = 0;
+/**
+ * A check that cannot run against this tenant or configuration, COUNTED rather than merely printed.
+ *
+ * The four pre-existing `console.log("[SKIP] …")` calls in this file printed without incrementing anything, so
+ * a run that skipped half its getters still ended "N passed, 0 failed". Review found the same defect in
+ * scripts/smoke-http.mjs; it was here too.
+ */
+function skip(name, reason) {
+  skipped++;
+  console.log(`  [SKIP] ${name} — ${reason}`);
+}
+
 function report(name, okFlag, detail) {
   const mark = okFlag ? "PASS" : "FAIL";
   if (okFlag) passed++;
@@ -74,6 +87,11 @@ async function main() {
       // The comment further down already says a reversible-mode server pointed at 2634 is "not a check worth
       // having". Forcing the mode is that reasoning applied to the line that chooses it.
       REAI_WRITE_MODE: "read-only",
+      // ENABLED here so the MCP Apps surface is actually exercised. It is off by default in production, which
+      // is why nothing had ever run it: this file's own notes list reai_reconcile_ui among the read tools "not
+      // named in ANY smoke script". The tool and its template are read-only, so forcing the flag adds no write
+      // risk, and the checks below skip cleanly if a deployment has it off.
+      REAI_ENABLE_UI: "1",
       ...(verbose ? { REAI_VERBOSE: "1" } : {}),
     },
     stderr: verbose ? "inherit" : "pipe",
@@ -368,7 +386,7 @@ async function main() {
       const res = await client.callTool({ name: "reai_get_tax_return", arguments: { tenantId, year } });
       const text = textOf(res);
       if (res.isError && /HTTP 404/.test(text)) {
-        console.log(`  [SKIP] reai_get_tax_return — no tax return data for ${year} on this tenant`);
+        skip("reai_get_tax_return", `no tax return data for ${year} on this tenant`);
       } else {
         report(`reai_get_tax_return ${year}`, !res.isError, firstLine(text));
       }
@@ -411,9 +429,9 @@ async function main() {
           okFlag ? firstLine(textOf(rec)) : textOf(rec).slice(0, 220),
         );
       } else {
-        console.log(
-          `  [SKIP] reai_get_bank_reconciliation — no bank-synced account on this tenant ` +
-            `(${banks.length} account(s), all manual or archived)`,
+        skip(
+          "reai_get_bank_reconciliation",
+          `no bank-synced account on this tenant (${banks.length} account(s), all manual or archived)`,
         );
       }
     } catch (err) {
@@ -461,7 +479,7 @@ async function main() {
             : text.slice(0, 220),
         );
       } else {
-        console.log("  [SKIP] reai_parse_ehf_attachment — no XML/EHF document in the reception inbox");
+        skip("reai_parse_ehf_attachment", "no XML/EHF document in the reception inbox");
       }
     } catch (err) {
       report("reai_parse_ehf_attachment", false, String(err));
@@ -472,8 +490,9 @@ async function main() {
     //
     //     Of 43 read tools, 13 were not named in this file and 9 were not named in ANY
     //     smoke script — seven of those nine were GETs by id, unexercised because no suite
-    //     had an id to pass them. (The other two are reai_api_notes, which reads the
-    //     bundled spec, and reai_reconcile_ui.) Several getters WERE already covered, but
+    //     had an id to pass them. Of the other two, reai_reconcile_ui is now covered by the
+    //     MCP Apps section at the end of this file; reai_api_notes reads the bundled spec
+    //     rather than the API, so it stays out. Several getters WERE already covered, but
     //     only inside the write suites, which do not run against a real company by default:
     //     reai_get_voucher and reai_get_customer read back what those scripts create.
     //
@@ -583,7 +602,7 @@ async function main() {
         }
         const id = firstIdOf(textOf(listed));
         if (id === null) {
-          console.log(`  [SKIP] ${getName} — ${listName} returned nothing to fetch on this tenant`);
+          skip(getName, `${listName} returned nothing to fetch on this tenant`);
           continue;
         }
         const res = await client.callTool({ name: getName, arguments: { id, tenantId } });
@@ -633,7 +652,7 @@ async function main() {
         }
       }
       if (transactionId === null) {
-        console.log("  [SKIP] reai_get_bank_transaction — no bank transaction on this tenant to fetch");
+        skip("reai_get_bank_transaction", "no bank transaction on this tenant to fetch");
       } else {
         const res = await client.callTool({
           name: "reai_get_bank_transaction",
@@ -826,9 +845,95 @@ async function main() {
     // books is not a check worth having.
   }
 
+  // --- The MCP Apps surface -------------------------------------------------------------------------------
+  //
+  // reai_reconcile_ui was listed in this file's own notes as a read tool "not named in ANY smoke script", and
+  // it is ENABLED on the production deployment. So the only UI widget this server ships had never been run
+  // against the real API by anything but fixtures — the same shape as the four connector bugs found on
+  // 2026-08-10, each of which passed every unit test.
+  //
+  // Three things have to hold, and the tool call alone proves none of them: the host fetches the template
+  // ITSELF from the ui:// URI, so the tool can succeed while nothing renders.
+  {
+    const uiRegistered = tools.some((t) => t.name === "reai_reconcile_ui");
+    if (!uiRegistered) {
+      skip("the MCP Apps view", "reai_reconcile_ui is not registered (REAI_ENABLE_UI is off)");
+    } else {
+      const uri = "ui://reai/reconciliation";
+
+      // 1. The host discovers the template through resources/list. Absent there, it is never fetched.
+      let listed = [];
+      let listError;
+      try {
+        listed = (await client.listResources()).resources ?? [];
+      } catch (err) {
+        // Recorded, not reported here: reporting in the catch AND again below counted one failure twice, so
+        // a server with no resources capability at all showed as two failures.
+        listError = String(err).slice(0, 120);
+      }
+      const entry = listed.find((r) => r.uri === uri);
+      report(
+        "resources/list serves the MCP Apps template",
+        entry !== undefined && /profile=mcp-app/.test(entry.mimeType ?? ""),
+        listError
+          ? `resources/list failed: ${listError}`
+          : entry
+            ? `${entry.uri} (${entry.mimeType})`
+            : `not listed; got ${listed.map((r) => r.uri).join(", ") || "nothing"}`,
+      );
+
+      // 2. resources/read must return a self-contained document. An external <script src> or <img src> would
+      //    be blocked by the host's sandbox, so the view would load and then render nothing — and that failure
+      //    is invisible from the server side.
+      try {
+        const contents = (await client.readResource({ uri })).contents ?? [];
+        const body = String(contents[0]?.text ?? contents[0]?.blob ?? "");
+        const external = /(?:src|href)\s*=\s*["']https?:/i.exec(body)?.[0];
+        report(
+          "resources/read returns a self-contained template",
+          body.length > 1000 && /<script/i.test(body) && external === undefined,
+          external
+            ? `${body.length} chars but references an external resource: ${external}`
+            : `${body.length} chars, inline script, no external references`,
+        );
+      } catch (err) {
+        report("resources/read returns a self-contained template", false, String(err).slice(0, 140));
+      }
+
+      // 3. The tool itself, on a real bank account, with the figures the view renders. The id is derived from
+      //    the tenant rather than hardcoded — a fixed id is how the other getters here came to be skipped.
+      const bankList = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
+      const bankId = Number(/"id"\s*:\s*(\d+)/.exec(textOf(bankList))?.[1]);
+      if (!Number.isInteger(bankId)) {
+        skip("reai_reconcile_ui", "no company bank on this tenant to reconcile");
+      } else {
+        const month = new Date().toISOString().slice(0, 7);
+        const res = await client.callTool({
+          name: "reai_reconcile_ui",
+          arguments: { bankAccountId: bankId, month, tenantId },
+        });
+        // structuredContent is what the view actually draws. A text-only success would render an empty widget,
+        // which is exactly the "looks like it worked" failure this whole section is about.
+        const data = res.structuredContent ?? {};
+        const required = ["bankAccountId", "month", "transactions", "postings", "canMatch", "writeMode"];
+        const missing = required.filter((k) => !(k in data));
+        report(
+          `reai_reconcile_ui (account ${bankId}, ${month})`,
+          !res.isError && missing.length === 0,
+          res.isError
+            ? firstLine(textOf(res))
+            : missing.length === 0
+              ? `structuredContent has all ${required.length} view fields; ${JSON.stringify(data).length} chars`
+              : `structuredContent is missing: ${missing.join(", ")}`,
+        );
+      }
+    }
+  }
+
   await client.close();
 
-  console.log(`\n${passed} passed, ${failed} failed\n`);
+  // Skips in the total line, so an incomplete run cannot read as a full one.
+  console.log(`\n${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}\n`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
