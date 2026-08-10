@@ -69,6 +69,32 @@ const MUST_FAIL = [
   ["a srcset URL named 2x", '<img srcset="2x">', "img"],
   ["a srcset URL named 640w", '<img srcset="640w">', "img"],
   ["a second srcset candidate", '<img srcset="data:image/png;base64,AAA 1x, other.png 2x">', "img"],
+  // Round 6: a `<!--` inside an inline script must not pair with a later real `-->` and swallow the loader
+  // between them. Stripping comments before neutralising raw-text bodies did exactly that.
+  [
+    "a loader between a script-local <!-- and a real comment",
+    '<script>const marker="<!--";</script><img src="remote.png"><!-- footer -->',
+    "img",
+  ],
+  [
+    "a loader after a style-local <!--",
+    '<style>/* <!-- */</style><script src="w.js"></script><!-- end -->',
+    "script",
+  ],
+  // Round 6, the MIRROR case: an unmatched raw-text opener inside a comment must not pair with the next real
+  // closing tag. Ordering the two transformations either way produced one of these two false PASSes, which is
+  // why the module now makes a single context-aware pass instead.
+  [
+    "a loader after a comment-local <script> opener",
+    '<!-- stale <script> --><img src="remote.png"><script>ok</script>',
+    "img",
+  ],
+  [
+    "a loader after a comment-local <style> opener",
+    '<!-- <style> --><img src="remote.png"><style>p{}</style>',
+    "img",
+  ],
+  ["both contexts interleaved", '<!-- <script> --><script>x="<!--"</script><img src="a.png">', "img"],
   // An image-button input DOES load.
   ["an image-button input", '<input type="image" src="remote.png">', "input"],
   // xlink:href is consulted when href is absent.
