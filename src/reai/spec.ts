@@ -475,14 +475,30 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
    * the class rather than this instance: any future equal-score tie involving a DELETE was resolvable by
    * alphabet alone.
    */
-  const destructiveness = (method: string): number => (method === "DELETE" ? 1 : 0);
+  // SAME PATH ONLY, and only when the query did not ask to delete. The first version applied this across
+  // unrelated resources, which was overreach and produced a worse answer than the alphabet it replaced:
+  //
+  //     "slett bankkonto pa faktura"  ->  POST /invoice/payment/{paymentId}/company-bank  19.00   <- promoted
+  //                                       DELETE /api/supplier-invoices/{id}             19.00
+  //
+  // Two things wrong with that. The query says `slett`, so deletion is the stated intent; and the promoted POST
+  // is ALSO classified irreversible, so nothing was made safer — two equally destructive operations were
+  // reordered against what the user asked for. Found in review of #174.
+  //
+  // The defect this rule exists for was three methods on ONE resource tying, where the ranker has no preference
+  // between them and the alphabet hands over the destructive one. Comparing a DELETE on resource A against a
+  // POST on resource B by destructiveness has no justification at all: they are different operations, and an
+  // equal score says only that both are equally relevant.
+  const deleteIntent = !wantMethod && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
+  const saferFirst = (a: SearchHit, b: SearchHit): number => {
+    if (deleteIntent) return 0;
+    if (a.path !== b.path) return 0;
+    const destructive = (method: string): number => (method === "DELETE" ? 1 : 0);
+    return destructive(a.method) - destructive(b.method);
+  };
 
   hits.sort(
-    (a, b) =>
-      b.score - a.score ||
-      destructiveness(a.method) - destructiveness(b.method) ||
-      byCodepoint(a.path, b.path) ||
-      byCodepoint(a.method, b.method),
+    (a, b) => b.score - a.score || saferFirst(a, b) || byCodepoint(a.path, b.path) || byCodepoint(a.method, b.method),
   );
   return hits.slice(0, limit);
 }
