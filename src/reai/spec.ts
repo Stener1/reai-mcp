@@ -428,7 +428,31 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
     if (score > 0) hits.push({ ...op, score: round2(score) });
   }
 
-  hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+  // Codepoint order for the tie-break, matching `scripts/build-spec-index.mjs`. Three things about this, because
+  // the first version of this comment got the mechanism, the hazard and the size of the effect all wrong.
+  //
+  // WHAT IT DOES. The index is already sorted by codepoint path-then-method by the builder, and `Array#sort` is
+  // stable, so an equal-score group arrives in that order and this comparator only re-derives it. Deleting the
+  // tie-break entirely produces byte-identical output over 792 probe queries — measured. What the change removes
+  // is therefore not a wrong order but an ACTIVE OVERRIDE: `localeCompare` was re-sorting a group the builder had
+  // already ordered deterministically. Kept rather than deleted as defence in depth, for the day the input is not
+  // pre-sorted; the builder owns the ordering, and this agrees with it.
+  //
+  // WHY IT MATTERED. `localeCompare` with no locale uses the runtime default, so the same query could rank ties
+  // differently between machines. The hazard is real on THIS spec: `/api/chart-of-accounts` vs
+  // `/api/company-banks` compares -1 under `en` and +1 under `cs`, because Czech collates `ch` after `h`. Under
+  // `LANG=cs_CZ` 192 of 1435 corpus queries returned a different order than under `en_US`.
+  //
+  // Not the Norwegian case the builder's own comment cites, which is what the first version of this claimed: no
+  // path in this spec contains a non-ASCII character or the `aa` digraph, and `"aa".localeCompare("å")` is 1
+  // under `nb_NO` as well as `en`. The builder's reasoning is sound for an artifact that might gain such a path;
+  // it just is not the divergence search was actually exposed to.
+  //
+  // The METHOD half cannot behave differently on this index — the five method names are ASCII uppercase and all
+  // 25 pairs agree — but that rests on the builder doing `method.toUpperCase()`, since `"DELETE"` vs `"delete"`
+  // is 1 under `localeCompare` and -1 by codepoint.
+  const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  hits.sort((a, b) => b.score - a.score || byCodepoint(a.path, b.path) || byCodepoint(a.method, b.method));
   return hits.slice(0, limit);
 }
 

@@ -840,16 +840,31 @@ test("the ranking defect docs/discovery.md describes is still present", async ()
 
   for (const query of ["create agreement", "opprett avtale", "create lease agreement"]) {
     const hits = searchOperations({ query, limit: 8 });
-    const top3 = hits.slice(0, 3);
-    for (const hit of top3) {
+    // TWO, not three. This was three until the path tie-break stopped using `localeCompare`: under that
+    // collation `{` sorted before letters, so `{id}/sign-requests/{signRequestId}/send` took rank 3 out of the
+    // 16-point tie; by codepoint it sorts after `a`-`z` and the concrete creation templates do. Nothing about
+    // merit changed — the whole group ties at 16 — which is why this number is a fact about the tie-break and
+    // the assertions below still pin the defect itself.
+    const leading = hits.slice(0, 2);
+    const sendScores = leading.map((h) => h.score);
+    for (const hit of leading) {
       const concrete = hit.path.replace(/\{[^}]+\}/g, "7");
       assert.match(hit.path, /sign-request/, `"${query}": rank ${hits.indexOf(hit) + 1} is ${hit.path}`);
       // The reason it matters that these are first, stated as an assertion rather than as prose.
       assert.equal(classifyTransmission(hit.method, concrete), "external", `${hit.path} should transmit`);
       assert.equal(classifyRequest(hit.method, concrete), "irreversible", `${hit.path} should be irreversible`);
     }
-    // And the five creation endpoints tie, which is why the page says "tied for fourth through eighth"
-    // rather than naming an order — the order among them comes from a path tie-break, not from merit.
+    // And rank 3 IS a creation template now, which is the part the tie-break changed. If this fails because a
+    // send has come back to rank 3, the tie-break has regressed; if it fails because rank 3 outscores the sends,
+    // the defect is genuinely fixed and this whole test should go.
+    assert.ok(
+      CREATION.includes(hits[2].path),
+      `"${query}": rank 3 should be a creation template, got ${hits[2].path}`,
+    );
+
+    // And the five creation endpoints tie, which is why the page names no order among them — the order comes
+    // from a path tie-break, not from merit. (The page used to say "tied for fourth through eighth"; since the
+    // tie-break change they are third through seventh, and this comment cited the old wording for one commit.)
     const creation = hits.filter((h) => CREATION.includes(h.path));
     assert.equal(creation.length, 5, `"${query}": expected all five creation templates in the top 8`);
     assert.equal(
@@ -857,9 +872,70 @@ test("the ranking defect docs/discovery.md describes is still present", async ()
       1,
       `"${query}": the creation templates no longer tie — docs/discovery.md says they do`,
     );
-    assert.ok(
-      creation[0].score < top3[2].score || creation[0].score === top3[2].score,
-      `"${query}": a creation endpoint now outscores the third sign endpoint — the defect may be fixed`,
+    // There WAS a score assertion here — "no creation template matches or beats a send" — and it is gone rather
+    // than repaired, because under codepoint ordering it cannot fail. Any creation scoring at or above a send
+    // also sorts before it (a letter beats `{`), so the position assertions above fire first, every time. Review
+    // found the version I had just rewritten was unfalsifiable, and rewriting it again against the sends by name
+    // did not help: the two conditions are the same condition.
+    //
+    // What remains pins the defect completely: ranks 1 and 2 are the sends, and rank 3 is a creation template. If
+    // the sends ever stop leading, the first assertion fails; if a send returns to rank 3, the second does.
+    // Keeping a third line that can only ever be decoration would misrepresent how much is checked.
+    assert.ok(sendScores.every((s) => s > creation[0].score), `"${query}": the sends should still outscore`);
+  }
+});
+
+test("search ranks identically whatever locale the process is in", async () => {
+  // THE property this change is about, and nothing pinned it. Review demonstrated that: a comparator built on
+  // `new Intl.Collator().compare` — genuinely locale-dependent — passed all 1203 tests, because the one test that
+  // caught the old `localeCompare` caught it for a side-effect of how `{` sorts, not for locale-dependence.
+  //
+  // Measured hazard on this spec, which is NOT the Norwegian one the builder's comment cites: `/api/chart-of-
+  // accounts` vs `/api/company-banks` compares -1 under `en` and +1 under `cs`, because Czech collates `ch` after
+  // `h`. Under the old tie-break, 192 of 1435 corpus queries ordered differently under `LANG=cs_CZ`.
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+  // Two ordering-sensitive queries plus the pair that actually diverges, run in a child process so the locale is
+  // genuinely different rather than simulated.
+  const script = `
+    const { searchOperations } = await import(${JSON.stringify(join(repo, "dist", "reai", "spec.js"))});
+    const out = [];
+    for (const q of ["ledger", "tax-returns", "vat-returns", "accounts", "create agreement"]) {
+      out.push(q + " => " + searchOperations({ query: q, limit: 10 }).map((h) => h.method + " " + h.path).join(","));
+    }
+    console.log(out.join("\\n"));
+  `;
+  const run = (locale) =>
+    execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, LANG: locale, LC_ALL: locale, LC_COLLATE: locale },
+    });
+
+  const baseline = run("en_US.UTF-8");
+  // The queries above are chosen because they produce SCORE TIES between paths the collations disagree on —
+  // `/api/chart-of-accounts` against `/api/general-sub-accounts` and `/api/countries`. My first version used
+  // queries that merely mentioned those paths without tying them, so the tie-break never decided between them
+  // and review's locale-dependent comparator passed. 228 such ties exist across the segment corpus.
+  assert.ok(baseline.includes("chart-of-accounts"), `the probe should reach the diverging paths: ${baseline}`);
+  assert.ok(
+    /general-sub-accounts|countries/.test(baseline),
+    `the probe must include a path that TIES with chart-of-accounts, or the collation cannot show: ${baseline}`,
+  );
+  for (const locale of ["cs_CZ.UTF-8", "nb_NO.UTF-8", "sv_SE.UTF-8", "lt_LT.UTF-8"]) {
+    assert.equal(
+      run(locale),
+      baseline,
+      `search ordered differently under LANG=${locale}; the tie-break has become locale-dependent again`,
     );
   }
+
+  // And the collation really does disagree, so the assertions above are not vacuous on this machine.
+  assert.notEqual(
+    "/api/chart-of-accounts".localeCompare("/api/company-banks", "cs"),
+    "/api/chart-of-accounts".localeCompare("/api/company-banks", "en"),
+    "if these agree, this Node build has no ICU data and the locale assertions above prove nothing",
+  );
 });
