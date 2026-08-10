@@ -605,6 +605,8 @@ const listLoans = defineTool({
     "this list, not about what the API would accept.",
   risk: "read",
   apiPaths: [["GET", "/api/loans"]],
+  // filtered locally: the endpoint takes no query parameter and returns the list whole
+  localArgs: ["query"],
   inputSchema: {
     query: z.string().optional().describe("Narrow by reference, description, counterparty, type or perspective."),
     tenantId: tenantIdArg,

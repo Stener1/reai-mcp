@@ -47,6 +47,25 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
    */
   apiPaths?: ReadonlyArray<readonly [HttpMethod, string]>;
   inputSchema: S;
+  /**
+   * Arguments this tool CONSUMES rather than forwards to the API.
+   *
+   * Declared here, next to the arguments themselves, so that
+   * `test/args-conform-to-spec.test.mjs` can require every other argument to correspond to something the
+   * endpoint declares. Without it that check needs a roster of exemptions living in the test file, which is the
+   * allowlist failure this repo has shipped repeatedly: a list of what to excuse silently exempts the next case
+   * too, and the guard then reads as coverage.
+   *
+   * The check exists because ReAI declares no `additionalProperties: false` ANYWHERE, so an argument the
+   * endpoint does not know is usually not refused — it is silently discarded. A caller sets a field, receives a
+   * 200, and the value is gone.
+   *
+   * Only for arguments the handler genuinely does not send: routing discriminators that choose an endpoint,
+   * filters applied to the response locally, and fields folded into a nested body structure. An argument that
+   * IS sent must appear in the spec, and listing it here to quiet the check would hide the defect the check is
+   * for. A `localArgs` entry naming an argument the endpoint already declares is itself a failure.
+   */
+  localArgs?: readonly string[];
   /** Signals a genuinely destructive call so clients can prompt the user. */
   destructive?: boolean;
   /**

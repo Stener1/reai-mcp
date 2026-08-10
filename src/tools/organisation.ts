@@ -317,6 +317,8 @@ const getEmployee = defineTool({
     "an employee do not need a fødselsnummer to answer.",
   risk: "read",
   apiPaths: [["GET", "/api/employees/{id}"]],
+  // selects how much of the response to render; the endpoint takes no such parameter
+  localArgs: ["includePersonalData"],
   inputSchema: {
     id: z.number().int().positive().describe("Employee id, from reai_list_employees."),
     includePersonalData: z
@@ -741,6 +743,8 @@ const addEmploymentLine = defineTool({
     ["GET", "/api/employees/{id}"],
     ["PATCH", "/api/employees/{id}"],
   ],
+  // folded into a line INSIDE the PATCH body; the spec index records top-level fields only
+  localArgs: ["fromDate", "percentage", "annualSalary", "hourlyWage", "occupationCode", "municipality"],
   inputSchema: {
     id: z.number().int().positive().describe("Employee id, from reai_list_employees."),
     fromDate: isoDate.describe(

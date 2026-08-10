@@ -321,63 +321,49 @@ internal directory rather than Brønnøysundregistrene — and that one asks the
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.
 
-## Why there is no argument-conformance check (yet)
+## The argument-conformance check, and what it took to make it derivable
 
-An obvious-looking audit does not work in the form tried here, and this section exists so nobody spends another
-afternoon rediscovering that. The idea: every argument a curated tool accepts should correspond to a field or
-parameter its endpoint declares.
+Every argument a curated tool accepts must correspond to something its endpoint declares, or be declared local by
+the tool itself. `test/args-conform-to-spec.test.mjs` enforces it.
 
-**The failure model matters, and the first version of this section got it backwards.** It claimed an undeclared
-argument is answered `400 "Unknown field: x"`. That is true of *some* endpoints and false as a generalisation:
-this API has **no `additionalProperties: false` anywhere**, and `customer-create-fields` records that
-`POST /api/customers` **silently discards** `invoiceEmail`, `phone` and `daysUntilDue` rather than refusing them.
-So the dominant failure is not a loud rejection but **silent data loss** — an agent sets a field, gets a 200, and
-the value is gone. That is the absence-read-as-success class this whole repository is organised against, which
-makes conformance checking *more* valuable than the first draft argued, not less.
+**Why it matters — and the first two drafts of this section got the failure model backwards.** They claimed an
+undeclared argument is answered `400 "Unknown field: x"`. ReAI declares **no `additionalProperties: false`
+anywhere**, and `customer-create-fields` records that `POST /api/customers` **silently discards**
+`invoiceEmail`, `phone` and `daysUntilDue`. So the failure is not a loud rejection a caller can react to: it is
+setting a field, receiving a 200, and losing the value. `src/tools/sales.ts` already carried the note *"An earlier
+comment justified this as 'an unknown field is refused' — both halves were invented."* The same assumption was
+made again here, in the repository that had already caught it.
 
-Recording that error deliberately: `src/tools/sales.ts` already carries the note *"An earlier comment justified
-this as 'the record carries more, and an unknown field is refused' — both halves were invented."* I made the same
-assumption in the same repository that had already caught and documented it.
+**Why the exemptions live on the tools.** A first attempt found **18** arguments the spec does not declare, all of
+them correct code, in five patterns:
 
-**Measured 2026-08-10: there are zero real divergences.** Across every single-endpoint write tool, eleven
-arguments are not declared by the spec and all eleven are deliberate — ten are the repo's `<resource>Id`
-convention for a `{id}` path parameter, and the eleventh is `acceptPermanentPosition`, a `z.literal(true)` gate
-that is never sent. Verified by reading each handler, not by observing API behaviour, which matters given that a
-silently-dropped field would not show up in a test either.
+- **Path parameters** — `assetId` for `/api/assets/{id}`. Ten of the eighteen. *Derivable*: the alias is accepted
+  only for an `id`-shaped parameter, so it can never excuse a body field.
+- **Acknowledgement gates** — `acceptPermanentPosition`, an optional `z.literal(true)` that is never sent.
+  *Derivable* from its schema.
+- **Server-consumed arguments** — `tenantId`, `clearOmittedFields`, `binary`. *Derivable*, as a three-name set
+  justified entry by entry in the test.
+- **Routing discriminators** — `kind === "delivery" ? "delivery-address" : "address"` picks the endpoint. **Not
+  derivable**: it looks like any enum.
+- **Local filters** — `query` on the reference listers, where the endpoint takes no query parameter and the tool
+  filters the response itself. **Not derivable**: it looks like any string.
 
-Widened to every tool, the check reports **18** arguments, all of them correct code, in **four** patterns:
+The last two, plus fields folded into a nested body the spec index flattens away, are why the check could not
+simply be written: it needed a roster of names, which is the
+[allowlist failure this repo has shipped three times](#audit-quirksmjs-the-128-claims-nobody-was-checking).
 
-- **Routing discriminators.** `kind` on the customer-address setter picks which endpoint to call —
-  `kind === "delivery" ? "delivery-address" : "address"`. Consumed by the handler, never sent.
-- **Client-side filters.** `query` on the country and currency listers: the endpoint takes no query parameter, so
-  the tool filters the response locally and says so — *"filtered locally out of 5"*.
-- **Nested body fields.** The employment-line arguments (`percentage`, `occupationCode`, `municipality`, …) build
-  a line *inside* the PATCH body, and the spec index records top-level fields only.
-- **Acknowledgement gates.** `acceptPermanentPosition` is an optional `z.literal(true)` whose only job is to make
-  a caller stop and think. This is the one pattern that IS structurally derivable — literal-true and optional —
-  so a check can recognise it without being told.
+So they moved to `localArgs` on the tool — **11 tools, 17 arguments**, each with a one-line reason beside the
+arguments themselves, where an author adding one will see the requirement. Two further assertions keep those
+declarations honest: an entry naming something the endpoint *does* declare fails, as does one naming an argument
+the tool does not have, because a dead exemption would permit a real divergence on that name forever.
 
-Of the four, one is derivable and three are not: a routing discriminator looks like any enum, a filter like any
-string, and a nested field is invisible while the spec index flattens to top level. So the check as designed can
-only pass by carrying an eighteen-name exemption list, which is the
-[allowlist failure this repo has shipped three times](#audit-quirksmjs-the-128-claims-nobody-was-checking): a
-roster of what to excuse exempts the nineteenth case too, silently, and then reads as coverage.
+**What this does and does not replace.** `confirm-against-response.test.mjs` drives handlers against a synthetic
+two-response queue; its census is spec-derived over every write tool and asks whether write-tool output reports
+disagreements — not whether an argument conforms, and not whether ReAI accepts it. `audit-storage.mjs` is the only
+harness that asks what the API actually *stores*, and so the only one that could observe a silently-dropped field
+live; it covers **customers and suppliers**. This check is static: it compares the tool surface to the pinned
+spec, and catches the mistake before a call is ever made.
 
-**What this ground is and is not covered by.** Not by `confirm-against-response.test.mjs` — that drives handlers
-against a synthetic two-response queue, and its census is about whether read-merge-write tools report
-disagreements, not about whether an argument conforms or whether ReAI accepts it. Saying otherwise, as the first
-draft did, left this gap looking defended when it is not. What does cover parts of it: the per-tool certifying
-tests, and `audit-storage.mjs`, which asks what the API actually stores — the only harness here that could catch
-a silently-dropped field, and it covers customers alone.
-
-**The way to build it, if it gets built.** Move the exemption from the test to the tool definition: an explicit
-`localArgs` on each tool naming the arguments the handler consumes rather than forwards. Then the rule becomes
-derivable — an argument must be declared by the endpoint, be a path parameter, be an acknowledgement gate, or be
-named local by its own author — and a new filter or discriminator is exempted at the point where it is added,
-visibly, instead of by a roster in a test file nobody editing a tool will read. That is a change to ~10 tool
-definitions and is the shape worth doing; a spec index that recorded nested body fields would remove the
-remaining pattern.
-
-A note on why the examples above are prose rather than a table: `test/docs.test.mjs` reads a tool name in a
+A note on why the patterns above are a list rather than a table: `test/docs.test.mjs` reads a tool name in a
 documentation table row as a claim about that tool's risk, and rejected an earlier draft for appearing to call an
 irreversible tool something else. The guard is right to be suspicious of tool names in table cells.
