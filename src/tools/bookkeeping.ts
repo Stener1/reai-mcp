@@ -886,43 +886,105 @@ const generalLedger = defineTool({
     }
 
     const accounts = data.accounts.filter(isRecord);
-    // A non-array `postings` is NOT zero postings, and saying so would be the silent-absence lie this repo is
-    // organised against — an inline `Array.isArray(x) ? x.length : 0` is forbidden by test/list-shape for exactly
-    // that reason, and it caught this. So the count is only ever taken from a real array, and an account whose
-    // postings came back in another shape is named rather than folded into a total.
-    const unexpected: string[] = [];
+
+    // A count is only ever taken from a real array, and anything else is NAMED rather than folded into a total.
+    // Two distinct anomalies, both reported: `postings` present but not a list, and `postings` ABSENT. The second
+    // was originally treated as ordinary — review pointed out that this endpoint returns only accounts WITH
+    // ACTIVITY, as this tool's own description says, so an account arriving without a postings list has an
+    // UNKNOWN count rather than a zero one. Adding zero for it and then stating a concrete total is the
+    // silent-absence lie in miniature.
+    const unknownCount: string[] = [];
     const summary = accounts.map((account) => {
       const postings = account.postings;
-      if (!Array.isArray(postings) && postings !== undefined) {
-        unexpected.push(String(account.accountNumber ?? "(unnumbered)"));
-      }
+      const counted = Array.isArray(postings);
+      if (!counted) unknownCount.push(String(account.accountNumber ?? "(unnumbered)"));
       return {
         accountNumber: account.accountNumber,
         accountName: account.accountName,
         openingBalance: account.openingBalance,
         closingBalance: account.closingBalance,
-        postingCount: Array.isArray(postings) ? postings.length : undefined,
+        postingCount: counted ? postings.length : undefined,
       };
     });
     const postingTotal = summary.reduce((sum, a) => sum + (a.postingCount ?? 0), 0);
-    const shapeNote =
-      unexpected.length > 0
-        ? ` NOTE: ${unexpected.length} account(s) returned \`postings\` as something other than a list ` +
-          `(${unexpected.slice(0, 5).join(", ")}), so their postingCount is absent rather than zero and the ` +
-          `total below excludes them.`
-        : "";
 
-    return ok(
-      { accounts: summary, totalAmount: data.totalAmount },
-      {
-        note:
-          `General ledger ${startDate} to ${endDate}: ${summary.length} account(s) with activity, ` +
-          `${postingTotal} posting(s) in total. Balances per account are complete; the individual postings are ` +
-          `NOT included, because the full ledger does not fit in one result and returning part of it would ` +
-          `answer about some accounts and silently omit others. For the postings on one account, call this tool ` +
-          `again with accountNumber, or reai_list_postings with the same filters.${shapeNote}`,
-      },
+    // Only the filters reai_list_postings ACCEPTS may be recommended. Unknown keys are stripped by the Zod
+    // object, so telling a caller who filtered by vatCode or an account RANGE to "use the same filters" would
+    // have them issue a much broader query and read unrelated postings as the detail they asked for — worse than
+    // a suggestion that fails, because it silently succeeds with the wrong answer. Review caught this.
+    const POSTINGS_ACCEPTS = new Set([
+      "startDate", "endDate", "accountNumber", "voucherId",
+      "customerId", "supplierId", "projectId", "employeeId", "companyBankId",
+    ]);
+    const unshared = Object.keys(filters).filter(
+      (key) => filters[key as keyof typeof filters] !== undefined && !POSTINGS_ACCEPTS.has(key),
     );
+    const detailRoute =
+      unshared.length === 0
+        ? "call this tool again with accountNumber, or reai_list_postings with the same filters."
+        : `call this tool again with accountNumber and the same filters. reai_list_postings is NOT ` +
+          `interchangeable here: it does not accept ${unshared.join(", ")}, and those would be silently dropped.`;
+
+    // The SUMMARY must itself fit, or this note claims completeness while ok() shortens the array underneath it —
+    // which is the defect this whole change exists to fix, merely at a higher account count. Measured: the full
+    // form is about 164 characters per account, so it crosses the 24,000-character cap at roughly 146 accounts,
+    // and a full Norwegian NS 4102 chart can exceed that. The compact form drops the names to about 22
+    // characters per account, which fits well over a thousand.
+    // Measured the way `ok()` measures, which is INDENTED. The first version compared `JSON.stringify(x)` against
+    // the budget while ok() serialises with two-space indentation, so 400 compact rows read as 9,014 characters
+    // here and 24,226 there — the check passed and the payload was truncated anyway, which is precisely the
+    // contradiction this is meant to prevent. Measuring the wrong serialisation is not a smaller mistake than not
+    // measuring.
+    // 22,000 rather than a round 20,000: `ok()` caps the whole result at 24,000 characters INCLUDING the note,
+    // which runs to roughly 800 here, so this reserves about 2,000 for it. An arbitrary budget made the tool
+    // under-claim — at 800 accounts the payload fit and the note said it did not, which is the safe direction to
+    // be wrong in but still wrong.
+    //
+    // The reserve is still deliberately CONSERVATIVE: in a band around 850-950 accounts the payload fits and this
+    // says it was shortened. That direction is acceptable — a caller narrows a query it did not have to — whereas
+    // the opposite, claiming completeness over a shortened list, is the defect this whole change exists to fix.
+    // Asserted as an invariant rather than as an exact boundary, which is what test/general-ledger checks.
+    const RESULT_BUDGET = 22_000;
+    const asRendered = (value: unknown) => JSON.stringify(value, null, 2).length;
+    const full = { accounts: summary, totalAmount: data.totalAmount };
+    const fits = asRendered(full) <= RESULT_BUDGET;
+    const payload = fits
+      ? full
+      : {
+          // Pipe-delimited strings rather than tuples, because `ok()` serialises INDENTED: a four-element array
+          // costs five lines, a string costs one. Measured at 400 accounts: 24,192 characters as tuples — over
+          // the cap — against 10,192 as strings. Strings fit roughly 800 accounts where tuples fit under 400,
+          // and no realistic Norwegian chart of accounts exceeds that.
+          accountsCompact: summary.map(
+            (a) => `${a.accountNumber}|${a.openingBalance}|${a.closingBalance}|${a.postingCount ?? "unknown"}`,
+          ),
+          totalAmount: data.totalAmount,
+        };
+
+    const shapeNote =
+      unknownCount.length > 0
+        ? ` NOTE: ${unknownCount.length} account(s) did not return a list of postings ` +
+          `(${unknownCount.slice(0, 5).join(", ")}), so their count is UNKNOWN rather than zero and the total ` +
+          `above excludes them.`
+        : "";
+    const compactFits = fits || asRendered(payload) <= RESULT_BUDGET;
+    const compactNote = fits
+      ? ""
+      : ` The account names are omitted because ${summary.length} accounts do not fit otherwise; each row is ` +
+        `accountNumber|openingBalance|closingBalance|postingCount, pipe-delimited.` +
+        (compactFits
+          ? " Balances are still complete for every account."
+          : ` Even this does not fit, so the list below IS shortened — the count above is the true number of ` +
+            `accounts, and the rows shown are fewer. Narrow the period or the account range.`);
+
+    return ok(payload, {
+      note:
+        `General ledger ${startDate} to ${endDate}: ${summary.length} account(s) with activity, ` +
+        `${postingTotal} posting(s) in total. ${compactFits ? "Balances per account are complete" : "The list below is shortened"}; the individual postings are ` +
+        `NOT included, because the full ledger does not fit in one result and returning part of it would ` +
+        `answer about some accounts and silently omit others. For the postings on one account, ` +
+        `${detailRoute}${compactNote}${shapeNote}`,
+    });
   },
 });
 
