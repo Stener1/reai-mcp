@@ -10,7 +10,7 @@ there rather than here, because a result restated in two places goes stale in on
 
 | harness | channel it checks | writes? |
 |---|---|---|
-| [`audit-quirks.mjs`](#audit-quirksmjs-the-130-claims-nobody-was-checking) | the 130 quirks, via the claims a `GET` can answer | no — safe against any tenant |
+| [`audit-quirks.mjs`](#audit-quirksmjs-the-131-claims-nobody-was-checking) | the 131 quirks, via the claims a `GET` can answer | no — safe against any tenant |
 | [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach) | quirks whose claim is that a **write is refused** | only requests built to fail |
 | [`audit-messages.mjs`](#why-audit-messagesmjs-exists-and-what-it-does-not-cover) | the nineteen places in `src/` that read a ReAI error's **text** | only requests built to fail |
 | [`audit-storage.mjs`](#audit-storagemjs-the-half-the-message-audit-cannot-reach) | claims about what the API **accepts, normalises or stores** | yes — customers, deleted in a `finally` |
@@ -25,9 +25,9 @@ There is a fifth harness that is not a live audit — the discovery sweep, which
 change did to every *other* query. It lives with the ranking work in
 [docs/discovery.md](discovery.md#what-did-a-ranking-change-do-to-every-other-query).
 
-## `audit-quirks.mjs`: the 130 claims nobody was checking
+## `audit-quirks.mjs`: the 131 claims nobody was checking
 
-The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 130 of
+The other two audits check `src/tools/*.ts`. **Quirks** are the third channel, and the largest: 131 of
 them, reaching agents through `reai_describe_endpoint` and `reai_api_notes`. Before this script, the two
 audits named **2 of them** — `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. Both
 defects that motivated those audits were in this channel: the `+47` phone claim (PR #115) and the four
@@ -35,9 +35,9 @@ places calling the agreement enums undocumented (PR #123).
 
 Resist quoting how many of the remaining 126 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
-`audit:census` exists to print rather than assert. The checkable figures: **130** quirks, of which **24** now
+`audit:census` exists to print rather than assert. The checkable figures: **131** quirks, of which **24** now
 have a live case — **16** here, **7** in [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach)
-(whose claims a `GET` cannot reach), and `customer-name-title-cased` in `audit-storage.mjs` — leaving **106**
+(whose claims a `GET` cannot reach), and `customer-name-title-cased` in `audit-storage.mjs` — leaving **107**
 unnamed.
 
 The arithmetic here has been wrong three times, in three directions: first 2 + 8 + 114 = 124 out of 122
@@ -351,7 +351,7 @@ them correct code, in five patterns:
 
 The last two, plus fields folded into a nested body the spec index flattens away, are why the check could not
 simply be written: it needed a roster of names, which is the
-[allowlist failure this repo has shipped three times](#audit-quirksmjs-the-130-claims-nobody-was-checking).
+[allowlist failure this repo has shipped three times](#audit-quirksmjs-the-131-claims-nobody-was-checking).
 
 So they moved to `localArgs` on the tool — **11 tools, 17 arguments**, each with a one-line reason beside the
 arguments themselves, where an author adding one will see the requirement. Two further assertions keep those

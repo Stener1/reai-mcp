@@ -1653,6 +1653,29 @@ export const QUIRKS: readonly Quirk[] = [
       "providerType from GET /api/company-banks before choosing.",
   },
   {
+    id: "provider-balance-is-not-month-scoped",
+    paths: ["/api/bank-reconciliations/{bankAccountId}"],
+    methods: ["GET"],
+    kind: "gotcha",
+    note:
+      "`providerBalance` is the bank feed's CURRENT balance, not the balance at the end of the month you asked " +
+      "for. Comparing it against `bankLedgerClosingBalance` invents a discrepancy that does not exist — and " +
+      "\"your bank does not match your books\" is an alarming answer to give wrongly.\n\n" +
+      "Measured on 2634, account 1338, two months in one sync:\n" +
+      "  month=2026-07  bankLedgerClosingBalance 554.31   providerBalance 1039.70\n" +
+      "  month=2026-08  bankLedgerClosingBalance 1002.36  providerBalance 1039.70\n" +
+      "`providerBalance` is IDENTICAL across both, with the same lastSyncedAt (2026-08-10T16:37:54Z), which is " +
+      "what shows it to be one live snapshot rather than a month-end figure. Reading July that way would report " +
+      "a 485.39 shortfall against books that balance.\n\n" +
+      "The month-scoped comparable is `actualBankDisplayedBalance`, which equalled the ledger closing balance " +
+      "exactly in both months. Better still, the endpoint answers the question directly: " +
+      "`pendingDiscrepancy` and `matchedDiscrepancy` were both 0 for July, with matchedTransactionsTotal and " +
+      "matchedPostingsTotal both 554.31. Use those rather than subtracting balances yourself.\n\n" +
+      "For the CURRENT month a gap between the ledger and the feed is expected rather than a fault — August " +
+      "shows 1002.36 against 1039.70 because the feed has movements not yet booked. `actualBankCurrentMonth` " +
+      "is true exactly then, so it is the flag that tells you a difference is not yet a problem.",
+  },
+  {
     id: "reconciliation-month-format",
     match: "descendants",
     paths: ["/api/bank-reconciliations", "/api/manual-reconciliations"],
@@ -1754,12 +1777,22 @@ export const QUIRKS: readonly Quirk[] = [
       "postings, vatCode=1 returns none, so the filter discriminates rather than being ignored. " +
       "GET /api/vat-codes gives each code its `rate` and a `vatType`. The schema declares FIVE: input_vat, " +
       "output_vat, exempt, outside_scope and reverse_charge. Summing per output_vat and per input_vat code " +
-      "and taking the difference is the position for an ordinary tenant — but reverse_charge is not a fifth " +
-      "bucket to ignore. Norwegian reverse charge (snudd avregning, on imported services and some domestic " +
-      "trades) puts the OUTPUT and the deductible INPUT on the same transaction, so a code of that type " +
-      "contributes to both sides and omitting it understates the amount owed. Only four types appear on " +
-      "2634 (8 input_vat, 5 output_vat, 1 exempt, 1 outside_scope) so this has not been observed live, and " +
-      "the four must NOT be treated as the whole set: a tenant importing services will have the fifth.\n\n" +
+      "and taking the difference is the position for an ordinary tenant. reverse_charge needs care, and the first " +
+      "version of this note got the direction wrong.\n\n" +
+      "Norwegian reverse charge (snudd avregning, on imported services and some domestic trades) has the " +
+      "BUYER self-account: they record the output VAT as if they had sold it, and claim input VAT as their own " +
+      "deduction. Where the purchase is FULLY deductible those two are equal, so leaving the transaction out " +
+      "of both sums changes both by the same amount and the difference — the liability — is unaffected. It is " +
+      "net-neutral, not a missing amount.\n\n" +
+      "The hazard is the opposite one: assuming full deductibility. Where the buyer can deduct only part of " +
+      "the input — pro-rata for mixed taxable and exempt activity, or an expense in a non-deductible " +
+      "category — the output is due in full while the deduction is limited, so the transaction does NOT " +
+      "contribute equally to both sides and treating it as if it did understates what is owed. Which case a " +
+      "given purchase falls in is a judgement about the tenant's activity that this server cannot make. If " +
+      "reverse_charge codes appear in a period, say so and ask, rather than defaulting either way.\n\n" +
+      "Only four types appear on 2634 (8 input_vat, 5 output_vat, 1 exempt, 1 outside_scope), so none of this " +
+      "has been observed live. The four must NOT be read as the whole set: a tenant importing services will " +
+      "have the fifth, and measurement on this tenant would have confirmed an incomplete list forever.\n\n" +
       "What is NOT verified, stated because it matters: neither tenant available for measurement has any VAT " +
       "activity at all — every posting on 2634 carries vatCode 0 and there are no 27xx accounts — so the " +
       "derivation above is verified as far as the filter reaching the API and discriminating, and no further. " +

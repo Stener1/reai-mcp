@@ -135,9 +135,12 @@ const listVatCodes = defineTool({
     "here carries a `rate` and a `vatType`; the schema declares five — input_vat, output_vat, exempt, " +
     "outside_scope and reverse_charge. reai_general_ledger takes a `vatCode` filter, so summing the ledger per " +
     "output_vat code and per input_vat code and taking the difference is the position for an ordinary tenant. " +
-    "reverse_charge is NOT a bucket to skip: Norwegian snudd avregning puts the output and the deductible input " +
-    "on the same transaction, so such a code contributes to both sides and omitting it understates what is owed. " +
-    "Check which types this tenant actually uses rather than assuming the common four. See the quirk " +
+    "reverse_charge needs care in the other direction from what you might expect: under snudd avregning the buyer " +
+    "self-accounts, so a FULLY deductible purchase puts equal amounts on both sides and is net-neutral to the " +
+    "liability. The risk is assuming that — where the input is only partly deductible, the output is still due " +
+    "in full and the difference grows. Which applies is a judgement about the tenant's activity that this " +
+    "server cannot make: if such codes appear, say so and ask. Check which types this tenant actually uses " +
+    "rather than assuming the common four. See the quirk " +
     "vat-position-has-no-read-endpoint, including what that derivation has and has not been verified against.",
   risk: "read",
   apiPaths: [["GET", "/api/vat-codes"]],
