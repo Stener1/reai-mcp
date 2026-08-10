@@ -178,7 +178,23 @@ async function handle(
       return;
 
     case "/":
-      sendHtml(res, 200, statusPage(config, publicUrl));
+      // A browser gets the status page; an MCP client gets the MCP endpoint.
+      //
+      // The endpoint is /mcp and the deploy script prints it, but the bare service URL is the natural thing to
+      // paste and it fails in the most confusing way available: OAuth discovery lives at the ORIGIN, so
+      // /.well-known/*, /register, /authorize and /token all succeed against the bare URL, the consent page
+      // renders, a token is issued — and then every JSON-RPC POST landed here and was answered with this HTML
+      // page and a 200. The client cannot parse HTML as JSON-RPC, so the only thing the user sees is "an unknown
+      // error has occurred" after an authorization that visibly worked. Reported from a real setup.
+      //
+      // Answering MCP here is safe rather than merely convenient: `authenticate` validates the sealed bearer
+      // token and nothing about it is bound to a path, so a token minted for this deployment is exactly as
+      // valid on / as on /mcp. Nothing is widened by accepting it.
+      if (req.method === "GET" || req.method === "HEAD") {
+        sendHtml(res, 200, statusPage(config, publicUrl));
+        return;
+      }
+      await handleMcp(req, res, config, oauth);
       return;
 
     case "/.well-known/oauth-protected-resource":
