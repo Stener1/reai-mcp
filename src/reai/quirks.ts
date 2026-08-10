@@ -1717,7 +1717,10 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "some-spec-paths-are-web-routes-not-api",
-    paths: ["/vat-return/altinn-sync", "/amelding/{id}/feedback-raw"],
+    // /vat/search is keyed here as well as named in the note. Quirks match declared paths EXACTLY, so an agent
+    // describing GET /vat/search got no warning while a sibling note said the route returns a login redirect —
+    // the information existed and did not reach the call that needed it.
+    paths: ["/vat-return/altinn-sync", "/vat/search", "/amelding/{id}/feedback-raw"],
     methods: ["GET"],
     kind: "gotcha",
     note:
@@ -1749,9 +1752,14 @@ export const QUIRKS: readonly Quirk[] = [
       "The answer is derived from the ledger instead. Every posting carries a `vatCode`, and " +
       "GET /api/ledger/general accepts `vatCode` as a filter — measured on 2634: vatCode=0 returns all 160 " +
       "postings, vatCode=1 returns none, so the filter discriminates rather than being ignored. " +
-      "GET /api/vat-codes gives each code its `rate` and a `vatType` of input_vat, output_vat, exempt or " +
-      "outside_scope. Summing the ledger per output_vat code and per input_vat code is the position; the " +
-      "difference is what the term owes.\n\n" +
+      "GET /api/vat-codes gives each code its `rate` and a `vatType`. The schema declares FIVE: input_vat, " +
+      "output_vat, exempt, outside_scope and reverse_charge. Summing per output_vat and per input_vat code " +
+      "and taking the difference is the position for an ordinary tenant — but reverse_charge is not a fifth " +
+      "bucket to ignore. Norwegian reverse charge (snudd avregning, on imported services and some domestic " +
+      "trades) puts the OUTPUT and the deductible INPUT on the same transaction, so a code of that type " +
+      "contributes to both sides and omitting it understates the amount owed. Only four types appear on " +
+      "2634 (8 input_vat, 5 output_vat, 1 exempt, 1 outside_scope) so this has not been observed live, and " +
+      "the four must NOT be treated as the whole set: a tenant importing services will have the fifth.\n\n" +
       "What is NOT verified, stated because it matters: neither tenant available for measurement has any VAT " +
       "activity at all — every posting on 2634 carries vatCode 0 and there are no 27xx accounts — so the " +
       "derivation above is verified as far as the filter reaching the API and discriminating, and no further. " +

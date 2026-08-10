@@ -1304,6 +1304,12 @@ export function curatedArgsEscalate(
  */
 const TRANSMITTING_GETS: readonly RegExp[] = [
   /^\/api\/peppol\/messages\/phase4ping$/,
+  // KEPT although an API token cannot currently reach it: measured 2026-08-11, GET /vat-return/altinn-sync
+  // answers 302 to /auth/login, because that path is the web application's own route. Review proposed removing
+  // it on that basis, and that is backwards — a gate exists for what the operation MEANS, and dropping it
+  // because the route is presently unreachable would leave nothing in place if ReAI makes it token-reachable.
+  // The false half of the same finding is fixed: the README claimed enabling external send permits an Altinn
+  // sync, and it permits reaching a login redirect. See some-spec-paths-are-web-routes-not-api.
   /^\/vat-return\/altinn-sync$/,
 ];
 

@@ -132,9 +132,12 @@ const listVatCodes = defineTool({
     "usage=\"customer-invoice\" or ask the user.\n\n" +
     "This is also how a VAT POSITION is answered, because nothing reads one: there is no " +
     "GET /api/vat-returns — measured, it answers 405 — and the only VAT-return tool FILES a term. Each code " +
-    "here carries a `rate` and a `vatType` of input_vat, output_vat, exempt or outside_scope; " +
-    "reai_general_ledger takes a `vatCode` filter, so summing the ledger per output_vat code and per input_vat " +
-    "code gives the position, and the difference is what the term owes. See the quirk " +
+    "here carries a `rate` and a `vatType`; the schema declares five — input_vat, output_vat, exempt, " +
+    "outside_scope and reverse_charge. reai_general_ledger takes a `vatCode` filter, so summing the ledger per " +
+    "output_vat code and per input_vat code and taking the difference is the position for an ordinary tenant. " +
+    "reverse_charge is NOT a bucket to skip: Norwegian snudd avregning puts the output and the deductible input " +
+    "on the same transaction, so such a code contributes to both sides and omitting it understates what is owed. " +
+    "Check which types this tenant actually uses rather than assuming the common four. See the quirk " +
     "vat-position-has-no-read-endpoint, including what that derivation has and has not been verified against.",
   risk: "read",
   apiPaths: [["GET", "/api/vat-codes"]],
