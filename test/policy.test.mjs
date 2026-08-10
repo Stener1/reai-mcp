@@ -1543,3 +1543,49 @@ test("the reversible tier is defined by exclusion, and says so wherever an opera
       `defensible after all and this comment should be revisited`,
   );
 });
+
+/**
+ * `scripts/smoke-http.mjs` hand-types the transmitting tool names, and that list is what decides whether the
+ * script believes a deployment can send real documents.
+ *
+ * It is currently exact — 3 named, 3 with `transmits === true`. The problem is the shape: a hand-maintained
+ * mirror of a derivable fact, guarding the one posture where being wrong means the verification script itself
+ * emails an invoice, pushes it over Peppol, or submits a tax return. A fourth transmitting tool added without
+ * touching the script would leave `sendingEnabled` false on a deployment where sending is enabled, and the
+ * script would then probe the sending paths it believes are refused.
+ *
+ * This is the third time in this repo I have written an enumeration where the set was derivable, so the guard
+ * is on the shape rather than on the current contents: the list must equal the derived set exactly, in both
+ * directions.
+ */
+test("smoke-http's transmitting-tool list is not allowed to drift from the tool definitions", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { allTools } = await import("../dist/server.js");
+
+  const script = readFileSync(new URL("../scripts/smoke-http.mjs", import.meta.url), "utf8");
+  const block = /const TRANSMITTING_TOOLS = \[([^\]]*)\]/.exec(script)?.[1];
+  assert.ok(block, "TRANSMITTING_TOOLS was renamed or restructured — re-anchor this guard, do not delete it");
+
+  const named = [...block.matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]).sort();
+  const derived = allTools.filter((t) => t.transmits === true).map((t) => t.name).sort();
+
+  assert.deepEqual(
+    named,
+    derived,
+    "the list in scripts/smoke-http.mjs no longer matches the tools declaring transmits === true.\n" +
+      `  named but not transmitting: ${named.filter((n) => !derived.includes(n)).join(", ") || "(none)"}\n` +
+      `  transmitting but not named: ${derived.filter((n) => !named.includes(n)).join(", ") || "(none)"}`,
+  );
+
+  // A non-empty derived set, or the assertion above is satisfied by two empty lists and certifies nothing.
+  assert.ok(derived.length > 0, "no tool declares transmits === true — the comparison has gone vacuous");
+
+  // Every transmitting tool must also be irreversible, which is what makes the script's fallback safe: in any
+  // configuration other than the dangerous one, the refusal happens before a request is built.
+  const notIrreversible = allTools.filter((t) => t.transmits === true && t.risk !== "irreversible");
+  assert.deepEqual(
+    notIrreversible.map((t) => `${t.name} (${t.risk})`),
+    [],
+    "a transmitting tool is not classified irreversible, so write-mode gating alone would not stop it",
+  );
+});

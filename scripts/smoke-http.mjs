@@ -310,6 +310,54 @@ async function main() {
   const { tools } = await client.listTools();
   report("tools/list over HTTP", tools.length > 0, `${tools.length} tools`);
 
+  // `length > 0` passes with a single tool, which is no assertion at all about a 177-tool registry reached
+  // through a real client over a real network. Two things are checked instead, both derived from the local
+  // build rather than hand-typed, and both independent of the deployment's write mode:
+  //
+  //   1. Every READ-risk tool must be visible. Reads are permitted in every write mode, so their absence
+  //      cannot be policy — it can only be truncation, a toolset misconfiguration, or a stale deployment.
+  //      This is the check that would notice a response silently capped by size or count.
+  //   2. Nothing may be visible that the local build does not define. A name the registry does not know
+  //      means the deployment is not running this commit, whatever `check:deployed` reports.
+  //
+  // Comparing against the local build is valid because `check:deployed` separately proves the deployment
+  // matches HEAD for live code; if it does not, these are exactly the checks that should complain.
+  // `allTools` deliberately excludes the opt-in UI tool, which a deployment with REAI_ENABLE_UI does serve —
+  // so comparing against allTools alone reports the UI tool as "unknown". Include it, or this check fails on a
+  // correctly configured deployment, which is how a useful check gets deleted for crying wolf.
+  const { allTools } = await import("../dist/server.js");
+  const { uiTools } = await import("../dist/tools/ui.js");
+  const localRegistry = [...allTools, ...uiTools];
+  const visible = new Set(tools.map((t) => t.name));
+  const localByName = new Map(localRegistry.map((t) => [t.name, t]));
+
+  const missingReads = localRegistry.filter((t) => t.risk === "read" && !visible.has(t.name)).map((t) => t.name);
+  report(
+    "every read-only tool survives the trip through tools/list",
+    missingReads.length === 0,
+    missingReads.length === 0
+      ? `all ${localRegistry.filter((t) => t.risk === "read").length} read tools present of ${tools.length} visible`
+      : `${missingReads.length} missing: ${missingReads.slice(0, 6).join(", ")}${missingReads.length > 6 ? " …" : ""}`,
+  );
+
+  const unknown = [...visible].filter((n) => !localByName.has(n));
+  report(
+    "no tool is visible that this build does not define",
+    unknown.length === 0,
+    unknown.length === 0 ? `${visible.size} names all known` : `unknown: ${unknown.join(", ")}`,
+  );
+
+  // And no tool the local build classifies as IRREVERSIBLE may be visible unless the deployment is in full
+  // mode. The write mode is not knowable from here, so this reports rather than fails when any are present —
+  // but it names them, which is the difference between "128 tools" and knowing what those 128 are.
+  const visibleIrreversible = [...visible].filter((n) => localByName.get(n)?.risk === "irreversible");
+  console.log(
+    `  [INFO] visible by risk — read ${[...visible].filter((n) => localByName.get(n)?.risk === "read").length}, ` +
+      `reversible ${[...visible].filter((n) => localByName.get(n)?.risk === "reversible").length}, ` +
+      `irreversible ${visibleIrreversible.length}` +
+      (visibleIrreversible.length > 0 ? ` (${visibleIrreversible.slice(0, 4).join(", ")}…)` : ""),
+  );
+
   const who = await client.callTool({ name: "reai_whoami", arguments: {} });
   const whoText = textOf(who);
   report(
