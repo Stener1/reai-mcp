@@ -696,6 +696,32 @@ export const SKIP_REGISTRY_LOOKUP_RULE =
   "superseded name and 976967631 with the wrong postcode. So read the created record back whenever the " +
   "name or address matters.";
 
+/**
+ * A code the API stores as a STRING but an agent will naturally pass as a number.
+ *
+ * `reai_list_postings` with `accountNumber: 4300` — the form an agent reaches for first, since an account number
+ * IS a number — was rejected outright: "Expected string, received number". Found while asking the tools a real
+ * accounting question. The API's own field is a string, so the schema was faithful; it just cost a turn for
+ * nothing.
+ *
+ * Accepting a number here cannot lose information, and that is the whole justification: JSON has no way to
+ * express a leading zero in a number, so `String(4300)` is exactly `"4300"` and anything a caller could have
+ * meant by a numeric literal survives.
+ *
+ * WHICH IS PRECISELY WHY THIS MUST NOT BE USED WIDELY. For a field where a leading zero is real, the string
+ * requirement is a FEATURE rather than friction: Norwegian postal codes run from 0001 (Oslo) and a fødselsnummer
+ * can begin 01–09, so `postalCode: 150` is not a clumsy way of writing "0150" — it is a different, wrong value.
+ * Rejecting it forces the caller to write the string and get it right, whereas coercing would silently accept
+ * corrupted data on a 200. That is the same silent-loss class as this API accepting undeclared fields and
+ * discarding them.
+ *
+ * So: only for codes where a leading zero cannot occur. `accountNumber` (the Norwegian standard chart runs
+ * 1000–8999) and `vatCode` (single digits) qualify. `postalCode`, `nationalIdentityNumber`, `bban`,
+ * `bankAccountNumber` and `iban` do not, and `test/numeric-code.test.mjs` fails if they are ever given this
+ * treatment.
+ */
+export const numericCode = z.union([z.string(), z.number().int()]).transform((v) => String(v));
+
 export const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be ISO format yyyy-MM-dd, e.g. 2026-03-31");

@@ -10,6 +10,7 @@ import {
   startOfYear,
   tenantIdArg,
   today,
+  numericCode,
   type ToolDef,
 } from "./registry.js";
 
@@ -791,7 +792,7 @@ const listPostings = defineTool({
   inputSchema: {
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
     endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
-    accountNumber: z.string().optional().describe("Filter by chart-of-accounts number."),
+    accountNumber: numericCode.optional().describe("Filter by chart-of-accounts number. A number is accepted."),
     voucherId: z.number().int().positive().optional().describe("Filter to one voucher's postings."),
     customerId: z.number().int().positive().optional().describe("Filter by customer."),
     supplierId: z.number().int().positive().optional().describe("Filter by supplier."),
@@ -840,7 +841,7 @@ const generalLedger = defineTool({
   inputSchema: {
     startDate: isoDate.optional().describe("Inclusive start date. Defaults to 1 January of the current year."),
     endDate: isoDate.optional().describe("Inclusive end date. Defaults to today."),
-    accountNumber: z.string().optional().describe("Restrict to a single account."),
+    accountNumber: numericCode.optional().describe("Restrict to a single account. A number is accepted."),
     accountFrom: z.string().optional().describe("Start of an account-number range."),
     accountTo: z.string().optional().describe("End of an account-number range."),
     vatCode: z.string().optional().describe("Filter by VAT code."),
