@@ -10,6 +10,7 @@ import {
   startOfYear,
   tenantIdArg,
   today,
+  isRecord,
   numericCode,
   type ToolDef,
 } from "./registry.js";
@@ -863,7 +864,65 @@ const generalLedger = defineTool({
       query: { ...filters, startDate, endDate },
       tenantId: requireTenantId(tenantId, ctx),
     });
-    return ok(res.data, { note: `General ledger ${startDate} to ${endDate}.` });
+
+    // SUMMARISED unless the caller named a single account, because the full response does not fit and silently
+    // answering about a fraction of the ledger is worse than answering about all of it in less detail.
+    //
+    // Measured on tenant 2634 — 160 postings across 10 accounts, about as little data as an active company can
+    // have: the API returns 45,805 characters and the 24,000-character result cap left `accounts shows 2 of 10`.
+    // A general-ledger question came back with a fifth of the ledger. On a real set of books the fraction is
+    // smaller, and nothing in the answer says which accounts are missing.
+    //
+    // The aggregate is already in the response: every account carries openingBalance and closingBalance, and the
+    // bulk is the per-account `postings` arrays. Dropping those and keeping a count per account turns 45,805
+    // characters into roughly a thousand, and answers what the question usually means — balances per account —
+    // while the detail stays one filtered call away.
+    //
+    // A caller who names `accountNumber` has asked about that account specifically, so the response is returned
+    // whole: it is bounded by construction and the postings are the point.
+    const data = res.data;
+    if (args.accountNumber !== undefined || !isRecord(data) || !Array.isArray(data.accounts)) {
+      return ok(data, { note: `General ledger ${startDate} to ${endDate}.` });
+    }
+
+    const accounts = data.accounts.filter(isRecord);
+    // A non-array `postings` is NOT zero postings, and saying so would be the silent-absence lie this repo is
+    // organised against — an inline `Array.isArray(x) ? x.length : 0` is forbidden by test/list-shape for exactly
+    // that reason, and it caught this. So the count is only ever taken from a real array, and an account whose
+    // postings came back in another shape is named rather than folded into a total.
+    const unexpected: string[] = [];
+    const summary = accounts.map((account) => {
+      const postings = account.postings;
+      if (!Array.isArray(postings) && postings !== undefined) {
+        unexpected.push(String(account.accountNumber ?? "(unnumbered)"));
+      }
+      return {
+        accountNumber: account.accountNumber,
+        accountName: account.accountName,
+        openingBalance: account.openingBalance,
+        closingBalance: account.closingBalance,
+        postingCount: Array.isArray(postings) ? postings.length : undefined,
+      };
+    });
+    const postingTotal = summary.reduce((sum, a) => sum + (a.postingCount ?? 0), 0);
+    const shapeNote =
+      unexpected.length > 0
+        ? ` NOTE: ${unexpected.length} account(s) returned \`postings\` as something other than a list ` +
+          `(${unexpected.slice(0, 5).join(", ")}), so their postingCount is absent rather than zero and the ` +
+          `total below excludes them.`
+        : "";
+
+    return ok(
+      { accounts: summary, totalAmount: data.totalAmount },
+      {
+        note:
+          `General ledger ${startDate} to ${endDate}: ${summary.length} account(s) with activity, ` +
+          `${postingTotal} posting(s) in total. Balances per account are complete; the individual postings are ` +
+          `NOT included, because the full ledger does not fit in one result and returning part of it would ` +
+          `answer about some accounts and silently omit others. For the postings on one account, call this tool ` +
+          `again with accountNumber, or reai_list_postings with the same filters.${shapeNote}`,
+      },
+    );
   },
 });
 
