@@ -33,10 +33,23 @@ if (!token) {
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 function report(name, okFlag, detail) {
   if (okFlag) passed++;
   else failed++;
   console.log(`  [${okFlag ? "PASS" : "FAIL"}] ${name}${detail ? ` — ${detail}` : ""}`);
+}
+
+/**
+ * A check that cannot run in this configuration, COUNTED rather than quietly omitted.
+ *
+ * Several probes name a specific tool, and REAI_TOOLSETS can legitimately remove it. Failing then is wrong —
+ * the deployment is healthy — but passing is worse, because a silent skip makes a narrowed run look like a
+ * full one. So it is reported and totalled.
+ */
+function skip(name, reason) {
+  skipped++;
+  console.log(`  [SKIP] ${name} — ${reason}`);
 }
 
 const textOf = (result) =>
@@ -311,33 +324,51 @@ async function main() {
   report("tools/list over HTTP", tools.length > 0, `${tools.length} tools`);
 
   // `length > 0` passes with a single tool, which is no assertion at all about a 177-tool registry reached
-  // through a real client over a real network. Two things are checked instead, both derived from the local
-  // build rather than hand-typed, and both independent of the deployment's write mode:
+  // through a real client over a real network. Two things are checked instead, both derived from the build
+  // rather than hand-typed.
   //
-  //   1. Every READ-risk tool must be visible. Reads are permitted in every write mode, so their absence
-  //      cannot be policy — it can only be truncation, a toolset misconfiguration, or a stale deployment.
-  //      This is the check that would notice a response silently capped by size or count.
-  //   2. Nothing may be visible that the local build does not define. A name the registry does not know
-  //      means the deployment is not running this commit, whatever `check:deployed` reports.
+  // The subtlety, which the first version of this check got wrong: "every read tool must be visible" is FALSE
+  // for a correctly configured deployment. Two mechanisms legitimately hide read tools, and neither is
+  // knowable from here:
   //
-  // Comparing against the local build is valid because `check:deployed` separately proves the deployment
-  // matches HEAD for live code; if it does not, these are exactly the checks that should complain.
-  // `allTools` deliberately excludes the opt-in UI tool, which a deployment with REAI_ENABLE_UI does serve —
-  // so comparing against allTools alone reports the UI tool as "unknown". Include it, or this check fails on a
-  // correctly configured deployment, which is how a useful check gets deleted for crying wolf.
-  const { allTools } = await import("../dist/server.js");
+  //   - REAI_ENABLE_UI is unset by DEFAULT, so `reai_reconcile_ui` is absent from a healthy deployment. The
+  //     first version required it and therefore failed every default deployment, passing only against ours
+  //     because that flag happens to be set. Review caught it.
+  //   - REAI_TOOLSETS can narrow the surface deliberately, omitting whole groups of read tools.
+  //
+  // So the requirement is per GROUP: if any tool of a group is visible, the group is enabled, and then every
+  // read tool in it must be visible. A group that is entirely absent was narrowed away on purpose. The
+  // always-on tools (meta, discovery) are required unconditionally, because no configuration removes them.
+  // This still catches the failure the check exists for -- truncation drops tools from a group that is
+  // otherwise present -- while tolerating both kinds of deliberate absence.
+  const { allTools, TOOL_GROUPS, alwaysOnTools } = await import("../dist/server.js");
+  // uiTools lives in its own module and is deliberately NOT part of `allTools` — that separation is the
+  // reason it must be recognised as a known name without being required to be visible.
   const { uiTools } = await import("../dist/tools/ui.js");
   const localRegistry = [...allTools, ...uiTools];
   const visible = new Set(tools.map((t) => t.name));
   const localByName = new Map(localRegistry.map((t) => [t.name, t]));
 
-  const missingReads = localRegistry.filter((t) => t.risk === "read" && !visible.has(t.name)).map((t) => t.name);
+  const requiredReads = [];
+  for (const t of alwaysOnTools) if (t.risk === "read") requiredReads.push(t);
+  for (const [group, groupTools] of Object.entries(TOOL_GROUPS)) {
+    const enabled = groupTools.some((t) => visible.has(t.name));
+    if (!enabled) continue;
+    for (const t of groupTools) if (t.risk === "read") requiredReads.push({ ...t, group });
+  }
+
+  const missingReads = requiredReads.filter((t) => !visible.has(t.name));
+  const absentGroups = Object.entries(TOOL_GROUPS)
+    .filter(([, gt]) => !gt.some((t) => visible.has(t.name)))
+    .map(([g]) => g);
   report(
-    "every read-only tool survives the trip through tools/list",
+    "every read-only tool of every ENABLED group survives the trip through tools/list",
     missingReads.length === 0,
     missingReads.length === 0
-      ? `all ${localRegistry.filter((t) => t.risk === "read").length} read tools present of ${tools.length} visible`
-      : `${missingReads.length} missing: ${missingReads.slice(0, 6).join(", ")}${missingReads.length > 6 ? " …" : ""}`,
+      ? `${requiredReads.length} required reads present of ${tools.length} visible` +
+        (absentGroups.length > 0 ? `; groups not enabled here: ${absentGroups.join(", ")}` : "")
+      : `${missingReads.length} missing: ${missingReads.map((t) => t.name).slice(0, 6).join(", ")}` +
+        `${missingReads.length > 6 ? " …" : ""}`,
   );
 
   const unknown = [...visible].filter((n) => !localByName.has(n));
@@ -384,27 +415,39 @@ async function main() {
     }
   }
 
-  const accounts = await client.callTool({ name: "reai_list_accounts", arguments: { query: "bank" } });
-  report(
-    "tenant bound at authorization time needs no tenantId argument",
-    !accounts.isError && /"number"/.test(textOf(accounts)),
-    firstLine(textOf(accounts)),
-  );
+  // These name specific tools, and REAI_TOOLSETS can remove the group they belong to. Both live in
+  // `bookkeeping`, so a deployment narrowed to, say, sales+bank answered "Tool not found" three times and
+  // exited nonzero on a perfectly healthy configuration.
+  if (visible.has("reai_list_accounts")) {
+    const accounts = await client.callTool({ name: "reai_list_accounts", arguments: { query: "bank" } });
+    report(
+      "tenant bound at authorization time needs no tenantId argument",
+      !accounts.isError && /"number"/.test(textOf(accounts)),
+      firstLine(textOf(accounts)),
+    );
 
-  const vouchers = await client.callTool({ name: "reai_list_vouchers", arguments: {} });
-  report("reai_list_vouchers through the connector", !vouchers.isError, firstLine(textOf(vouchers)));
+    // The tenant chosen at authorization time must be a boundary, not a default.
+    const crossTenant = await client.callTool({
+      name: "reai_list_accounts",
+      arguments: { tenantId: 999999 },
+    });
+    const crossText = textOf(crossTenant);
+    report(
+      "a bound connection refuses a different tenant",
+      crossTenant.isError === true && /bound to tenant/i.test(crossText),
+      crossTenant.isError ? "refused" : `NOT REFUSED: ${crossText.slice(0, 160)}`,
+    );
+  } else {
+    skip("tenant bound at authorization time needs no tenantId argument", "reai_list_accounts is not registered");
+    skip("a bound connection refuses a different tenant", "reai_list_accounts is not registered");
+  }
 
-  // The tenant chosen at authorization time must be a boundary, not a default.
-  const crossTenant = await client.callTool({
-    name: "reai_list_accounts",
-    arguments: { tenantId: 999999 },
-  });
-  const crossText = textOf(crossTenant);
-  report(
-    "a bound connection refuses a different tenant",
-    crossTenant.isError === true && /bound to tenant/i.test(crossText),
-    crossTenant.isError ? "refused" : `NOT REFUSED: ${crossText.slice(0, 160)}`,
-  );
+  if (visible.has("reai_list_vouchers")) {
+    const vouchers = await client.callTool({ name: "reai_list_vouchers", arguments: {} });
+    report("reai_list_vouchers through the connector", !vouchers.isError, firstLine(textOf(vouchers)));
+  } else {
+    skip("reai_list_vouchers through the connector", "reai_list_vouchers is not registered");
+  }
 
   const switchTenant = await client.callTool({
     name: "reai_use_tenant",
@@ -535,7 +578,8 @@ async function main() {
   });
   report("a forged access token is refused", badToken.status === 401);
 
-  console.log(`\n${passed} passed, ${failed} failed\n`);
+  // Skips are in the total line so a narrowed run cannot be mistaken for a full one at a glance.
+  console.log(`\n${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}\n`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
