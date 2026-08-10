@@ -37,7 +37,26 @@ test("the GET-only wrapper refuses every method but GET", async () => {
     );
   }
   // Nothing reached the underlying fetch beyond the three GETs.
-  assert.equal(calls.length, 3, `the wrapper let ${calls.length - 3} non-GET call(s) through`);
+
+  // A Request object carries its own method, and `fetch` honours it. Reading `init?.method` alone let
+  // `fetch(new Request(url, { method: "POST" }))` reach the network — measured, before this was fixed.
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    assert.throws(
+      () => scope.fetch(new Request("https://example.invalid", { method })),
+      /GET-only/,
+      `a Request carrying ${method} was not refused`,
+    );
+  }
+  // A GET Request still passes, and init overrides the Request's method the way fetch does.
+  assert.equal(await scope.fetch(new Request("https://example.invalid")), "ok");
+  assert.throws(
+    () => scope.fetch(new Request("https://example.invalid"), { method: "POST" }),
+    /GET-only/,
+    "init.method must be honoured over a GET Request",
+  );
+  // An object that merely has a `method`-like property must not confuse it into allowing a write.
+  assert.throws(() => scope.fetch({ method: "delete" }), /GET-only/, "a lowercase method on the input passed");
+  assert.equal(calls.length, 4, `the wrapper let ${calls.length - 4} unexpected call(s) through`);
 
   // The native function must not be reachable from the wrapper's surface.
   assert.equal(Object.keys(guarded).length, 0, "the wrapper exposes properties a later edit could use to bypass it");

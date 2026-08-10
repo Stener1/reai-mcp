@@ -489,24 +489,28 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   // between them and the alphabet hands over the destructive one. Comparing a DELETE on resource A against a
   // POST on resource B by destructiveness has no justification at all: they are different operations, and an
   // equal score says only that both are equally relevant.
-  // Gated on the ABSENCE OF READ INTENT, which is the thing actually being detected.
+  // THERE IS NO DELETE-INTENT YIELD, and its absence is the point.
   //
-  // `cancel` sits in the DELETE method group but is deliberately absent from WRITE_INTENT_VERBS, so that
-  // "which invoices did we cancel" reads as a question about the past. Two wrong gates preceded this one, each
-  // found by review:
+  // Three gates were tried, each to stop `saferFirst` demoting a DELETE the caller asked for, and each failed
+  // from a different direction because `cancel` is deliberately absent from WRITE_INTENT_VERBS and so cannot be
+  // resolved from the verb:
   //
-  //   the method HINT alone  — a retrospective question yielded the rule, so "when did we cancel expenses"
-  //                            ranked DELETE above the PATCH tied with it at 9.59.
-  //   requiring writeIntent  — an IMPERATIVE cancel does not set it either, so "cancel expenses" had its
-  //                            requested DELETE pushed below PATCH and out of a three-result view entirely.
+  //   the method hint alone   -> "when did we cancel expenses" ranked DELETE above the tied PATCH
+  //   requiring writeIntent   -> "cancel expenses" pushed its DELETE out of a three-result view
+  //   requiring !readIntent   -> "did we cancel expenses" ranked DELETE first, because `did` is not a
+  //                              recognised read verb
   //
-  // `cancel` cannot resolve either way from the verb, so the discriminator has to be the rest of the sentence.
-  // Measured: the retrospective forms carry the read-intent penalty (writes at 9.59) and the imperatives do not
-  // (15.34), so readIntent separates them where neither verb table can.
-  const deleteIntent =
-    !wantMethod && !readIntent && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
+  // The fourth attempt would have been another word added to a list. Measurement made that unnecessary: an
+  // UNAMBIGUOUS delete request wins on SCORE, so the tie-break is never consulted for it — "delete expenses"
+  // scores 42.1 against PATCH's 26.9, "slett utgift" 15.5 against 9.4, and both keep DELETE first with no yield
+  // at all. The yield only ever changed the answer for `cancel`, which is exactly the verb this codebase treats
+  // as not-a-delete-request.
+  //
+  // So an ambiguous "cancel expenses" now ranks PATCH first. That partly declines the finding this began with
+  // (#177 asked for the DELETE to lead): `cancel` is not a deletion request in this vocabulary, and for an
+  // accounting system cancelling an expense is at least as likely to be a status change. An explicit delete verb
+  // is unaffected.
   const saferFirst = (a: SearchHit, b: SearchHit): number => {
-    if (deleteIntent) return 0;
     if (a.path !== b.path) return 0;
     const destructive = (method: string): number => (method === "DELETE" ? 1 : 0);
     return destructive(a.method) - destructive(b.method);
