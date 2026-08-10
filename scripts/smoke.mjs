@@ -112,7 +112,11 @@ async function main() {
     const res = await client.callTool({ name: "reai_whoami", arguments: {} });
     const text = textOf(res);
     const okFlag = !res.isError && text.includes("tenants");
-    report("reai_whoami", okFlag, okFlag ? firstLine(text) : text.slice(0, 200));
+    report(
+      "reai_whoami",
+      okFlag,
+      okFlag ? firstLine(text) : text.slice(0, 200),
+    );
     if (!tenantId) {
       // Only a tenant that has been explicitly declared safe to READ. This used to
       // take the first id out of /api/me, which was harmless while every token
@@ -128,7 +132,9 @@ async function main() {
       const pick = ids.find((id) => allowed.includes(id));
       if (pick) {
         tenantId = Number(pick);
-        console.log(`  (using tenant ${tenantId}, declared in REAI_READ_TENANTS)`);
+        console.log(
+          `  (using tenant ${tenantId}, declared in REAI_READ_TENANTS)`,
+        );
       } else if (ids.length > 0) {
         console.log(
           `  This token reaches ${ids.length} companies and none is declared in\n` +
@@ -147,9 +153,17 @@ async function main() {
   // 2. Spec-driven discovery needs no network at all.
   for (const [name, args, expect] of [
     ["reai_list_api_tags", {}, "Invoices"],
-    ["reai_search_endpoints", { query: "bank reconciliation" }, "/api/bank-reconciliations"],
+    [
+      "reai_search_endpoints",
+      { query: "bank reconciliation" },
+      "/api/bank-reconciliations",
+    ],
     ["reai_search_endpoints", { query: "credit note" }, "/api/"],
-    ["reai_describe_endpoint", { method: "POST", path: "/api/vouchers" }, "postings"],
+    [
+      "reai_describe_endpoint",
+      { method: "POST", path: "/api/vouchers" },
+      "postings",
+    ],
   ]) {
     try {
       const res = await client.callTool({ name, arguments: args });
@@ -157,7 +171,9 @@ async function main() {
       report(
         `${name} ${JSON.stringify(args)}`,
         !res.isError && text.includes(expect),
-        !res.isError && text.includes(expect) ? `found "${expect}"` : text.slice(0, 200),
+        !res.isError && text.includes(expect)
+          ? `found "${expect}"`
+          : text.slice(0, 200),
       );
     } catch (err) {
       report(name, false, String(err));
@@ -167,11 +183,19 @@ async function main() {
   // 3. Tenant-scoped reads.
   if (tenantId) {
     for (const [name, args, check] of [
-      ["reai_list_accounts", { tenantId, query: "bank" }, (t) => /"number"/.test(t)],
+      [
+        "reai_list_accounts",
+        { tenantId, query: "bank" },
+        (t) => /"number"/.test(t),
+      ],
       ["reai_list_vat_codes", { tenantId }, (t) => /"code"/.test(t)],
       ["reai_list_vouchers", { tenantId }, (t) => /voucher\(s\)/.test(t)],
       ["reai_list_postings", { tenantId }, (t) => /posting\(s\)/.test(t)],
-      ["reai_general_ledger", { tenantId, accountFrom: "1900", accountTo: "1999" }, (t) => /General ledger/.test(t)],
+      [
+        "reai_general_ledger",
+        { tenantId, accountFrom: "1900", accountTo: "1999" },
+        (t) => /General ledger/.test(t),
+      ],
     ]) {
       try {
         const res = await client.callTool({ name, arguments: args });
@@ -191,7 +215,11 @@ async function main() {
       });
       const text = textOf(res);
       const okFlag = !res.isError && text.includes("NOK");
-      report("reai_request GET /api/currencies", okFlag, okFlag ? "reached the API" : text.slice(0, 200));
+      report(
+        "reai_request GET /api/currencies",
+        okFlag,
+        okFlag ? "reached the API" : text.slice(0, 200),
+      );
     } catch (err) {
       report("reai_request", false, String(err));
     }
@@ -232,7 +260,9 @@ async function main() {
           arguments: { method: "POST", path: smuggle, tenantId, body: {} },
         });
         const text = textOf(res);
-        const blocked = res.isError === true && /write policy|not a usable API path/i.test(text);
+        const blocked =
+          res.isError === true &&
+          /write policy|not a usable API path/i.test(text);
         report(
           `path traversal blocked: POST ${smuggle}`,
           blocked,
@@ -255,13 +285,21 @@ async function main() {
       ["reai_list_invoices", { tenantId }, (t) => /invoice\(s\)/.test(t)],
       ["reai_list_offers", { tenantId }, (t) => /offer\(s\)/.test(t)],
       ["reai_customer_ledger", { tenantId }, (t) => /Customer ledger/.test(t)],
-      ["reai_customer_ledger", { tenantId, isOpenPosting: true }, (t) => /open postings only/.test(t)],
+      [
+        "reai_customer_ledger",
+        { tenantId, isOpenPosting: true },
+        (t) => /open postings only/.test(t),
+      ],
     ]) {
       try {
         const res = await client.callTool({ name, arguments: args });
         const text = textOf(res);
         const okFlag = !res.isError && check(text);
-        report(`${name}${args.isOpenPosting ? " (open)" : ""}`, okFlag, okFlag ? firstLine(text) : text.slice(0, 200));
+        report(
+          `${name}${args.isOpenPosting ? " (open)" : ""}`,
+          okFlag,
+          okFlag ? firstLine(text) : text.slice(0, 200),
+        );
       } catch (err) {
         report(name, false, String(err));
       }
@@ -270,11 +308,27 @@ async function main() {
     // 7b. Purchase-side reads.
     for (const [name, args, check] of [
       ["reai_list_suppliers", { tenantId }, (t) => /supplier\(s\)/.test(t)],
-      ["reai_list_supplier_invoices", { tenantId }, (t) => /supplier invoice\(s\)/.test(t)],
+      [
+        "reai_list_supplier_invoices",
+        { tenantId },
+        (t) => /supplier invoice\(s\)/.test(t),
+      ],
       ["reai_supplier_ledger", { tenantId }, (t) => /Supplier ledger/.test(t)],
-      ["reai_supplier_ledger", { tenantId, isUnpaid: true }, (t) => /Supplier ledger/.test(t)],
-      ["reai_list_reception_documents", { tenantId }, (t) => /document\(s\) awaiting processing/.test(t)],
-      ["reai_list_reception_documents", { tenantId, kind: "invoice" }, (t) => /invoice document\(s\)/.test(t)],
+      [
+        "reai_supplier_ledger",
+        { tenantId, isUnpaid: true },
+        (t) => /Supplier ledger/.test(t),
+      ],
+      [
+        "reai_list_reception_documents",
+        { tenantId },
+        (t) => /document\(s\) awaiting processing/.test(t),
+      ],
+      [
+        "reai_list_reception_documents",
+        { tenantId, kind: "invoice" },
+        (t) => /invoice document\(s\)/.test(t),
+      ],
       ["reai_list_expenses", { tenantId }, (t) => /expense claim\(s\)/.test(t)],
       // Organisation. An empty tenant is the common case here, and the assertion is on the
       // sentence that distinguishes "none are defined" from "unavailable" — the two readings
@@ -282,7 +336,9 @@ async function main() {
       [
         "reai_list_departments",
         { tenantId },
-        (t) => /department\(s\)\.$/m.test(t) || /No departments\. That is not the same/.test(t),
+        (t) =>
+          /department\(s\)\.$/m.test(t) ||
+          /No departments\. That is not the same/.test(t),
       ],
       // Leads. The register is the source, so this returns rows on any tenant — which makes it one
       // of the few list checks with a guaranteed non-empty answer, and the assertion is on the
@@ -290,7 +346,10 @@ async function main() {
       [
         "reai_search_leads",
         { tenantId, pageSize: 3 },
-        (t) => /row\(s\) on page 1/.test(t) && /no total/.test(t) && !/UNKNOWN/.test(t),
+        (t) =>
+          /row\(s\) on page 1/.test(t) &&
+          /no total/.test(t) &&
+          !/UNKNOWN/.test(t),
       ],
       // Access control. Every tenant has at least the owner, so unlike departments there IS a
       // non-empty answer to assert — and the role comparison is computed from the response, so
@@ -306,24 +365,35 @@ async function main() {
         // The finding this toolset exists for: an assignable role identical to the owner's. If ReAI
         // ever narrows ROLE_ACCOUNTANT this check fails, which is the point — the claim is measured
         // per tenant rather than asserted from a comment.
-        (t) => /IDENTICAL to ROLE_OWNER/.test(t) && /ASSIGNABLE role\(s\) carry everything/.test(t),
+        (t) =>
+          /IDENTICAL to ROLE_OWNER/.test(t) &&
+          /ASSIGNABLE role\(s\) carry everything/.test(t),
       ],
       [
         "reai_list_permissions",
         { tenantId },
-        (t) => /permission\(s\), in \d+ group\(s\)/.test(t) && /tenant-wide and \d+ self-scoped/.test(t),
+        (t) =>
+          /permission\(s\), in \d+ group\(s\)/.test(t) &&
+          /tenant-wide and \d+ self-scoped/.test(t),
       ],
       [
         "reai_list_user_invitations",
         { tenantId },
-        (t) => /pending invitation\(s\)/.test(t) || /No pending invitations/.test(t),
+        (t) =>
+          /pending invitation\(s\)/.test(t) || /No pending invitations/.test(t),
       ],
       [
         "reai_list_employees",
         { tenantId },
-        (t) => /employee\(s\), summarised/.test(t) || /No employees are registered/.test(t),
+        (t) =>
+          /employee\(s\), summarised/.test(t) ||
+          /No employees are registered/.test(t),
       ],
-      ["reai_employee_ledger", { tenantId }, (t) => /Employee ledger \d{4}-\d{2}-\d{2} to/.test(t)],
+      [
+        "reai_employee_ledger",
+        { tenantId },
+        (t) => /Employee ledger \d{4}-\d{2}-\d{2} to/.test(t),
+      ],
       // Fixed assets. Empty is the common case, and the assertion is on the sentence that
       // keeps "nothing capitalised" apart from "the company owns nothing".
       [
@@ -334,7 +404,8 @@ async function main() {
       [
         "reai_employee_ledger",
         { tenantId, isOpenPosting: true },
-        (t) => /Employee ledger 2000-01-01 to/.test(t) && /window widened/.test(t),
+        (t) =>
+          /Employee ledger 2000-01-01 to/.test(t) && /window widened/.test(t),
       ],
     ]) {
       try {
@@ -365,9 +436,14 @@ async function main() {
       [
         "reai_list_company_banks",
         { tenantId },
-        (t) => /"providerType"|"bban"/.test(t) || /\b0 bank account\(s\)/.test(t),
+        (t) =>
+          /"providerType"|"bban"/.test(t) || /\b0 bank account\(s\)/.test(t),
       ],
-      ["reai_list_reconciliation_rules", { tenantId }, (t) => /reconciliation rule\(s\)/.test(t)],
+      [
+        "reai_list_reconciliation_rules",
+        { tenantId },
+        (t) => /reconciliation rule\(s\)/.test(t),
+      ],
     ]) {
       try {
         const res = await client.callTool({ name, arguments: args });
@@ -383,10 +459,16 @@ async function main() {
     // not a failure.
     try {
       const year = String(new Date().getUTCFullYear() - 1);
-      const res = await client.callTool({ name: "reai_get_tax_return", arguments: { tenantId, year } });
+      const res = await client.callTool({
+        name: "reai_get_tax_return",
+        arguments: { tenantId, year },
+      });
       const text = textOf(res);
       if (res.isError && /HTTP 404/.test(text)) {
-        skip("reai_get_tax_return", `no tax return data for ${year} on this tenant`);
+        skip(
+          "reai_get_tax_return",
+          `no tax return data for ${year} on this tenant`,
+        );
       } else {
         report(`reai_get_tax_return ${year}`, !res.isError, firstLine(text));
       }
@@ -420,9 +502,15 @@ async function main() {
         const thisMonth = new Date().toISOString().slice(0, 7);
         const rec = await client.callTool({
           name: "reai_get_bank_reconciliation",
-          arguments: { tenantId, bankAccountId: bankId, month: thisMonth, include: ["summary"] },
+          arguments: {
+            tenantId,
+            bankAccountId: bankId,
+            month: thisMonth,
+            include: ["summary"],
+          },
         });
-        const okFlag = !rec.isError && /Reconciliation for bank account/.test(textOf(rec));
+        const okFlag =
+          !rec.isError && /Reconciliation for bank account/.test(textOf(rec));
         report(
           `reai_get_bank_reconciliation (account ${bankId}, ${thisMonth})`,
           okFlag,
@@ -470,7 +558,10 @@ async function main() {
           arguments: { tenantId, attachmentId },
         });
         const text = textOf(res);
-        const parsed = !res.isError && /"supplier"/.test(text) && /"payableAmount"/.test(text);
+        const parsed =
+          !res.isError &&
+          /"supplier"/.test(text) &&
+          /"payableAmount"/.test(text);
         report(
           `reai_parse_ehf_attachment on real document ${attachmentId}`,
           parsed,
@@ -479,7 +570,10 @@ async function main() {
             : text.slice(0, 220),
         );
       } else {
-        skip("reai_parse_ehf_attachment", "no XML/EHF document in the reception inbox");
+        skip(
+          "reai_parse_ehf_attachment",
+          "no XML/EHF document in the reception inbox",
+        );
       }
     } catch (err) {
       report("reai_parse_ehf_attachment", false, String(err));
@@ -505,7 +599,9 @@ async function main() {
       const now = new Date();
       for (let i = 0; i < count; i++) {
         const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-        out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+        out.push(
+          `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+        );
       }
       return out;
     };
@@ -545,7 +641,14 @@ async function main() {
     // keyed `userId` and agreements `agreementId`, and having the finder look at one field while the
     // verifier looked at another is how this produced "id=1853 → but the response is not a record"
     // for a record it had just fetched by that id.
-    const ID_FIELDS = ["id", "userId", "agreementId", "voucherId", "customerId", "supplierId"];
+    const ID_FIELDS = [
+      "id",
+      "userId",
+      "agreementId",
+      "voucherId",
+      "customerId",
+      "supplierId",
+    ];
     const idOfRecord = (body) => {
       for (const field of ID_FIELDS) {
         if (typeof body?.[field] === "number") return body[field];
@@ -554,13 +657,22 @@ async function main() {
     };
     const isRecordWithId = (text, id) => {
       const body = parseBody(text);
-      return !!body && !Array.isArray(body) && typeof body === "object" && idOfRecord(body) === id;
+      return (
+        !!body &&
+        !Array.isArray(body) &&
+        typeof body === "object" &&
+        idOfRecord(body) === id
+      );
     };
     const describeRecord = (text, id) => {
       const body = parseBody(text);
-      if (Array.isArray(body)) return `id=${id} but the response is a LIST of ${body.length}`;
-      if (!body || typeof body !== "object") return `id=${id} but the response is not a record`;
-      return idOfRecord(body) === id ? `id=${id}` : `asked for ${id}, got ${JSON.stringify(idOfRecord(body))}`;
+      if (Array.isArray(body))
+        return `id=${id} but the response is a LIST of ${body.length}`;
+      if (!body || typeof body !== "object")
+        return `id=${id} but the response is not a record`;
+      return idOfRecord(body) === id
+        ? `id=${id}`
+        : `asked for ${id}, got ${JSON.stringify(idOfRecord(body))}`;
     };
     // A hardcoded `.id` returned null for users, so the getter was SKIPPED — silently, on every
     // run, for a tenant that plainly has a user to fetch, and the skip line said "returned nothing
@@ -569,7 +681,9 @@ async function main() {
     const firstIdOf = (text) => {
       const parsed = parseBody(text);
       if (parsed === undefined) return null;
-      const rows = Array.isArray(parsed) ? parsed : (parsed?.content ?? parsed?.items ?? []);
+      const rows = Array.isArray(parsed)
+        ? parsed
+        : (parsed?.content ?? parsed?.items ?? []);
       if (!Array.isArray(rows) || rows.length === 0) return null;
       return idOfRecord(rows[0]) ?? null;
     };
@@ -584,20 +698,31 @@ async function main() {
       ["reai_list_orders", "reai_get_order", anyPeriod],
       ["reai_list_invoices", "reai_get_invoice", anyPeriod],
       ["reai_list_suppliers", "reai_get_supplier", { tenantId }],
-      ["reai_list_supplier_invoices", "reai_get_supplier_invoice", { tenantId }],
+      [
+        "reai_list_supplier_invoices",
+        "reai_get_supplier_invoice",
+        { tenantId },
+      ],
       ["reai_list_departments", "reai_get_department", { tenantId }],
       ["reai_list_employees", "reai_get_employee", { tenantId }],
       ["reai_list_users", "reai_get_user", { tenantId }],
       ["reai_list_assets", "reai_get_asset", { tenantId }],
     ]) {
       try {
-        const listed = await client.callTool({ name: listName, arguments: listArgs });
+        const listed = await client.callTool({
+          name: listName,
+          arguments: listArgs,
+        });
         // A list tool that FAILED is not a list tool that returned nothing. 403 module
         // gating is real on this API, and reporting it as "nothing to fetch on this
         // tenant" would be a false statement plus two silently skipped checks — the
         // absence-read-as-success this block's own comment claims to avoid.
         if (listed.isError) {
-          report(getName, false, `${listName} failed: ${textOf(listed).split("\n")[0].slice(0, 60)}`);
+          report(
+            getName,
+            false,
+            `${listName} failed: ${textOf(listed).split("\n")[0].slice(0, 60)}`,
+          );
           continue;
         }
         const id = firstIdOf(textOf(listed));
@@ -605,9 +730,16 @@ async function main() {
           skip(getName, `${listName} returned nothing to fetch on this tenant`);
           continue;
         }
-        const res = await client.callTool({ name: getName, arguments: { id, tenantId } });
+        const res = await client.callTool({
+          name: getName,
+          arguments: { id, tenantId },
+        });
         const text = textOf(res);
-        report(getName, !res.isError && isRecordWithId(text, id), `id=${id} → ${describeRecord(text, id)}`);
+        report(
+          getName,
+          !res.isError && isRecordWithId(text, id),
+          `id=${id} → ${describeRecord(text, id)}`,
+        );
       } catch (err) {
         report(getName, false, String(err));
       }
@@ -618,15 +750,23 @@ async function main() {
     //     month's reconciliation → the first transaction id it can find, in either the
     //     pending or the matched groups.
     try {
-      const banks = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
-      if (banks.isError) throw new Error(`reai_list_company_banks failed: ${textOf(banks).split("\n")[0]}`);
+      const banks = await client.callTool({
+        name: "reai_list_company_banks",
+        arguments: { tenantId },
+      });
+      if (banks.isError)
+        throw new Error(
+          `reai_list_company_banks failed: ${textOf(banks).split("\n")[0]}`,
+        );
       // The same selection the reconciliation check above makes, and for the same reason:
       // the synced view does not apply to a manual account, and an archived one is not a
       // working account. Taking banks[0] would have blamed the tenant for a wrong-view call.
       const bankAccountId = (() => {
         const rows = parseBody(textOf(banks));
         if (!Array.isArray(rows)) return null;
-        const synced = rows.find((b) => !b?.archived && (b?.providerType ?? "manual") !== "manual");
+        const synced = rows.find(
+          (b) => !b?.archived && (b?.providerType ?? "manual") !== "manual",
+        );
         return Number.isInteger(Number(synced?.id)) ? Number(synced.id) : null;
       })();
       let transactionId = null;
@@ -643,8 +783,12 @@ async function main() {
           // groups, which is precisely the state the bank workflow exists for, reported
           // "no bank transaction on this tenant" and skipped the check.
           const found =
-            /"pendingTransactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec)) ??
-            /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(textOf(rec));
+            /"pendingTransactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(
+              textOf(rec),
+            ) ??
+            /"transactions"\s*:\s*\[\s*\{[\s\S]*?"id"\s*:\s*(\d+)/.exec(
+              textOf(rec),
+            );
           if (found) {
             transactionId = Number(found[1]);
             break;
@@ -652,7 +796,10 @@ async function main() {
         }
       }
       if (transactionId === null) {
-        skip("reai_get_bank_transaction", "no bank transaction on this tenant to fetch");
+        skip(
+          "reai_get_bank_transaction",
+          "no bank transaction on this tenant to fetch",
+        );
       } else {
         const res = await client.callTool({
           name: "reai_get_bank_transaction",
@@ -691,19 +838,36 @@ async function main() {
     report(
       "irreversible tools are not advertised in this write mode",
       leaked.length === 0,
-      leaked.length === 0 ? `all ${mustBeHidden.length} hidden` : `LEAKED: ${leaked.join(", ")}`,
+      leaked.length === 0
+        ? `all ${mustBeHidden.length} hidden`
+        : `LEAKED: ${leaked.join(", ")}`,
     );
 
     for (const [label, body] of [
-      ["POST /api/subscriptions with outputMode=create_invoice", { customerId: 1, outputMode: "create_invoice" }],
-      ["POST /api/subscriptions with automaticBillingGeneration", { customerId: 1, automaticBillingGeneration: true }],
+      [
+        "POST /api/subscriptions with outputMode=create_invoice",
+        { customerId: 1, outputMode: "create_invoice" },
+      ],
+      [
+        "POST /api/subscriptions with automaticBillingGeneration",
+        { customerId: 1, automaticBillingGeneration: true },
+      ],
     ]) {
       const res = await client.callTool({
         name: "reai_request",
-        arguments: { method: "POST", path: "/api/subscriptions", tenantId, body },
+        arguments: {
+          method: "POST",
+          path: "/api/subscriptions",
+          tenantId,
+          body,
+        },
       });
       const blocked = res.isError === true && /write policy/i.test(textOf(res));
-      report(`self-invoicing subscription blocked: ${label}`, blocked, blocked ? "blocked" : textOf(res).slice(0, 160));
+      report(
+        `self-invoicing subscription blocked: ${label}`,
+        blocked,
+        blocked ? "blocked" : textOf(res).slice(0, 160),
+      );
     }
 
     for (const path of [
@@ -721,7 +885,8 @@ async function main() {
       // name the irreversible class — otherwise this passes even if the path were
       // reclassified as merely reversible.
       const text = textOf(res);
-      const blocked = res.isError === true && /classified "irreversible"/.test(text);
+      const blocked =
+        res.isError === true && /classified "irreversible"/.test(text);
       report(
         `blocked as irreversible: POST ${path}`,
         blocked,
@@ -740,11 +905,16 @@ async function main() {
         },
       });
       const text = textOf(res);
-      const blocked = res.isError === true && /write policy/i.test(text) && /sendEhf/.test(text);
+      const blocked =
+        res.isError === true &&
+        /write policy/i.test(text) &&
+        /sendEhf/.test(text);
       report(
         "sendEhf=true escalates a reversible path and is blocked",
         blocked,
-        blocked ? "blocked, and the flag is named" : `NOT BLOCKED: ${text.slice(0, 200)}`,
+        blocked
+          ? "blocked, and the flag is named"
+          : `NOT BLOCKED: ${text.slice(0, 200)}`,
       );
     } catch (err) {
       report("sendEhf escalation", false, String(err));
@@ -755,13 +925,18 @@ async function main() {
     // "no opening balance" is a claim about the books and a 403 would otherwise look the same.
     console.log("  Reference data:");
     try {
-      const countries = await client.callTool({ name: "reai_list_countries", arguments: { tenantId } });
+      const countries = await client.callTool({
+        name: "reai_list_countries",
+        arguments: { tenantId },
+      });
       const parsed = parseBody(textOf(countries));
       const list = Array.isArray(parsed) ? parsed : [];
       const gb = list.find((row) => row.code === "GB");
       report(
         "the country list arrives, with GB and a currency on every row",
-        list.length > 100 && gb?.currencyCode === "GBP" && list.every((r) => r.code?.length === 2 && r.currencyCode),
+        list.length > 100 &&
+          gb?.currencyCode === "GBP" &&
+          list.every((r) => r.code?.length === 2 && r.currencyCode),
         list.length === 0
           ? `COULD NOT READ the country list: ${firstLine(textOf(countries))}`
           : `${list.length} countries, GB -> ${gb?.currencyCode ?? "MISSING"}`,
@@ -772,19 +947,28 @@ async function main() {
         arguments: { tenantId, query: "united kingdom" },
       });
       const named = /Send countryCode: "GB"/.test(textOf(filtered));
-      report("filtering names the code to send", named, named ? "GB" : firstLine(textOf(filtered)));
+      report(
+        "filtering names the code to send",
+        named,
+        named ? "GB" : firstLine(textOf(filtered)),
+      );
     } catch (err) {
       report("reference country list", false, String(err));
     }
 
     try {
-      const currencies = await client.callTool({ name: "reai_list_currencies", arguments: { tenantId } });
+      const currencies = await client.callTool({
+        name: "reai_list_currencies",
+        arguments: { tenantId },
+      });
       const parsedCurrencies = parseBody(textOf(currencies));
       const list = Array.isArray(parsedCurrencies) ? parsedCurrencies : [];
       report(
         "the currency list arrives, all three-letter codes",
         list.length > 100 && list.every((r) => r.code?.length === 3),
-        list.length === 0 ? `COULD NOT READ: ${firstLine(textOf(currencies))}` : `${list.length} currencies`,
+        list.length === 0
+          ? `COULD NOT READ: ${firstLine(textOf(currencies))}`
+          : `${list.length} currencies`,
       );
     } catch (err) {
       report("reference currency list", false, String(err));
@@ -816,9 +1000,13 @@ async function main() {
       ],
     ]) {
       try {
-        const res = await client.callTool({ name, arguments: { tenantId, ...args } });
+        const res = await client.callTool({
+          name,
+          arguments: { tenantId, ...args },
+        });
         const text = textOf(res);
-        const answered = res.isError !== true && (absent.test(text) || present.test(text));
+        const answered =
+          res.isError !== true && (absent.test(text) || present.test(text));
         report(
           label,
           answered,
@@ -857,9 +1045,25 @@ async function main() {
   {
     const uiRegistered = tools.some((t) => t.name === "reai_reconcile_ui");
     if (!uiRegistered) {
-      skip("the MCP Apps view", "reai_reconcile_ui is not registered (REAI_ENABLE_UI is off)");
+      skip(
+        "the MCP Apps view",
+        "reai_reconcile_ui is not registered (REAI_ENABLE_UI is off)",
+      );
     } else {
-      const uri = "ui://reai/reconciliation";
+      // Finding: the URI must come from the tool's OWN wire definition, not be hardcoded here. A host discovers
+      // the template through `_meta.ui.resourceUri`; if the tool stopped advertising it, or advertised a
+      // different one, no host could ever find the resource — and a hardcoded URI here would still pass,
+      // because the resource is registered independently of the pointer to it.
+      const advertised = tools.find((t) => t.name === "reai_reconcile_ui")
+        ?._meta?.ui?.resourceUri;
+      const uri = advertised ?? "ui://reai/reconciliation";
+      report(
+        "the tool advertises its MCP Apps resource URI on the wire",
+        advertised === "ui://reai/reconciliation",
+        advertised
+          ? `_meta.ui.resourceUri = ${advertised}`
+          : "no _meta.ui.resourceUri on the tool definition",
+      );
 
       // 1. The host discovers the template through resources/list. Absent there, it is never fetched.
       let listed = [];
@@ -888,44 +1092,122 @@ async function main() {
       try {
         const contents = (await client.readResource({ uri })).contents ?? [];
         const body = String(contents[0]?.text ?? contents[0]?.blob ?? "");
-        const external = /(?:src|href)\s*=\s*["']https?:/i.exec(body)?.[0];
+        // ANY src= or href= is disqualifying, not just an http(s) one. `<script src="widget.js">` and
+        // `<img src="/logo.svg">` are equally unfetchable inside the host's sandbox, and the first version of
+        // this check required `https?:` — so a relative asset passed while breaking the view just as
+        // completely. Measured: this template has zero src=, zero href=, no <link>, no <img>, and exactly one
+        // inline <script>, so the strict form is correct rather than merely stricter.
+        const asset = /(?:\bsrc\s*=|\bhref\s*=|<link\b|<img\b)/i.exec(
+          body,
+        )?.[0];
         report(
           "resources/read returns a self-contained template",
-          body.length > 1000 && /<script/i.test(body) && external === undefined,
-          external
-            ? `${body.length} chars but references an external resource: ${external}`
-            : `${body.length} chars, inline script, no external references`,
+          body.length > 1000 && /<script/i.test(body) && asset === undefined,
+          asset
+            ? `${body.length} chars but references an external asset: ${asset.trim()}`
+            : `${body.length} chars, inline script, no external assets`,
         );
       } catch (err) {
-        report("resources/read returns a self-contained template", false, String(err).slice(0, 140));
+        report(
+          "resources/read returns a self-contained template",
+          false,
+          String(err).slice(0, 140),
+        );
       }
 
       // 3. The tool itself, on a real bank account, with the figures the view renders. The id is derived from
       //    the tenant rather than hardcoded — a fixed id is how the other getters here came to be skipped.
-      const bankList = await client.callTool({ name: "reai_list_company_banks", arguments: { tenantId } });
-      const bankId = Number(/"id"\s*:\s*(\d+)/.exec(textOf(bankList))?.[1]);
-      if (!Number.isInteger(bankId)) {
-        skip("reai_reconcile_ui", "no company bank on this tenant to reconcile");
-      } else {
-        const month = new Date().toISOString().slice(0, 7);
-        const res = await client.callTool({
-          name: "reai_reconcile_ui",
-          arguments: { bankAccountId: bankId, month, tenantId },
-        });
-        // structuredContent is what the view actually draws. A text-only success would render an empty widget,
-        // which is exactly the "looks like it worked" failure this whole section is about.
-        const data = res.structuredContent ?? {};
-        const required = ["bankAccountId", "month", "transactions", "postings", "canMatch", "writeMode"];
-        const missing = required.filter((k) => !(k in data));
-        report(
-          `reai_reconcile_ui (account ${bankId}, ${month})`,
-          !res.isError && missing.length === 0,
-          res.isError
-            ? firstLine(textOf(res))
-            : missing.length === 0
-              ? `structuredContent has all ${required.length} view fields; ${JSON.stringify(data).length} chars`
-              : `structuredContent is missing: ${missing.join(", ")}`,
+      //
+      //    GATED on the explicitly approved tenantId. Without this the calls below omit the argument, the
+      //    spawned server resolves it from an ambient REAI_TENANT_ID, and this block reads a tenant's bank
+      //    list and reconciliation after the script has already announced that every tenant-scoped check would
+      //    be skipped. Reads only, but the approval mechanism exists precisely so that reads are a decision
+      //    too — REAI_READ_TENANTS gates reads, not just writes. Review caught this as a P1 and it was right:
+      //    the two checks above need no tenant at all, so only this half moves behind the gate.
+      // A `return` here would leave main() early and skip client.close() and the summary, so this is a branch.
+      if (!tenantId) {
+        skip(
+          "reai_reconcile_ui",
+          "no tenant was approved for this run, so no bank data is read",
         );
+      } else {
+        const bankList = await client.callTool({
+          name: "reai_list_company_banks",
+          arguments: { tenantId },
+        });
+        // A feed-backed, unarchived account — the same selector the reconciliation check above uses. Taking the
+        // first "id" in the text would exercise the view against a manual account, which is not what it is for:
+        // the handler still assembles every structuredContent key, so that run would PASS while never testing
+        // the usable case. On 2634 all three accounts happen to be providerType "ztl", so the first-id version
+        // worked by luck rather than by selection.
+        const bankRecords = (() => {
+          const t = textOf(bankList);
+          const start = t.indexOf("[");
+          const end = t.lastIndexOf("]");
+          if (start < 0 || end <= start) return [];
+          try {
+            return JSON.parse(t.slice(start, end + 1));
+          } catch {
+            return [];
+          }
+        })();
+        const synced = bankRecords.find(
+          (b) => !b?.archived && (b?.providerType ?? "manual") !== "manual",
+        );
+        const bankId = Number(synced?.id);
+        if (!Number.isInteger(bankId)) {
+          skip(
+            "reai_reconcile_ui",
+            `no feed-backed bank on this tenant (${bankRecords.length} account(s), all manual or archived)`,
+          );
+        } else {
+          const month = new Date().toISOString().slice(0, 7);
+          const res = await client.callTool({
+            name: "reai_reconcile_ui",
+            arguments: { bankAccountId: bankId, month, tenantId },
+          });
+          // structuredContent is what the view actually draws. A text-only success would render an empty widget,
+          // which is exactly the "looks like it worked" failure this whole section is about.
+          // Presence is not usability. `transactions: null` or `postings: "invalid"` satisfies a key check while
+          // the template's apply() rejects non-array collections and leaves the widget on its placeholder — the
+          // exact "looks like it worked" failure this section exists to catch, reproduced one level in. So the
+          // TYPES are checked, and the echoed account and month must match what was asked for: a view rendering
+          // a different month than requested is wrong in a way no key check can see.
+          const data = res.structuredContent ?? {};
+          const problems = [];
+          for (const k of ["transactions", "postings"]) {
+            if (!Array.isArray(data[k]))
+              problems.push(
+                `${k} is ${data[k] === undefined ? "absent" : JSON.stringify(data[k])?.slice(0, 30)}, not an array`,
+              );
+          }
+          if (data.bankAccountId !== bankId)
+            problems.push(
+              `bankAccountId is ${JSON.stringify(data.bankAccountId)}, asked for ${bankId}`,
+            );
+          if (data.month !== month)
+            problems.push(
+              `month is ${JSON.stringify(data.month)}, asked for ${month}`,
+            );
+          if (typeof data.canMatch !== "boolean")
+            problems.push(
+              `canMatch is ${JSON.stringify(data.canMatch)}, not a boolean`,
+            );
+          if (typeof data.writeMode !== "string")
+            problems.push(
+              `writeMode is ${JSON.stringify(data.writeMode)}, not a string`,
+            );
+          report(
+            `reai_reconcile_ui (account ${bankId}, ${month})`,
+            !res.isError && problems.length === 0,
+            res.isError
+              ? firstLine(textOf(res))
+              : problems.length === 0
+                ? `structuredContent renderable: ${data.transactions.length} transaction(s), ${data.postings.length} posting(s), ` +
+                  `canMatch=${data.canMatch}, writeMode=${data.writeMode}`
+                : problems.join("; "),
+          );
+        }
       }
     }
   }
@@ -933,7 +1215,9 @@ async function main() {
   await client.close();
 
   // Skips in the total line, so an incomplete run cannot read as a full one.
-  console.log(`\n${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}\n`);
+  console.log(
+    `\n${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}\n`,
+  );
   process.exit(failed === 0 ? 0 : 1);
 }
 
