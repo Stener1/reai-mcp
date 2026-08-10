@@ -74,11 +74,37 @@ function operationsOf(spec) {
   return out;
 }
 
+/**
+ * Everything a caller MUST supply: required body fields and required parameters alike.
+ *
+ * The first version read the JSON body schema only, so a query parameter becoming required was invisible —
+ * `GET /api/customers` gaining a mandatory `archived` would have started failing every ordinary call while both
+ * required arrays stayed empty and this exited 0. A parameter is as breaking as a body field and arrives by the
+ * same route, so it is the same question.
+ *
+ * Parameters are prefixed by their location so `query:archived` cannot be confused with a body field of the same
+ * name, which matters because this repo's tools name arguments after both.
+ */
 function requiredFieldsOf(spec, op) {
+  const required = [];
+
   const schema = op?.requestBody?.content?.["application/json"]?.schema;
-  if (!schema) return [];
-  const resolved = schema.$ref ? spec.components?.schemas?.[schema.$ref.split("/").pop()] : schema;
-  return [...(resolved?.required ?? [])].sort();
+  if (schema) {
+    const resolved = schema.$ref ? spec.components?.schemas?.[schema.$ref.split("/").pop()] : schema;
+    required.push(...(resolved?.required ?? []));
+  }
+
+  for (const parameter of op?.parameters ?? []) {
+    const resolved = parameter?.$ref
+      ? spec.components?.parameters?.[parameter.$ref.split("/").pop()]
+      : parameter;
+    // A path parameter is required by construction and cannot meaningfully change, so reporting it would be
+    // noise on every operation that has one.
+    if (!resolved?.required || resolved.in === "path") continue;
+    required.push(`${resolved.in}:${resolved.name}`);
+  }
+
+  return [...new Set(required)].sort();
 }
 
 /**
