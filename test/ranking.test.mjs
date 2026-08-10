@@ -1053,3 +1053,65 @@ test("a tie never ranks DELETE above a safer method", () => {
   const norsk = searchOperations({ query: "slett åpningsbalanse", limit: 3 });
   assert.equal(norsk[0].method, "DELETE", "slett should still rank DELETE first");
 });
+
+/**
+ * The safer-first rule applies to ONE resource, and never against a stated delete intent.
+ *
+ * The first version compared destructiveness across unrelated paths, which was overreach and gave a worse answer
+ * than the alphabet it replaced. Found in review of #174:
+ *
+ *     "slett bankkonto pa faktura"  ->  POST /invoice/payment/{paymentId}/company-bank  19.00  <- promoted
+ *                                       DELETE /api/supplier-invoices/{id}             19.00
+ *
+ * The query says `slett`, and the promoted POST is itself classified irreversible — so two equally destructive
+ * operations were reordered against what the user asked for, making nothing safer. A tie between different
+ * resources says only that both are equally relevant; it licenses no preference about their methods.
+ */
+test("safer-first does not reorder different resources, and yields to delete intent", async () => {
+  // Cross-resource: the ASCII-folded form is the one that ties, so it is the one asserted.
+  const folded = searchOperations({ query: "slett bankkonto pa faktura", limit: 5 });
+  const tied = folded.filter((h) => h.score === folded[0].score);
+  assert.ok(tied.length > 1, "the fixture no longer ties across resources — re-anchor this");
+  assert.ok(
+    new Set(tied.map((h) => h.path)).size > 1,
+    "the tied group is on one path, so this no longer exercises the cross-resource case",
+  );
+  assert.equal(
+    folded[0].method,
+    "DELETE",
+    `a query saying "slett" ranked ${folded[0].method} ${folded[0].path} first over tied DELETEs`,
+  );
+
+  // And the promoted operation in the regression was irreversible too, which is why "prefer the safer method"
+  // did not apply: there was no safer method to prefer.
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(
+    classifyRequest("POST", "/invoice/payment/1/company-bank"),
+    "irreversible",
+    "the premise of this test is that the promoted POST is not safer than the DELETEs it outranked",
+  );
+
+  // The same-resource case still works, which is the whole point of keeping the rule.
+  const create = searchOperations({ query: "create opening balance", limit: 5 });
+  const sameResource = create.filter((h) => h.score === create[0].score);
+  assert.ok(sameResource.every((h) => h.path === create[0].path), "expected a single-resource tie here");
+  assert.notEqual(create[0].method, "DELETE");
+
+  // BOTH CONDITIONS ASSERTED IN THE SOURCE, because behaviour cannot separate them.
+  //
+  // The rule has two guards — same-path, and yield-to-delete-intent — and on every fixture available here EACH
+  // ONE ALONE is sufficient: "slett bankkonto pa faktura" has delete intent AND ties across paths, so removing
+  // either guard leaves the ranking unchanged. Mutation-tested: dropping either survives, dropping both fails.
+  //
+  // That redundancy is not a reason to delete one. They are independently justified — a cross-resource tie
+  // licenses no preference about methods, and a stated delete intent should not be overridden on ANY resource —
+  // and a same-path tie under delete intent is a real case even though no query in this corpus produces one.
+  // But shipping two guards while only being able to prove one is how a check comes to read as coverage, so the
+  // source is asserted directly, the way the ledger classification is.
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/reai/spec.ts", import.meta.url), "utf8");
+  const rule = /const saferFirst[\s\S]*?\n  };/.exec(source)?.[0];
+  assert.ok(rule, "saferFirst was renamed or restructured — re-anchor this, do not delete it");
+  assert.match(rule, /if \(deleteIntent\) return 0;/, "the delete-intent yield is missing from saferFirst");
+  assert.match(rule, /if \(a\.path !== b\.path\) return 0;/, "the same-path restriction is missing");
+});
