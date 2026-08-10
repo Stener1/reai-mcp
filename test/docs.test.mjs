@@ -127,7 +127,14 @@ test("EVERY stated quirk count matches the registry, wherever it is written", ()
     for (const line of text.split("\n")) {
       // A line that is explicitly about the arithmetic having been wrong is history, not a claim.
       if (/wrong twice|has been wrong|already understates/.test(line)) continue;
-      for (const m of line.matchAll(/\*{0,2}(\d+)\*{0,2} (?:quirks|claims nobody)/g)) {
+      // A NAMED set of modifiers, not "any two words". Review found the README's headline bullet saying
+      // "**124 measured API quirks**" — stale for three iterations and invisible to the bare `N quirks` pattern
+      // this extends. Widening it to any intervening words instead produced false positives on prose where the
+      // number belongs to something else entirely: "revision 115 corrected two quirks" is about a deployment,
+      // not a count. So the modifiers are enumerated, and a phrasing outside the list is caught by the floor
+      // below rather than silently uncounted.
+      const MODIFIERS = /(?:measured(?: API)?|documented|known|registered)/.source;
+      for (const m of line.matchAll(new RegExp(`\\*{0,2}(\\d+)\\*{0,2} (?:${MODIFIERS} )?(?:quirks|claims nobody)`, "g"))) {
         found += 1;
         if (Number(m[1]) !== QUIRKS.length) wrong.push(`${file}: "${m[0]}" (registry has ${QUIRKS.length})`);
       }
@@ -138,7 +145,11 @@ test("EVERY stated quirk count matches the registry, wherever it is written", ()
   // "N quirks" phrasing. `scripts/audit-quirks.mjs` also carries interlocking BARE numbers ("That 2, and the
   // 127, are exact", "leaving 110 unnamed") which no generic regex can distinguish from prose, and those remain
   // unguarded. Recorded rather than implied: this guard closed five of six drifting sites, not all arithmetic.
-  assert.ok(found >= 5, `only ${found} stated counts were found; this guard has stopped covering them`);
+  // NINE, the number actually present — not a loose floor. Review showed why the loose one was not enough:
+  // narrowing the modifier list drops a phrasing from the sweep, and with every count correct nothing else
+  // fails, so a floor of 5 could absorb four lost sites in silence. It still cannot pin its own loosening, but
+  // it can pin the coverage, and that is the half that was slipping.
+  assert.ok(found >= 9, `only ${found} stated counts were found; this guard has stopped covering them`);
   assert.deepEqual(wrong, [], `stale quirk counts:\n  ${wrong.join("\n  ")}`);
 });
 

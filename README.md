@@ -15,7 +15,7 @@ Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 
 
 - **177 tools**: 170 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
-- **124 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
+- **126 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
 - **Self-hosted, and deliberately not on npm.** Run it as local stdio, or deploy your own Streamable HTTP connector with OAuth 2.1. Nothing is published to the registry until it has been seen working against real books, so there is no `npx reai-mcp` to copy.
 

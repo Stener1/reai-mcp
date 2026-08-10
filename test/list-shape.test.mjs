@@ -427,6 +427,11 @@ test("no tool throws on a 200 whose shape is not what its declared type promises
     directPermissionCodes: [], effectivePermissionCodes: [], contactEvents: [{}], postings: [{}],
     transactions: [{}], users: [{}], wageSpecs: [{ id: 1 }], data: [], content: [],
     reconciledTransactionIds: [1], reconciledPostingIds: [1], voucherIds: [1],
+    // `usedBy` was missing, and review showed the cost: reverting `asArray` to `?? []` left the new attachment
+    // tool's handling of it uncaught here, so the only thing that failed was an unrelated tool. The allowlist
+    // shape again — this sweep breaks the array fields somebody enumerated, and a new one has to be added.
+    usedBy: [{ ownerType: "SUPPLIER_INVOICE", ownerId: 5830 }],
+    attachments: [{ id: 1 }],
   };
   const swap = (fn) => Object.fromEntries(Object.entries(base).map(([k, v]) => [k, Array.isArray(v) ? fn() : v]));
   const bodies = [
