@@ -428,7 +428,28 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
     if (score > 0) hits.push({ ...op, score: round2(score) });
   }
 
-  hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+  // Codepoint order for the tie-break, matching `scripts/build-spec-index.mjs`, which refuses `localeCompare`
+  // for stated reasons: "the default collation is locale-dependent, and under LANG=nb_NO Node sorts 'aa' as 'å'
+  // (after z)". This is a Norwegian API with Norwegian-named paths, so that is a live hazard, and the two
+  // orderings do differ — `"aa".localeCompare("å")` is 1 while codepoint order gives -1. Search was the only
+  // place left that ordered results by a locale-dependent comparison, which meant identical queries could rank
+  // ties differently between machines.
+  //
+  // It also changes which tie is shown first, in the direction the discovery notes wanted. Under `localeCompare`
+  // `{` sorts BEFORE letters, so a `{param}` route beat a concrete sibling on equal scores; by codepoint `{` is
+  // 0x7B and sorts after `a`-`z`, so the concrete one wins. For "create agreement" that moves
+  // POST /api/agreements/accounting-services — an actual creation template — ahead of
+  // POST /api/agreements/{id}/sign-requests/{signRequestId}/send, an external send, in their 16-point tie.
+  // That is one fewer "email a counterparty" above a creation route; it does not fix the ranking bias documented
+  // in docs/discovery.md, and is not claimed to — two irreversible external sends still outrank every creation
+  // template, on score rather than on a tie-break.
+  //
+  // The METHOD comparison is changed for consistency only and cannot behave differently: HTTP method names are a
+  // fixed set of ASCII uppercase words, and the two collations agree on every pair of them. Reverting that half
+  // alone fails no test, which is measured rather than assumed — there are 12 same-path score ties across the
+  // obvious resource queries (`DELETE` beside `PATCH`, `PUT` or `POST`) and both orderings rank them identically.
+  const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  hits.sort((a, b) => b.score - a.score || byCodepoint(a.path, b.path) || byCodepoint(a.method, b.method));
   return hits.slice(0, limit);
 }
 

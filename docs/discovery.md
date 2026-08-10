@@ -99,12 +99,18 @@ It shows up as this, identically for "create agreement", "opprett avtale" and "c
 ```
 19  POST /api/agreements/{id}/sign-request                      irreversible / external
 18  POST /api/agreements/{id}/sign-requests                     irreversible / external
-16  POST /api/agreements/{id}/sign-requests/{signRequestId}/send irreversible / external
 16  POST /api/agreements/accounting-services                    reversible / none
-16  … and the other four creation templates, tied
+16  … and the other four creation templates, tied at 16
+16  POST /api/agreements/{id}/sign-requests/{signRequestId}/send irreversible / external
 ```
 
-An agent asking to create a contract is offered three ways to email a counterparty first.
+An agent asking to create a contract is offered **two** ways to email a counterparty first.
+
+It was three until the tie-break stopped using `localeCompare` (see the caveat at the end of this section). That
+change moved the first creation template from rank 4 to rank 3 and the third send from rank 3 to rank 8 — the
+whole 16-point group is a tie, so nothing about *merit* changed, only which member of a tie is named first. The
+defect this section is about is untouched: two irreversible external sends still outrank every creation template,
+for the reason decomposed below.
 
 ### The mechanism is narrower than it looks, and worth stating exactly
 
@@ -156,4 +162,18 @@ Regressions were measured with the committed sweep; benefit with a throwaway scr
 
 Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **56** bare operations no curated tool covers.
 
-One caveat on the table above: among the operations tied at 16, which one is named first comes from `a.path.localeCompare(b.path)`, under which `{` sorts before letters. Codepoint order would put `accounting-services` first. `scripts/build-spec-index.mjs` deliberately refuses `localeCompare` for reproducibility; `searchOperations` does not. And with prose stripped from the whole family, `sign-requests` still comes out first — so "if only ReAI documented these evenly" would not by itself fix the symptom.
+One caveat on the table above, now resolved: among the operations tied at 16, which one is named first comes from
+the path tie-break. It used to be `a.path.localeCompare(b.path)`, under which `{` sorts before letters, so a
+`{param}` route beat a concrete sibling on equal scores. `searchOperations` now uses codepoint order, matching
+`scripts/build-spec-index.mjs`, which refuses `localeCompare` for a stated reason — "under LANG=nb_NO Node sorts
+'aa' as 'å' (after z)" — on an API whose paths are Norwegian. Search was the last place ordering results by a
+locale-dependent comparison, so identical queries could rank ties differently between machines. The two
+collations do differ: `"aa".localeCompare("å")` is `1`, codepoint order gives `-1`.
+
+That is a reproducibility fix that happens to help here, not a ranking change: by codepoint `{` is `0x7B` and
+sorts after `a`–`z`, so the concrete creation templates take the earlier places in their own tie. Measured on the
+three queries above, the effect is exactly one position for the first creation template and five for the third
+send.
+
+And with prose stripped from the whole family, `sign-requests` still comes out first — so "if only ReAI
+documented these evenly" would not by itself fix the symptom.

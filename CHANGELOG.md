@@ -9,6 +9,33 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Search ranked ties by a locale-dependent comparison, which `scripts/build-spec-index.mjs` had refused for
+  years and said why.** `searchOperations` sorted equal-scoring hits with `a.path.localeCompare(b.path)`; the
+  index builder uses codepoint order, with the reason written down: *"the default collation is locale-dependent,
+  and under LANG=nb_NO Node sorts 'aa' as 'å' (after z)"*. This is a Norwegian API with Norwegian-named paths, so
+  identical queries could rank ties differently between machines. The two collations do differ —
+  `"aa".localeCompare("å")` is `1`, codepoint order gives `-1`.
+  - It is a reproducibility fix that happens to help the documented ranking bias, and only through the tie-break.
+    By codepoint `{` is `0x7B` and sorts after `a`–`z`, so a concrete path now wins a tie against a `{param}`
+    sibling. Measured on the three queries `docs/discovery.md` reasons from: the first creation template moves
+    from rank **4 to 3**, and `POST /api/agreements/{id}/sign-requests/{signRequestId}/send` — an irreversible
+    external send — from rank **3 to 8**. So an agent asking to create a contract is offered **two** ways to email
+    a counterparty first rather than three.
+  - **The defect itself is untouched**, and the page says so: two sends still outrank every creation template on
+    *score*, 19 and 18 against 16. Nothing about merit changed; the whole 16-point group is a tie, and this only
+    decides which member of it is named first.
+  - `test/ranking.test.mjs` has a test whose comment says it *exists to fail* when this behaviour changes, with
+    the instruction to rewrite the docs rather than adjust the test. It failed, and that is what happened: the
+    table and the "three ways" sentence in `docs/discovery.md` now match the measurement. The test's own defect
+    assertion was also re-based — it compared against whatever sat at rank 3, which stopped meaning "a send" once
+    a creation template moved there; it now states the defect directly, that every creation template scores below
+    both leading sends.
+  - The **method** half of the tie-break is consistency-only and cannot behave differently, which is measured
+    rather than assumed: HTTP method names are ASCII uppercase words the two collations agree on, and reverting
+    that half alone fails no test. There are 12 same-path score ties across the obvious resource queries, and both
+    orderings rank them identically. Recorded rather than left implied.
+  - No regressions across the four committed discovery sweeps.
+
 - **The `reversible` tier's one-line definition was false, and so was my replacement for it.** Two glosses, both
   wrong, both caught by review:
   - *"Creates or edits master data that can be cleanly deleted again."* Several records in the tier **archive**

@@ -840,14 +840,27 @@ test("the ranking defect docs/discovery.md describes is still present", async ()
 
   for (const query of ["create agreement", "opprett avtale", "create lease agreement"]) {
     const hits = searchOperations({ query, limit: 8 });
-    const top3 = hits.slice(0, 3);
-    for (const hit of top3) {
+    // TWO, not three. This was three until the path tie-break stopped using `localeCompare`: under that
+    // collation `{` sorted before letters, so `{id}/sign-requests/{signRequestId}/send` took rank 3 out of the
+    // 16-point tie; by codepoint it sorts after `a`-`z` and the concrete creation templates do. Nothing about
+    // merit changed — the whole group ties at 16 — which is why this number is a fact about the tie-break and
+    // the assertions below still pin the defect itself.
+    const leading = hits.slice(0, 2);
+    for (const hit of leading) {
       const concrete = hit.path.replace(/\{[^}]+\}/g, "7");
       assert.match(hit.path, /sign-request/, `"${query}": rank ${hits.indexOf(hit) + 1} is ${hit.path}`);
       // The reason it matters that these are first, stated as an assertion rather than as prose.
       assert.equal(classifyTransmission(hit.method, concrete), "external", `${hit.path} should transmit`);
       assert.equal(classifyRequest(hit.method, concrete), "irreversible", `${hit.path} should be irreversible`);
     }
+    // And rank 3 IS a creation template now, which is the part the tie-break changed. If this fails because a
+    // send has come back to rank 3, the tie-break has regressed; if it fails because rank 3 outscores the sends,
+    // the defect is genuinely fixed and this whole test should go.
+    assert.ok(
+      CREATION.includes(hits[2].path),
+      `"${query}": rank 3 should be a creation template, got ${hits[2].path}`,
+    );
+
     // And the five creation endpoints tie, which is why the page says "tied for fourth through eighth"
     // rather than naming an order — the order among them comes from a path tie-break, not from merit.
     const creation = hits.filter((h) => CREATION.includes(h.path));
@@ -857,9 +870,13 @@ test("the ranking defect docs/discovery.md describes is still present", async ()
       1,
       `"${query}": the creation templates no longer tie — docs/discovery.md says they do`,
     );
+    // The defect itself, stated directly rather than against whatever happens to be at rank 3: every creation
+    // template scores BELOW both leading sends. The old form compared against `top3[2]`, which stopped meaning
+    // "a send" once the tie-break moved a creation template into that slot.
     assert.ok(
-      creation[0].score < top3[2].score || creation[0].score === top3[2].score,
-      `"${query}": a creation endpoint now outscores the third sign endpoint — the defect may be fixed`,
+      creation[0].score < leading[1].score,
+      `"${query}": a creation template (${creation[0].score}) now matches or beats the second send ` +
+        `(${leading[1].score}) — the defect may be fixed, and this test should go rather than be adjusted`,
     );
   }
 });
