@@ -56,7 +56,7 @@ Both switches sit on one path, and a curated tool is not a softer route to the A
 hatch is — they converge on the same gates, in this order:
 
 ```
-  curated tool (168) ---+
+  curated tool (170) ---+
                         +---> 1. write policy .......... REAI_WRITE_MODE
   reai_request (321) ---+     2. external-send gate .... REAI_ALLOW_EXTERNAL_SEND  ---> ReAI API
                               3. PUT omission gate ..... reai_request only
@@ -234,7 +234,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 `reai_request` — which between them reach all 321 public operations. They cannot be disabled, so a
 narrowed server still reaches everything.
 
-The other 168 are curated, in thirteen groups. **[docs/tools.md](docs/tools.md) is the reference**:
+The other 170 are curated, in thirteen groups. **[docs/tools.md](docs/tools.md) is the reference**:
 every tool with its purpose and its risk classification, and per domain what driving it against live
 books actually turned out to do.
 
@@ -259,7 +259,7 @@ stop a rename destroying a payment destination
 ([docs/tools.md](docs/tools.md#renaming-something-must-not-erase-where-money-goes)). That is a
 documentation grouping only — `reai_update_company_bank` belongs to `bank`,
 `reai_set_supplier_address` to `purchase` and `reai_update_creditor` to `loans`, they are inside the
-168, and narrowing with `REAI_TOOLSETS` enables each one with its own domain. One tool genuinely is
+170, and narrowing with `REAI_TOOLSETS` enables each one with its own domain. One tool genuinely is
 outside all thirteen: `reai_reconcile_ui` is off unless `REAI_ENABLE_UI=1`, because it is the only *view* here, and the only
 payload in this API that does not fit comfortably in text
 ([why](docs/tools.md#the-one-ui-surface)).
@@ -284,7 +284,7 @@ REAI_TOOLSETS=salary               # 14 tools
 REAI_TOOLSETS=reference            # 11 tools
 REAI_TOOLSETS=loans                # 20 tools
 REAI_TOOLSETS=investments          # 14 tools
-(unset)                            # all 175
+(unset)                            # all 177
 ```
 
 Valid groups are `bookkeeping`, `sales`, `purchase`, `bank`, `organisation`, `assets`, `subscriptions`, `warehouses`, `agreements`, `salary`, `reference`, `loans` and `investments`; listing all thirteen is the same as leaving it unset. Orientation and discovery are never disabled, so a narrowed server still reaches every endpoint through `reai_search_endpoints` + `reai_request`.

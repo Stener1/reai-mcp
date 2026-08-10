@@ -512,7 +512,15 @@ Measured on 2634 against supplier invoice 5830 and its attachment 19780 (`faktur
 
 There is **no global attachment list** — `GET /api/attachments` answers **405**, because only `POST` exists on that collection. `reai_list_attachments` wraps the two owner-scoped routes: `GET /api/orders/{id}/attachments` and `GET /api/supplier-invoices/{id}/attachments`. An unknown owner answers **404 naming the owner**, so an empty list means the record exists and has no files — a different answer.
 
-**Those are not the only place ids live, and an earlier version of this page said they were.** A **voucher embeds its attachments in its own response**, so `reai_list_vouchers` and `reai_get_voucher` already carry them — and on 2634 that is where most of them are: six of 58 vouchers had one, against one supplier invoice, so vouchers held six of the seven attachments on the tenant. There is no `/api/vouchers/{id}/attachments` route (404), which is why `voucher` is not an `ownerType` on this tool; when `usedBy` names one, `reai_get_attachment` points at the voucher read instead.
+**There are three ways to reach an attachment id, and an earlier version of this page claimed this tool was the only one.** It is often not even the right one:
+
+| route | when | how it was established |
+|---|---|---|
+| `reai_list_vouchers` · `reai_get_voucher` | a voucher **embeds** its attachments | measured — six of 58 vouchers on 2634, against one supplier invoice, so vouchers held six of the seven attachments on the tenant |
+| `reai_list_reception_documents` | a document that has **not yet** become an order or invoice — the case this tool structurally cannot reach | from the schema: `attachmentId` is on every reception row, and `reai_parse_ehf_attachment` has always relied on it. Both inboxes were empty on the tenant available, so not measured |
+| `reai_list_attachments` | already attached to an order or a supplier invoice | measured |
+
+There is no `/api/vouchers/{id}/attachments` route (404), which is why `voucher` is not an `ownerType` here; when `usedBy` names one, `reai_get_attachment` points at the voucher read instead.
 
 **The two routes disagree on four fields, not one.** The owner-scoped list leaves `usedBy` null; reading the same attachment by id fills it in (`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`). So "what else points at this file" is a question only `reai_get_attachment` can answer, and it is the one to ask before deleting. `contentUrl` and `downloadUrl` point at the **owner** path rather than `/api/attachments/{id}/content` — both serve the same bytes, verified byte-identical. And **`createdAt` differs by two days** between the routes (`2026-08-07T10:21:49` scoped against `2026-08-05T17:22:28` by id). Which one means "when the document arrived" is **not established**, so neither tool reports it as that. Voucher-embedded rows carry the by-id value, so the drift belongs to the supplier-invoice route rather than to scoped listing in general.
 

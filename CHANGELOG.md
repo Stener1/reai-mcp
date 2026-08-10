@@ -9,6 +9,20 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found a THIRD discovery route and four stale README counts my own fix had walked past.**
+  - **The reception inbox carries `attachmentId` on every row**, and `reai_parse_ehf_attachment` has relied on
+    that all along. It is the route for a document that has not yet become an order or a supplier invoice —
+    exactly the case `reai_list_attachments` structurally cannot reach, since it takes those two owners and
+    nothing else. So the tool's original "ONLY" was wrong twice over, by two different reviewers. Named now, and
+    marked as read off the SCHEMA rather than measured, because both inboxes were empty on the tenant available.
+  - **Four README counts contradicted the page's own total**: "curated tool (168)", "The other 168 are curated",
+    "inside the 168" and "(unset) → all 175". The guard passed them because it only checked that the real total
+    APPEARS and that nothing exceeds it — every stale value was *below* 177. A reader deciding whether to narrow
+    `REAI_TOOLSETS` got three different answers. The guard now checks the curated total and the `(unset)` row
+    directly, and both stale values fail it.
+  - Its third finding (a non-array `usedBy` reported as an empty list) was already fixed one commit earlier — it
+    reviewed the previous head — and the fix is pinned by name.
+
 - **Review falsified the new tool's central claim and found six more defects.** Every one of the seven live
   measurements held; the reasoning built on top of them did not.
   - **"The ONLY way to discover attachment ids" was false, and the tool reaches one of the seven attachments on

@@ -244,3 +244,21 @@ test("reai_get_attachment sends a VOUCHER owner to the tool that can actually re
   });
   assert.doesNotMatch(invoice.text, /reai_get_voucher/);
 });
+
+test("reai_list_attachments names all three ways to reach an attachment id", async () => {
+  // reai_list_attachments: its first version said "this is the ONLY way to discover attachment ids". Two
+  // reviews found two other routes, and both matter more than this tool for the cases they cover:
+  //
+  //   a VOUCHER embeds its attachments — six of seven attachments on the measured tenant were there;
+  //   the RECEPTION INBOX carries attachmentId — the case this tool structurally cannot reach, because it
+  //   takes an order or a supplier invoice and a document in the inbox is neither yet.
+  //
+  // Pinned because the claim is about what an agent will not find on its own: a tool that says "only" sends
+  // them away from the route that would have worked.
+  const description = tool("reai_list_attachments").description;
+  assert.match(description, /reai_list_vouchers|reai_get_voucher/, "the voucher route must be named");
+  assert.match(description, /reai_list_reception_documents/, "the reception inbox must be named");
+  assert.doesNotMatch(description, /ONLY way/, "the claim this text used to make was false");
+  // And the reception one must be marked as unmeasured, because both inboxes were empty on the tenant used.
+  assert.match(description, /schema rather than\s+"?\s*\+?\s*"?measured/s, "say it is from the schema, not measured");
+});

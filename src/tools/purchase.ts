@@ -882,11 +882,16 @@ const listAttachments = defineTool({
     "List the files attached to an order or a supplier invoice — the scanned invoice, the receipt, the " +
     "EHF document.\n\n" +
     "There is no GLOBAL attachment list: measured, GET /api/attachments answers 405, because only POST " +
-    "exists on that collection. But this tool is not the only way to reach an id, and the other way is where " +
-    "most receipts actually are — **a VOUCHER embeds its attachments in its own response**, so " +
-    "reai_list_vouchers and reai_get_voucher already carry them. Measured on 2634: six of 58 vouchers had " +
-    "one, against one supplier invoice, so vouchers held six of the seven attachments on that tenant. There " +
-    "is no /api/vouchers/{id}/attachments route (404), which is why they are not an ownerType here.\n\n" +
+    "exists on that collection. This tool is one of THREE ways to reach an id, and often not the right one:\n\n" +
+    "- **A voucher embeds its attachments** in its own response, so reai_list_vouchers and reai_get_voucher " +
+    "already carry them. Measured on 2634: six of 58 vouchers had one, against one supplier invoice — so " +
+    "vouchers held six of the seven attachments on that tenant. There is no /api/vouchers/{id}/attachments " +
+    "route (404), which is why voucher is not an ownerType here.\n" +
+    "- **The reception inbox** carries `attachmentId` on every row — reai_list_reception_documents. That is " +
+    "the route for a document that has NOT yet become an order or a supplier invoice, which is exactly the " +
+    "case this tool cannot reach: it takes those two owners and nothing else. Read off the schema rather than " +
+    "measured, because both inboxes were empty on the tenant available.\n" +
+    "- This tool, for a document already attached to an order or a supplier invoice.\n\n" +
     "Each row carries filename, mimeType, size and the URL its bytes live at. Two measured caveats worth " +
     "knowing before you act on the result:\n\n" +
     "- `usedBy` is NULL here even when the attachment is referenced. Read one by id with " +

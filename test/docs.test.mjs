@@ -60,6 +60,22 @@ test("the README's tool count matches reality", () => {
   // Group subtotals are also stated, so only check that the total appears and
   // that no stated count exceeds it.
   assert.ok(claimed.includes(allTools.length), `README should mention ${allTools.length} tools`);
+
+  // The CURATED total, and the `(unset)` row, both of which slipped through. Review found four stale counts
+  // this test had passed: "curated tool (168)", "The other 168 are curated", "inside the 168" and
+  // "(unset) -> all 175". Every one is BELOW the real total, so "the total appears and nothing exceeds it" was
+  // satisfied while the page contradicted itself in four places. A reader deciding whether to narrow
+  // REAI_TOOLSETS was given three different answers.
+  const curated = allTools.length - alwaysOnTools.length;
+  const staleCurated = [...README.matchAll(/(?:curated tool \((\d+)\)|other (\d+) are curated|inside the\s+(\d+),)/g)]
+    .flatMap((m) => [m[1], m[2], m[3]])
+    .filter((n) => n !== undefined)
+    .map(Number)
+    .filter((n) => n !== curated);
+  assert.deepEqual(staleCurated, [], `the README states a curated count that is not ${curated}`);
+  const unsetRow = /^\(unset\)\s+# all (\d+)$/m.exec(README);
+  assert.ok(unsetRow, "the README's REAI_TOOLSETS block should keep an `(unset) # all N` row");
+  assert.equal(Number(unsetRow[1]), allTools.length, "the README's (unset) row is stale");
   for (const n of claimed) {
     assert.ok(n <= allTools.length, `README claims ${n} tools, but only ${allTools.length} exist`);
   }
