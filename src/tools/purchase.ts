@@ -901,7 +901,16 @@ const listAttachments = defineTool({
     "- `createdAt` DISAGREES with the by-id read — measured, by two days on the one attachment available. " +
     "Which one means \"when the document arrived\" is not established, so do not report either as that.\n\n" +
     "This does not fetch the file. Content is the raw document — measured, application/pdf at 1.7 MB for one " +
-    "supplier invoice — so it is reported as a URL rather than returned.",
+    "supplier invoice — so it is reported as a URL rather than returned.\n\n" +
+    "ATTACHING one is not curated, and the two owners do not work the same way — measured on 2783:\n\n" +
+    "- An ORDER only LINKS an attachment that already exists. POST /api/orders/{id}/attachments takes JSON " +
+    '(`{"attachmentId": N}`), and sending a FILE to it answers 415. So a new file is two calls: upload with ' +
+    "POST /api/attachments (multipart), then link with the id it returns.\n" +
+    "- A SUPPLIER INVOICE takes the file directly at POST /api/supplier-invoices/{id}/attachments " +
+    "(multipart). Its link route is a different path, .../attachments/existing, with the same JSON body an " +
+    "order takes at its plain /attachments.\n\n" +
+    "So the two owners wire the same two capabilities to opposite paths. reai_describe_endpoint carries the " +
+    "detail; drive either through reai_request.",
   risk: "read",
   apiPaths: [
     ["GET", "/api/orders/{id}/attachments"],

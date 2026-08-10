@@ -9,6 +9,27 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **How you attach a file depends on which record it hangs off, and the two owners are wired to opposite
+  paths.** Measured on 2783 on 2026-08-10, with every probe failing so nothing was created.
+  - An **order only LINKS** an attachment that already exists: `POST /api/orders/{id}/attachments` takes JSON
+    `{"attachmentId": N}`, and a bad id answers `404 "Attachment not found"` — the proof it parsed the body and
+    looked the attachment up. Sending a **file** there answers
+    `415 "Content-Type 'multipart/form-data' is not supported"`. So attaching a new file to an order is **two
+    calls**: upload with `POST /api/attachments`, then link with the id it returns.
+  - A **supplier invoice takes the file directly** at `POST /api/supplier-invoices/{id}/attachments`
+    (multipart), and its link route is a *different path* — `.../attachments/existing` — carrying the same JSON
+    body an order takes at its plain `/attachments`.
+  - So the same two capabilities are wired to opposite paths, which is what makes it a quirk rather than a
+    footnote: an agent that learns one owner and applies it to the other gets a 415 or a 404, neither of which
+    hints at the right route. `reai_list_attachments` now says so, since that is the tool in hand when someone
+    wants to attach something.
+  - Both routes validate the **owner** first — an unknown order or invoice answers 404 naming it, before
+    content type or attachment id is considered.
+  - This also closed a gap the previous PR left named: the **order branch** of `reai_list_attachments` had never
+    been measured, because 2634 has no orders. On 2783 it returns `[]` with a 200 for an order with no files,
+    and 404 `"No order with id 999999"` for an unknown one — matching what the tool already claimed.
+  - **127 quirks**, and the count guard added two PRs ago forced all four files into agreement in one pass.
+
 - **Codex found a THIRD discovery route and four stale README counts my own fix had walked past.**
   - **The reception inbox carries `attachmentId` on every row**, and `reai_parse_ehf_attachment` has relied on
     that all along. It is the route for a document that has not yet become an order or a supplier invoice —

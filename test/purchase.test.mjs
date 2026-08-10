@@ -262,3 +262,49 @@ test("reai_list_attachments names all three ways to reach an attachment id", asy
   // And the reception one must be marked as unmeasured, because both inboxes were empty on the tenant used.
   assert.match(description, /schema rather than\s+"?\s*\+?\s*"?measured/s, "say it is from the schema, not measured");
 });
+
+test("the attach workflow says which owner takes a file and which takes a link", async () => {
+  // Measured on 2783 on 2026-08-10, all three probes failing so nothing was created:
+  //
+  //   JSON {attachmentId: 99999999} -> POST /api/orders/4105/attachments
+  //     404 "Attachment not found" — it parsed the body and looked the attachment up, so it LINKS
+  //   multipart -> the same route
+  //     415 "Content-Type 'multipart/form-data' is not supported" — so a file cannot be uploaded there
+  //   JSON -> POST /api/supplier-invoices/1/attachments/existing
+  //     404 "Supplier invoice 1 not found" — the route exists and validates the owner first
+  //
+  // The consequence is the point: the two owners wire the same two capabilities to OPPOSITE paths, so an agent
+  // that learns one and applies it to the other gets a 415 or a 404 instead of a hint.
+  const { quirksFor } = await import("../dist/reai/quirks.js");
+  for (const path of ["/api/orders/{id}/attachments", "/api/supplier-invoices/{id}/attachments"]) {
+    const found = quirksFor("POST", path).map((q) => q.id);
+    assert.ok(
+      found.includes("attaching-a-file-differs-by-owner"),
+      `${path} should carry the attach-workflow quirk, got ${found.join(", ") || "none"}`,
+    );
+  }
+  // A GET must NOT get it — it is about the POST bodies.
+  assert.ok(
+    !quirksFor("GET", "/api/orders/{id}/attachments").some((q) => q.id === "attaching-a-file-differs-by-owner"),
+    "the attach quirk is about POSTing, not listing",
+  );
+
+  const note = quirksFor("POST", "/api/orders/{id}/attachments").find(
+    (q) => q.id === "attaching-a-file-differs-by-owner",
+  ).note;
+  // VERBATIM for the two quoted upstream messages, loose for the rest. A reword of a message the note presents
+  // as the API's own words is a drift this repo cares about — the first version asserted only "415", so
+  // changing "is not supported" to "is unsupported" survived while the note still claimed to quote ReAI.
+  for (const verbatim of ["Content-Type 'multipart/form-data' is not supported", '404 "Attachment not found"']) {
+    assert.ok(note.includes(verbatim), `the note should quote ${verbatim} exactly, as measured`);
+  }
+  for (const measured of ["415", "attachments/existing", "opposite paths"]) {
+    assert.ok(note.includes(measured), `the note should carry the measured ${measured}`);
+  }
+
+  // And the tool an agent is holding when it wants to attach something must point at all this.
+  const description = tool("reai_list_attachments").description;
+  assert.match(description, /An ORDER only LINKS/);
+  assert.match(description, /answers 415/);
+  assert.match(description, /attachments\/existing/);
+});
