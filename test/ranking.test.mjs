@@ -1097,6 +1097,21 @@ test("safer-first does not reorder different resources, and yields to delete int
   assert.ok(sameResource.every((h) => h.path === create[0].path), "expected a single-resource tie here");
   assert.notEqual(create[0].method, "DELETE");
 
+  // A RETROSPECTIVE QUESTION must not yield the rule. `cancel` is in the DELETE method group but deliberately
+  // absent from WRITE_INTENT_VERBS, so that "which invoices did we cancel" reads as a question about the past.
+  // Gating the yield on the method HINT rather than on write intent let exactly that kind of question surface
+  // the destructive operation earlier: measured, "when did we cancel expenses" ranked DELETE /api/expenses/{id}
+  // above the PATCH tied with it at 9.59. Found in review of #175.
+  const retrospective = searchOperations({ query: "when did we cancel expenses", limit: 6 });
+  const onExpense = retrospective.filter((h) => h.path === "/api/expenses/{id}" && h.method !== "GET");
+  assert.ok(onExpense.length > 1, "expected a tie between writes on /api/expenses/{id} — re-anchor this");
+  assert.equal(onExpense[0].score, onExpense[1].score, "the fixture no longer ties");
+  assert.notEqual(
+    onExpense[0].method,
+    "DELETE",
+    "a question about the past ranked DELETE above a write tied with it on the same resource",
+  );
+
   // BOTH CONDITIONS ASSERTED IN THE SOURCE, because behaviour cannot separate them.
   //
   // The rule has two guards — same-path, and yield-to-delete-intent — and on every fixture available here EACH
@@ -1113,5 +1128,7 @@ test("safer-first does not reorder different resources, and yields to delete int
   const rule = /const saferFirst[\s\S]*?\n  };/.exec(source)?.[0];
   assert.ok(rule, "saferFirst was renamed or restructured — re-anchor this, do not delete it");
   assert.match(rule, /if \(deleteIntent\) return 0;/, "the delete-intent yield is missing from saferFirst");
+  // And the yield itself must require write intent, not just the DELETE hint.
+  assert.match(source, /const deleteIntent =\s*\n?\s*!wantMethod && writeIntent &&/, "deleteIntent no longer requires writeIntent");
   assert.match(rule, /if \(a\.path !== b\.path\) return 0;/, "the same-path restriction is missing");
 });

@@ -489,7 +489,13 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   // between them and the alphabet hands over the destructive one. Comparing a DELETE on resource A against a
   // POST on resource B by destructiveness has no justification at all: they are different operations, and an
   // equal score says only that both are equally relevant.
-  const deleteIntent = !wantMethod && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
+  // WRITE intent is required, not merely the DELETE method hint. `cancel` sits in the DELETE method group but is
+  // deliberately absent from WRITE_INTENT_VERBS so that retrospective questions work — "which invoices did we
+  // cancel" is a read. Gating on the hint alone therefore let a read question yield this rule: measured,
+  // "when did we cancel expenses" ranked DELETE /api/expenses/{id} above the PATCH tied with it at 9.59. Found
+  // in review of #175. A question about the past should never surface the destructive operation earlier.
+  const deleteIntent =
+    !wantMethod && writeIntent && impliedMethods?.size === 1 && impliedMethods.has("DELETE");
   const saferFirst = (a: SearchHit, b: SearchHit): number => {
     if (deleteIntent) return 0;
     if (a.path !== b.path) return 0;
