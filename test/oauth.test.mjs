@@ -503,11 +503,41 @@ test("a raw ReAI token is refused unless passthrough is enabled", () => {
   assert.equal(result.grant.tenantId, 99);
 });
 
-test("the challenge header points at the resource metadata", () => {
+test("the challenge header points at the resource metadata for the endpoint that issued it", () => {
   const { provider } = makeProvider();
-  const header = provider.challengeHeader("invalid_token", "expired");
-  assert.match(header, /^Bearer /);
-  assert.match(header, /resource_metadata="https:\/\/reai\.example\.com\/\.well-known\/oauth-protected-resource"/);
+
+  // RFC 9728 derives the metadata URL by inserting the well-known path BETWEEN host and resource path, and
+  // requires `resource` in the document to equal the identifier the client used — "if these values are not
+  // identical, the data contained in the response MUST NOT be used". So the two endpoints this server accepts
+  // must advertise two different documents; one shared URL handed a root client a document to discard.
+  const forMcp = provider.challengeHeader("invalid_token", "expired");
+  assert.match(forMcp, /^Bearer /);
+  assert.match(
+    forMcp,
+    /resource_metadata="https:\/\/reai\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/,
+    "the /mcp endpoint must point at its own metadata document",
+  );
+
+  const forRoot = provider.challengeHeader("invalid_token", "expired", "https://reai.example.com");
+  assert.match(
+    forRoot,
+    /resource_metadata="https:\/\/reai\.example\.com\/\.well-known\/oauth-protected-resource"/,
+    "the root endpoint must point at the no-path metadata document",
+  );
+  assert.notEqual(forRoot, forMcp, "the two endpoints cannot share one metadata pointer");
+
+  // And each document names itself, which is the property the RFC actually turns on.
+  assert.equal(provider.protectedResourceMetadata("https://reai.example.com").resource, "https://reai.example.com");
+  assert.equal(
+    provider.protectedResourceMetadata(`${"https://reai.example.com"}/mcp`).resource,
+    "https://reai.example.com/mcp",
+  );
+
+  // A trailing slash must not produce ".../oauth-protected-resource/" — that is a different URL.
+  assert.equal(
+    provider.resourceMetadataUrl("https://reai.example.com/"),
+    "https://reai.example.com/.well-known/oauth-protected-resource",
+  );
 });
 
 // --- Consent page ----------------------------------------------------------
