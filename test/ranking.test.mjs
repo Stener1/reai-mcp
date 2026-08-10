@@ -971,11 +971,26 @@ test("every hyphenated phrase-synonym replacement still matches an operation", a
   const block = /const PHRASE_SYNONYMS[^=]*=\s*\[([\s\S]*?)\n\];/.exec(source)?.[1];
   assert.ok(block, "PHRASE_SYNONYMS was renamed or restructured — re-anchor this, do not delete it");
 
-  const pairs = [...block.matchAll(/\[\s*\/(.+?)\/[a-z]*\s*,\s*"([^"]+)"\s*\]/g)].map((m) => ({
+  // Layout-tolerant, because the first version was not and silently checked less than it claimed. `.+?` cannot
+  // cross a newline, so the four tuples this repo formats across multiple lines — regex on one line, replacement
+  // on the next, trailing comma before the `]` — were skipped entirely: 22 of 26 extracted, and the other four
+  // unguarded. Review caught it. The character class excludes an unescaped `/` so the regex literal ends where
+  // it should, while allowing escapes and newlines inside it, and the trailing comma is optional.
+  const pairs = [...block.matchAll(/\[\s*\/((?:[^/\\\n]|\\.)+)\/[a-z]*\s*,\s*"([^"]+)"\s*,?\s*\]/g)].map((m) => ({
     pattern: m[1],
     replacement: m[2],
   }));
-  assert.ok(pairs.length > 15, `only ${pairs.length} phrase synonyms parsed — the extractor is out of date`);
+
+  // Counted against the tuples actually present, not a floor. A floor is what let the previous version pass
+  // while missing four: `> 15` was true of 22 and would have been true of 16.
+  const tuples = (block.match(/\]\s*,/g) ?? []).length;
+  assert.equal(
+    pairs.length,
+    tuples,
+    `extracted ${pairs.length} phrase synonyms but ${tuples} tuples are present — the extractor is skipping ` +
+      "entries, which means their replacements are unguarded",
+  );
+  assert.ok(pairs.length > 20, `only ${pairs.length} phrase synonyms parsed`);
 
   const { getSpecIndex } = await import("../dist/reai/spec.js");
   const ops = getSpecIndex().operations;
@@ -998,4 +1013,43 @@ test("every hyphenated phrase-synonym replacement still matches an operation", a
   // Non-vacuous: at least one hyphenated replacement must exist, or the loop above checks nothing.
   const hyphenated = pairs.flatMap((p) => p.replacement.split(" ")).filter((t) => t.includes("-"));
   assert.ok(hyphenated.length > 0, "no hyphenated replacements exist, so this test asserts nothing");
+});
+
+/**
+ * At equal score, a destructive method never outranks a safer one.
+ *
+ * The ordering is otherwise by codepoint, which puts DELETE ahead of GET, PATCH, POST and PUT purely because "D"
+ * sorts first — invisible until a genuine tie occurs, and then it hands the caller the most destructive option.
+ * Found in review of #173:
+ *
+ *     "create opening balance"  ->  DELETE /api/opening-balance  30.38  <- rank 1
+ *                                   GET    /api/opening-balance  30.38
+ *                                   PUT    /api/opening-balance  30.38
+ *
+ * PUT there is documented "Create or replace opening balance", so a creation query was answered with its
+ * destructive opposite. The tie is arithmetic: the resource has no POST, so the create verb's implied {POST}
+ * matches nothing, the writes take the generic +0.5, and that lands exactly on the GET's raw score.
+ */
+test("a tie never ranks DELETE above a safer method", () => {
+  const hits = searchOperations({ query: "create opening balance", limit: 5 });
+  const tied = hits.filter((h) => h.score === hits[0].score);
+  assert.ok(tied.length > 1, "the fixture no longer produces a tie — re-anchor this on a query that does");
+  assert.notEqual(
+    hits[0].method,
+    "DELETE",
+    `"create opening balance" ranked ${hits[0].method} ${hits[0].path} first among ${tied.length} tied results`,
+  );
+  // DELETE must be LAST among the tied group, not merely not-first.
+  const deleteIndex = tied.findIndex((h) => h.method === "DELETE");
+  assert.equal(deleteIndex, tied.length - 1, "DELETE should sort last within a tied group");
+
+  // The rule must not suppress a DELETE the caller asked for. That one wins on SCORE, so the tie-break is
+  // never consulted — which is the property that makes this safe to apply unconditionally.
+  const asked = searchOperations({ query: "delete opening balance", limit: 3 });
+  assert.equal(asked[0].method, "DELETE", "an explicit delete query must still rank DELETE first");
+  assert.ok(asked[0].score > asked[1].score, "it must win on score, not on the tie-break");
+
+  // Norwegian too, since the intent tables are consulted with raw tokens.
+  const norsk = searchOperations({ query: "slett åpningsbalanse", limit: 3 });
+  assert.equal(norsk[0].method, "DELETE", "slett should still rank DELETE first");
 });
