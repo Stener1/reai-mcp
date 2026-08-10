@@ -30,6 +30,16 @@ All notable changes to `reai-mcp`. Format loosely follows
     contradicting it.
   - `POST /api/documents` is a third upload in the tier that creates an attachment record, which my survey missed
     entirely: it looked for creates-of-a-named-resource and never considered uploads-as-a-side-effect.
+- **Codex found a SECOND operator-facing statement I had missed, which is the same fix-one-occurrence failure
+  twice in one PR.** The README's write-mode table was not the only place: its **ASCII diagram of the modes** said
+  *"master data that deletes cleanly"*, and `docs/audits.md` asserted customers "delete cleanly" without the
+  reference caveat. The guard now sweeps **every line** of the operator-facing pages for any phrasing of the
+  promise, treating a qualified line as the fix rather than the defect — a targeted check on one row was what let
+  the second one through.
+  - Its other finding (my test proved only that no *dedicated* contact-event DELETE exists, while the source
+    comment claimed nothing could remove them) was already fixed: the whole "nothing can remove" premise is gone,
+    because `reai_delete_lead` does remove them and this repo's own tool text says so.
+
 - **Places the retracted promise still lived, which the first attempt did not reach.** `README.md`'s write-mode
   table — the most-read statement of the modes, and the one an operator uses to decide what to allow — plus the
   allowlist comment fourteen lines above the entry it contradicted, and an escalation argument elsewhere in

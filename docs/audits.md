@@ -274,7 +274,7 @@ request built to fail, so nothing observes what the API *accepts, normalises or 
 false claims that motivated it live in that gap — `skipRegistryLookup` drifts on a `201`, and the phone
 rule was wrong three times about what gets **stored**.
 
-So this one writes. That difference dictates the design: only customers, which delete cleanly and which
+So this one writes. That difference dictates the design: only customers, which do delete cleanly on a tenant where they carry no references, and which
 `classifyRequest` calls reversible; everything recorded in `created` and removed in a `finally`; a record
 that cannot be confirmed deleted **fails the run**; and the token's reachable tenants verified before
 anything is written, since a single-tenant token ignores `X-Tenant-Id`. A test asserts it never writes to

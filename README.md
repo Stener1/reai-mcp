@@ -77,8 +77,8 @@ That asymmetry is the whole reason there are two switches rather than one settin
                      +-------------------------------+----------------------------+
    read-only         | read the books                | + altinn-sync              |
                      +-------------------------------+----------------------------+
-   reversible        | + master data that            | nothing more — 17 of the   |
-   (default)         |   deletes cleanly             |   18 sends are ALSO        |
+   reversible        | + master data (may ARCHIVE    | nothing more — 17 of the   |
+   (default)         |   rather than delete)         |   18 sends are ALSO        |
                      |                               |   irreversible             |
                      +-------------------------------+----------------------------+
    full              | + the ledger, VAT settlement, | + issuing invoices, EHF/   |

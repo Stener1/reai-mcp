@@ -1503,6 +1503,26 @@ test("the reversible tier is defined by exclusion, and says so wherever an opera
   assert.doesNotMatch(row, /that can be cleanly deleted/, `the README row promises deletability: ${row}`);
   assert.match(row, /archive/i, "the README row should say those records archive instead");
 
+  // EVERY statement, not just the table. Fixing the row alone is what I did first, and both reviewers pointed at
+  // a SECOND place — the ASCII diagram of the modes said "master data that deletes cleanly" — which is the same
+  // fix-one-occurrence failure the docs count guards were built for. Any phrasing of the promise, anywhere the
+  // operator-facing pages describe a mode, now fails.
+  const CLAIMS = /(?:delete|deleted|deletes)\s+cleanly|cleanly\s+(?:delete|deleted|deletable)/i;
+  const offenders = [];
+  for (const [file, text] of [["README.md", readme], ["docs/safety.md", readFileSync(join(repo, "docs", "safety.md"), "utf8")]]) {
+    for (const line of text.split("\n")) {
+      if (!CLAIMS.test(line)) continue;
+      // A line that qualifies the claim is the fix, not the defect.
+      if (/archive|not a promise|do delete cleanly on a tenant|used to|no longer/i.test(line)) continue;
+      offenders.push(`${file}: ${line.trim().slice(0, 90)}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these operator-facing lines still promise the reversible tier deletes cleanly:\n  ${offenders.join("\n  ")}`,
+  );
+
   // 4. And the measurement the `additive` gloss died on, so the definition's own claim is checked rather than
   //    asserted: the tier really does contain DELETEs.
   const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
