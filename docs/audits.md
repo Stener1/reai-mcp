@@ -320,3 +320,40 @@ Latest run: **17 of 17 claims verified**, including that the `skipRegistryLookup
 internal directory rather than Brønnøysundregistrene — and that one asks the registry live rather than
 hardcoding a name, because a hardcoded string would report OK if Brreg ever converged on it, and DRIFT if
 ReAI merely *updated* its directory, which would confirm the account rather than refute it.
+
+## Why there is no argument-conformance check
+
+An obvious-looking audit does not work, and this section exists so nobody spends another afternoon rediscovering
+that. The idea: every argument a curated tool accepts should correspond to a field or parameter its endpoint
+declares, because an argument the API does not know is answered `400 "Unknown field: x"` at call time.
+
+**Measured 2026-08-10: there are zero real divergences.** Across every single-endpoint write tool, eleven
+arguments are not declared by the spec and all eleven are deliberate — ten are the repo's `<resource>Id`
+convention for a `{id}` path parameter (`assetId`, `warehouseId`, `departmentId`), and the eleventh is
+`acceptPermanentPosition`, a `z.literal(true)` gate that is never sent.
+
+Widened to every tool, the check reports **18** arguments, and all eighteen are correct code in three patterns a
+naive conformance model cannot see:
+
+- **Routing discriminators.** `kind` on the customer-address setter picks which endpoint to call —
+  `kind === "delivery" ? "delivery-address" : "address"`. It is consumed by the handler, never sent.
+- **Client-side filters.** `query` on the country and currency listers: the endpoint takes no query parameter, so
+  the tool filters the response locally and says so — *"filtered locally out of 5"*.
+- **Nested body fields.** The employment-line arguments (`percentage`, `occupationCode`, `municipality`, …) build
+  a line *inside* the PATCH body, and the spec index records top-level fields only.
+
+A note on why this list is prose rather than a table: `test/docs.test.mjs` reads a tool name in a documentation
+table row as a claim about that tool's risk, and rejected an earlier draft for appearing to call an irreversible
+tool something else. The guard is right to be suspicious of tool names in table cells, so the examples above name
+the arguments and describe the tools instead.
+
+Two of the three are undetectable structurally. A routing discriminator looks like any enum; a client-side filter
+looks like any string. So the check can only pass by carrying an eighteen-name exemption list — which is the
+[allowlist failure this repo has shipped three times](#audit-quirksmjs-the-128-claims-nobody-was-checking): a
+roster of what to excuse exempts the nineteenth case too, silently, and the guard then reads as coverage.
+
+Against zero measured divergences, that trade is not worth making. **What would change the answer:** a spec index
+that records nested body fields, which would collapse the third pattern and leave only two — at which point
+requiring routing and filter arguments to be declared in the tool definition (rather than inferred) could make
+the remainder derivable. Until then, per-tool certifying tests and `confirm-against-response.mjs` cover this
+ground with real API responses instead of a static model of them.
