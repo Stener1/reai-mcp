@@ -24,22 +24,13 @@ const QUESTIONS = [
   ["list fixed assets and their depreciation", "/api/assets"],
   ["set up a recurring monthly invoice", "/api/subscriptions"],
   ["what departments or cost centres exist", "/api/departments"],
-  // PINNED AS A REGRESSION, not fixed, and the measurement is the point.
-  //
-  // On the spec pinned through 2026-08-09 this query ranked GET /api/opening-balances FIRST at 40.40. After the
-  // API renamed the path to the singular /api/opening-balance, the same query does not return it AT ALL — 22
-  // hits, none of them it, with GET /api/expenses, /api/invoices and /api/leads tied at 2.30 on top.
-  //
-  // The shorter query is fine: "opening balance" alone still ranks it first at 18.50, and "opening-balance"
-  // hyphenated scores 78.40. So the resource is findable; it is the extra natural-language words that now
-  // exclude it, and they did not before. The cause is not the prose — the renamed operation GAINED a summary
-  // ("Get opening balance") where the old one had none — so this is about how added query terms interact with
-  // tokenisation, and diagnosing it properly needs the scoring internals rather than another fixture edit.
-  //
-  // Recorded here with both numbers rather than deleted, because deleting the case is how a ranking regression
-  // becomes invisible, and swapping in a query that happens to work would be worse: it would look like coverage.
-  // The assertion below uses the short form so the corpus keeps a live case for this resource.
-  ["opening balance", "/api/opening-balance"],
+  // The long form is back, and it is the case that caught #172. A phrase synonym rewrote "opening balance" to
+  // the hyphenated term `opening-balances`, the API renamed the path to the singular, and because a hyphenated
+  // term is all-or-nothing AND a matched phrase is consumed, this query lost both the substitute and its own
+  // words: it ranked the endpoint FIRST at 40.40 before the rename and returned it nowhere afterwards. With the
+  // replacement corrected to the singular it ranks first at 43.40 — higher than the pre-rename baseline, because
+  // the singular term matches the path exactly where the plural only prefix-matched.
+  ["opening balance when starting in the system", "/api/opening-balance"],
   ["annual accounts submission", "/api/annual-accounts"],
   ["stock levels in the warehouse", "/api/warehouses"],
   ["employee hours on a project", "/api/timesheets"],
@@ -113,10 +104,7 @@ test("a question with no stated intent does not rank a write first", () => {
     "bank reconciliation",
     "chart of accounts",
     "annual accounts submission",
-    // The long form is pinned as a regression above and excluded here on purpose: it currently returns no
-    // opening-balance operation at all, so asserting a GET ranks first would fail for the diagnosed reason
-    // rather than for the property this list is about (read intent ranking a read).
-    "opening balance",
+    "opening balance when starting in the system",
     "stock levels in the warehouse",
     "what departments or cost centres exist",
   ];
@@ -959,4 +947,55 @@ test("search ranks identically whatever locale the process is in", async () => {
     "/api/chart-of-accounts".localeCompare("/api/company-banks", "en"),
     "if these agree, this Node build has no ICU data and the locale assertions above prove nothing",
   );
+});
+
+/**
+ * Every hyphenated phrase-synonym replacement must still match a real operation.
+ *
+ * This is the class of failure behind #172, and it is silent by construction. A phrase synonym is CONSUMED —
+ * the matched words are removed from the query and replaced — so when its replacement stops matching anything,
+ * the query loses both the substitute AND its own words. `opening balance` mapped to `opening-balances`, the API
+ * renamed the path to the singular, and a query that had ranked the endpoint FIRST at 40.40 returned it nowhere.
+ * Nothing failed except one held-out corpus case, and only because that case existed.
+ *
+ * Only HYPHENATED replacements are checked, and the distinction is the point. A hyphenated term is
+ * all-or-nothing against a field, so a single stale part kills it outright. A bare word like `statement` may
+ * legitimately score through prose or a tag rather than a path — measured, "profit and loss" ranks
+ * GET /api/annual-accounts/{year} first through exactly that route — so requiring a structural match for those
+ * would fail a working mapping and get the test weakened rather than the mapping fixed.
+ */
+test("every hyphenated phrase-synonym replacement still matches an operation", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/reai/spec.ts", import.meta.url), "utf8");
+
+  const block = /const PHRASE_SYNONYMS[^=]*=\s*\[([\s\S]*?)\n\];/.exec(source)?.[1];
+  assert.ok(block, "PHRASE_SYNONYMS was renamed or restructured — re-anchor this, do not delete it");
+
+  const pairs = [...block.matchAll(/\[\s*\/(.+?)\/[a-z]*\s*,\s*"([^"]+)"\s*\]/g)].map((m) => ({
+    pattern: m[1],
+    replacement: m[2],
+  }));
+  assert.ok(pairs.length > 15, `only ${pairs.length} phrase synonyms parsed — the extractor is out of date`);
+
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const ops = getSpecIndex().operations;
+  const dead = [];
+  for (const { pattern, replacement } of pairs) {
+    for (const term of replacement.split(" ")) {
+      if (!term.includes("-")) continue; // a bare word may score through prose; see the note above
+      const reachable = ops.some((op) => matchStrength(op.path, fieldTokens(op.path), term, true) > 0);
+      if (!reachable) dead.push(`/${pattern}/ -> "${term}" matches no operation path`);
+    }
+  }
+  assert.deepEqual(
+    dead,
+    [],
+    "these phrase synonyms contribute a hyphenated term that no operation path matches. A hyphenated term is " +
+      "all-or-nothing, and a matched phrase is consumed, so the query loses its own words too:\n  " +
+      dead.join("\n  "),
+  );
+
+  // Non-vacuous: at least one hyphenated replacement must exist, or the loop above checks nothing.
+  const hyphenated = pairs.flatMap((p) => p.replacement.split(" ")).filter((t) => t.includes("-"));
+  assert.ok(hyphenated.length > 0, "no hyphenated replacements exist, so this test asserts nothing");
 });
