@@ -137,7 +137,7 @@ There is already a rule for this shape: an irreversible or transmitting action h
 
 1. **`sign-request` is hyphenated**, and the rule is deliberately scoped to single-word segments, so the block never executes. Removing that scope fails the test pinning it (`test/ranking.test.mjs`, "the demotion is scoped to single-word segments"): it inverts "Apply a manual credit note to an invoice" into the DELETE that *unapplies* it, and drops the rounding-adjustment endpoint for "Settle insignificant invoice outstanding" from rank 2 to 31, outside the default limit.
 2. **Even then the cut is ×0.9, not ×0.45** — 19.0 → 17.1, so it still wins. `familyOffersNonNested` compares `familyOf` values, and `familyOf` truncates at the first `{param}`: the signing call is in family `/api/agreements`, while `/api/agreements/rent-agreement` has no parameter and is its own family. The check that asks "is there a better alternative?" cannot see the five alternatives. Note the order — fixing this *alone* changes nothing, because blocker 1 means the block never runs.
-3. **And fixing both still leaves an external send at rank 1.** Applying both changes, `sign-request` correctly collapses to 8.55 and disappears — and `POST /api/agreements/{id}/sign-requests/{signRequestId}/send` takes its place, exempt for a third reason: `nestedActionSegments` returns **two** segments (`sign-requests`, `send`), so the single-segment requirement excludes it whatever the hyphen guard does. It then wins the 16-point tie on the path tie-break.
+3. **Fixing both used to leave an external send at rank 1, and no longer does.** Applying both changes, `sign-request` correctly collapses to 8.55 and disappears. `POST /api/agreements/{id}/sign-requests/{signRequestId}/send` is still exempt from the block for a third reason — `nestedActionSegments` returns **two** segments (`sign-requests`, `send`), so the single-segment requirement excludes it whatever the hyphen guard does — but it no longer takes rank 1: it used to win the 16-point tie on `localeCompare`, and by codepoint the concrete creation templates do. (Where exactly it lands after both fixes is not measured here — the two changes are hypothetical, and the last version of this paragraph stated a rank for it that came from a review rather than a run.) So this blocker is now about a wasted slot rather than a wrong first answer, which weakens the "sequential blockers" argument rather than removing it: the first two fixes on their own still do not surface a creation template above the 19 and 18.
 
 An earlier version of this page called blocker 2 "the real defect". That was wrong: it is *a* blocker, and the implied fix path does not fix the reported symptom.
 
@@ -175,5 +175,22 @@ sorts after `a`–`z`, so the concrete creation templates take the earlier place
 three queries above, the effect is exactly one position for the first creation template and five for the third
 send.
 
-And with prose stripped from the whole family, `sign-requests` still comes out first — so "if only ReAI
-documented these evenly" would not by itself fix the symptom.
+And with prose stripped from the whole family, `sign-requests` **still** comes out first — so "if only ReAI
+documented these evenly" would not by itself fix the symptom. Measured on the current tie-break, stripping
+`summary` and `description` from all six documented `/api/agreements*` operations:
+
+```
+18     POST /api/agreements/{id}/sign-requests
+16.88  POST /api/agreements/{id}/sign-request
+16     the five creation templates, then .../sign-requests/{signRequestId}/send at eighth
+```
+
+Two things worth noting from that. The eight do **not** all collapse to 16 — `sign-requests` keeps 18 and
+`sign-request` 16.88, so prose is not the only thing separating them from the creation templates, which is a
+caveat this page did not have before. And the tie-break's effect here is the same one position as everywhere else:
+under `localeCompare` the third place went to `.../send`, by codepoint it goes to a creation template.
+
+(A review of the tie-break change reported that the creation templates take ranks 1–5 once prose is evened out,
+which would have reversed this section's conclusion. Measured here, they do not — ranks 1 and 2 are still sends.
+Recorded because the claim was nearly written into this page on the strength of the review rather than a
+measurement.)

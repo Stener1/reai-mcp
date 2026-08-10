@@ -9,12 +9,21 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **Search ranked ties by a locale-dependent comparison, which `scripts/build-spec-index.mjs` had refused for
-  years and said why.** `searchOperations` sorted equal-scoring hits with `a.path.localeCompare(b.path)`; the
-  index builder uses codepoint order, with the reason written down: *"the default collation is locale-dependent,
-  and under LANG=nb_NO Node sorts 'aa' as 'å' (after z)"*. This is a Norwegian API with Norwegian-named paths, so
-  identical queries could rank ties differently between machines. The two collations do differ —
-  `"aa".localeCompare("å")` is `1`, codepoint order gives `-1`.
+- **Search ranked ties by a locale-dependent comparison, which `scripts/build-spec-index.mjs` refuses and says
+  why.** `searchOperations` sorted equal-scoring hits with `a.path.localeCompare(b.path)`; the
+  index builder uses codepoint order. Identical queries could therefore rank ties differently between machines,
+  and the hazard is real on this spec — but **not the one I first cited**. The builder's comment reasons from
+  Norwegian (`"aa"` sorting as `"å"`), and no path in this spec contains a non-ASCII character or the `aa`
+  digraph; `"aa".localeCompare("å")` is `1` under `nb_NO` as well as `en`. The divergence search was actually
+  exposed to is Czech: `/api/chart-of-accounts` vs `/api/company-banks` compares `-1` under `en` and `+1` under
+  `cs`, because Czech collates `ch` after `h`. **228 score ties** across the segment corpus involve a pair the two
+  collations order differently.
+  - **And the tie-break is a no-op on the current index**, which the first version of this entry did not know:
+    deleting it entirely produces byte-identical output over 792 probe queries, because the builder already sorts
+    operations by codepoint path-then-method and `Array#sort` is stable. So what the change removes is not a wrong
+    order but an **active override** — `localeCompare` re-sorting a group the builder had already ordered
+    deterministically. It is kept rather than deleted as defence in depth, and the comment now says the builder
+    owns the ordering.
   - It is a reproducibility fix that happens to help the documented ranking bias, and only through the tie-break.
     By codepoint `{` is `0x7B` and sorts after `a`–`z`, so a concrete path now wins a tie against a `{param}`
     sibling. Measured on the three queries `docs/discovery.md` reasons from: the first creation template moves
@@ -30,10 +39,27 @@ All notable changes to `reai-mcp`. Format loosely follows
     assertion was also re-based — it compared against whatever sat at rank 3, which stopped meaning "a send" once
     a creation template moved there; it now states the defect directly, that every creation template scores below
     both leading sends.
-  - The **method** half of the tie-break is consistency-only and cannot behave differently, which is measured
-    rather than assumed: HTTP method names are ASCII uppercase words the two collations agree on, and reverting
-    that half alone fails no test. There are 12 same-path score ties across the obvious resource queries, and both
-    orderings rank them identically. Recorded rather than left implied.
+  - The **method** half is consistency-only and cannot behave differently on this index: the five method names are
+    ASCII uppercase and all 25 pairs agree, and reverting that half alone fails no test. That guarantee rests on
+    the builder doing `method.toUpperCase()` — `"DELETE"` vs `"delete"` is `1` under `localeCompare` and `-1` by
+    codepoint. (An earlier version of this entry cited "12 same-path score ties" as the evidence; that figure came
+    from a throwaway probe with no defined corpus and is not reproducible — counted over the segment corpus it is
+    69 or 672 depending on the query shape. The conclusion holds; the number was decoration presented as rigour.)
+  - **18 rank-1 changes I had not reported**, all one family: five lead sub-resources
+    (`follow-up`, `contact-events`, `status`, `contact`, `notes`) now offer the `/api/leads/org/{orgNumber}` route
+    ahead of `/api/leads/{id}`, because `org` sorts before `{`. Arguably worse for an agent holding a lead id
+    rather than an org number, and not covered by any committed sweep. No risk-class inversions at rank 1.
+    Measured over 1435 queries: 396 change order, 86 change their top 3, 18 change rank 1.
+  - **A test now pins the actual property**, which nothing did before: search must rank identically under
+    `LANG=cs_CZ`, `nb_NO`, `sv_SE` and `lt_LT`, run in child processes so the locale is real. Review had shown a
+    genuinely locale-dependent comparator passing all 1203 tests, because the one test that caught the old
+    `localeCompare` caught it for a side-effect of how `{` sorts. My first version of the new test also missed it —
+    its probe queries mentioned the diverging paths without ever *tying* them, so the tie-break never decided
+    between them.
+  - **A score assertion in the defect test was removed rather than repaired.** Under codepoint ordering a creation
+    template that ties a send also sorts before it, so the position assertions fire first and the score line can
+    never fail. I had rewritten it in the same commit that made it unfalsifiable, then rewritten it again against
+    the sends by name, which did not help — the two conditions are the same condition.
   - No regressions across the four committed discovery sweeps.
 
 - **The `reversible` tier's one-line definition was false, and so was my replacement for it.** Two glosses, both
