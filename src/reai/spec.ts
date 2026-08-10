@@ -452,7 +452,38 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
   // 25 pairs agree — but that rests on the builder doing `method.toUpperCase()`, since `"DELETE"` vs `"delete"`
   // is 1 under `localeCompare` and -1 by codepoint.
   const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-  hits.sort((a, b) => b.score - a.score || byCodepoint(a.path, b.path) || byCodepoint(a.method, b.method));
+
+  /**
+   * At EQUAL score, a destructive method never outranks a safer one.
+   *
+   * The ordering below is otherwise by codepoint, which puts DELETE ahead of GET, PATCH, POST and PUT purely
+   * because "D" sorts first. That is invisible until a genuine tie occurs on one resource, and then it hands the
+   * caller the most destructive option. Measured, and found in review of #173:
+   *
+   *     "create opening balance"  ->  DELETE /api/opening-balance  30.38   <- rank 1
+   *                                   GET    /api/opening-balance  30.38
+   *                                   PUT    /api/opening-balance  30.38
+   *
+   * PUT on that path is documented "Create or replace opening balance", so a creation query was answered with
+   * its destructive opposite. The tie itself is arithmetic: /api/opening-balance has no POST, so the create
+   * verb's implied {POST} matches nothing, the writes take the generic +0.5, and that lands exactly on the GET's
+   * raw score.
+   *
+   * Fixing the tie-break rather than the arithmetic is deliberate. The +0.5 exists for the case where a verb
+   * names no method present on the resource, and re-tuning it moves every query; this rule changes results ONLY
+   * where scores are already equal, where by definition the ranker has expressed no preference. It also closes
+   * the class rather than this instance: any future equal-score tie involving a DELETE was resolvable by
+   * alphabet alone.
+   */
+  const destructiveness = (method: string): number => (method === "DELETE" ? 1 : 0);
+
+  hits.sort(
+    (a, b) =>
+      b.score - a.score ||
+      destructiveness(a.method) - destructiveness(b.method) ||
+      byCodepoint(a.path, b.path) ||
+      byCodepoint(a.method, b.method),
+  );
   return hits.slice(0, limit);
 }
 
