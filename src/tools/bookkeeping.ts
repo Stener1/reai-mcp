@@ -455,7 +455,7 @@ const createVoucher = defineTool({
     // repository's own coverage audits, which endpoints a curated tool touches — an undeclared pre-read
     // understates the tool and hides it from those checks. Codex found it missing here.
     ["GET", "/api/chart-of-accounts/accounts"],
-    ["POST", "/api/vouchers"],
+    ["POST", "/api/manual-vouchers"],
   ],
   inputSchema: {
     date: isoDate.describe("Voucher date. Determines the accounting period."),
@@ -673,7 +673,9 @@ const createVoucher = defineTool({
     try {
       res = await ctx.client.request<{ id?: number; number?: string }>({
         method: "POST",
-        path: "/api/vouchers",
+        // Moved 2026-08-10: the API relocated voucher WRITES here. Measured — POST /api/vouchers now answers
+        // 405 "Method 'POST' is not supported", and POST /api/manual-vouchers validates. GET did not move.
+        path: "/api/manual-vouchers",
         body,
         tenantId,
       });
@@ -728,7 +730,7 @@ const deleteVoucher = defineTool({
     '"reversed" the transaction is still there, now with an offsetting entry, so do NOT re-book it. ' +
     "Requires REAI_WRITE_MODE=full.",
   risk: "irreversible",
-  apiPaths: [["DELETE", "/api/vouchers/{id}"]],
+  apiPaths: [["DELETE", "/api/manual-vouchers/{id}"]],
   destructive: true,
   inputSchema: {
     id: z.number().int().positive().describe("Voucher id to delete."),
@@ -737,7 +739,9 @@ const deleteVoucher = defineTool({
   handler: async (args, ctx) => {
     const res = await ctx.client.request<{ outcome?: string }>({
       method: "DELETE",
-      path: `/api/vouchers/${args.id}`,
+      // Moved 2026-08-10 with POST: writes live under /api/manual-vouchers now. GET /api/vouchers/{id}
+      // is unchanged, which is why line ~207 keeps the original path.
+      path: `/api/manual-vouchers/${args.id}`,
       tenantId: requireTenantId(args.tenantId, ctx),
     });
     // The outcome must be passed through, not assumed. This reported "deleted"

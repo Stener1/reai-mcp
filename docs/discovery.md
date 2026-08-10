@@ -92,7 +92,11 @@ as "no longer reachable" for the family it replaced. Read the lines rather than 
 
 ## More than half the API documents nothing, and prose is worth a flat +3 whatever it says
 
-Measured 2026-08-09: **178 of the 321 public operations carry neither a summary nor a description.** Not thin prose — nothing at all. Verified against the raw document, not just the index: none of the 178 has prose that `scripts/build-spec-index.mjs` dropped, so this is a fact about ReAI's API rather than about the builder.
+Measured 2026-08-10 on the refreshed spec: **173 of the 320 public operations carry neither a summary nor a
+description.** (Five more operations were bare on the spec pinned through 2026-08-09; the refresh that moved
+voucher writes to `/api/manual-vouchers` also brought prose for a handful of them. A stale figure is not quoted
+here on purpose — `test/docs.test.mjs` requires every stated count to equal the current one, and it cannot tell
+history from a live claim.) Not thin prose — nothing at all. Verified against the raw document, not just the index: none of the 173 has prose that `scripts/build-spec-index.mjs` dropped, so this is a fact about ReAI's API rather than about the builder.
 
 It shows up as this, identically for "create agreement", "opprett avtale" and "create lease agreement":
 
@@ -129,7 +133,7 @@ Both score **14** on structure. The margin is exactly `PROSE_CAP`. Three things 
 
 So the bias is not "better documented endpoints match more". It is: **having any prose at all is worth a flat +3, whether or not the prose is about what you asked for** — and where everything else ties, +3 decides it. Strip both prose fields from `sign-request` and it falls to 16, into the tie.
 
-This is not an unknown bias. `PROSE_CAP` and `IDENTITY_BONUS` exist for it and say so at their definitions ("Verbose documentation should not outrank being the right resource"). What this case shows is that the cap bounds the bias without removing it: 3 points is small, and still decisive when 178 operations bring nothing to the other side.
+This is not an unknown bias. `PROSE_CAP` and `IDENTITY_BONUS` exist for it and say so at their definitions ("Verbose documentation should not outrank being the right resource"). What this case shows is that the cap bounds the bias without removing it: 3 points is small, and still decisive when 173 operations bring nothing to the other side.
 
 ### Three blockers, sequential — and fixing the two obvious ones does not fix the symptom
 
@@ -147,20 +151,20 @@ An earlier version of this page called blocker 2 "the real defect". That was wro
 
 ### One thing tried and rejected: a derived phrase for the bare operations
 
-Give the 178 bare operations a phrase from method plus path, in a separate field so it is never shown as the API's own words, so ranking can see the verb a path cannot carry. The naive form double-counts — it restates resource words the path already scores at 6 — and displaced five known-good answers, including `finn kunde amelding` moving to `/api/customers` from `/api/ledger/customer` and a salary run falling to rank 7. Constrained to contribute **only terms the path lacks**, with no phrase bonus, it reached zero regressions against the committed sweep.
+Give the 173 bare operations a phrase from method plus path, in a separate field so it is never shown as the API's own words, so ranking can see the verb a path cannot carry. The naive form double-counts — it restates resource words the path already scores at 6 — and displaced five known-good answers, including `finn kunde amelding` moving to `/api/customers` from `/api/ledger/customer` and a salary run falling to rank 7. Constrained to contribute **only terms the path lacks**, with no phrase bonus, it reached zero regressions against the committed sweep.
 
-**It was dropped, but the measurement that justified dropping it was weak, and that is worth recording honestly.** A probe of all 178 bare operations, each queried as `<verb> <last path segment>`, returned one improvement and one regression. Four reasons that is thin:
+**It was dropped, but the measurement that justified dropping it was weak, and that is worth recording honestly.** A probe of all 173 bare operations, each queried as `<verb> <last path segment>`, returned one improvement and one regression. Four reasons that is thin:
 
-- **Almost no headroom.** Of the 178 bare operations, 129 are *already* at rank 1 on `main` and 176 are already in the top 3; the worst sits at rank 4. "Unchanged: 176" mostly means "already correct". That is structural, not luck: the query is built from the operation's own path, and the path is the heaviest haystack.
+- **Almost no headroom.** Of the 173 bare operations, 129 are *already* at rank 1 on `main` and 176 are already in the top 3; the worst sits at rank 4. "Unchanged: 176" mostly means "already correct". That is structural, not luck: the query is built from the operation's own path, and the path is the heaviest haystack.
 - **The probe assumes its own conclusion.** Constrained to terms the path lacks, the field effectively contributes the verb — and the probe always states the verb, so `writeIntent` and `impliedMethodsFor` always fire. "The verb is already supplied by write intent" is built into the corpus rather than tested by it.
 - **The motivating query was absent, and unwinnable anyway.** `create agreement` is not in the corpus, and simulated as a seventh haystack the creation templates reach 17.31 at weight 3 and 18.63 at weight 6 — equal to the path, the heaviest field there is — still behind 19. Only an indefensible weight 10 wins. The mechanism could not have fixed the defect it was written for.
 - **It used rank-1 only**, the metric this page calls "the least informative alone", for a change whose purpose was making undocumented endpoints *reachable*. An operation moving 9 → 3 counted as unchanged.
 
-Regressions were measured with the committed sweep; benefit with a throwaway script over the same 178 bare operations, which is not committed and so cannot be re-run. So the decision stands on **redundancy with `writeIntent`/`impliedMethods` plus regression risk on a change that could not win the case it was built for** — not on a measured absence of benefit.
+Regressions were measured with the committed sweep; benefit with a throwaway script over the same 173 bare operations, which is not committed and so cannot be re-run. So the decision stands on **redundancy with `writeIntent`/`impliedMethods` plus regression risk on a change that could not win the case it was built for** — not on a measured absence of benefit.
 
 ### What is actually protecting the live case
 
-Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **56** bare operations no curated tool covers.
+Not ranking. `reai_create_agreement` exists, so an agent has a curated tool and does not depend on the search result. The bias remains for the **53** bare operations no curated tool covers.
 
 One caveat on the table above, now resolved: among the operations tied at 16, which one is named first comes from
 the path tie-break. It used to be `a.path.localeCompare(b.path)`, under which `{` sorts before letters, so a

@@ -77,7 +77,7 @@ test("search results are capped by limit", () => {
 
 test("findOperation resolves by method and path, including templated paths", () => {
   assert.ok(findOperation("GET", "/api/customers"));
-  assert.ok(findOperation("POST", "/api/vouchers"));
+  assert.ok(findOperation("POST", "/api/manual-vouchers"));
   assert.ok(findOperation("GET", "/api/customers/{id}"));
   // Path-parameter names are interchangeable for route matching.
   assert.ok(findOperation("GET", "/api/customers/{customerId}"));
@@ -85,17 +85,17 @@ test("findOperation resolves by method and path, including templated paths", () 
 });
 
 test("findOperation resolves by operation id", () => {
-  const byPath = findOperation("POST", "/api/vouchers");
+  const byPath = findOperation("POST", "/api/manual-vouchers");
   const byId = findOperation(byPath.id);
-  assert.equal(byId?.path, "/api/vouchers");
+  assert.equal(byId?.path, "/api/manual-vouchers");
 });
 
 test("describeOperation expands the voucher body to real posting fields", () => {
-  const op = findOperation("POST", "/api/vouchers");
+  const op = findOperation("POST", "/api/manual-vouchers");
   const described = describeOperation(op);
 
   assert.equal(described.method, "POST");
-  assert.equal(described.path, "/api/vouchers");
+  assert.equal(described.path, "/api/manual-vouchers");
   assert.ok(described.requestBody);
 
   const schema = described.requestBody.schema;
@@ -113,7 +113,7 @@ test("describeOperation expands the voucher body to real posting fields", () => 
 });
 
 test("describeOperation hides the tenant header, which the client owns", () => {
-  const op = findOperation("POST", "/api/vouchers");
+  const op = findOperation("POST", "/api/manual-vouchers");
   const described = describeOperation(op);
   assert.ok(
     !described.parameters.some((p) => p.name.toLowerCase() === "x-tenant-id"),

@@ -336,7 +336,7 @@ test("every stated uncovered-operation count matches the registry", async () => 
   }
   const uncovered = publicOps - covered.size;
 
-  assert.equal(publicOps, 321, "the README says 321 public operations in four places");
+  assert.equal(publicOps, 320, "the README says 320 public operations in four places");
 
   // Both phrasings in use, and `~` allowed so an approximate claim is caught rather than excused.
   const CLAIM = /~?(\d+)\s+(?:public\s+)?(?:operations?\s+no curated tool covers?|uncovered operations?)/g;

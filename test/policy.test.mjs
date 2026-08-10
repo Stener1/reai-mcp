@@ -60,7 +60,7 @@ test("GET is always a read, whatever the path", () => {
 
 test("ledger, legal-document, money and payroll writes are irreversible", () => {
   const cases = [
-    ["POST", "/api/vouchers"],
+    ["POST", "/api/manual-vouchers"],
     ["DELETE", "/api/vouchers/123"],
     ["PUT", "/api/vouchers/123"],
     ["POST", "/api/postings/customer/close"],
@@ -70,7 +70,7 @@ test("ledger, legal-document, money and payroll writes are irreversible", () => 
     ["POST", "/api/salary-payments"],
     ["POST", "/api/vat-returns"],
     ["POST", "/api/tax-returns"],
-    ["POST", "/api/opening-balances"],
+    ["POST", "/api/opening-balance"],
     ["POST", "/api/bank-reconciliations"],
     ["POST", "/api/assets"],
     ["POST", "/api/loans"],
@@ -171,7 +171,7 @@ test("assertAllowed explains how to widen the policy", () => {
   assert.doesNotThrow(() => assertAllowed("read", "read-only", "GET /api/me"));
 
   try {
-    assertAllowed("irreversible", "reversible", "POST /api/vouchers");
+    assertAllowed("irreversible", "reversible", "POST /api/manual-vouchers");
     assert.fail("expected WriteBlockedError");
   } catch (err) {
     assert.ok(err instanceof WriteBlockedError);
@@ -646,7 +646,7 @@ test("the two axes are genuinely independent", () => {
   );
   // ...and external send does not loosen the write policy.
   assert.throws(
-    () => assertAllowed("irreversible", "reversible", "POST /api/vouchers"),
+    () => assertAllowed("irreversible", "reversible", "POST /api/manual-vouchers"),
     WriteBlockedError,
   );
 });
@@ -1588,4 +1588,55 @@ test("smoke-http's transmitting-tool list is not allowed to drift from the tool 
     [],
     "a transmitting tool is not classified irreversible, so write-mode gating alone would not stop it",
   );
+});
+
+/**
+ * The general ledger's write path is classified by INTENT, not by the fallthrough.
+ *
+ * `classifyRequest` returns `irreversible` for any path it does not recognise, which is the right default and
+ * also a trap: when the API moved voucher writes to /api/manual-vouchers on 2026-08-10, that path classified
+ * exactly like `/api/totally-made-up-thing`. Safe, but for no reason connected to the ledger — the single most
+ * consequential prefix in the policy had no intentional entry for its own writes, and a later reader deciding a
+ * "manual voucher" sounds editable could have added it to the reversible list unopposed.
+ *
+ * So this asserts the SOURCE lists it, not merely that the answer comes out right. Behaviour alone cannot tell
+ * an explicit classification from an accidental one.
+ */
+test("voucher writes are named in the irreversible list, not left to the default", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/policy.ts", import.meta.url), "utf8");
+
+  const block = /const IRREVERSIBLE_PREFIXES: readonly string\[\] = \[([\s\S]*?)\n\];/.exec(source)?.[1];
+  assert.ok(block, "IRREVERSIBLE_PREFIXES was renamed or restructured — re-anchor this, do not delete it");
+  const listed = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+
+  for (const ledger of ["/api/manual-vouchers", "/api/vouchers", "/api/postings"]) {
+    assert.ok(
+      listed.includes(ledger),
+      `${ledger} is not named in IRREVERSIBLE_PREFIXES. It may still classify as irreversible via the ` +
+        "fallthrough, which is exactly the accident this asserts against: the ledger must be intentional.",
+    );
+  }
+
+  // And it must not appear in the reversible list, which would win if it did.
+  const reversible = /const REVERSIBLE_PREFIXES: readonly string\[\] = \[([\s\S]*?)\n\];/.exec(source)?.[1] ?? "";
+  const reversibleListed = [...reversible.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  for (const ledger of ["/api/manual-vouchers", "/api/vouchers"]) {
+    assert.ok(!reversibleListed.includes(ledger), `${ledger} appears in REVERSIBLE_PREFIXES`);
+  }
+
+  // The behaviour, for completeness — including a sub-resource, which prefix matching must also cover.
+  const { classifyRequest } = await import("../dist/policy.js");
+  for (const [method, path] of [
+    ["POST", "/api/manual-vouchers"],
+    ["PUT", "/api/manual-vouchers/1"],
+    ["DELETE", "/api/manual-vouchers/1"],
+    ["POST", "/api/manual-vouchers/1/attachments"],
+  ]) {
+    assert.equal(classifyRequest(method, path), "irreversible", `${method} ${path}`);
+  }
+
+  // Non-vacuous: the default really does return irreversible, so the assertions above would pass without the
+  // list entry. That is precisely why they check the source.
+  assert.equal(classifyRequest("POST", "/api/a-path-that-does-not-exist"), "irreversible");
 });

@@ -105,7 +105,7 @@ test("a present-but-falsy parameter counts as supplied", () => {
 });
 
 test("missing required body fields are reported", () => {
-  const op = resolveOperation("POST", "/api/vouchers");
+  const op = resolveOperation("POST", "/api/manual-vouchers");
   assert.ok(op, "POST /api/vouchers should resolve");
   const required = op.body?.required ?? [];
   assert.ok(required.length > 0, "POST /api/vouchers should declare required body fields");
@@ -119,7 +119,7 @@ test("missing required body fields are reported", () => {
 
 test("a non-object body reports the spec's required fields rather than crashing", () => {
   // `body` is typed unknown on reai_request, so it can be an array or a string.
-  const op = resolveOperation("POST", "/api/vouchers");
+  const op = resolveOperation("POST", "/api/manual-vouchers");
   const required = op.body?.required ?? [];
   for (const body of [undefined, null, "a string", 42, [1, 2, 3]]) {
     const result = missingRequired(op, undefined, body);
@@ -136,7 +136,7 @@ test("literal path segments are matched exactly, not case-insensitively", () => 
   // "/API/opening-balances" really does 404. Folding case here resolved it to the
   // real operation and then attached that endpoint's empty-state quirk, telling the
   // agent nothing had been set up rather than that the path was wrong.
-  assert.ok(resolveOperation("GET", "/api/opening-balances"), "the correct path must resolve");
+  assert.ok(resolveOperation("GET", "/api/opening-balance"), "the correct path must resolve");
   assert.equal(resolveOperation("GET", "/API/opening-balances"), undefined);
   assert.equal(resolveOperation("GET", "/Api/Customers/1"), undefined);
 });
@@ -193,7 +193,7 @@ test("an HTML response is reported as a routing miss, not a success", async () =
     },
   };
 
-  const res = await tool.handler({ method: "GET", path: "/api/opening-balances" }, ctx);
+  const res = await tool.handler({ method: "GET", path: "/api/opening-balance" }, ctx);
   assert.equal(res.isError, true, "HTML must not be reported as a successful call");
   const text = res.content.map((c) => c.text).join("\n");
   assert.match(text, /matched no API route/);
@@ -324,7 +324,7 @@ test("a 403 does NOT get the 404 empty-state quirk", async () => {
   // This stated something false about a customer's books: it told the agent to
   // "report it as empty" when the real answer was that it may not read them.
   const text = await callFailing(
-    { method: "GET", path: "/api/opening-balances" },
+    { method: "GET", path: "/api/opening-balance" },
     { status: 403, detail: "Forbidden" },
   );
   assert.doesNotMatch(text, /NOTHING HAS BEEN SET UP YET/);
@@ -333,7 +333,7 @@ test("a 403 does NOT get the 404 empty-state quirk", async () => {
 
 test("a 404 DOES get the empty-state quirk", async () => {
   const text = await callFailing(
-    { method: "GET", path: "/api/opening-balances" },
+    { method: "GET", path: "/api/opening-balance" },
     { status: 404, detail: "Opening balance not found" },
   );
   assert.match(text, /NOTHING HAS BEEN SET UP YET/);
@@ -414,7 +414,7 @@ test("an HTML body with no content-type is still caught", async () => {
   // false success this guard exists to close.
   const tool = allTools.find((t) => t.name === "reai_request");
   const res = await tool.handler(
-    { method: "GET", path: "/api/opening-balances" },
+    { method: "GET", path: "/api/opening-balance" },
     {
       ...REQUEST_CTX,
       client: {
@@ -430,7 +430,7 @@ test("an HTML body with no content-type is still caught", async () => {
 test("charset on the content-type does not defeat the guard", async () => {
   const tool = allTools.find((t) => t.name === "reai_request");
   const res = await tool.handler(
-    { method: "GET", path: "/api/opening-balances" },
+    { method: "GET", path: "/api/opening-balance" },
     {
       ...REQUEST_CTX,
       client: {

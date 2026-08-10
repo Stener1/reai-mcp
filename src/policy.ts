@@ -97,7 +97,20 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   // correction is an offsetting adjustment, which is precisely the reverse-don't-delete
   // property that puts vouchers in this tier.
   "/api/warehouses/inventory/adjust",
+  // Both voucher paths. The API moved voucher WRITES to /api/manual-vouchers on 2026-08-10 — measured, POST
+  // /api/vouchers answers 405 "Method 'POST' is not supported" and POST /api/manual-vouchers validates — while
+  // GET stayed on /api/vouchers.
+  //
+  // Listing the new path EXPLICITLY rather than relying on the fallthrough at the end of classifyRequest, which
+  // already returns `irreversible` for anything unrecognised. That default made the move safe by accident:
+  // /api/manual-vouchers classified exactly like /api/totally-made-up-thing, so the general ledger — the single
+  // most consequential prefix in this list — had no intentional entry for its own writes. A later reader deciding
+  // that a "manual voucher" sounds editable and adding it to REVERSIBLE_PREFIXES would have met no objection.
+  //
+  // /api/vouchers stays: GET is `read` regardless of this list, and if a write ever returns to that path it is
+  // already covered.
   "/api/vouchers",
+  "/api/manual-vouchers",
   "/api/postings",
   "/api/invoices",
   "/api/supplier-invoices",

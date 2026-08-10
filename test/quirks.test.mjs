@@ -4,7 +4,7 @@ import { QUIRKS, quirksFor, findQuirks } from "../dist/reai/quirks.js";
 import { getSpecIndex } from "../dist/reai/spec.js";
 
 /**
- * The point of this registry is that quirks reach the 132 operations no curated
+ * The point of this registry is that quirks reach the 131 operations no curated
  * tool covers. These tests keep it honest: a quirk pointing at a path that no
  * longer exists is worse than no quirk, because it looks authoritative.
  */
@@ -132,7 +132,7 @@ test("the quirks that motivated this registry reach their endpoints", () => {
     ["POST", "/api/subscriptions", "subscription-self-invoicing"],
     ["POST", "/api/vat-returns", "vat-return-does-not-file"],
     ["POST", "/api/vat-returns", "vat-return-query-params"],
-    ["POST", "/api/vouchers", "voucher-signed-amounts"],
+    ["POST", "/api/manual-vouchers", "voucher-signed-amounts"],
     ["GET", "/api/vouchers", "date-range-required"],
     ["POST", "/api/bank-reconciliations/{bankAccountId}/apply-rules", "apply-rules-async"],
     ["POST", "/api/bank-reconciliations/{bankAccountId}/vouchers", "book-transactions-subledger"],
@@ -146,7 +146,7 @@ test("the quirks that motivated this registry reach their endpoints", () => {
 test("method-scoped quirks do not leak onto other methods", () => {
   // The signed-amount convention is about writing a voucher, not reading one.
   assert.ok(!quirksFor("GET", "/api/vouchers").some((q) => q.id === "voucher-signed-amounts"));
-  assert.ok(quirksFor("POST", "/api/vouchers").some((q) => q.id === "voucher-signed-amounts"));
+  assert.ok(quirksFor("POST", "/api/manual-vouchers").some((q) => q.id === "voucher-signed-amounts"));
   // And a read never carries the sendEhf warning.
   assert.ok(!quirksFor("GET", "/api/orders").some((q) => q.id === "order-send-ehf"));
 });

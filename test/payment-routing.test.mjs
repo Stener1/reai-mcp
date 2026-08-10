@@ -241,8 +241,8 @@ const NOT_A_DESTINATION_PATH = {
   // irreversible by path anyway — the next test proves it — but they are listed here rather
   // than skipped for being irreversible, because skipping on path risk is what hid the
   // nested paymentDetails bug from this very test.
-  "POST /api/vouchers": "postings[].accountNumber is the ledger account a line is booked to",
-  "PUT /api/vouchers/{id}": "postings[].accountNumber is the ledger account a line is booked to",
+  "POST /api/manual-vouchers": "postings[].accountNumber is the ledger account a line is booked to",
+  "PUT /api/manual-vouchers/{id}": "postings[].accountNumber is the ledger account a line is booked to",
   "POST /api/reconciliation-rules": "accountNumber is the account to book to ($ref AccountNumber)",
   "PUT /api/reconciliation-rules/{id}": "accountNumber is the account to book to ($ref AccountNumber)",
   "POST /api/assets": "accountNumber is the balance-sheet account, pinned to pattern 1\\d{3}",
@@ -328,7 +328,11 @@ test("the exempted paths really do mean a chart-of-accounts code", () => {
     /AccountNumber/,
   );
   // A voucher's accountNumber lives on a posting line, which is what makes it a ledger code.
-  const voucher = writeOperations().find((o) => o.method === "POST" && o.path === "/api/vouchers");
+  // /api/manual-vouchers since 2026-08-10: the API moved voucher writes there and POST /api/vouchers now
+  // answers 405. The claim under test is unchanged — a voucher's accountNumber lives on a posting line, which
+  // is what makes it a ledger code rather than a payment destination.
+  const voucher = writeOperations().find((o) => o.method === "POST" && o.path === "/api/manual-vouchers");
+  assert.ok(voucher, "POST /api/manual-vouchers is not a write operation — did the path move again?");
   assert.deepEqual(voucher.locations.get("accountNumber"), ["postings[].accountNumber"]);
   assert.match(JSON.stringify(SCHEMAS.AccountNumber.description), /chart of accounts/i);
 

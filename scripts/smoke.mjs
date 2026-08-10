@@ -162,7 +162,7 @@ async function main() {
     ["reai_search_endpoints", { query: "credit note" }, "/api/"],
     [
       "reai_describe_endpoint",
-      { method: "POST", path: "/api/vouchers" },
+      { method: "POST", path: "/api/manual-vouchers" },
       "postings",
     ],
   ]) {
@@ -231,7 +231,10 @@ async function main() {
         name: "reai_request",
         arguments: {
           method: "POST",
-          path: "/api/vouchers",
+          // /api/manual-vouchers since 2026-08-10; the old path answers 405 now. This asserts the write POLICY
+          // refuses a ledger write in read-only mode, so it must name a path the policy still classifies as
+          // irreversible — which is exactly what the explicit IRREVERSIBLE_PREFIXES entry guarantees.
+          path: "/api/manual-vouchers",
           tenantId,
           body: { date: "2026-01-01", postings: [] },
         },
@@ -239,7 +242,7 @@ async function main() {
       const text = textOf(res);
       const blocked = res.isError === true && /write policy/i.test(text);
       report(
-        "write policy blocks POST /api/vouchers in read-only mode",
+        "write policy blocks POST /api/manual-vouchers in read-only mode",
         blocked,
         blocked ? "blocked as expected" : `NOT BLOCKED: ${text.slice(0, 200)}`,
       );

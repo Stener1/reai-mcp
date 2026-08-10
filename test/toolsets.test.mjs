@@ -9,7 +9,7 @@ import { classifyRequest } from "../dist/policy.js";
 import { findOperation } from "../dist/reai/spec.js";
 
 /**
- * The premise of this server is that 321 API operations cannot all be tools. As
+ * The premise of this server is that 320 API operations cannot all be tools. As
  * the curated set grows the same pressure applies to it, so an operator can
  * narrow it — without ever losing reach, since discovery stays on.
  */
@@ -213,8 +213,8 @@ test("a curated tool accepting an arms-a-send field escalates like the escape ha
   // Scoped to where these fields exist. bindsToCreateInvoice fails closed on an
   // unrecognised string, so without the path check a future export tool taking
   // outputMode: "csv" would be refused in the default mode with a message about Peppol.
-  assert.equal(curatedArgsEscalate([["POST", "/api/vouchers"]], { outputMode: "csv" }), undefined);
-  assert.equal(curatedArgsEscalate([["POST", "/api/vouchers"]], { sendEhf: true }), undefined);
+  assert.equal(curatedArgsEscalate([["POST", "/api/manual-vouchers"]], { outputMode: "csv" }), undefined);
+  assert.equal(curatedArgsEscalate([["POST", "/api/manual-vouchers"]], { sendEhf: true }), undefined);
   assert.ok(curatedArgsEscalate([["POST", "/api/orders"]], { sendEhf: true }), "orders carry sendEhf too");
 
   // And every reason is reported, not the first one found: the server tells the caller

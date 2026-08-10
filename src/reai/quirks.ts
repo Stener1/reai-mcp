@@ -188,7 +188,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Cross-cutting -------------------------------------------------------
   // Note: quirks true of the whole API (tenant scoping, deep links needing
   // ?tenantId) deliberately live in the server instructions instead. Attached
-  // here they would match all 321 operations and drown the endpoint-specific
+  // here they would match all 320 operations and drown the endpoint-specific
   // notes that are the point of this registry.
   {
     id: "tenant-header-ignored-single-tenant",
@@ -279,7 +279,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "empty-state-is-404",
-    paths: ["/api/opening-balances", "/api/annual-accounts/{year}"],
+    paths: ["/api/opening-balance", "/api/annual-accounts/{year}"],
     methods: ["GET"],
     kind: "gotcha",
     statuses: [404],
@@ -310,7 +310,7 @@ export const QUIRKS: readonly Quirk[] = [
   // --- Bookkeeping ---------------------------------------------------------
   {
     id: "voucher-signed-amounts",
-    paths: ["/api/vouchers", "/api/vouchers/{id}"],
+    paths: ["/api/manual-vouchers", "/api/manual-vouchers/{id}"],
     methods: ["POST", "PUT"],
     kind: "shape",
     note:
@@ -320,7 +320,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "voucher-row-merge",
-    paths: ["/api/vouchers", "/api/vouchers/{id}"],
+    paths: ["/api/manual-vouchers", "/api/manual-vouchers/{id}"],
     methods: ["POST", "PUT"],
     kind: "validation",
     note:
@@ -334,7 +334,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "voucher-not-deletable",
-    paths: ["/api/vouchers/{id}"],
+    paths: ["/api/manual-vouchers/{id}"],
     methods: ["DELETE"],
     kind: "irreversible",
     note:
@@ -842,7 +842,7 @@ export const QUIRKS: readonly Quirk[] = [
     // rejection for an unknown field. The sub-account half that DOES apply to rules is the entry
     // below.
     id: "some-accounts-demand-a-dimension",
-    paths: ["/api/vouchers"],
+    paths: ["/api/manual-vouchers"],
     methods: ["POST"],
     kind: "validation",
     statuses: [400],
@@ -1375,7 +1375,7 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "manual-voucher-needs-manual-asset",
-    paths: ["/api/vouchers", "/api/vouchers/{id}"],
+    paths: ["/api/manual-vouchers", "/api/manual-vouchers/{id}"],
     methods: ["POST", "PUT"],
     kind: "gotcha",
     note:

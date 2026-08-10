@@ -192,7 +192,7 @@ test("both posting fields say they are conditionally required, and the quirks ca
     assert.match(posting[field]._def.description, needle, field);
     assert.match(posting[field]._def.description, /REQUIRE[SD]/, field);
   }
-  const q = quirksFor("POST", "/api/vouchers").map((x) => x.id);
+  const q = quirksFor("POST", "/api/manual-vouchers").map((x) => x.id);
   assert.ok(q.includes("some-accounts-demand-a-dimension"));
   assert.ok(
     quirksFor("PUT", "/api/general-sub-accounts/{id}")
@@ -291,7 +291,7 @@ test("the reconciliation-rule quirk does not mention companyBankId", () => {
   assert.ok(!voucherOnly.includes("some-accounts-demand-a-dimension"));
   // And the voucher keeps the full version.
   assert.ok(
-    quirksFor("POST", "/api/vouchers")
+    quirksFor("POST", "/api/manual-vouchers")
       .map((q) => q.id)
       .includes("some-accounts-demand-a-dimension"),
   );
