@@ -9,30 +9,42 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
-- **A claim I made last PR was wrong, and the repo already had the right answer written down.** I said
-  `POST /api/attachments` being classified `reversible` "is wrong", because nothing can delete an attachment. It
-  is not wrong — it is **deliberate**, and `src/policy.ts` had reasoned about that exact case for some time: it
-  promotes `PATCH`/`PUT` on an attachment to irreversible *because* "no DELETE exists under /api/attachments to
-  undo it", while recording that "UPLOADING a new attachment is additive and stays reversible". A third comment,
-  on the agreement templates, already pushes back on the phrase I built the claim on.
-  - What WAS wrong is the tier's one-line definition: *"Creates or edits master data that can be cleanly deleted
-    again."* The tier turns on **additive**, not deletable, which is how the classifier below it already reasons.
-    Fixed, with the two operations the old promise is false for named in it: `POST /api/attachments` and
-    `POST /api/leads/{id}/contact-events` (plus its `/org/{orgNumber}` form), for which no DELETE exists at all.
-    `reai_log_lead_contact` has always said so in its own text.
-  - `test/policy.test.mjs` now asserts both facts against the pinned spec, so the sentence and the reasoning
-    cannot drift apart: no DELETE under `/api/attachments`, none mentioning contact events, and both operations
-    still `reversible`. It also asserts the old promise appears **only as a retraction**.
-  - **There is no way to derive "removable" from the spec, and the near miss is worth recording.** `/api/leads`
-    HAS deletes — of the lead, not of its contact events — so the obvious collection-root heuristic clears the
-    one case that most needs catching. My first survey also cleared the five agreement creates as unremovable
-    because their `DELETE` lives at `/api/agreements/{id}`, a different path shape from the create. A guard built
-    on either version would have covered one of the two real cases and read as covering both.
-- Three defects in my own first attempt at the guard, all of the same kind — a check that punishes the
-  correction it is meant to protect. It forbade the retracted phrase outright and so failed on the doc comment's
-  own *"the wording used to be …"*; then it looked only BEHIND the phrase and failed the pre-existing agreement
-  comment, whose retraction comes after it; then its flatten stripped `*` comment leaders but not `//`, so that
-  retraction read *"is not // what this is"* and matched nothing.
+- **The `reversible` tier's one-line definition was false, and so was my replacement for it.** Two glosses, both
+  wrong, both caught by review:
+  - *"Creates or edits master data that can be cleanly deleted again."* Several records in the tier **archive**
+    instead of deleting once they carry references — which `delete-may-archive` already documents — and **four of
+    the five examples the README gave for this tier are among them.**
+  - *"Additive"*, my replacement, and worse for sounding principled. Measured: **23 of the 88 reversible
+    operations are DELETEs**, which neither create nor edit anything, and **17 of the 24 reversible PUTs can clear
+    a documented field by omitting it**. The comment on agreement templates in the same file makes exactly that
+    argument about a replacing PUT, and 17 such PUTs stay in the tier.
+  - So the definition is now the **exclusion list** the classifier actually implements — nothing touching the
+    ledger, a legal document, money, payroll, an authority filing, or user administration — with no adjective.
+- **Three claims I made in the first attempt at this were false, and the premise was the worst of them.** I said
+  two operations in the tier create something *nothing can remove*. Both are removable:
+  - `DELETE /api/orders/{id}/attachments/{attachmentId}` says, in the pinned spec, *"If the attachment has no
+    other references, **the stored file is deleted**."* So upload → link → unlink removes it, both steps inside
+    the reversible tier. I had read the route's *summary* ("Unlink an attachment") and not its description.
+  - A lead contact event has no individual DELETE, but **`reai_delete_lead` removes it** — and this repo's own
+    tool text says so twice, including *"the only way to remove one"*. I cited that text as support while
+    contradicting it.
+  - `POST /api/documents` is a third upload in the tier that creates an attachment record, which my survey missed
+    entirely: it looked for creates-of-a-named-resource and never considered uploads-as-a-side-effect.
+- **Places the retracted promise still lived, which the first attempt did not reach.** `README.md`'s write-mode
+  table — the most-read statement of the modes, and the one an operator uses to decide what to allow — plus the
+  allowlist comment fourteen lines above the entry it contradicted, and an escalation argument elsewhere in
+  `policy.ts` that *cited the old gloss as its basis* and was orphaned by changing it. All three fixed; the
+  payment-routing argument is stronger resting on the money exclusion than on deletability.
+- **The guard I wrote to protect all this was smugglable, and its bypass was a word the writer picks.** It
+  allowed the false phrase when a retraction-ish word appeared within 110 characters, so review reinstated the
+  promise twice by writing "used to be" nearby. Replaced: it now asserts the exclusion list is present in the
+  defining sentence and that the README row does not promise deletability, which are properties rather than
+  string absences.
+  - Its first version searched the whole `Risk` region for the exclusion words — including this comment's own
+    prose about why the glosses failed — so deleting two exclusions from the definition changed nothing. Mutation
+    testing caught that: the check was reading its own explanation.
+  - `docs/tools.md` also contradicted itself for one PR, advising a caller to check references *before deleting* a
+    file two paragraphs above claiming the file "cannot be deleted at all".
 
 - **Codex found the same two defects independently, and one of its findings implied a third I had missed.** Both
   were already fixed when it reviewed; it was looking at the previous head.

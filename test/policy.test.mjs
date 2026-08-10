@@ -1449,74 +1449,77 @@ test("narrowerWriteMode fails closed on a mode it does not recognise", async () 
   assert.equal(narrowerWriteMode("READ-ONLY", "reversible"), "read-only");
 });
 
-test("the reversible tier turns on ADDITIVE, not deletable, and two of its operations are permanent", async () => {
-  // The tier's definition used to say "creates or edits master data that can be cleanly deleted again", and
-  // deletable is not what it turns on — additive is. `reversible` is the DEFAULT write mode, so that sentence is
-  // what someone reads when deciding what to allow, which is why the wording matters.
+test("the reversible tier is defined by exclusion, and says so wherever an operator reads it", async () => {
+  // Two attempts at a one-line gloss for this tier have both been false, and review caught both:
   //
-  // What this is NOT: a misclassification. The PR that added the attachment tools claimed the tier assignment
-  // itself was a defect. It is not — the classifier already reasons in exactly these terms and says so, treating
-  // PATCH on an attachment as irreversible "because no DELETE exists under /api/attachments to undo it" while
-  // recording that "UPLOADING a new attachment is additive and stays reversible". The claim was the defect, and
-  // this test exists so the sentence and the reasoning cannot drift apart again.
+  //   "master data that can be cleanly deleted again" — several records in the tier ARCHIVE instead of deleting
+  //   once they carry references, which `delete-may-archive` documents, and four of the five examples the README
+  //   gave for the tier are among them.
+  //
+  //   "additive" — my replacement, and worse for sounding principled. Measured below: 23 of the reversible
+  //   operations are DELETEs, which neither create nor edit anything.
+  //
+  // So this test asserts the EXCLUSION list rather than policing a phrase. The previous version of it policed a
+  // phrase and review smuggled the false promise back past it twice, by putting "used to be" within its window —
+  // a guard whose bypass is a word the writer chooses is not a guard.
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const { join, dirname } = await import("node:path");
   const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
-  const deletes = Object.keys(spec.paths ?? {}).filter((p) => spec.paths[p].delete);
-  // A floor so the sweep cannot silently stop reading the spec. It cannot pin its own loosening — while both
-  // facts hold, lowering it fails nothing — which is the same limit the sibling count guards record.
-  assert.ok(deletes.length > 30, `only ${deletes.length} DELETE routes found; this sweep is reading nothing`);
-
-  // 1. An attachment cannot be deleted. The two attachment DELETEs UNLINK a file from an owner — they are under
-  //    /api/orders and /api/vouchers, not under /api/attachments — so the record itself is permanent.
-  const underAttachments = deletes.filter((p) => p.startsWith("/api/attachments"));
-  assert.deepEqual(
-    underAttachments,
-    [],
-    `a DELETE now exists under /api/attachments (${underAttachments.join(", ")}) — if an attachment can be ` +
-      `removed, the exception in the Risk doc comment should go`,
-  );
-  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
-  // And the unlink routes DO exist, or the sentence explaining why the deletes above are not deletions is wrong.
-  for (const unlink of ["/api/orders/{id}/attachments/{attachmentId}", "/api/vouchers/{id}/attachments/{attachmentId}"]) {
-    assert.ok(deletes.includes(unlink), `${unlink} should exist — it is what the doc comment calls an unlink`);
-  }
-
-  // 2. A lead contact event cannot be deleted either, and this one is the reason no general check is possible:
-  //    /api/leads HAS deletes — of the LEAD — so a collection-root heuristic would clear it. Asserted on the
-  //    resource name instead.
-  const contactEventDeletes = deletes.filter((p) => /contact-?events?/i.test(p));
-  assert.deepEqual(contactEventDeletes, [], `a contact-event DELETE now exists: ${contactEventDeletes.join(", ")}`);
-  assert.ok(
-    deletes.some((p) => p.startsWith("/api/leads")),
-    "the point of the previous assertion is that /api/leads does have deletes; if it stops, rewrite the reason",
-  );
-  for (const path of ["/api/leads/{id}/contact-events", "/api/leads/org/{orgNumber}/contact-events"]) {
-    assert.equal(classifyRequest("POST", path), "reversible", `${path} should stay in the reversible tier`);
-  }
-
-  // 3. The doc comment must carry both exceptions and must NOT carry the old promise.
   const policy = readFileSync(join(repo, "src", "policy.ts"), "utf8");
-  // The phrase may appear, but only as a RETRACTION. The first version of this assertion forbade it outright and
-  // failed on the doc comment's own "It used to read …", which is exactly the sentence that fixes the problem —
-  // a guard that punishes the correction is worse than no guard.
-  // Both comment leaders. Stripping only `*` left `//` inside the flattened text, so the agreement comment's
-  // retraction read "is not // what this is" and did not match — the sibling docs test learned the same lesson.
-  const flattened = policy.replace(/\s*\n\s*(?:\*|\/\/)?\s*/g, " ");
-  // BOTH sides of the phrase. The retraction can precede it ("the wording used to be …") or follow it — the
-  // pre-existing comment on agreement templates ends "… is not what this is", and a backward-only window failed
-  // that one, which is a correct retraction written the other way round.
-  for (const m of flattened.matchAll(/master data that can be cleanly deleted again/g)) {
-    const window = flattened.slice(Math.max(0, m.index - 110), m.index + m[0].length + 60);
-    assert.match(
-      window,
-      /used to (read|be)|is false|is not what this is|no longer|retract|pushing back/i,
-      `the old promise appears as a claim rather than a retraction: …${window.slice(0, 120)}`,
+
+  // 1. The DEFINING SENTENCE states the exclusions. Scoped to that sentence, not to the whole `Risk` region:
+  //    the first version searched the region, which includes this comment's own prose about why two glosses
+  //    failed — so deleting two exclusions from the definition itself changed nothing, because the words still
+  //    appeared further down. Mutation testing found that; the region-wide check was reading its own explanation.
+  const region = policy.slice(policy.indexOf("export type Risk ="), policy.indexOf('| "irreversible"'));
+  const sentenceStart = region.indexOf("Everything this tier is defined by is an EXCLUSION");
+  assert.ok(sentenceStart > 0, "the reversible definition should open by saying it is defined by exclusion");
+  const sentence = region
+    .slice(sentenceStart, region.indexOf("That is what an operator", sentenceStart))
+    .replace(/\s*\n\s*\*\s*/g, " ");
+  for (const excluded of ["ledger", "legal document", "money", "payroll", "authority", "users and tenants"]) {
+    assert.ok(
+      sentence.includes(excluded),
+      `the defining sentence should name the ${excluded} exclusion, got: ${sentence}`,
     );
   }
-  for (const named of ["POST /api/attachments", "contact-events"]) {
-    assert.ok(policy.includes(named), `the tier definition should name ${named} as an exception`);
+  const definition = region;
+
+  // 2. It must not resurrect either false gloss as its own claim. Checked on the DEFINITION only, not the whole
+  //    file — elsewhere the phrase legitimately appears inside arguments about why it does not hold.
+  assert.doesNotMatch(
+    definition.slice(definition.indexOf('| "reversible"') - 2000, definition.indexOf('| "reversible"')),
+    /tier turns on \*{0,2}additive/i,
+    "the `additive` gloss is back; 23 of the tier's operations are DELETEs",
+  );
+
+  // 3. The README's own table is where an operator actually decides what to allow, and it shipped the deletable
+  //    promise for far longer than the code comment did — the earlier version of this test greped only
+  //    src/policy.ts and could not see it.
+  const readme = readFileSync(join(repo, "README.md"), "utf8");
+  const row = readme.split("\n").find((l) => /^\|\s*\*\*`reversible`\*\*/.test(l));
+  assert.ok(row, "the README should keep a reversible row in its write-mode table");
+  assert.doesNotMatch(row, /that can be cleanly deleted/, `the README row promises deletability: ${row}`);
+  assert.match(row, /archive/i, "the README row should say those records archive instead");
+
+  // 4. And the measurement the `additive` gloss died on, so the definition's own claim is checked rather than
+  //    asserted: the tier really does contain DELETEs.
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  let reversibleDeletes = 0;
+  let reversibleTotal = 0;
+  for (const [path, ops] of Object.entries(spec.paths ?? {})) {
+    for (const method of Object.keys(ops)) {
+      if (!["get", "post", "put", "patch", "delete"].includes(method)) continue;
+      if (classifyRequest(method.toUpperCase(), path) !== "reversible") continue;
+      reversibleTotal += 1;
+      if (method === "delete") reversibleDeletes += 1;
+    }
   }
+  assert.ok(reversibleTotal > 50, `only ${reversibleTotal} reversible operations found; this sweep reads nothing`);
+  assert.ok(
+    reversibleDeletes > 10,
+    `only ${reversibleDeletes} reversible DELETEs — if the tier no longer contains deletes, "additive" may be ` +
+      `defensible after all and this comment should be revisited`,
+  );
 });

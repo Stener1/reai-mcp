@@ -49,27 +49,26 @@ export type Risk =
   /** Reads nothing but data. Always allowed. */
   | "read"
   /**
-   * ADDITIVE master data: it creates or edits a record, and does not touch the ledger, issue a legal document,
+   * Everything this tier is defined by is an EXCLUSION: it does not touch the ledger, issue a legal document,
    * move money, run payroll, file with an authority, or administer users and tenants. That is what an operator
-   * running at the default `reversible` mode is agreeing to.
+   * running at the default mode is agreeing to, and it is what the classifier below actually implements — the
+   * irreversible list is the positive statement, and this is the remainder.
    *
-   * The wording used to be "creates or edits master data that can be cleanly deleted again", and *deletable* is
-   * not what this tier turns on — *additive* is. The classifier below already reasons that way and says so in
-   * two places: `PATCH`/`PUT` on an attachment is promoted to irreversible because "no DELETE exists under
-   * /api/attachments to undo it", while "UPLOADING a new attachment is additive and stays reversible"; and the
-   * agreement templates carry the same split, with the comment there pushing back on this very phrase.
+   * Two attempts at a shorter phrase have both been wrong, so the exclusion list is the definition rather than a
+   * gloss on one:
    *
-   * So two operations sit in this tier that nothing can remove — `POST /api/attachments`, and
-   * `POST /api/leads/{id}/contact-events` (and its `/org/{orgNumber}` form), for which no DELETE exists at all.
-   * Both belong here: adding a file or logging that someone was called is not the risk the irreversible tier is
-   * about, and refusing to store a file at the default mode would be wrong in the other direction. What was
-   * wrong was the sentence, not the classification — a correction to a claim made in the PR that added the
-   * attachment tools, which asserted the tier assignment itself was a defect. It is not; it is deliberate, and
-   * the reasoning was already in this file.
+   *   "master data that can be cleanly deleted again" — false. Several records in this tier ARCHIVE instead of
+   *   deleting when they carry references, which `delete-may-archive` in the quirk registry documents, and four
+   *   of the five examples the README used to give for this tier are among them.
    *
-   * Note for anyone tempted to derive "removable" automatically: it cannot be done from the spec. `/api/leads`
-   * HAS deletes — of the lead, not of its contact events — so the obvious collection-root heuristic clears the
-   * one case that most needs catching. `test/policy.test.mjs` asserts the two facts directly instead.
+   *   "additive" — also false, and worse because it sounded principled. 23 of the 88 reversible operations are
+   *   DELETEs, which neither create nor edit anything, and 17 of the 24 reversible PUTs can clear a documented
+   *   field by omitting it. `POST /api/customers/{id}/sync-brreg` overwrites master data from the registry with
+   *   no undo. The comment on agreement templates below makes exactly this argument about a replacing PUT, and
+   *   17 such PUTs stay in the tier regardless.
+   *
+   * So: no adjective. Reversible means "none of the things the irreversible tier is for", which is narrower than
+   * it sounds and is the only claim the code supports.
    */
   | "reversible"
   /**
@@ -147,7 +146,7 @@ const IRREVERSIBLE_PREFIXES: readonly string[] = [
   "/api/reconciliation-rules",
 ];
 
-/** Master data: reference records an agent can safely create and clean up. */
+/** Master data: reference records outside the ledger, legal-document, money and payroll surfaces. */
 const REVERSIBLE_PREFIXES: readonly string[] = [
   "/api/customers",
   "/api/suppliers",
@@ -801,8 +800,10 @@ const TRANSMITTING_PATTERNS: readonly RegExp[] = [
  * in the DEFAULT configuration could repoint a supplier's bank details and the loss
  * would happen later, through a legitimate action by a person.
  *
- * `reversible` is documented as "master data that can be cleanly deleted", and that
- * criterion simply does not describe "redirects a future payment".
+ * `reversible` is defined by exclusion — not the ledger, not a legal document, not money, not payroll, not a
+ * filing, not user administration — and "redirects a future payment" is squarely inside the money exclusion,
+ * whoever presses the button later. (This argument used to cite the tier's old one-line gloss, "master data that
+ * can be cleanly deleted"; that wording was removed for being false, and the argument is stronger without it.)
  *
  * Deliberately path-scoped rather than added to the body-field map: registering the
  * company's OWN bank account (POST /api/company-banks) also carries a swiftCode and
