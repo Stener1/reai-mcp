@@ -22,10 +22,15 @@ const MUST_PASS = [
   ["href= as text inside the script", "<script>el.outerHTML = '<a href=\"/x\">';</script>"],
   ["src= as text inside the script", "<script>const s = 'src=\"http://x/y.js\"';</script>"],
   ["href= inside a style block", "<style>/* href=\"http://x\" */</style>"],
-  ["a blob: source", '<video src="blob:abc-123"></video>'],
   ["an empty src", '<img src="">'],
   ["a same-document SVG use", '<svg><use href="#icon"/></svg>'],
+  ["a same-document SVG use via xlink", '<svg><use xlink:href="#icon"/></svg>'],
   ["an anchor to an external site", '<a href="https://example.com">docs</a>'],
+  // A quoted attribute containing ">" must not derail the tag scan, and must not itself be read as a URL.
+  ["an attribute containing a greater-than", '<div data-note=">">x</div>'],
+  ["an aria-label containing a greater-than", '<button aria-label="a > b">go</button>'],
+  ["an empty srcset", '<img srcset="">'],
+  ["a data: URI in srcset", '<img srcset="data:image/png;base64,iVBORw0KGgo= 1x">'],
 ];
 
 const MUST_FAIL = [
@@ -41,6 +46,19 @@ const MUST_FAIL = [
   ["a single-quoted src", "<script src='widget.js'></script>", "script"],
   ["src before other attributes", '<script src="w.js" defer type="module"></script>', "script"],
   ["src after other attributes", '<script defer type="module" src="w.js"></script>', "script"],
+  // --- Review round 4. Each of these passed the previous version. ---------------------------------------
+  // srcset fetches, and was not inspected at all.
+  ["a bare srcset with no src", '<img srcset="logo.png 1x">', "img"],
+  ["a srcset on <source>", '<source srcset="logo.png 2x">', "source"],
+  // The tag scan stopped at the ">" inside the quoted value, so src was never seen. Ordinary markup.
+  ['a quoted ">" before the src', '<script data-note=">" src="widget.js"></script>', "script"],
+  ["an aria-label with > before the src", '<img aria-label="a > b" src="/logo.svg">', "img"],
+  // blob: names an entry in the creating context's Blob store; it does not carry its bytes.
+  ["a blob: script", '<script src="blob:abc-123"></script>', "script"],
+  // A fragment is not read as the resource for a loader: it resolves against the document URL.
+  ["a fragment as a script src", '<script src="#payload"></script>', "script"],
+  ["a fragment as an img src", '<img src="#icon">', "img"],
+  ["a video poster", '<video poster="thumb.jpg"></video>', "video"],
 ];
 
 test("a self-contained document is not reported as external", () => {
