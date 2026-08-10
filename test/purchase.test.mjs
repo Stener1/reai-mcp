@@ -264,26 +264,25 @@ test("reai_list_attachments names all three ways to reach an attachment id", asy
 });
 
 test("the attach workflow says which owner takes a file and which takes a link", async () => {
-  // Measured on 2783 on 2026-08-10, all three probes failing so nothing was created:
-  //
-  //   JSON {attachmentId: 99999999} -> POST /api/orders/4105/attachments
-  //     404 "Attachment not found" — it parsed the body and looked the attachment up, so it LINKS
-  //   multipart -> the same route
-  //     415 "Content-Type 'multipart/form-data' is not supported" — so a file cannot be uploaded there
-  //   JSON -> POST /api/supplier-invoices/1/attachments/existing
-  //     404 "Supplier invoice 1 not found" — the route exists and validates the owner first
-  //
-  // The consequence is the point: the two owners wire the same two capabilities to OPPOSITE paths, so an agent
-  // that learns one and applies it to the other gets a 415 or a 404 instead of a hint.
+  // Measured on 2783 on 2026-08-10, every probe failing so nothing was created. The FIRST version of this test
+  // recorded the measurements in a comment and asserted almost none of them, and review found the one sentence
+  // that was false was the one sentence nothing guarded. So the claims are assertions now.
   const { quirksFor } = await import("../dist/reai/quirks.js");
-  for (const path of ["/api/orders/{id}/attachments", "/api/supplier-invoices/{id}/attachments"]) {
+  const ROUTES = [
+    "/api/orders/{id}/attachments",
+    "/api/supplier-invoices/{id}/attachments",
+    // The two review found missing: the LINK route the note sends agents to, and the UPLOAD route it names.
+    // `quirksFor` is exact-match, so an agent asking reai_describe_endpoint about `/existing` saw nothing.
+    "/api/supplier-invoices/{id}/attachments/existing",
+    "/api/attachments",
+  ];
+  for (const path of ROUTES) {
     const found = quirksFor("POST", path).map((q) => q.id);
     assert.ok(
       found.includes("attaching-a-file-differs-by-owner"),
       `${path} should carry the attach-workflow quirk, got ${found.join(", ") || "none"}`,
     );
   }
-  // A GET must NOT get it — it is about the POST bodies.
   assert.ok(
     !quirksFor("GET", "/api/orders/{id}/attachments").some((q) => q.id === "attaching-a-file-differs-by-owner"),
     "the attach quirk is about POSTing, not listing",
@@ -292,19 +291,43 @@ test("the attach workflow says which owner takes a file and which takes a link",
   const note = quirksFor("POST", "/api/orders/{id}/attachments").find(
     (q) => q.id === "attaching-a-file-differs-by-owner",
   ).note;
-  // VERBATIM for the two quoted upstream messages, loose for the rest. A reword of a message the note presents
-  // as the API's own words is a drift this repo cares about — the first version asserted only "415", so
-  // changing "is not supported" to "is unsupported" survived while the note still claimed to quote ReAI.
-  for (const verbatim of ["Content-Type 'multipart/form-data' is not supported", '404 "Attachment not found"']) {
+
+  // The PRECEDENCE, which is what the first version got backwards. Measured: a nonexistent order with a VALID
+  // multipart body answers 415, not the owner's 404 — so content type is decided first and a 415 says nothing
+  // about whether the record exists. The note claimed the opposite ("owner first, before content type"), and
+  // rewriting that sentence to the truth failed no test at all.
+  assert.match(note, /order of checks is CONTENT TYPE, then owner, then attachment id/);
+  assert.match(note, /valid multipart body answers 415, not the owner's 404/);
+
+  // The 415 detail echoes the Content-Type back WITH its boundary and charset, so it differs every request.
+  // The first version quoted a truncated version of it as verbatim and pinned that here — enshrining a string
+  // the API never emits. The note must now say not to match on it.
+  assert.match(note, /is not a string to match on\. Match the status, not the message/);
+  assert.doesNotMatch(
+    note,
+    /"Content-Type 'multipart\/form-data' is not supported"/,
+    "that exact string is not what the API returns — it echoes the boundary and charset too",
+  );
+
+  // The two messages that ARE stable, verbatim.
+  for (const verbatim of ['404 "Attachment not found"', 'Failed to parse multipart request']) {
     assert.ok(note.includes(verbatim), `the note should quote ${verbatim} exactly, as measured`);
   }
-  for (const measured of ["415", "attachments/existing", "opposite paths"]) {
-    assert.ok(note.includes(measured), `the note should carry the measured ${measured}`);
-  }
 
-  // And the tool an agent is holding when it wants to attach something must point at all this.
+  // And the two things this server cannot do, which the first version told agents to do anyway.
+  assert.match(note, /never constructs a multipart body/);
+  assert.match(note, /NO delete route/);
+});
+
+test("reai_list_attachments does not tell an agent to upload through this server", async () => {
+  // The tool text said "drive either through reai_request" for both halves. Neither upload route is reachable
+  // that way: reai_request transports its body as JSON and nothing in this server builds a FormData. The repo
+  // had ALREADY caught and corrected this exact error — src/tools/investments.ts records it — and this PR
+  // reintroduced it, which is why it is pinned here rather than only fixed.
   const description = tool("reai_list_attachments").description;
-  assert.match(description, /An ORDER only LINKS/);
-  assert.match(description, /answers 415/);
+  assert.match(description, /UPLOADING a file is not possible through this server/);
+  assert.match(description, /belongs in the ReAI web UI or another client/);
   assert.match(description, /attachments\/existing/);
+  // A supplier invoice must not be described as linkable at its plain /attachments.
+  assert.doesNotMatch(description, /takes the file directly/);
 });

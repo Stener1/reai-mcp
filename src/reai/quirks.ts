@@ -2138,24 +2138,40 @@ export const QUIRKS: readonly Quirk[] = [
   },
   {
     id: "attaching-a-file-differs-by-owner",
-    paths: ["/api/orders/{id}/attachments", "/api/supplier-invoices/{id}/attachments"],
+    paths: [
+      "/api/orders/{id}/attachments",
+      "/api/supplier-invoices/{id}/attachments",
+      // The LINK route an agent is sent to, and the UPLOAD route it is told to use first. Review found both
+      // missing: `quirksFor` is exact-match, so an agent that followed this note to `/existing` and asked
+      // reai_describe_endpoint about it saw nothing at all.
+      "/api/supplier-invoices/{id}/attachments/existing",
+      "/api/attachments",
+    ],
     methods: ["POST"],
     kind: "workflow",
     note:
-      "The two owners do NOT take a file the same way, and the same JSON body lives at different paths for " +
-      "each. Measured on tenant 2783 on 2026-08-10.\n\n" +
+      "The two owners do NOT take a file the same way, and the same JSON body lives at a different path for " +
+      "each. Measured on tenant 2783 on 2026-08-10, every probe failing so nothing was created.\n\n" +
       "An ORDER only LINKS an attachment that already exists. POST /api/orders/{id}/attachments takes " +
       'application/json — {"attachmentId": N} — and a bad id answers 404 "Attachment not found", which is the ' +
-      "proof it parsed the body and looked the attachment up. Sending a file to it instead answers " +
-      "415 \"Content-Type 'multipart/form-data' is not supported\". So attaching a NEW file to an order is two " +
-      "calls: upload with POST /api/attachments (multipart), then link with the id it returns.\n\n" +
-      "A SUPPLIER INVOICE takes the file directly: POST /api/supplier-invoices/{id}/attachments is " +
-      "multipart/form-data. Its LINK route is a different path — POST " +
-      "/api/supplier-invoices/{id}/attachments/existing — with the same JSON body an order takes at its plain " +
-      "/attachments. So the two owners have the same two capabilities wired to opposite paths, and an agent " +
-      "that learns one and applies it to the other gets a 415 or a 404 rather than a hint.\n\n" +
-      "Both routes validate the OWNER first: an unknown order or supplier invoice answers 404 naming it, " +
-      "before anything about the attachment or the content type is considered.",
+      "proof it parsed the body and looked the attachment up. A multipart body there answers 415 Unsupported " +
+      "Media Type, and a MALFORMED one answers 400 \"Failed to parse multipart request\" instead.\n\n" +
+      "A SUPPLIER INVOICE is multipart-only on its plain route: POST " +
+      "/api/supplier-invoices/{id}/attachments answers 415 to application/json. Its LINK route is a different " +
+      "path — .../attachments/existing — with the same JSON body an order takes at its plain /attachments. So " +
+      "the two owners wire the same two capabilities to opposite paths, and an agent that learns one and " +
+      "applies it to the other gets a 415 or a 404 rather than a hint.\n\n" +
+      "The order of checks is CONTENT TYPE, then owner, then attachment id. Measured: a nonexistent order with " +
+      "a valid multipart body answers 415, not the owner's 404 — so a 415 tells you nothing about whether the " +
+      "record exists. With a valid JSON body the same nonexistent order answers 404 naming it.\n\n" +
+      "The 415 detail echoes the Content-Type header back INCLUDING its boundary and charset, so it differs on " +
+      "every request and is not a string to match on. Match the status, not the message.\n\n" +
+      "TWO THINGS THIS SERVER CANNOT DO, so plan around them rather than retrying. It never constructs a " +
+      "multipart body — reai_request transports its `body` as JSON — so neither upload route is reachable " +
+      "through it at all; the upload belongs in the ReAI web UI or another client. And an attachment, once " +
+      "uploaded, has NO delete route: /api/attachments/{id} is GET and PATCH only, and only orders and " +
+      "vouchers have an unlink route. A supplier invoice has none, so a file attached to one cannot be " +
+      "detached through the API either.",
   },
 ];
 

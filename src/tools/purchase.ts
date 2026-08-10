@@ -902,15 +902,18 @@ const listAttachments = defineTool({
     "Which one means \"when the document arrived\" is not established, so do not report either as that.\n\n" +
     "This does not fetch the file. Content is the raw document — measured, application/pdf at 1.7 MB for one " +
     "supplier invoice — so it is reported as a URL rather than returned.\n\n" +
-    "ATTACHING one is not curated, and the two owners do not work the same way — measured on 2783:\n\n" +
-    "- An ORDER only LINKS an attachment that already exists. POST /api/orders/{id}/attachments takes JSON " +
-    '(`{"attachmentId": N}`), and sending a FILE to it answers 415. So a new file is two calls: upload with ' +
-    "POST /api/attachments (multipart), then link with the id it returns.\n" +
-    "- A SUPPLIER INVOICE takes the file directly at POST /api/supplier-invoices/{id}/attachments " +
-    "(multipart). Its link route is a different path, .../attachments/existing, with the same JSON body an " +
-    "order takes at its plain /attachments.\n\n" +
-    "So the two owners wire the same two capabilities to opposite paths. reai_describe_endpoint carries the " +
-    "detail; drive either through reai_request.",
+    "UPLOADING a file is not possible through this server at all, so do not plan a workflow around it: " +
+    "reai_request transports its body as JSON and nothing here ever builds a multipart request, which is what " +
+    "both upload routes require. The upload belongs in the ReAI web UI or another client.\n\n" +
+    "LINKING an attachment that already exists IS reachable, and the two owners use opposite paths for it — " +
+    "measured on 2783:\n\n" +
+    "- An ORDER links at POST /api/orders/{id}/attachments with JSON `{\"attachmentId\": N}`. A bad id " +
+    'answers 404 "Attachment not found".\n' +
+    "- A SUPPLIER INVOICE links at POST /api/supplier-invoices/{id}/attachments/existing — its plain " +
+    "/attachments is the multipart upload, and answers 415 to JSON.\n\n" +
+    "So the JSON body an order takes at /attachments is what a supplier invoice takes at " +
+    "/attachments/existing. reai_describe_endpoint carries the rest, including that a 415 is decided BEFORE " +
+    "the owner is looked up, and that an uploaded attachment has no delete route.",
   risk: "read",
   apiPaths: [
     ["GET", "/api/orders/{id}/attachments"],

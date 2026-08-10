@@ -9,6 +9,40 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Review found three of my claims false, one of them a quote the API never emits — which I had then pinned as
+  verbatim.** The measurements about *which* route takes what held; almost everything I inferred around them did
+  not.
+  - **The "verbatim" 415 message was fabricated.** The API echoes the `Content-Type` header back *including its
+    boundary and charset* (`multipart/form-data;boundary=----formdata-undici-032389436896;charset=UTF-8`), with a
+    trailing period — so the string I quoted cannot occur, and a test I wrote specifically to catch "a reword of
+    a message the note presents as the API's own words" was guarding a truncation of my own making. The note now
+    says to match the status, not the message, and the test asserts the fabricated form is absent.
+  - **"Both routes validate the owner first, before content type" was backwards.** Measured: a nonexistent order
+    with a VALID multipart body answers **415**, not the owner's 404. I had generalised from one probe against a
+    different route. The real order is content type → owner → attachment id, and a malformed multipart body
+    answers `400 "Failed to parse multipart request"` instead of 415 — three failures meaning three things.
+    - This was also the one sentence in the note that nothing guarded: rewriting it to the truth failed no test.
+      Recorded as evidence in a comment, never asserted.
+  - **The workflow I prescribed cannot be executed through this server, and the repo had already caught that
+    exact error once.** `reai_request` transports its body as JSON and nothing here ever constructs a
+    `FormData`, so neither upload route is reachable — `src/tools/investments.ts` records the same conclusion for
+    a different upload, in a comment about a claim that "was probably false and was not checked". I
+    reintroduced it. The tool now says uploading is impossible here and belongs in the ReAI web UI.
+  - **The quirk missed `/attachments/existing`** — the route the note sends agents to — and `/api/attachments`,
+    the upload route it names. `quirksFor` is exact-match, so an agent following the advice and asking
+    `reai_describe_endpoint` about it saw nothing. Both keyed now.
+  - **A sharper asymmetry one row down, missed:** a supplier invoice is the only owner that takes a file directly
+    and the only one with **no detach route**, and an uploaded attachment cannot be deleted at all
+    (`/api/attachments/{id}` is GET and PATCH only). So step 1 of an upload-then-link workflow is not undoable if
+    step 2 fails. `POST /api/attachments` is classified `reversible`, whose definition is "can be cleanly deleted
+    again" — that is wrong, and is recorded rather than retiered here, since it is a shared classifier and the
+    call is unreachable anyway.
+  - **"Measured on 2783" overstated the supplier-invoice half**: that tenant has zero supplier invoices, so the
+    route split is read off the spec. What is genuinely measured is the 415/404/400 behaviour.
+  - And the interlocking arithmetic in `docs/audits.md` was stale in two places I had edited the same sentence of
+    — so my claim that the count guard "forced all four files into agreement in one pass" was not true of those
+    figures. The guard's own comment already admits bare derived numbers are outside it.
+
 - **How you attach a file depends on which record it hangs off, and the two owners are wired to opposite
   paths.** Measured on 2783 on 2026-08-10, with every probe failing so nothing was created.
   - An **order only LINKS** an attachment that already exists: `POST /api/orders/{id}/attachments` takes JSON

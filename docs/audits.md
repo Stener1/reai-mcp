@@ -32,11 +32,11 @@ audits named **2 of them** — `tenant-header-ignored-single-tenant` and `custom
 defects that motivated those audits were in this channel: the `+47` phone claim (PR #115) and the four
 places calling the agreement enums undocumented (PR #123).
 
-Resist quoting how many of the remaining 120 are "checkable": a keyword sweep over `note` prose gives 86 or
+Resist quoting how many of the remaining 125 are "checkable": a keyword sweep over `note` prose gives 86 or
 95 depending on the word list, so it is a lower bound dressed as a measurement — the false precision
 `audit:census` exists to print rather than assert. The checkable figures, **restated for the 16-case audit**: **127** quirks, of which **17** now have a live
 case — 16 here plus `customer-name-title-cased` in `audit-storage.mjs`, with
-`tenant-header-ignored-single-tenant` in both sets — leaving **105** unnamed.
+`tenant-header-ignored-single-tenant` in both sets — leaving **110** unnamed.
 
 The arithmetic here has been wrong twice, in opposite directions: first 2 + 8 + 114 = 124 out of 122
 (double-counting the tenant-header quirk), then the 8-case accounting left in place beside a 16-case

@@ -524,14 +524,24 @@ There is no `/api/vouchers/{id}/attachments` route (404), which is why `voucher`
 
 **The two routes disagree on four fields, not one.** The owner-scoped list leaves `usedBy` null; reading the same attachment by id fills it in (`[{"ownerType":"SUPPLIER_INVOICE","ownerId":5830}]`). So "what else points at this file" is a question only `reai_get_attachment` can answer, and it is the one to ask before deleting. `contentUrl` and `downloadUrl` point at the **owner** path rather than `/api/attachments/{id}/content` — both serve the same bytes, verified byte-identical. And **`createdAt` differs by two days** between the routes (`2026-08-07T10:21:49` scoped against `2026-08-05T17:22:28` by id). Which one means "when the document arrived" is **not established**, so neither tool reports it as that. Voucher-embedded rows carry the by-id value, so the drift belongs to the supplier-invoice route rather than to scoped listing in general.
 
-**Attaching one is not curated, and the two owners are wired to opposite paths.** Measured on 2783, with all three probes failing so nothing was created:
+**Attaching a file: uploading is impossible through this server, and linking uses opposite paths per owner.** Measured on 2783 on 2026-08-10, with all probes failing so nothing was created.
 
-| | upload a new file | link an existing one |
-|---|---|---|
-| **order** | no route — `POST /api/orders/{id}/attachments` with a file answers **415** `Content-Type 'multipart/form-data' is not supported` | `POST /api/orders/{id}/attachments`, JSON `{"attachmentId": N}` — a bad id answers `404 "Attachment not found"`, which is the proof it parsed the body |
-| **supplier invoice** | `POST /api/supplier-invoices/{id}/attachments`, multipart | `POST /api/supplier-invoices/{id}/attachments/existing`, the same JSON body an order takes at its *plain* `/attachments` |
+| | upload a new file | link an existing one | detach |
+|---|---|---|---|
+| **order** | no route — multipart answers **415** | `POST /api/orders/{id}/attachments`, JSON `{"attachmentId": N}`; a bad id answers `404 "Attachment not found"` | `DELETE /api/orders/{id}/attachments/{attachmentId}` |
+| **supplier invoice** | `POST /api/supplier-invoices/{id}/attachments`, multipart — answers **415** to JSON | `POST …/attachments/existing`, the same JSON body an order takes at its *plain* `/attachments` | **nothing** |
+| **voucher** | no route | no route | `DELETE /api/vouchers/{id}/attachments/{attachmentId}` |
+| **the file itself** | `POST /api/attachments`, multipart | — | **nothing** — `/api/attachments/{id}` is `GET` and `PATCH` only |
 
-So attaching a new file to an order is **two calls** — upload with `POST /api/attachments`, then link — while a supplier invoice takes it in one. An agent that learns one owner and applies it to the other gets a 415 or a 404 rather than a hint, which is why this is a quirk rather than a footnote. Both routes validate the **owner** first: an unknown order or invoice answers 404 naming it, before content type or attachment id is considered.
+Three things follow, and the first two were wrong in an earlier version of this page.
+
+**Uploading cannot be done here at all.** `reai_request` transports its `body` as JSON and nothing in this server ever constructs a `FormData`, so neither multipart route is reachable through it — the upload belongs in the ReAI web UI or another client. The repo had already recorded this once (`src/tools/investments.ts` documents the same conclusion for a different upload), and this page reintroduced it before review caught it.
+
+**The order of checks is content type, then owner, then attachment id** — not owner first. Measured: a nonexistent order with a *valid* multipart body answers **415**, not the owner's 404, so a 415 tells you nothing about whether the record exists. With a valid JSON body the same nonexistent order answers `404 "No order with id 999999"`. A *malformed* multipart body answers `400 "Failed to parse multipart request"` instead of 415, so the three failures mean three different things.
+
+**The 415 detail echoes the `Content-Type` header back including its boundary and charset**, so it differs on every request. Match the status, not the message — an earlier version of this page quoted a truncated form of it as though it were the API's exact words.
+
+And the asymmetry has a sharper instance than the attach one: **a supplier invoice is the only owner that takes a file directly and the only one with no detach route**, while an uploaded attachment cannot be deleted at all. So step 1 of an upload-then-link workflow is not undoable even if step 2 fails. (`POST /api/attachments` is classified `reversible`, whose own definition is "can be cleanly deleted again" — that is not true here. Left as-is rather than retiered in this change, since it is a shared classifier and the call is unreachable anyway, but it is wrong.)
 
 **Neither tool returns the file.** Content is the raw document — `application/pdf`, 1.7 MB for that one — so the tools report the URL and leave fetching to the caller. Two adjacent routes are EHF-only despite their names: `/ehf` **and** `/embedded-files` both answer `400 "Attachment is not a valid EHF XML"` on a PDF, so check `mimeType` before reaching for `reai_parse_ehf_attachment`.
 
