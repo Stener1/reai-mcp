@@ -251,7 +251,7 @@ const getOpeningBalance = defineTool({
     "looks like. Neither test tenant has an opening balance to experiment on, so this server has " +
     "never watched those three endpoints run: no curated tool will claim to know what they do.",
   risk: "read",
-  apiPaths: [["GET", "/api/opening-balances"]],
+  apiPaths: [["GET", "/api/opening-balance"]],
   idempotent: true,
   inputSchema: { tenantId: tenantIdArg },
   handler: async (args, ctx) => {
@@ -259,7 +259,9 @@ const getOpeningBalance = defineTool({
     try {
       const res = await ctx.client.request<unknown>({
         method: "GET",
-        path: "/api/opening-balances",
+        // Renamed 2026-08-10: /api/opening-balances answers 404 "No static resource"; the singular path
+        // answers 404 "Opening balance not found", which is the documented empty state.
+        path: "/api/opening-balance",
         tenantId,
       });
       // The flag on BOTH branches, not just the 404 one. Review's point: a consumer keying on
