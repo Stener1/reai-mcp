@@ -167,7 +167,13 @@ function srcsetUrls(value) {
  * "not self-contained" and something actionable.
  */
 export function externalReferences(html) {
-  const scanned = blankInlineCode(stripComments(String(html)));
+  // ORDER MATTERS, and getting it wrong was a defect I introduced when comment-stripping was added.
+  // Stripping comments FIRST lets a `<!--` inside an inline script pair with a later real `-->` and delete
+  // everything between them — including any loader in that span. Measured:
+  //   <script>const marker="<!--";</script><img src="remote.png"><!-- footer -->
+  // reported NO references, so a document that fetches passed. Script and style bodies are raw text and cannot
+  // contain a comment, so they are neutralised first; only then is comment-stripping safe.
+  const scanned = stripComments(blankInlineCode(String(html)));
   const found = [];
 
   for (const match of scanned.matchAll(TAG)) {
