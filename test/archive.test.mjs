@@ -352,7 +352,7 @@ test("a curated tool on an {outcome} endpoint reports which outcome happened", a
       "DELETE /api/documents/{id}",
       "DELETE /api/invoices/{id}/manual-credit-note-applications/{creditNoteInvoiceId}",
       "DELETE /api/invoices/{id}/payments/{paymentId}",
-      "DELETE /api/opening-balances",
+      "DELETE /api/opening-balance",
       "DELETE /api/projects/{id}",
       "DELETE /api/supplier-invoices/{id}",
       "DELETE /api/supplier-invoices/{invoiceId}/payments/{paymentId}",

@@ -366,7 +366,7 @@ test("the value that empties an invoice email is one the curated tool really acc
 test("escalation is scoped by path, so ledger account numbers are unaffected", async () => {
   const { curatedArgsEscalate } = await import("../dist/policy.js");
   assert.equal(
-    curatedArgsEscalate([["POST", "/api/vouchers"]], { accountNumber: "4300", amount: 100 }),
+    curatedArgsEscalate([["POST", "/api/manual-vouchers"]], { accountNumber: "4300", amount: 100 }),
     undefined,
   );
   assert.equal(curatedArgsEscalate([["PATCH", "/api/suppliers/{id}"]], { id: 1, name: "Acme" }), undefined);

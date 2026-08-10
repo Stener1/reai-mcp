@@ -35,7 +35,7 @@ On a [bound remote connection](self-hosting.md#one-tenant-per-authorization) `re
 | Tool | Purpose |
 |---|---|
 | `reai_list_api_tags` | All 52 API domains with operation counts — a map of what the system can do |
-| `reai_search_endpoints` | Keyword search across all 321 public operations |
+| `reai_search_endpoints` | Keyword search across all 320 public operations |
 | `reai_describe_endpoint` | Full schema for one endpoint, nested objects resolved — **with known quirks first** |
 | `reai_api_notes` | Browse the known API quirks (see [docs/api-quirks.md](api-quirks.md)) |
 | `reai_request` | Call any endpoint. Auth and tenant handled; writes are policy-checked |

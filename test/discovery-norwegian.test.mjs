@@ -14,7 +14,7 @@ import { searchOperations } from "../dist/reai/spec.js";
  * together, so the word a user types is often a compound whose meaning lives in one half —
  * lønn+kjøring, vare+lager, lager+beholdning — which no plural or diacritic rule reaches.
  *
- * The escape hatch is how an agent gets at the 132 operations no curated tool covers, so a
+ * The escape hatch is how an agent gets at the 131 operations no curated tool covers, so a
  * query that returns nothing is the difference between a capable agent and a stuck one.
  */
 
@@ -29,7 +29,7 @@ const NORWEGIAN = [
   ["lønnskjøring", "POST /api/salary-payments"],
   ["varelager", "GET /api/warehouses/inventory"],
   ["lagerbeholdning", "GET /api/warehouses/inventory"],
-  ["opprett bilag", "POST /api/vouchers"],
+  ["opprett bilag", "POST /api/manual-vouchers"],
   ["leverandørfaktura", "GET /api/supplier-invoices"],
   ["kundefaktura", "GET /api/invoices"],
   ["abonnement", "GET /api/subscriptions"],
@@ -39,7 +39,7 @@ const NORWEGIAN = [
   ["skattemelding", "GET /api/tax-returns/{year}"],
   ["kontoplan", "GET /api/chart-of-accounts"],
   ["utgifter", "GET /api/expenses"],
-  ["åpningsbalanse", "GET /api/opening-balances"],
+  ["åpningsbalanse", "GET /api/opening-balance"],
   ["aksjer", "GET /api/share-investments"],
   ["lån", "GET /api/loans"],
   ["reskontro for kunde", "GET /api/ledger/customer"],
@@ -59,7 +59,7 @@ const ENGLISH = [
   ["adjust inventory", "POST /api/warehouses/inventory/adjust"],
   ["rent agreement", "POST /api/agreements/rent-agreement"],
   ["employment contract", "POST /api/agreements/employee-contract"],
-  ["opening balance", "GET /api/opening-balances"],
+  ["opening balance", "GET /api/opening-balance"],
   ["loan", "GET /api/loans"],
   ["timesheet hours", "GET /api/timesheets"],
   ["leads", "GET /api/leads"],
@@ -105,7 +105,7 @@ test("word order does not change the answer", () => {
   for (const [a, b, want] of [
     ["fakturagebyr på faktura", "faktura på fakturagebyr", "GET /api/invoices"],
     ["fakturagebyr fakturaer", "fakturaer fakturagebyr", "GET /api/invoices"],
-    ["lønnskjøring bilag", "bilag lønnskjøring", "POST /api/vouchers"],
+    ["lønnskjøring bilag", "bilag lønnskjøring", "POST /api/manual-vouchers"],
   ]) {
     const rankA = rankOf(a, want);
     const rankB = rankOf(b, want);
@@ -192,7 +192,7 @@ test("the definite article does not change the answer", () => {
     // was pinned to a mutating endpoint. It asserts the READ now, which the ranker does reach.
     ["hva står i leieavtale", "hva står i leieavtalen", "GET /api/agreements/{id}"],
     // And forms that already worked, so the test would notice the rule breaking them.
-    ["slett bilag", "slett bilaget", "DELETE /api/vouchers/{id}"],
+    ["slett bilag", "slett bilaget", "DELETE /api/manual-vouchers/{id}"],
     ["godkjenn reiseregning", "godkjenn reiseregningen", "POST /api/expenses/{id}/approve"],
     // The -en consonant-stem class, which the first version of this work left out entirely.
     ["godkjenn reiseregning", "godkjenn reiseregningen", "POST /api/expenses/{id}/approve"],
@@ -565,7 +565,7 @@ const VOCABULARY_GAPS = [
 test("a write verb on a mapped noun reaches the operation that performs it", async () => {
   const { searchOperations } = await import("../dist/reai/spec.js");
   const hits = searchOperations({ query: "opprett postering", limit: 5 }).map((h) => `${h.method} ${h.path}`);
-  assert.equal(hits[0], "POST /api/vouchers", `got ${hits.slice(0, 3).join(", ")}`);
+  assert.equal(hits[0], "POST /api/manual-vouchers", `got ${hits.slice(0, 3).join(", ")}`);
   // And the bare noun must still reach the collection, which is what reai_list_postings wraps.
   const bare = searchOperations({ query: "postering", limit: 3 }).map((h) => `${h.method} ${h.path}`);
   assert.equal(bare[0], "GET /api/postings", `got ${bare.join(", ")}`);

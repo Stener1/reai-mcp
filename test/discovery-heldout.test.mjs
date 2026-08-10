@@ -93,7 +93,7 @@ const rankOf = (query, want) =>
 
 test("no held-out query returns nothing at all", () => {
   // The floor, and the one that matters most: a query with no results is the difference between
-  // an agent that reaches the 132 uncovered operations and one that gives up. Twelve of these
+  // an agent that reaches the 131 uncovered operations and one that gives up. Twelve of these
   // returned nothing before the vocabulary was added.
   const empty = CASES.filter(([q]) => searchOperations({ query: q, limit: 5 }).length === 0).map(
     ([q]) => q,
@@ -136,10 +136,10 @@ test("a Norwegian create verb ranks the write it asks for", () => {
   for (const [query, want] of [
     ["opprett kreditnota", "POST /api/invoices/{id}/credit"],
     ["opprett reiseregning", "POST /api/expenses"],
-    ["registrer bilag", "POST /api/vouchers"],
-    ["bokfør bilag", "POST /api/vouchers"],
+    ["registrer bilag", "POST /api/manual-vouchers"],
+    ["bokfør bilag", "POST /api/manual-vouchers"],
     // Both spellings, because these tables are consulted with raw tokens rather than folded ones.
-    ["bokfor bilag", "POST /api/vouchers"],
+    ["bokfor bilag", "POST /api/manual-vouchers"],
   ]) {
     const top = searchOperations({ query, limit: 3 }).map((h) => `${h.method} ${h.path}`);
     assert.ok(top.includes(want), `"${query}" → wanted ${want}, got ${top.join(", ")}`);

@@ -13,7 +13,7 @@ You:   What did we spend on inventory this year, and which account is it on?
 Agent: [reai_general_ledger] Account 1460 "Innkjøpte varer for videresalg" — 12 postings, closing balance 4 812,60 NOK.
 ```
 
-- **177 tools**: 170 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 321 public API operations.
+- **177 tools**: 170 curated across thirteen accounting domains, plus 7 always-on — orientation, and a discovery escape hatch that reaches all 320 public API operations.
 - **Two independent safety switches.** One bounds what can be undone in the books; the other decides whether anything may leave the tenant at all. Both default to the cautious setting, and the first does not lift the second.
 - **128 measured API quirks** keyed to the operations they affect, so `reai_describe_endpoint` warns you before the API rejects you.
 - **Discovery works in Norwegian** — *"lønnskjøring"*, *"send fakturaen"* — measured against three query corpora.
@@ -23,7 +23,7 @@ Full reference material lives in [`docs/`](docs/): [every tool and what each dom
 
 ## Why this exists
 
-ReAI's API is genuinely good — 321 documented operations covering the whole accounting domain. But that is far too many to expose as 321 MCP tools: it would exhaust any client's tool budget and bury the agent in choices.
+ReAI's API is genuinely good — 320 documented operations covering the whole accounting domain. But that is far too many to expose as 320 MCP tools: it would exhaust any client's tool budget and bury the agent in choices.
 
 So this server does two things at once:
 
@@ -58,7 +58,7 @@ hatch is — they converge on the same gates, in this order:
 ```
   curated tool (170) ---+
                         +---> 1. write policy .......... REAI_WRITE_MODE
-  reai_request (321) ---+     2. external-send gate .... REAI_ALLOW_EXTERNAL_SEND  ---> ReAI API
+  reai_request (320) ---+     2. external-send gate .... REAI_ALLOW_EXTERNAL_SEND  ---> ReAI API
                               3. PUT omission gate ..... reai_request only
 ```
 
@@ -231,7 +231,7 @@ Then work normally. Set `REAI_TENANT_ID` to skip step 2.
 
 7 tools are always on: `reai_whoami` and `reai_use_tenant` for orientation, and the escape hatch —
 `reai_list_api_tags`, `reai_search_endpoints`, `reai_describe_endpoint`, `reai_api_notes` and
-`reai_request` — which between them reach all 321 public operations. They cannot be disabled, so a
+`reai_request` — which between them reach all 320 public operations. They cannot be disabled, so a
 narrowed server still reaches everything.
 
 The other 170 are curated, in thirteen groups. **[docs/tools.md](docs/tools.md) is the reference**:
@@ -314,7 +314,7 @@ Most of what this server knows about ReAI was learned from a rejected request ra
 reading the spec. Rather than leave that in commit messages, it lives in
 [`src/reai/quirks.ts`](src/reai/quirks.ts) as **128 quirks keyed to the operations they affect** — so
 they surface automatically in `reai_describe_endpoint` and `reai_search_endpoints`, including for the
-132 public operations no curated tool covers. A test asserts every quirk still matches a real
+131 public operations no curated tool covers. A test asserts every quirk still matches a real
 operation in the spec, so they cannot quietly rot as the API changes.
 
 Four to give the flavour: an invoice is created from an *order*, not from line items; there is no

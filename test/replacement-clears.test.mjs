@@ -249,7 +249,7 @@ test("the refusal says why THIS endpoint is irreversible, not what the class usu
   assert.match(r.text, /send the missing fields rather than to raise the write mode/);
 
   // A path that IS in the class for the usual reasons must still read sensibly.
-  const voucher = await raw("POST", "/api/vouchers", {}, "reversible");
+  const voucher = await raw("POST", "/api/manual-vouchers", {}, "reversible");
   assert.equal(voucher.refused, true);
   assert.match(voucher.text, /classified "irreversible"/);
 });

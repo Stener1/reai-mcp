@@ -142,7 +142,7 @@ if (!Number.isInteger(tenantId)) {
  *
  * The first version relied on the method being a literal in the source plus a test that grepped for it.
  * Review broke that in one line: keep `method: "GET"` and add `...EXTRA` after it, where EXTRA computes
- * `{ method: "POST" }` — the audit then issued real POSTs to /api/vouchers and /api/opening-balances with
+ * `{ method: "POST" }` — the audit then issued real POSTs to /api/vouchers and /api/opening-balance with
  * all nine guard tests green. The same review showed the classification assertion was tautological:
  * `classifyRequest("GET", anything)` returns "read" by an early return in policy.ts, so it could not fail
  * for any path.
@@ -405,14 +405,14 @@ const CASES = [
     quirk: "empty-state-is-404",
     claim: "a 404 on these means nothing has been set up yet, and the detail says so in words",
     marker: "A 404 here means NOTHING HAS BEEN SET UP YET",
-    probes: ["/api/opening-balances", "/api/annual-accounts/1997"],
+    probes: ["/api/opening-balance", "/api/annual-accounts/1997"],
     async check() {
       // Both details the note quotes, because the claim is that the WORDING carries the meaning.
       // 1997 rather than 2025: 2634 is a real company that will plausibly file 2025, and the moment it does
       // this case loses a probe and (under the both-must-answer rule below) goes inconclusive forever. A
       // fiscal year before the company existed can never be filed, so the empty state stays observable.
       const cases = [
-        ["/api/opening-balances", /opening balance not found/i],
+        ["/api/opening-balance", /opening balance not found/i],
         ["/api/annual-accounts/1997", /no annual-accounts submission exists for fiscal year 1997/i],
       ];
       const seen = [];

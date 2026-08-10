@@ -176,8 +176,8 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
         // projectId and employeeId — the names were there, just never scored.
         [fieldNamesOf(op), 3, false, "prose"],
         // A seventh haystack was tried here and rejected: a phrase derived from method and path, for the
-        // 178 bare operations that carry NO summary and NO description, so ranking could see the verb a
-        // path cannot carry. Measured across all 178 bare operations: one improvement, one regression —
+        // 173 bare operations that carry NO summary and NO description, so ranking could see the verb a
+        // path cannot carry. Measured across all 173 bare operations: one improvement, one regression —
         // and at no defensible weight could it win the case it was built for. docs/discovery.md records
         // the measurement and why it is weaker evidence than it first looks.
       ];

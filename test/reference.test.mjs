@@ -121,7 +121,7 @@ test("a non-list response is not reported as an empty list", async () => {
 // handler now inspects. A stub throwing `new Error("... HTTP 404 ...")` used to satisfy it, and that
 // was the weakness review named: any failure whose text happened to contain both "HTTP 404" and the
 // phrase would have been reported as an empty set of books.
-const apiError = (status, message, path = "/api/opening-balances") =>
+const apiError = (status, message, path = "/api/opening-balance") =>
   new ReaiApiError({
     status,
     method: "GET",
