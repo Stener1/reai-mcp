@@ -9,6 +9,30 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Two tools for the document behind a record: `reai_list_attachments` and `reai_get_attachment`.** An agent
+  looking at supplier invoice 5830 had no curated way to reach the PDF it came from — 15 of the 16
+  attachment-related operations were uncovered, only the EHF parse was wrapped.
+  - Measured on 2634 against attachment 19780 (`faktura_2026_10009.pdf`, 1,784,632 bytes) on 2026-08-10.
+  - **There is no global list**, so the owner-scoped routes ARE the discovery path: `GET /api/attachments` is
+    405 because only `POST` exists on that collection. An unknown owner answers 404 naming the owner, so an
+    empty list means the record exists with no files — a different answer.
+  - **The scoped list leaves `usedBy` null; the by-id fetch fills it in.** So "what else references this file"
+    is a question only `reai_get_attachment` can answer, and it is the one to ask before deleting. Also
+    measured: `contentUrl` on a scoped row points at the OWNER path, not `/api/attachments/{id}/content`.
+  - **Neither tool returns the file.** Content is the raw document — 1.7 MB of `application/pdf` for that one —
+    so the tools report the URL and leave fetching outside this protocol. And `/ehf` **and** `/embedded-files`
+    are both EHF-only despite the second one's generic name: both answer
+    `400 "Attachment is not a valid EHF XML"` on a PDF.
+  - `GET /attachments/{id}` and `/attachments/{id}/view/{filename}` (no `/api`) are **not API endpoints** — they
+    return the web app's HTML shell with a 200 for any id, without authentication, identical to a nonsense path.
+    `reai_request` already recognises that and says so instead of handing back HTML, which I verified rather
+    than assuming.
+  - **177 tools**: 170 across thirteen accounting domains, plus 7 always-on. Nine repo guards fired on the two
+    new tools — the tool count in four files, the purchase subtotal, the uncovered- and bare-operation counts,
+    documentation, a cross-toolset reference, and the `reai_get_*` argument-naming convention (my getter took
+    `attachmentId`; the convention is `id`, because two spellings make an agent guess and get "Invalid arguments
+    for tool"). Every one was a real inconsistency, not a false alarm.
+
 - **Every list tool told agents to use a paging parameter that does not exist and is silently ignored.** The
   shared array-truncation note in `okList` ended *"or use the limit/page parameters"*. Measured against the spec
   and the live API, that was wrong twice over:

@@ -514,6 +514,10 @@ const CROSS_GROUP_REFERENCES = new Set([
   // update does, and naming the precedent is the clearest way to say the tier is about the operation rather
   // than the care taken over it.
   "sales: reai_update_order -> reai_update_agreement",
+  // reai_list_attachments spans both domains by nature — an attachment hangs off an ORDER or a supplier
+  // invoice — so it lives in `purchase` while one of the two ids it takes comes from `sales`. The description
+  // says the order path needs that toolset, and reai_request reaches the endpoint either way.
+  "purchase: reai_list_attachments -> reai_list_orders",
 ]);
 
 test("a description that points across toolsets is recorded, not accidental", async () => {
