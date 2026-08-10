@@ -9,6 +9,17 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **Codex found the same two defects independently, and one of its findings implied a third I had missed.** Both
+  were already fixed when it reviewed; it was looking at the previous head.
+  - Its remark about the multipart route led to something neither the note nor the description had said: the two
+    upload routes sit at **different write tiers**. `POST /api/supplier-invoices/{id}/attachments` is classified
+    **irreversible**, so it is refused at the default `REAI_WRITE_MODE=reversible` before the multipart problem
+    is even reached, while `POST /api/attachments` and both link routes are reversible. Added — and asserted
+    against `classifyRequest` rather than restated in prose, so the sentence cannot outlive the classification.
+  - On why the quirk lists four paths instead of using `match: "descendants"`: descendants on
+    `/api/supplier-invoices/{id}/attachments` would also attach the note to `.../{attachmentId}/content`, a
+    plain download that has nothing to do with how a file gets attached.
+
 - **Review found three of my claims false, one of them a quote the API never emits — which I had then pinned as
   verbatim.** The measurements about *which* route takes what held; almost everything I inferred around them did
   not.

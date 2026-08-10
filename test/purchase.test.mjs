@@ -317,6 +317,15 @@ test("the attach workflow says which owner takes a file and which takes a link",
   // And the two things this server cannot do, which the first version told agents to do anyway.
   assert.match(note, /never constructs a multipart body/);
   assert.match(note, /NO delete route/);
+
+  // The write tier, which neither the note nor the description had mentioned: the supplier-invoice upload is
+  // classified irreversible, so it is refused at the default write mode before multipart is even a problem.
+  // Asserted against the classifier rather than restated, so the sentence cannot outlive the classification.
+  const { classifyRequest } = await import("../dist/policy.js");
+  assert.equal(classifyRequest("POST", "/api/supplier-invoices/1/attachments"), "irreversible");
+  assert.equal(classifyRequest("POST", "/api/supplier-invoices/1/attachments/existing"), "irreversible");
+  assert.equal(classifyRequest("POST", "/api/orders/1/attachments"), "reversible");
+  assert.match(note, /classified irreversible and is\s+"?\s*\+?\s*"?therefore refused at the default/s);
 });
 
 test("reai_list_attachments does not tell an agent to upload through this server", async () => {

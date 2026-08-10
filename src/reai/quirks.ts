@@ -2166,6 +2166,10 @@ export const QUIRKS: readonly Quirk[] = [
       "record exists. With a valid JSON body the same nonexistent order answers 404 naming it.\n\n" +
       "The 415 detail echoes the Content-Type header back INCLUDING its boundary and charset, so it differs on " +
       "every request and is not a string to match on. Match the status, not the message.\n\n" +
+      "The two upload routes also sit at different WRITE TIERS, which matters before the multipart problem " +
+      "below is even reached: POST /api/supplier-invoices/{id}/attachments is classified irreversible and is " +
+      "therefore refused at the default REAI_WRITE_MODE=reversible, while POST /api/attachments and the two " +
+      "link routes are reversible.\n\n" +
       "TWO THINGS THIS SERVER CANNOT DO, so plan around them rather than retrying. It never constructs a " +
       "multipart body — reai_request transports its `body` as JSON — so neither upload route is reachable " +
       "through it at all; the upload belongs in the ReAI web UI or another client. And an attachment, once " +
