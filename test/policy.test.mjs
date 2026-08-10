@@ -1448,3 +1448,75 @@ test("narrowerWriteMode fails closed on a mode it does not recognise", async () 
   assert.equal(narrowerWriteMode("readonly", "full"), "read-only");
   assert.equal(narrowerWriteMode("READ-ONLY", "reversible"), "read-only");
 });
+
+test("the reversible tier turns on ADDITIVE, not deletable, and two of its operations are permanent", async () => {
+  // The tier's definition used to say "creates or edits master data that can be cleanly deleted again", and
+  // deletable is not what it turns on — additive is. `reversible` is the DEFAULT write mode, so that sentence is
+  // what someone reads when deciding what to allow, which is why the wording matters.
+  //
+  // What this is NOT: a misclassification. The PR that added the attachment tools claimed the tier assignment
+  // itself was a defect. It is not — the classifier already reasons in exactly these terms and says so, treating
+  // PATCH on an attachment as irreversible "because no DELETE exists under /api/attachments to undo it" while
+  // recording that "UPLOADING a new attachment is additive and stays reversible". The claim was the defect, and
+  // this test exists so the sentence and the reasoning cannot drift apart again.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { join, dirname } = await import("node:path");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const spec = JSON.parse(readFileSync(join(repo, "spec", "reai-openapi.json"), "utf8"));
+  const deletes = Object.keys(spec.paths ?? {}).filter((p) => spec.paths[p].delete);
+  // A floor so the sweep cannot silently stop reading the spec. It cannot pin its own loosening — while both
+  // facts hold, lowering it fails nothing — which is the same limit the sibling count guards record.
+  assert.ok(deletes.length > 30, `only ${deletes.length} DELETE routes found; this sweep is reading nothing`);
+
+  // 1. An attachment cannot be deleted. The two attachment DELETEs UNLINK a file from an owner — they are under
+  //    /api/orders and /api/vouchers, not under /api/attachments — so the record itself is permanent.
+  const underAttachments = deletes.filter((p) => p.startsWith("/api/attachments"));
+  assert.deepEqual(
+    underAttachments,
+    [],
+    `a DELETE now exists under /api/attachments (${underAttachments.join(", ")}) — if an attachment can be ` +
+      `removed, the exception in the Risk doc comment should go`,
+  );
+  assert.equal(classifyRequest("POST", "/api/attachments"), "reversible");
+  // And the unlink routes DO exist, or the sentence explaining why the deletes above are not deletions is wrong.
+  for (const unlink of ["/api/orders/{id}/attachments/{attachmentId}", "/api/vouchers/{id}/attachments/{attachmentId}"]) {
+    assert.ok(deletes.includes(unlink), `${unlink} should exist — it is what the doc comment calls an unlink`);
+  }
+
+  // 2. A lead contact event cannot be deleted either, and this one is the reason no general check is possible:
+  //    /api/leads HAS deletes — of the LEAD — so a collection-root heuristic would clear it. Asserted on the
+  //    resource name instead.
+  const contactEventDeletes = deletes.filter((p) => /contact-?events?/i.test(p));
+  assert.deepEqual(contactEventDeletes, [], `a contact-event DELETE now exists: ${contactEventDeletes.join(", ")}`);
+  assert.ok(
+    deletes.some((p) => p.startsWith("/api/leads")),
+    "the point of the previous assertion is that /api/leads does have deletes; if it stops, rewrite the reason",
+  );
+  for (const path of ["/api/leads/{id}/contact-events", "/api/leads/org/{orgNumber}/contact-events"]) {
+    assert.equal(classifyRequest("POST", path), "reversible", `${path} should stay in the reversible tier`);
+  }
+
+  // 3. The doc comment must carry both exceptions and must NOT carry the old promise.
+  const policy = readFileSync(join(repo, "src", "policy.ts"), "utf8");
+  // The phrase may appear, but only as a RETRACTION. The first version of this assertion forbade it outright and
+  // failed on the doc comment's own "It used to read …", which is exactly the sentence that fixes the problem —
+  // a guard that punishes the correction is worse than no guard.
+  // Both comment leaders. Stripping only `*` left `//` inside the flattened text, so the agreement comment's
+  // retraction read "is not // what this is" and did not match — the sibling docs test learned the same lesson.
+  const flattened = policy.replace(/\s*\n\s*(?:\*|\/\/)?\s*/g, " ");
+  // BOTH sides of the phrase. The retraction can precede it ("the wording used to be …") or follow it — the
+  // pre-existing comment on agreement templates ends "… is not what this is", and a backward-only window failed
+  // that one, which is a correct retraction written the other way round.
+  for (const m of flattened.matchAll(/master data that can be cleanly deleted again/g)) {
+    const window = flattened.slice(Math.max(0, m.index - 110), m.index + m[0].length + 60);
+    assert.match(
+      window,
+      /used to (read|be)|is false|is not what this is|no longer|retract|pushing back/i,
+      `the old promise appears as a claim rather than a retraction: …${window.slice(0, 120)}`,
+    );
+  }
+  for (const named of ["POST /api/attachments", "contact-events"]) {
+    assert.ok(policy.includes(named), `the tier definition should name ${named} as an exception`);
+  }
+});

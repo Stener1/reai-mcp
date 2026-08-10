@@ -9,6 +9,31 @@ All notable changes to `reai-mcp`. Format loosely follows
 
 ### Added
 
+- **A claim I made last PR was wrong, and the repo already had the right answer written down.** I said
+  `POST /api/attachments` being classified `reversible` "is wrong", because nothing can delete an attachment. It
+  is not wrong — it is **deliberate**, and `src/policy.ts` had reasoned about that exact case for some time: it
+  promotes `PATCH`/`PUT` on an attachment to irreversible *because* "no DELETE exists under /api/attachments to
+  undo it", while recording that "UPLOADING a new attachment is additive and stays reversible". A third comment,
+  on the agreement templates, already pushes back on the phrase I built the claim on.
+  - What WAS wrong is the tier's one-line definition: *"Creates or edits master data that can be cleanly deleted
+    again."* The tier turns on **additive**, not deletable, which is how the classifier below it already reasons.
+    Fixed, with the two operations the old promise is false for named in it: `POST /api/attachments` and
+    `POST /api/leads/{id}/contact-events` (plus its `/org/{orgNumber}` form), for which no DELETE exists at all.
+    `reai_log_lead_contact` has always said so in its own text.
+  - `test/policy.test.mjs` now asserts both facts against the pinned spec, so the sentence and the reasoning
+    cannot drift apart: no DELETE under `/api/attachments`, none mentioning contact events, and both operations
+    still `reversible`. It also asserts the old promise appears **only as a retraction**.
+  - **There is no way to derive "removable" from the spec, and the near miss is worth recording.** `/api/leads`
+    HAS deletes — of the lead, not of its contact events — so the obvious collection-root heuristic clears the
+    one case that most needs catching. My first survey also cleared the five agreement creates as unremovable
+    because their `DELETE` lives at `/api/agreements/{id}`, a different path shape from the create. A guard built
+    on either version would have covered one of the two real cases and read as covering both.
+- Three defects in my own first attempt at the guard, all of the same kind — a check that punishes the
+  correction it is meant to protect. It forbade the retracted phrase outright and so failed on the doc comment's
+  own *"the wording used to be …"*; then it looked only BEHIND the phrase and failed the pre-existing agreement
+  comment, whose retraction comes after it; then its flatten stripped `*` comment leaders but not `//`, so that
+  retraction read *"is not // what this is"* and matched nothing.
+
 - **Codex found the same two defects independently, and one of its findings implied a third I had missed.** Both
   were already fixed when it reviewed; it was looking at the previous head.
   - Its remark about the multipart route led to something neither the note nor the description had said: the two

@@ -48,7 +48,29 @@ export function parseWriteMode(raw: string | undefined): WriteMode {
 export type Risk =
   /** Reads nothing but data. Always allowed. */
   | "read"
-  /** Creates or edits master data that can be cleanly deleted again. */
+  /**
+   * ADDITIVE master data: it creates or edits a record, and does not touch the ledger, issue a legal document,
+   * move money, run payroll, file with an authority, or administer users and tenants. That is what an operator
+   * running at the default `reversible` mode is agreeing to.
+   *
+   * The wording used to be "creates or edits master data that can be cleanly deleted again", and *deletable* is
+   * not what this tier turns on — *additive* is. The classifier below already reasons that way and says so in
+   * two places: `PATCH`/`PUT` on an attachment is promoted to irreversible because "no DELETE exists under
+   * /api/attachments to undo it", while "UPLOADING a new attachment is additive and stays reversible"; and the
+   * agreement templates carry the same split, with the comment there pushing back on this very phrase.
+   *
+   * So two operations sit in this tier that nothing can remove — `POST /api/attachments`, and
+   * `POST /api/leads/{id}/contact-events` (and its `/org/{orgNumber}` form), for which no DELETE exists at all.
+   * Both belong here: adding a file or logging that someone was called is not the risk the irreversible tier is
+   * about, and refusing to store a file at the default mode would be wrong in the other direction. What was
+   * wrong was the sentence, not the classification — a correction to a claim made in the PR that added the
+   * attachment tools, which asserted the tier assignment itself was a defect. It is not; it is deliberate, and
+   * the reasoning was already in this file.
+   *
+   * Note for anyone tempted to derive "removable" automatically: it cannot be done from the spec. `/api/leads`
+   * HAS deletes — of the lead, not of its contact events — so the obvious collection-root heuristic clears the
+   * one case that most needs catching. `test/policy.test.mjs` asserts the two facts directly instead.
+   */
   | "reversible"
   /**
    * Touches the ledger, issues a legal document, moves money, runs payroll,
