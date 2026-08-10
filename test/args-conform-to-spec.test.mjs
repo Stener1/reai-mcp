@@ -25,7 +25,15 @@ import { uiTools } from "../dist/tools/ui.js";
  * an argument will see the requirement.
  */
 
-/** An optional (or bare) `z.literal(true)` — a confirmation gate. Never sent; its job is to make a caller stop. */
+/**
+ * An optional (or bare) `z.literal(true)`.
+ *
+ * NOT an exemption. It was one, and review was right that it should not be: a literal-true schema constrains the
+ * accepted VALUE and says nothing about whether the handler forwards the argument. A future tool sending an
+ * undeclared true-only API flag would have been waved through by exactly the silent-discard route this check
+ * guards. Acknowledgement gates are declared in `localArgs` like every other locally-consumed argument; this
+ * predicate survives only so the test below can assert such arguments exist and are declared.
+ */
 function isAcknowledgementGate(schema) {
   const def = schema?._def;
   const inner = def?.typeName === "ZodOptional" ? def.innerType?._def : def;
@@ -45,13 +53,33 @@ const SERVER_CONSUMED = new Set(["tenantId", "clearOmittedFields", "binary"]);
  * Does `arg` name a path parameter of `op`, allowing the repo's `<resource>Id` convention?
  *
  * `reai_delete_asset` takes `assetId` for `/api/assets/{id}` deliberately — a bare `id` beside `tenantId` reads
- * as ambiguous in a tool call. The alias is only accepted for an `id`-shaped parameter, so this can never excuse
- * a body field: `name` or `accountNumber` will not pass.
+ * as ambiguous in a tool call.
+ *
+ * The alias must correspond to THIS path's resource, not merely end in `Id`. Accepting any `*Id` was a real hole,
+ * found in review: `customerId`, `supplierId`, `projectId` and `companyBankId` are all ordinary BODY fields with
+ * that shape, so adding one to an unrelated `{id}` tool would have passed the guard even while the handler
+ * forwarded it and the endpoint silently discarded it — precisely the regression this check exists to catch.
+ *
+ * So the accepted alias is derived from the segment preceding the parameter: `/api/assets/{id}` admits `assetId`
+ * and nothing else. An irregular plural, or any other shape, is declared in the tool's `localArgs` instead of
+ * being guessed at here.
  */
 function namesPathParameter(arg, op) {
   const pathParams = (op.params ?? []).filter((p) => p.in === "path").map((p) => p.name);
   if (pathParams.includes(arg)) return true;
-  return pathParams.some((p) => /^id$/i.test(p) && /^[a-z][a-zA-Z]*Id$/.test(arg));
+
+  const segments = op.path.split("/").filter(Boolean);
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (!/^\{id\}$/i.test(segment)) continue;
+    const resource = segments[i - 1];
+    if (resource === undefined || resource.startsWith("{")) continue;
+    // `assets` -> `asset`, `customers` -> `customer`. Hyphens become camelCase: `company-banks` -> `companyBank`.
+    const singular = resource.replace(/s$/, "");
+    const camel = singular.replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+    if (arg === `${camel}Id`) return true;
+  }
+  return false;
 }
 
 /** What an operation declares: top-level body fields plus every parameter. */
@@ -85,9 +113,8 @@ test("no curated tool accepts an argument its endpoint does not declare", () => 
     const declared = declaredBy(ops);
     const local = new Set(tool.localArgs ?? []);
 
-    for (const [arg, schema] of Object.entries(tool.inputSchema ?? {})) {
+    for (const [arg] of Object.entries(tool.inputSchema ?? {})) {
       if (SERVER_CONSUMED.has(arg)) continue;
-      if (isAcknowledgementGate(schema)) continue;
       if (declared.has(arg)) continue;
       if (local.has(arg)) continue;
       if (ops.some((op) => namesPathParameter(arg, op))) continue;
@@ -150,8 +177,35 @@ test("the conformance check can actually fail", () => {
   assert.ok(pairs.length > 100, `only ${pairs.length} tools resolved to operations`);
   const withLocal = TOOLS.filter((t) => (t.localArgs ?? []).length > 0);
   assert.ok(withLocal.length > 0, "no tool declares localArgs, so that exemption is untested");
-  assert.ok(
-    TOOLS.some((t) => Object.values(t.inputSchema ?? {}).some(isAcknowledgementGate)),
-    "no tool has an acknowledgement gate, so that exemption is untested",
-  );
+  // Acknowledgement gates must still EXIST, and must be declared local rather than inferred. If a gate ever
+  // stops being declared, the first assertion in this file fails — which is the point of removing the
+  // inference, so this asserts the arrangement is real and not merely possible.
+  const gated = TOOLS.filter((t) => Object.values(t.inputSchema ?? {}).some(isAcknowledgementGate));
+  assert.ok(gated.length > 0, "no tool has an acknowledgement gate, so that arrangement is untested");
+  for (const tool of gated) {
+    const gates = Object.entries(tool.inputSchema)
+      .filter(([, schema]) => isAcknowledgementGate(schema))
+      .map(([arg]) => arg);
+    const ops = (tool.apiPaths ?? []).map(([m, p]) => findOperation(m, p)).filter(Boolean);
+    const declared = declaredBy(ops);
+    for (const gate of gates) {
+      if (declared.has(gate)) continue; // the endpoint really takes it, so it is not a local gate
+      assert.ok(
+        (tool.localArgs ?? []).includes(gate),
+        `${tool.name}: "${gate}" is a literal-true gate that the endpoint does not declare, so it must appear ` +
+          "in localArgs — a literal-true schema constrains the value, not whether the handler forwards it",
+      );
+    }
+  }
+
+  // The path-parameter rule must be derived from the path, not from the `Id` suffix. These are real body-field
+  // names elsewhere in the spec, and accepting them on an unrelated {id} tool was the hole review found.
+  const assets = findOperation("DELETE", "/api/assets/{id}");
+  for (const foreign of ["customerId", "supplierId", "projectId", "companyBankId"]) {
+    assert.equal(
+      namesPathParameter(foreign, assets),
+      false,
+      `${foreign} is an ordinary body field elsewhere and must not pass as an alias for /api/assets/{id}`,
+    );
+  }
 });
