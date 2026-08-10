@@ -81,6 +81,20 @@ const MUST_FAIL = [
     '<style>/* <!-- */</style><script src="w.js"></script><!-- end -->',
     "script",
   ],
+  // Round 6, the MIRROR case: an unmatched raw-text opener inside a comment must not pair with the next real
+  // closing tag. Ordering the two transformations either way produced one of these two false PASSes, which is
+  // why the module now makes a single context-aware pass instead.
+  [
+    "a loader after a comment-local <script> opener",
+    '<!-- stale <script> --><img src="remote.png"><script>ok</script>',
+    "img",
+  ],
+  [
+    "a loader after a comment-local <style> opener",
+    '<!-- <style> --><img src="remote.png"><style>p{}</style>',
+    "img",
+  ],
+  ["both contexts interleaved", '<!-- <script> --><script>x="<!--"</script><img src="a.png">', "img"],
   // An image-button input DOES load.
   ["an image-button input", '<input type="image" src="remote.png">', "input"],
   // xlink:href is consulted when href is absent.

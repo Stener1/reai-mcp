@@ -84,21 +84,66 @@ const EMBEDDED_SCHEME = /^data:/i;
  * Without this, `href=` written inside the inline script — ordinary for code that builds markup — reads as a
  * reference. The opening tag is preserved so `<script src=…>` is still visible.
  */
-function stripComments(html) {
-  // A comment performs no fetch, so markup inside one is inert. Templates plausibly carry a disabled example
-  // or a note containing markup, and reporting it would fail a self-contained document.
-  return html.replace(/<!--[\s\S]*?-->/g, "");
+/**
+ * The document with comments and raw-text bodies removed, leaving only live markup.
+ *
+ * This is ONE left-to-right pass, and it has to be. Comments and raw-text elements (`script`, `style`) can each
+ * open a context inside the other, so two independent global replacements are wrong in whichever order they
+ * run — measured, both ways:
+ *
+ *   comments first:  <script>const m="<!--";</script><img src="remote.png"><!-- footer -->
+ *                    the script-local `<!--` pairs with the real `-->` and the img is erased.
+ *   raw text first:  <!-- stale <script> --><img src="remote.png"><script>ok</script>
+ *                    the comment-local `<script>` pairs with the real `</script>` and the img is erased.
+ *
+ * Both are false PASSes on a document that fetches an ordinary image. I shipped the first, review caught it, I
+ * shipped the second fixing it, and review caught that — which is the signal that ordering was never the
+ * question. A scan that recognises whichever context STARTS first cannot have either bug.
+ *
+ * The opening tag of a raw-text element is kept, because `<script src=…>` is itself a reference.
+ */
+function liveMarkup(html) {
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    if (html.startsWith("<!--", i)) {
+      const end = html.indexOf("-->", i + 4);
+      i = end === -1 ? html.length : end + 3;
+      continue;
+    }
+    const rawText = /^<(script|style)\b/i.exec(html.slice(i));
+    if (rawText) {
+      const tagEnd = endOfTag(html, i);
+      out += html.slice(i, tagEnd); // keep the opening tag; it may carry src=
+      const close = new RegExp(`</${rawText[1]}\\s*>`, "i").exec(html.slice(tagEnd));
+      i = close ? tagEnd + close.index + close[0].length : html.length;
+      continue;
+    }
+    out += html[i];
+    i += 1;
+  }
+  return out;
 }
 
-function blankInlineCode(html) {
-  // The attribute run is quote-aware for the SAME reason the tag scan below is: `[^>]*` stops at a `>` inside a
-  // quoted value, which truncated the opening tag and then blanked the REST of it as if it were script content.
-  // `<script data-note=">" src="widget.js">` lost its src that way — the fix was applied to the tag scan and
-  // not here, so the hole moved rather than closed. Both places parse attributes; both need the same rule.
-  return html.replace(
-    /(<(script|style)\b(?:"[^"]*"|'[^']*'|[^>"'])*>)([\s\S]*?)(<\/\2\s*>)/gi,
-    (_m, open, _tag, _body, close) => `${open}/* inline */${close}`,
-  );
+/**
+ * Index just past the `>` that closes the tag starting at `start`.
+ *
+ * Quote-aware for the same reason the tag scan is: a quoted attribute value may contain `>`, and stopping there
+ * would cut the tag short and spill its attributes into the surrounding text.
+ */
+function endOfTag(html, start) {
+  let quote;
+  for (let i = start + 1; i < html.length; i++) {
+    const ch = html[i];
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === ">") {
+      return i + 1;
+    }
+  }
+  return html.length;
 }
 
 /**
@@ -167,13 +212,7 @@ function srcsetUrls(value) {
  * "not self-contained" and something actionable.
  */
 export function externalReferences(html) {
-  // ORDER MATTERS, and getting it wrong was a defect I introduced when comment-stripping was added.
-  // Stripping comments FIRST lets a `<!--` inside an inline script pair with a later real `-->` and delete
-  // everything between them — including any loader in that span. Measured:
-  //   <script>const marker="<!--";</script><img src="remote.png"><!-- footer -->
-  // reported NO references, so a document that fetches passed. Script and style bodies are raw text and cannot
-  // contain a comment, so they are neutralised first; only then is comment-stripping safe.
-  const scanned = stripComments(blankInlineCode(String(html)));
+  const scanned = liveMarkup(String(html));
   const found = [];
 
   for (const match of scanned.matchAll(TAG)) {
