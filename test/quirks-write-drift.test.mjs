@@ -51,7 +51,7 @@ function auditCases() {
 
 test("every probe names a real quirk and binds to text that still predicts what it measures", () => {
   const cases = auditCases();
-  assert.equal(cases.length, 6, `expected 6 refusal cases, extracted ${cases.length}`);
+  assert.equal(cases.length, 7, `expected 7 refusal cases, extracted ${cases.length}`);
   const byId = new Map(QUIRKS.map((q) => [q.id, q]));
   for (const { quirk, claim, marker } of cases) {
     const q = byId.get(quirk);

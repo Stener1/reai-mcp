@@ -8,20 +8,20 @@
  * rejected on a supplier phone, and that foreign numbers are stored as sent), and PR #123 corrected four
  * places claiming the agreement enums are undocumented when the document declares all fourteen.
  *
- * Two live audits already existed, and between them they named **2 of the 127 quirks**:
- * `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. That 2, and the 127, are exact.
+ * Two live audits already existed, and between them they named **2 of the 128 quirks**:
+ * `tenant-header-ignored-single-tenant` and `customer-name-title-cased`. That 2, and the 128, are exact.
  *
- * How many of the remaining 125 assert something an API call could check is NOT exact, and the number is
+ * How many of the remaining 126 assert something an API call could check is NOT exact, and the number is
  * deliberately not quoted here. A keyword sweep over `note` prose returns 86 or 95 depending on the word
  * list, which makes it a lower bound dressed as a measurement — the false precision `storage-drift` was
  * corrected for, and which its census script prints rather than asserts for the same reason. The exact,
- * checkable statement is the one that matters: of **127** quirks, **17** now have a live case — the 16 here plus
+ * checkable statement is the one that matters: of **128** quirks, **17** now have a live case — the 16 here plus
  * `customer-name-title-cased` in audit-storage.mjs, with `tenant-header-ignored-single-tenant` in both sets —
- * leaving **110** unnamed. This arithmetic has been wrong FOUR times: 124-out-of-122 from double-counting,
+ * leaving **111** unnamed. This arithmetic has been wrong FOUR times: 124-out-of-122 from double-counting,
  * then an 8-case accounting left standing beside a 16-case audit, then this header still saying 8/113 after the
  * docs were corrected, then a PR that added three quirks bumped four of the six places this number is written
  * and left this file and two lines of docs/audits.md behind — which is why a test now checks every stated count
- * rather than the first one in the README. Count distinct ids and check the total against 127.
+ * rather than the first one in the README. Count distinct ids and check the total against 128.
  *
  * This closes the read-only part of that gap. Every request below is a GET, so it runs against any tenant
  * the token reaches, which is why there is no write guard and no `REAI_WRITE_TEST_TENANTS`: nothing here

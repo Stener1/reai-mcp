@@ -354,7 +354,12 @@ export const QUIRKS: readonly Quirk[] = [
       "These return a PAGE OBJECT, not the bare array almost every other collection here returns, " +
       "so iterating the response or reading .length yields nothing. /api/leads gives " +
       "{ items, page, hasPrevious, hasNext, latestRegisteredAt } and takes page plus pageSize " +
-      "(1-200, default 50); /api/leads/person-profiles gives { items, hasMore, nextStartOrgNo, limit } " +
+      "(1-200, default 50). `page` is ONE-based and says so: page=0 is refused, not clamped — 400 with " +
+      "fieldErrors [{ field: \"page\", message: \"must be greater than or equal to 1\" }], measured on 2783 " +
+      "on 2026-08-10. Worth stating because paging on this API usually goes the other way: see " +
+      "paging-parameters-are-ignored-not-refused, where an unsupported paging parameter is silently " +
+      "ignored on a 200. Here it genuinely pages — page=1 and page=2 at pageSize=5 returned disjoint rows. " +
+      "/api/leads/person-profiles gives { items, hasMore, nextStartOrgNo, limit } " +
       "and pages by nextStartOrgNo rather than by number. Read the wrapper before assuming a count. " +
       "/api/leads/person-role-matches is an object too but a DIFFERENT one — " +
       "{ matched, companyMatched, items } with no paging fields at all — so do not assume these " +
@@ -2176,6 +2181,60 @@ export const QUIRKS: readonly Quirk[] = [
       "uploaded, has NO delete route: /api/attachments/{id} is GET and PATCH only, and only orders and " +
       "vouchers have an unlink route. A supplier invoice has none, so a file attached to one cannot be " +
       "detached through the API either.",
+  },
+  {
+    id: "lead-sub-resources-need-a-saved-lead-in-the-id-form",
+    paths: [
+      // The five sub-resources...
+      "/api/leads/{id}/contact",
+      "/api/leads/{id}/contact-events",
+      "/api/leads/{id}/follow-up",
+      "/api/leads/{id}/notes",
+      "/api/leads/{id}/status",
+      // ...and the record itself. PATCH and DELETE carry the identical trap — measured 2026-08-10, both answer
+      // 404 "CRM lead with id=99999999 not found" on a valid-but-absent id. DELETE had no quirk at all before
+      // this. PATCH already has one (lead-patch-cannot-clear-a-field-only-the-put-setters-can); two notes on one
+      // call is fine when they say DIFFERENT things — that one is about clearing fields, this one about
+      // addressing. The duplicate-quirk mistake made with /api/projects was two notes saying the same thing.
+      // GET /api/leads/{id} is deliberately absent: lead-detail-nests-what-the-search-flattens is keyed there
+      // and the addressing advice already lives in that family's prose.
+      "/api/leads/{id}",
+      // NOT /convert. `lead-convert-is-addressable-by-id-only` already covers it, and says more: that the org
+      // form answers 404 "No static resource" and that converting twice is safe.
+    ],
+    // These are the calls that WRITE, so the methods are named rather than left to match everything: a GET on
+    // the same paths is a different question and has its own notes.
+    methods: ["POST", "PUT", "PATCH", "DELETE"],
+    kind: "workflow",
+    note:
+      "Every one of these has an /api/leads/org/{orgNumber} twin, and the org form is the one to use — with " +
+      "ONE exception that has to come first, because taking the advice literally there is worse than the " +
+      "error it replaces. On /contact, the org twin does NOT create the row: measured 2026-08-10 on 2783, " +
+      "PUT /api/leads/org/{orgNumber}/contact against a company with no lead row answers 200, echoes the " +
+      "company back, and stores neither email nor phone. So for contact details, create the lead FIRST " +
+      "(POST /api/leads, or reai_save_lead) and then set them — reai_update_lead already does exactly " +
+      "that, in that order, for this reason. For every other field the org form is safe to write " +
+      "directly, because the first write creates the row " +
+      "(lead-rows-are-created-by-the-first-write-except-contact).\n\n" +
+      "A row from GET /api/leads carries `id: null` for any company nobody on this tenant has touched — which " +
+      "is not the exception but the rule, because the search covers the Norwegian company register rather than " +
+      "the tenant's own records: measured 2026-08-10, 250 of 250 distinct rows on 2783 AND 250 of 250 on 2634 " +
+      "came back with id: null. Substituting that null gives 400 \"Failed to convert 'id' with value: 'null'\" " +
+      "on /contact, /contact-events, /follow-up, /notes and /status alike, and on PATCH and DELETE of the " +
+      "record. A numerically valid but absent id is a DIFFERENT failure — 404 \"CRM lead with id=99999999 not " +
+      "found\" — so the two say different things: the first means you have no lead yet, the second means you " +
+      "have the wrong one.\n\n" +
+      "(One wrinkle on PATCH: it validates the BODY before the id, so an unrecognised field answers 400 " +
+      "\"Unknown field: <name>\" even when the id is also absent. Send a documented field — status, notes, " +
+      "email, phone, followUpAt — before concluding anything about the id.)\n\n" +
+      "What makes the org form the right default is that an organisation number is on every row whether the " +
+      "company is saved or not, so it can address a company that has no id yet — which the id form, by " +
+      "construction, cannot.\n\n" +
+      "That is why NO curated lead tool on this server is addressed by lead id: 6 of the 7 take `orgNumber`, " +
+      "and the seventh is reai_search_leads, which is the search that produces the rows. reai_convert_lead " +
+      "takes an orgNumber too and resolves the id itself, because /convert is the exception in the other " +
+      "direction — id-only, so it needs a saved lead first. It has its own note: " +
+      "lead-convert-is-addressable-by-id-only.",
   },
 ];
 

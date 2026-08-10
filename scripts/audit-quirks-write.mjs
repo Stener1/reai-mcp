@@ -469,6 +469,46 @@ const CASES = [
           ];
     },
   },
+  {
+    quirk: "lead-sub-resources-need-a-saved-lead-in-the-id-form",
+    probes: ["/api/leads/{id}/contact-events", "/api/leads/{id}"],
+    unprobedClaims:
+      "the DELETE half. DELETE /api/leads/{id} carries the same 404, but rule 1 excludes it: if the refusal " +
+      "ever stopped working the request would go through, and deleting a lead is not a harmless success. The " +
+      "404 is probed via PATCH instead, which is refused by the same id lookup and would at worst set a note",
+    claim:
+      "a write addressed by lead id is refused two different ways — 400 for the null an untouched search row " +
+      "carries, 404 for a numerically valid id that does not exist",
+    marker: "Failed to convert 'id' with value: 'null'",
+    async check() {
+      // The null half cannot succeed under any drift: there is no route that accepts a non-integer here, so
+      // this probe is safe by construction rather than by the refusal holding.
+      const nul = await call("POST", "/api/leads/null/contact-events", {
+        contactType: "PHONE",
+        occurredAt: today(),
+      });
+      if (nul.status < 300) {
+        return ["safety", `a lead sub-resource accepted the literal null as an id (${nul.status})`];
+      }
+      if (nul.status !== 400) return ["inconclusive", `the null id answered ${nul.status}, not the documented 400`];
+      if (!/Failed to convert 'id' with value: 'null'/.test(detailOf(nul))) {
+        return ["drift", `the 400 message changed: ${detailOf(nul)}`];
+      }
+
+      // The absent-id half. A documented field, because PATCH validates the BODY before the id — an unknown
+      // field answers 400 "Unknown field: …" and the id claim is never reached. That is in the note too.
+      const absent = await call("PATCH", "/api/leads/99999999", { notes: "audit-refusal-probe" });
+      if (absent.status < 300) {
+        return ["safety", "lead id 99999999 exists on this tenant and was just PATCHED — pick another id"];
+      }
+      if (absent.status !== 404) {
+        return ["drift", `a valid-but-absent lead id answered ${absent.status}, not 404: ${detailOf(absent)}`];
+      }
+      return /not found/i.test(detailOf(absent))
+        ? ["ok", `400 ${detailOf(nul)} / 404 ${detailOf(absent)}`]
+        : ["drift", `the 404 no longer reads as not-found: ${detailOf(absent)}`];
+    },
+  },
 ];
 
 /** An existing customer id, archived ones included — a line needs one and this tenant may have no active ones. */

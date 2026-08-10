@@ -469,6 +469,55 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
  * "/api/vat-returns/reopen" resolves to the literal operation rather than to a
  * "/api/vat-returns/{id}"-shaped one.
  */
+/**
+ * Why did no operation match this path?
+ *
+ * `resolveOperation` refuses a non-numeric segment where the spec declares an integer path parameter, and it is
+ * right to: that is what keeps `/api/users/permissions` from resolving to `/api/users/{id}`. But the caller then
+ * gets nothing, and `enrichRequestFailure` bails before any quirk or hint can be attached — so the failure an
+ * agent is most likely to cause arrives with the least help.
+ *
+ * The case that motivated this: `GET /api/leads` returns rows whose `id` is **null** for every company nobody on
+ * the tenant has touched, and an agent that substitutes it calls `/api/leads/null/notes`. Measured, the API
+ * answers 400 "Failed to convert 'id' with value: 'null'", and the server added the generic
+ * "the body or query parameters were rejected" hint — pointing at the body, when the path was the problem.
+ *
+ * Returns the spec-form path and the offending segment when exactly one operation would have matched but for a
+ * parameter type, so a caller can say which segment to fix and what to use instead. Deliberately narrow: if
+ * several candidates fit, or the shape is wrong for another reason, it returns nothing rather than guessing.
+ */
+export function explainUnresolvedPath(
+  method: HttpMethod,
+  path: string,
+): { specPath: string; parameter: string; got: string } | undefined {
+  const wanted = normalizePath(path).split("/");
+  const candidates: Array<{ specPath: string; parameter: string; got: string }> = [];
+  for (const op of getSpecIndex().operations) {
+    if (op.method !== method) continue;
+    const segments = op.path.split("/");
+    if (segments.length !== wanted.length) continue;
+    let mismatch: { parameter: string; got: string } | undefined;
+    let ok = true;
+    for (let i = 0; i < segments.length; i++) {
+      const spec = segments[i] ?? "";
+      const actual = wanted[i] ?? "";
+      if (spec.startsWith("{") && spec.endsWith("}")) {
+        const name = spec.slice(1, -1);
+        const declared = (op.params ?? []).find((prm) => prm.in === "path" && prm.name === name);
+        if (declared && /^integer|^number/.test(declared.type) && !/^-?\d+$/.test(actual)) {
+          // The FIRST such mismatch only. Two wrong parameters is not a case worth naming precisely.
+          if (mismatch) { ok = false; break; }
+          mismatch = { parameter: name, got: actual };
+        }
+        continue;
+      }
+      if (spec !== actual) { ok = false; break; }
+    }
+    if (ok && mismatch) candidates.push({ specPath: op.path, ...mismatch });
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 export function resolveOperation(method: string, concretePath: string): SpecOperation | undefined {
   const index = getSpecIndex();
   const wantMethod = method.toUpperCase();

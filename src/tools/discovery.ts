@@ -2,6 +2,7 @@ import { z } from "zod";
 import { defineTool, ok, okText, tenantIdArg, resolveTenantId, type ToolDef } from "./registry.js";
 import {
   describeOperation,
+  explainUnresolvedPath,
   findOperation,
   getSpecIndex,
   missingRequired,
@@ -405,7 +406,47 @@ function enrichRequestFailure(
   if (err.status < 400 || err.status > 599) return err;
 
   const op = resolveOperation(method, path);
-  if (!op) return err;
+  if (!op) {
+    // Before giving up: the path may have failed to resolve because a segment is the wrong TYPE for a declared
+    // parameter, which is the most likely mistake an agent makes and the one that arrived with the least help.
+    // `GET /api/leads` returns rows whose `id` is null for every untouched company, so an agent substituting it
+    // calls `/api/leads/null/notes` — the API answers 400 and this function used to bail, leaving only the
+    // generic "the body or query parameters were rejected" hint, which points at the body when the path is wrong.
+    const why = explainUnresolvedPath(method, path);
+    if (!why) return err;
+    // The org-number twin is the fix for every lead path EXCEPT /contact, where recommending it unconditionally
+    // would be worse than the 400: measured on 2783 on 2026-08-10, PUT /api/leads/org/{orgNumber}/contact on a
+    // company with no lead row answers 200, echoes the company back, and stores neither email nor phone — a
+    // loud failure turned into a silent one. So that path is told to create the row first.
+    const orgTwin = why.specPath.replace("/{id}", "/org/{orgNumber}");
+    const alternative = !why.specPath.startsWith("/api/leads/{id}")
+      ? ``
+      : why.specPath.endsWith("/contact")
+        ? ` Address leads by organisation number instead — but NOT by sending this straight to ${orgTwin}: on a ` +
+          `company that has no lead row yet that answers 200 and stores neither email nor phone, which is worse ` +
+          `than this 400 because nothing signals the loss. Create the lead first (reai_save_lead, or ` +
+          `POST /api/leads), then set the contact. reai_update_lead does both in one call.`
+        : ` This API also addresses a lead by organisation number — ${orgTwin} — and that form works whether or ` +
+          `not the company has been saved: the first write CREATES the lead row. That is why none of the ` +
+          `curated lead tools is addressed by lead id.`;
+    // Appended to err.message, the same way the quirk path below does it: the message is what
+    // server.ts reads to build the tool error, so a note attached anywhere else — a `hint` property,
+    // a spread into a new object — is invisible to the agent. Spreading also drops the prototype and
+    // with it `message` itself, which is how the first draft of this delivered nothing at all while a
+    // probe that read the property directly still reported success.
+    err.message =
+      `${err.message}\n` +
+      `The PATH is what was rejected, not the body — so disregard the hint above about required fields: the ` +
+      `\`{${why.parameter}}\` segment of ${why.specPath} is declared as an integer and this call sent ` +
+      `${JSON.stringify(why.got)}. (reai_describe_endpoint answers for ${why.specPath} but NOT for the ` +
+      `concrete path, which resolves to no endpoint at all — that is why this arrived without a schema.)` +
+      (why.got === "null"
+        ? ` A literal "null" usually means it was copied out of a response field that was null — check the ` +
+          `record actually has an id before using it.`
+        : ``) +
+      alternative;
+    return err;
+  }
 
   const extra: string[] = [];
   // Payload analysis belongs only to the statuses that are ABOUT the payload. On a

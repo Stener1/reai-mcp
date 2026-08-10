@@ -948,3 +948,57 @@ test("reai_update_lead routes a whitespace-only value the same way it verifies i
   assert.match(text, /email cleared/, `a blank value is a clear on the calls line too: ${text}`);
   assert.notEqual(result.isError, true);
 });
+
+test("the id form of a lead sub-resource is documented as needing a saved lead", async () => {
+  // Measured on 2783 on 2026-08-10, all four probes failing so nothing was created:
+  //
+  //   PUT  /api/leads/null/follow-up      400 "Failed to convert 'id' with value: 'null'"
+  //   PUT  /api/leads/null/notes          the same
+  //   PUT  /api/leads/null/status         the same
+  //   POST /api/leads/null/contact-events the same
+  //   PUT  /api/leads/99999999/follow-up  404 "CRM lead with id=99999999 not found"
+  //
+  // A row from GET /api/leads carries `id: null` for any company nobody here has touched, which is most of them.
+  // The addressing warning already existed but was attached to GET /api/leads/{id} and to the search — not to
+  // these, which are the calls that WRITE. The last two failures differ, and mean different things.
+  const { quirksFor } = await import("../dist/reai/quirks.js");
+  const ID_FORMS = [
+    ["PUT", "/api/leads/{id}/contact"],
+    ["POST", "/api/leads/{id}/contact-events"],
+    ["PUT", "/api/leads/{id}/follow-up"],
+    ["PUT", "/api/leads/{id}/notes"],
+    ["PUT", "/api/leads/{id}/status"],
+  ];
+  for (const [method, path] of ID_FORMS) {
+    const found = quirksFor(method, path).map((q) => q.id);
+    assert.ok(
+      found.includes("lead-sub-resources-need-a-saved-lead-in-the-id-form"),
+      `${method} ${path} should carry the addressing note, got ${found.join(", ") || "none"}`,
+    );
+  }
+  // The ORG form must NOT carry it — the whole point is that it always works.
+  for (const [method, path] of ID_FORMS) {
+    const org = path.replace("/{id}/", "/org/{orgNumber}/");
+    assert.ok(
+      !quirksFor(method, org).some((q) => q.id === "lead-sub-resources-need-a-saved-lead-in-the-id-form"),
+      `${org} should not carry a warning about the id form`,
+    );
+  }
+  // And /convert must not, because `lead-convert-is-addressable-by-id-only` already says more about it. Two
+  // overlapping notes on one call is the duplicate-quirk mistake made with /api/projects a few changes ago.
+  const convert = quirksFor("POST", "/api/leads/{id}/convert").map((q) => q.id);
+  assert.ok(convert.includes("lead-convert-is-addressable-by-id-only"), "convert keeps its own note");
+  assert.ok(
+    !convert.includes("lead-sub-resources-need-a-saved-lead-in-the-id-form"),
+    "convert should not carry both notes",
+  );
+
+  const note = quirksFor("PUT", "/api/leads/{id}/follow-up").find(
+    (q) => q.id === "lead-sub-resources-need-a-saved-lead-in-the-id-form",
+  ).note;
+  // The two measured failures, verbatim, because they are the API's own words and they differ.
+  for (const measured of [`Failed to convert 'id' with value: 'null'`, "CRM lead with id=99999999 not found"]) {
+    assert.ok(note.includes(measured), `the note should quote ${measured} exactly`);
+  }
+  assert.match(note, /no lead yet, the second means you have the wrong one/);
+});
