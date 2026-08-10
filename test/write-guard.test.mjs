@@ -250,12 +250,17 @@ test("every script that writes calls the guard, checked from the AST", async () 
     ["check-deployed.mjs", "compares git and Cloud Run metadata"],
     ["discovery-sweep.mjs", "offline ranking sweep"],
     ["storage-census.mjs", "counts claims in source"],
-    // Fetches https://app.reai.no/openapi and reads local files. It sends no tenant header and addresses no
-    // tenant, so the tenant guard has nothing to assert — but the exemption is not taken on that reasoning
-    // alone: the script installs installProtectedTenantFetchGuard() as its first executable statement, so a
-    // non-GET is refused at runtime. Same standard as audit-quirks.mjs, enforcement rather than intent. It is
-    // flagged as a writer only because `method.toUpperCase()` appears in it, which is spec ITERATION.
-    ["spec-drift.mjs", "read-only: fetches the spec document, and installs the fetch guard to enforce it"],
+    // Fetches https://app.reai.no/openapi and reads local files. It is flagged as a writer only because
+    // `method.toUpperCase()` appears in it, which is spec ITERATION rather than a request.
+    //
+    // The first version of this entry cited installProtectedTenantFetchGuard() as the enforcement. That was
+    // FALSE and review caught it: that guard rejects a non-GET only when it carries a protected tenant header,
+    // and this script sends none — so it did nothing here, while the exemption caused this very test to skip the
+    // file. A POST added later would have gone out unnoticed, certified by a reason that was never true.
+    //
+    // The script now wraps fetch itself, unconditionally refusing any method but GET whatever headers it
+    // carries, as its first executable statement. The test below pins that.
+    ["spec-drift.mjs", "read-only: wraps fetch to refuse any method but GET, pinned by its own test"],
   ]);
 
   const findings = [];
@@ -419,25 +424,36 @@ test("the read-only smoke forces read-only mode rather than forwarding it", () =
 
 
 /**
- * The exemption granted to spec-drift.mjs claims enforcement, so the enforcement is asserted.
+ * The exemption granted to spec-drift.mjs claims GET-only enforcement, so the mechanism is asserted here and its
+ * behaviour in test/get-only-fetch.test.mjs.
  *
- * Every entry in the EXEMPT map above is a reason written in prose, and prose does not fail when it stops being
- * true. `audit-quirks.mjs` has an AST test holding it to its claim; this does the same for the one exemption
- * whose justification is "installs the fetch guard" rather than "makes no API call at all".
+ * Every entry in the EXEMPT map is a reason written in prose, and prose does not fail when it stops being true.
+ * The first version of this entry cited `installProtectedTenantFetchGuard()`, which review showed does nothing
+ * for a script that sends no tenant header — so it certified a property that was not enforced, and the AST scan
+ * skipped the file on the strength of it. The wrapper now lives in scripts/lib where its refusal is exercised
+ * directly; this asserts spec-drift installs it, first, and has not gone back to the tenant guard.
  */
-test("spec-drift.mjs installs the fetch guard its exemption claims", () => {
+test("spec-drift.mjs installs the GET-only wrapper its exemption claims", () => {
   const source = readFileSync(path.join(SCRIPTS, "spec-drift.mjs"), "utf8");
-  assert.match(
-    source,
-    /^\s*installProtectedTenantFetchGuard\(\);/m,
-    "spec-drift.mjs is exempt from the tenant guard on the grounds that it installs the FETCH guard — and no " +
-      "longer does, so the exemption's stated reason is false",
-  );
-  // Before any other executable statement, or there is a window in which the native fetch is reachable.
-  const guardAt = source.indexOf("installProtectedTenantFetchGuard();");
+
+  assert.match(source, /^\s*installGetOnlyFetch\(\);/m, "spec-drift.mjs no longer installs the GET-only wrapper");
+
+  // Before any other executable statement, or the native fetch is briefly reachable. Import declarations hoist
+  // and do not count.
+  const guardAt = source.indexOf("installGetOnlyFetch();");
   const firstOther = source.search(/^(?:const|let|var|await|if|for|function\s)/m);
-  assert.ok(
-    guardAt >= 0 && (firstOther === -1 || guardAt < firstOther),
-    "the guard must be installed before any other executable statement",
+  assert.ok(firstOther === -1 || guardAt < firstOther, "the wrapper must be installed before any other statement");
+
+  // Anchored to CODE, not prose: the unanchored form matched this file's own comment explaining why the tenant
+  // guard is the wrong mechanism.
+  assert.doesNotMatch(
+    source,
+    /^\s*import\b[^\n]*write-guard/m,
+    "spec-drift.mjs imports the tenant guard again; it is not a GET-only guard",
+  );
+  assert.doesNotMatch(
+    source,
+    /^\s*installProtectedTenantFetchGuard\(/m,
+    "the tenant guard is not a GET-only guard; citing it as one was the defect this replaced",
   );
 });

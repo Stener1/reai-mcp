@@ -26,14 +26,16 @@
  *
  * Exit codes:  0 nothing that breaks anything   1 a dependency is broken   2 could not fetch or parse
  */
-// FIRST executable statement, before anything can name the unguarded fetch. This script only ever issues one
-// GET, for the spec document, and the guard enforces that at runtime rather than by argument. The AST invariant
-// in test/write-guard.test.mjs demanded it because `method.toUpperCase()` appears here — that is spec ITERATION,
-// not a request, but the checker cannot prove it, and a checker that trusts my reading of my own code is worth
-// less than one that does not.
-import { installProtectedTenantFetchGuard } from "./lib/write-guard.mjs";
+// GET-ONLY, enforced rather than claimed, and installed before any other statement so the native fetch is never
+// reachable. The wrapper lives in scripts/lib so a test can exercise it — importing THIS file to test it is not
+// possible, because its top level calls process.exit and would take the runner with it.
+//
+// The first version cited installProtectedTenantFetchGuard() as the enforcement. Review showed that was empty:
+// that guard refuses a non-GET only when it carries a protected tenant header, and this script sends none. So it
+// did nothing here while the EXEMPT entry it justified caused the AST coverage test to skip this file.
+import { installGetOnlyFetch } from "./lib/get-only-fetch.mjs";
 
-installProtectedTenantFetchGuard();
+installGetOnlyFetch();
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -72,11 +74,37 @@ function operationsOf(spec) {
   return out;
 }
 
+/**
+ * Everything a caller MUST supply: required body fields and required parameters alike.
+ *
+ * The first version read the JSON body schema only, so a query parameter becoming required was invisible —
+ * `GET /api/customers` gaining a mandatory `archived` would have started failing every ordinary call while both
+ * required arrays stayed empty and this exited 0. A parameter is as breaking as a body field and arrives by the
+ * same route, so it is the same question.
+ *
+ * Parameters are prefixed by their location so `query:archived` cannot be confused with a body field of the same
+ * name, which matters because this repo's tools name arguments after both.
+ */
 function requiredFieldsOf(spec, op) {
+  const required = [];
+
   const schema = op?.requestBody?.content?.["application/json"]?.schema;
-  if (!schema) return [];
-  const resolved = schema.$ref ? spec.components?.schemas?.[schema.$ref.split("/").pop()] : schema;
-  return [...(resolved?.required ?? [])].sort();
+  if (schema) {
+    const resolved = schema.$ref ? spec.components?.schemas?.[schema.$ref.split("/").pop()] : schema;
+    required.push(...(resolved?.required ?? []));
+  }
+
+  for (const parameter of op?.parameters ?? []) {
+    const resolved = parameter?.$ref
+      ? spec.components?.parameters?.[parameter.$ref.split("/").pop()]
+      : parameter;
+    // A path parameter is required by construction and cannot meaningfully change, so reporting it would be
+    // noise on every operation that has one.
+    if (!resolved?.required || resolved.in === "path") continue;
+    required.push(`${resolved.in}:${resolved.name}`);
+  }
+
+  return [...new Set(required)].sort();
 }
 
 /**
@@ -99,10 +127,31 @@ async function dependenciesOn(key, { tools, quirkPaths, scriptText }) {
     const methodsMatch = quirk.methods === undefined || quirk.methods.includes(method);
     if (methodsMatch && quirk.paths.includes(path)) reasons.push(`quirk ${quirk.id}`);
   }
-  // An audit or smoke script naming the concrete path. A string match is right here: these scripts write the
-  // path literally, and the point is to catch a probe that will start 404ing.
+  // A probe in an audit or smoke script. Matched on METHOD AND a NORMALISED path, because the first version
+  // matched the path string alone and was wrong in both directions:
+  //
+  //   FALSE POSITIVE — a script probing GET /api/vouchers was reported as depending on the REMOVED
+  //   POST /api/vouchers. My own replay printed exactly that for audit-quirks.mjs, which is read-only by
+  //   construction and cannot have been probing the POST. I presented that line as a success.
+  //
+  //   FALSE NEGATIVE — smoke-full-write.mjs calls "/api/invoices/1/ehf" while the operation key is
+  //   "/api/invoices/{id}/ehf", so the concrete id never matched and its dependency was invisible. Removing that
+  //   operation would have been classified an orphan and exited 0.
+  //
+  // This remains a heuristic over source text, and says so: it looks for a method and a path within a short
+  // window of each other, covering the two shapes these scripts use — `method: "POST", path: "/x"` and
+  // `call("POST", "/x")`. A probe that assembles its path from variables is not found, and no text scan will
+  // find it; the tool and quirk dependencies above are structured data and carry no such caveat.
+  const template = (candidate) => candidate.replace(/\/\d+(?=\/|$)/g, "/{id}");
   for (const [file, text] of Object.entries(scriptText)) {
-    if (text.includes(`"${path}"`) || text.includes(`\`${path}`)) reasons.push(`probe in ${file}`);
+    for (const found of text.matchAll(/"(GET|POST|PUT|PATCH|DELETE)"[^"]{0,40}"([^"`]+?)"|`(GET|POST|PUT|PATCH|DELETE) ([^`"]+?)`/g)) {
+      const probeMethod = found[1] ?? found[3];
+      const probePath = found[2] ?? found[4];
+      if (probeMethod !== method || probePath === undefined) continue;
+      // Compare with numeric ids folded to {id}, in both directions: the script may write the concrete id, and
+      // the spec's parameter may be named something other than `id`.
+      if (template(probePath) === template(path) || probePath === path) reasons.push(`probe in ${file}`);
+    }
   }
   return [...new Set(reasons)];
 }
@@ -140,6 +189,7 @@ async function main() {
   const removed = [];
   const added = [];
   const requiredChanged = [];
+  const relaxed = [];
 
   for (const key of before.keys()) {
     if (after.has(key)) continue;
@@ -156,13 +206,20 @@ async function main() {
     const dependencies = await dependenciesOn(key, context);
     // A required-field change matters where something calls the operation. Elsewhere it is noise: 320 public
     // operations churn their schemas and this report has to stay readable enough to be run.
-    if (dependencies.length > 0) requiredChanged.push({ key, gained, lost, dependencies });
+    //
+    // Only a GAINED requirement breaks a caller. Losing one makes the operation LESS restrictive, so every
+    // existing call stays valid — the first version counted both and would have exited 1 with a remediation
+    // message on a change that requires none. My own verification used the `lost` direction and called it
+    // breaking, so the test exercised the wrong half of this.
+    if (dependencies.length === 0) continue;
+    if (gained.length > 0) requiredChanged.push({ key, gained, lost, dependencies });
+    else relaxed.push({ key, lost, dependencies });
   }
 
   const breaking = [...removed.filter((r) => r.dependencies.length > 0), ...requiredChanged];
 
   if (asJson) {
-    console.log(JSON.stringify({ removed, added, requiredChanged, breaking: breaking.length }, null, 2));
+    console.log(JSON.stringify({ removed, added, requiredChanged, relaxed, breaking: breaking.length }, null, 2));
   } else {
     console.log(`\nSpec drift: pinned ${before.size} operations, live ${after.size}\n`);
 
@@ -182,6 +239,12 @@ async function main() {
     if (orphaned.length > 0) {
       console.log(`\n  ${orphaned.length} removed operation(s) nothing here depends on:`);
       for (const { key } of orphaned) console.log(`    - ${key}`);
+    }
+    if (relaxed.length > 0) {
+      console.log(`\n  ${relaxed.length} operation(s) became LESS restrictive — informational, nothing to fix:`);
+      for (const { key, lost, dependencies } of relaxed) {
+        console.log(`    ~ ${key} no longer requires: ${lost.join(", ")}  (${dependencies.length} dependent)`);
+      }
     }
     if (added.length > 0) {
       console.log(`\n  ${added.length} new operation(s), which may deserve curated tools:`);
