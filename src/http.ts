@@ -194,11 +194,18 @@ async function handle(
         sendHtml(res, 200, statusPage(config, publicUrl));
         return;
       }
-      await handleMcp(req, res, config, oauth);
+      await handleMcp(req, res, config, oauth, publicUrl);
       return;
 
+    // RFC 9728 derives the metadata URL by inserting the well-known path BETWEEN host and resource path, so
+    // each accepted endpoint has its own document and each must name itself. Serving one document for both
+    // meant a client connecting to the root received `resource: .../mcp` and is required to discard it.
     case "/.well-known/oauth-protected-resource":
-      sendJson(res, 200, oauth.protectedResourceMetadata());
+      sendJson(res, 200, oauth.protectedResourceMetadata(publicUrl));
+      return;
+
+    case `/.well-known/oauth-protected-resource${MCP_PATH}`:
+      sendJson(res, 200, oauth.protectedResourceMetadata(`${publicUrl}${MCP_PATH}`));
       return;
 
     case "/.well-known/oauth-authorization-server":
@@ -299,7 +306,7 @@ async function handle(
         });
         return;
       }
-      await handleMcp(req, res, config, oauth);
+      await handleMcp(req, res, config, oauth, `${publicUrl}${MCP_PATH}`);
       return;
 
     default:
@@ -312,10 +319,11 @@ async function handleMcp(
   res: ServerResponse,
   config: ServerConfig,
   oauth: OAuthProvider,
+  resource: string,
 ): Promise<void> {
   const auth = oauth.authenticate(req.headers.authorization);
   if (!auth.ok) {
-    res.setHeader("WWW-Authenticate", oauth.challengeHeader(auth.error, auth.description));
+    res.setHeader("WWW-Authenticate", oauth.challengeHeader(auth.error, auth.description, resource));
     sendJson(res, auth.status, { error: auth.error, error_description: auth.description });
     return;
   }
@@ -344,6 +352,7 @@ async function handleMcp(
       oauth.challengeHeader(
         "invalid_token",
         "This authorization is not bound to a company. Re-authorize the connector.",
+        resource,
       ),
     );
     sendJson(res, 401, {

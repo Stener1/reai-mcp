@@ -483,7 +483,30 @@ test("POST / is the MCP endpoint, and GET / is still the status page", async () 
   assert.equal(answers[0].status, answers[1].status, "POST / and POST /mcp must answer alike");
 
   // The WWW-Authenticate challenge is what points a client at the metadata, so it must be present on both
-  // paths or discovery restarts from nothing.
+  // paths or discovery restarts from nothing — but it must NOT be the same pointer. RFC 9728 requires the
+  // document's `resource` to equal the identifier the client used, so the root and /mcp advertise separate
+  // documents; sharing one handed a root client the /mcp document, which it is required to discard.
   assert.ok(answers[0].challenge, "POST / returned no WWW-Authenticate challenge");
-  assert.equal(answers[0].challenge, answers[1].challenge, "the challenge differs between / and /mcp");
+  assert.ok(answers[1].challenge, "POST /mcp returned no WWW-Authenticate challenge");
+  assert.match(
+    answers[0].challenge,
+    /resource_metadata="[^"]*\/\.well-known\/oauth-protected-resource"/,
+    "the root challenge must point at the no-path metadata document",
+  );
+  assert.match(
+    answers[1].challenge,
+    /resource_metadata="[^"]*\/\.well-known\/oauth-protected-resource\/mcp"/,
+    "the /mcp challenge must point at its own metadata document",
+  );
+
+  // Each advertised document must exist and name itself, or a conformant client stops here.
+  for (const [metaPath, expected] of [
+    ["/.well-known/oauth-protected-resource", base],
+    ["/.well-known/oauth-protected-resource/mcp", `${base}/mcp`],
+  ]) {
+    const res = await fetch(base + metaPath);
+    assert.equal(res.status, 200, `${metaPath} is not served — the challenge points at a 404`);
+    const doc = await res.json();
+    assert.equal(doc.resource, expected, `${metaPath} names ${doc.resource}, not the resource it describes`);
+  }
 });

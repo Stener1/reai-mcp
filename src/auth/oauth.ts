@@ -132,15 +132,38 @@ export class OAuthProvider {
     return `${this.deps.publicUrl}/mcp`;
   }
 
-  /** RFC 9728 — tells the client which authorization server protects this resource. */
-  protectedResourceMetadata(): Record<string, unknown> {
+  /**
+   * RFC 9728 — tells the client which authorization server protects this resource.
+   *
+   * `resource` MUST equal the identifier the client used to locate this document, and the RFC is emphatic:
+   * "If these values are not identical, the data contained in the response MUST NOT be used." The metadata URL
+   * is derived by inserting `/.well-known/oauth-protected-resource` BETWEEN the host and the resource's path,
+   * so the two endpoints this server accepts have two different metadata locations:
+   *
+   *   https://host/mcp  ->  https://host/.well-known/oauth-protected-resource/mcp
+   *   https://host      ->  https://host/.well-known/oauth-protected-resource
+   *
+   * Both were previously served from the second location with `resource` fixed at `${publicUrl}/mcp`. That
+   * made the canonical location for the /mcp resource a 404, and gave a client connecting to the root a
+   * document it is required to discard. Nothing broke in practice only because the clients tried so far do not
+   * enforce the comparison — which is exactly the kind of thing that works until it doesn't.
+   */
+  protectedResourceMetadata(resource: string = this.resourceUrl): Record<string, unknown> {
     return {
-      resource: this.resourceUrl,
+      resource,
       authorization_servers: [this.deps.publicUrl],
       bearer_methods_supported: ["header"],
       resource_documentation: "https://github.com/Stener1/reai-mcp",
       scopes_supported: ["reai"],
     };
+  }
+
+  /** The RFC 9728 metadata URL for a resource identifier, by the insertion rule above. */
+  resourceMetadataUrl(resource: string): string {
+    const path = resource.startsWith(this.deps.publicUrl)
+      ? resource.slice(this.deps.publicUrl.length).replace(/\/+$/, "")
+      : "";
+    return `${this.deps.publicUrl}/.well-known/oauth-protected-resource${path}`;
   }
 
   /** RFC 8414 — authorization server metadata. */
@@ -687,14 +710,16 @@ export class OAuthProvider {
   }
 
   /** `WWW-Authenticate` value pointing clients at our metadata (RFC 9728). */
-  challengeHeader(error: string, description: string): string {
+  challengeHeader(error: string, description: string, resource: string = this.resourceUrl): string {
     // Every interpolated value is quote-stripped: publicUrl can be derived from
     // a client-supplied Host header, and an unescaped quote would inject an
     // extra auth-param into the header.
     const quoteless = (value: string) => value.replace(/["\\]/g, "");
     return (
       `Bearer error="${quoteless(error)}", error_description="${quoteless(description)}", ` +
-      `resource_metadata="${quoteless(this.deps.publicUrl)}/.well-known/oauth-protected-resource"`
+      // Points at the document for the endpoint the client actually called, not always the /mcp one: a client
+      // that connected to the root and is handed the /mcp document must discard it (RFC 9728).
+      `resource_metadata="${quoteless(this.resourceMetadataUrl(resource))}"`
     );
   }
 
