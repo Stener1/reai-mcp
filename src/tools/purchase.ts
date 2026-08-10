@@ -921,8 +921,9 @@ const listAttachments = defineTool({
     ["GET", "/api/orders/{id}/attachments"],
     ["GET", "/api/supplier-invoices/{id}/attachments"],
   ],
-  // routes the call: selects which owner's attachment endpoint to read
-  localArgs: ["ownerType"],
+  // ownerType routes the call; ownerId is the path parameter under a generic name, because this tool is
+  // polymorphic over owners and no per-path derivation can name it. Neither becomes a body field.
+  localArgs: ["ownerType", "ownerId"],
   inputSchema: {
     ownerType: z
       .enum(["order", "supplierInvoice"])

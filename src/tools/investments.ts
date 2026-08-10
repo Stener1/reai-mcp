@@ -378,6 +378,8 @@ const createInvestment = defineTool({
     "answer is an accountant rather than a default.",
   risk: "irreversible",
   apiPaths: [["POST", "/api/share-investments"]],
+  // an acknowledgement gate: never sent, its only job is to make a caller stop and think
+  localArgs: ["acceptPermanentPosition"],
   inputSchema: {
     name: requiredName(150).describe("What the holding is called. The API caps this at 150 characters."),
     instrumentType: z

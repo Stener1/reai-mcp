@@ -60,10 +60,15 @@ export type ToolDef<S extends ZodRawShape = ZodRawShape> = {
    * endpoint does not know is usually not refused — it is silently discarded. A caller sets a field, receives a
    * 200, and the value is gone.
    *
-   * Only for arguments the handler genuinely does not send: routing discriminators that choose an endpoint,
-   * filters applied to the response locally, and fields folded into a nested body structure. An argument that
-   * IS sent must appear in the spec, and listing it here to quiet the check would hide the defect the check is
-   * for. A `localArgs` entry naming an argument the endpoint already declares is itself a failure.
+   * Only for arguments that never become a body field: routing discriminators that choose an endpoint, filters
+   * applied to the response locally, fields folded into a nested body structure the spec index flattens away,
+   * acknowledgement gates that are never sent at all, and a GENERIC name for a path parameter on a tool that is
+   * polymorphic over resources — `reai_list_attachments` takes `ownerId` because `ownerType` decides whether it
+   * addresses an order or a supplier invoice, so no per-path derivation can name it.
+   *
+   * An argument that IS sent in a body must appear in the spec, and listing it here to quiet the check would
+   * hide the defect the check is for. A `localArgs` entry naming an argument the endpoint already declares is
+   * itself a failure, as is one naming an argument the tool does not have.
    */
   localArgs?: readonly string[];
   /** Signals a genuinely destructive call so clients can prompt the user. */
