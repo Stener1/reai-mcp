@@ -64,8 +64,11 @@ hatch is — they converge on the same gates, in this order:
 
 The write policy speaks first, so a call the mode forbids is refused for that reason rather than for
 a send it also happens to arm. Of the 18 public operations classified as reaching a third party, 17
-are *also* classified irreversible — the exception is `GET /vat-return/altinn-sync`, which is
-read-shaped and still talks to Altinn. So the two switches are not redundant in either direction:
+are *also* classified irreversible — the exception is `GET /vat-return/altinn-sync`, which is read-shaped and
+whose NAME says it talks to Altinn. Measured 2026-08-11, an API token cannot: it answers `302` to
+`/auth/login`, because that path is the web application's own route rather than an API endpoint. The gate stays
+anyway — see `TRANSMITTING_GETS` for why removing a guard because a route is *currently* unreachable is
+backwards. So the two switches are not redundant in either direction:
 turning on external send grants almost nothing by itself, and `full` alone reaches nothing that
 leaves the tenant.
 
@@ -75,7 +78,8 @@ That asymmetry is the whole reason there are two switches rather than one settin
                              REAI_ALLOW_EXTERNAL_SEND
                         off (default)                 1
                      +-------------------------------+----------------------------+
-   read-only         | read the books                | + altinn-sync              |
+   read-only         | read the books                | + altinn-sync (see above:  |
+                     |                               |   a token gets a redirect) |
                      +-------------------------------+----------------------------+
    reversible        | + master data (may ARCHIVE    | nothing more — 17 of the   |
    (default)         |   rather than delete)         |   18 sends are ALSO        |
