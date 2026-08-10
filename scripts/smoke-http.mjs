@@ -49,12 +49,45 @@ async function main() {
   console.log(`\nVerifying reai-mcp deployment at ${BASE}\n`);
 
   // 1. Discovery.
-  const prMeta = await (await fetch(`${BASE}/.well-known/oauth-protected-resource`)).json();
-  report(
-    "protected resource metadata",
-    prMeta.resource === `${BASE}/mcp`,
-    `resource=${prMeta.resource}`,
-  );
+  //
+  // RFC 9728 derives the metadata URL by inserting the well-known path BETWEEN host and resource path, and the
+  // document's `resource` MUST equal the identifier the client used to find it — "if these values are not
+  // identical, the data contained in the response MUST NOT be used". Both endpoints this server accepts are
+  // checked, because the earlier version of this check asserted the NO-PATH document names `${BASE}/mcp`, which
+  // is precisely the violation: it passed while the canonical URL for the /mcp resource was a 404, and while a
+  // client connecting to the root was being handed a document it is required to discard.
+  const metadataFor = {
+    [`${BASE}/.well-known/oauth-protected-resource`]: BASE,
+    [`${BASE}/.well-known/oauth-protected-resource/mcp`]: `${BASE}/mcp`,
+  };
+  let prMeta;
+  for (const [url, expected] of Object.entries(metadataFor)) {
+    const res = await fetch(url);
+    const doc = res.ok ? await res.json() : undefined;
+    report(
+      `protected resource metadata names itself at ${url.slice(BASE.length)}`,
+      res.ok && doc?.resource === expected,
+      res.ok ? `resource=${doc?.resource} (expected ${expected})` : `HTTP ${res.status}`,
+    );
+    if (expected === `${BASE}/mcp`) prMeta = doc;
+  }
+
+  // And the challenge for each endpoint must point at ITS document, not a shared one — following the wrong
+  // pointer is what a conformant client would refuse to proceed from.
+  for (const [endpoint, suffix] of [["/mcp", "/mcp"], ["/", ""]]) {
+    const res = await fetch(`${BASE}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    const challenge = res.headers.get("www-authenticate") ?? "";
+    const want = `resource_metadata="${BASE}/.well-known/oauth-protected-resource${suffix}"`;
+    report(
+      `POST ${endpoint} challenges with its own metadata pointer`,
+      res.status === 401 && challenge.includes(want),
+      `status=${res.status} challenge=${challenge || "(none)"}`,
+    );
+  }
 
   const asUrl = prMeta.authorization_servers?.[0] ?? BASE;
   const asMeta = await (await fetch(`${asUrl}/.well-known/oauth-authorization-server`)).json();
