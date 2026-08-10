@@ -349,18 +349,43 @@ async function main() {
   const visible = new Set(tools.map((t) => t.name));
   const localByName = new Map(localRegistry.map((t) => [t.name, t]));
 
+  // Which groups are enabled must come from a signal INDEPENDENT of the response being checked. Inferring it
+  // with `groupTools.some(visible.has)` — the first version — cannot detect whole-group truncation: if a group
+  // vanishes entirely, `some()` is false, the group is treated as deliberately disabled, none of its reads are
+  // required, and the check reports success on exactly the truncation it exists to catch. Review caught this.
+  //
+  // The server states its own configuration in the `instructions` it sends at initialize, naming the variable
+  // verbatim: "N tool(s) are disabled by REAI_TOOLSETS=sales,bank". That is in-band, authenticated, needs no
+  // server change, and comes from a different message than tools/list.
+  const instructions = client.getInstructions() ?? "";
+  const declaredToolsets = /REAI_TOOLSETS=([a-z0-9,_-]+)/i.exec(instructions)?.[1];
+  const enabledGroups = declaredToolsets
+    ? declaredToolsets.split(",").map((g) => g.trim()).filter(Boolean)
+    : Object.keys(TOOL_GROUPS);
+  report(
+    "the server declares its toolset selection in the initialize instructions",
+    instructions.length > 0,
+    declaredToolsets
+      ? `REAI_TOOLSETS=${declaredToolsets}`
+      : `no REAI_TOOLSETS line, so all ${enabledGroups.length} groups are expected`,
+  );
+
+  // A named group that does not exist would silently expect nothing, so it is an error rather than a no-op.
+  const unknownGroups = enabledGroups.filter((g) => !(g in TOOL_GROUPS));
+  report(
+    "every declared toolset names a real group",
+    unknownGroups.length === 0,
+    unknownGroups.length === 0 ? `${enabledGroups.length} groups` : `unknown: ${unknownGroups.join(", ")}`,
+  );
+
   const requiredReads = [];
   for (const t of alwaysOnTools) if (t.risk === "read") requiredReads.push(t);
-  for (const [group, groupTools] of Object.entries(TOOL_GROUPS)) {
-    const enabled = groupTools.some((t) => visible.has(t.name));
-    if (!enabled) continue;
-    for (const t of groupTools) if (t.risk === "read") requiredReads.push({ ...t, group });
+  for (const group of enabledGroups) {
+    for (const t of TOOL_GROUPS[group] ?? []) if (t.risk === "read") requiredReads.push({ ...t, group });
   }
 
   const missingReads = requiredReads.filter((t) => !visible.has(t.name));
-  const absentGroups = Object.entries(TOOL_GROUPS)
-    .filter(([, gt]) => !gt.some((t) => visible.has(t.name)))
-    .map(([g]) => g);
+  const absentGroups = Object.keys(TOOL_GROUPS).filter((g) => !enabledGroups.includes(g));
   report(
     "every read-only tool of every ENABLED group survives the trip through tools/list",
     missingReads.length === 0,
@@ -418,29 +443,39 @@ async function main() {
   // These name specific tools, and REAI_TOOLSETS can remove the group they belong to. Both live in
   // `bookkeeping`, so a deployment narrowed to, say, sales+bank answered "Tool not found" three times and
   // exited nonzero on a perfectly healthy configuration.
-  if (visible.has("reai_list_accounts")) {
-    const accounts = await client.callTool({ name: "reai_list_accounts", arguments: { query: "bank" } });
-    report(
-      "tenant bound at authorization time needs no tenantId argument",
-      !accounts.isError && /"number"/.test(textOf(accounts)),
-      firstLine(textOf(accounts)),
-    );
+  // The tenant boundary is the security property of this whole design, so it is exercised on a real API
+  // request under EVERY configuration. The first version skipped both checks when `bookkeeping` was excluded,
+  // which let a deployment with broken request-time enforcement pass the smoke test entirely — review caught
+  // that, and it was the worst of the three findings. `reai_request` is always-on under every REAI_TOOLSETS
+  // selection and takes a tenantId, so it can carry both halves when the curated tool is absent. The later
+  // reai_use_tenant check is not a substitute: it tests session switching, not enforcement on a request.
+  const boundProbe = visible.has("reai_list_accounts")
+    ? { name: "reai_list_accounts", implicit: { query: "bank" }, cross: { tenantId: 999999 }, expect: /"number"/ }
+    : {
+        name: "reai_request",
+        // The spec path, taken from reai_list_accounts's own apiPaths rather than guessed. My first attempt
+        // used "/api/accounts", which does not exist — the API answered 404 "No static resource" and the check
+        // failed for a reason that had nothing to do with the tenant boundary it was testing.
+        implicit: { method: "GET", path: "/api/chart-of-accounts/accounts" },
+        cross: { method: "GET", path: "/api/chart-of-accounts/accounts", tenantId: 999999 },
+        expect: /"number"/,
+      };
 
-    // The tenant chosen at authorization time must be a boundary, not a default.
-    const crossTenant = await client.callTool({
-      name: "reai_list_accounts",
-      arguments: { tenantId: 999999 },
-    });
-    const crossText = textOf(crossTenant);
-    report(
-      "a bound connection refuses a different tenant",
-      crossTenant.isError === true && /bound to tenant/i.test(crossText),
-      crossTenant.isError ? "refused" : `NOT REFUSED: ${crossText.slice(0, 160)}`,
-    );
-  } else {
-    skip("tenant bound at authorization time needs no tenantId argument", "reai_list_accounts is not registered");
-    skip("a bound connection refuses a different tenant", "reai_list_accounts is not registered");
-  }
+  const accounts = await client.callTool({ name: boundProbe.name, arguments: boundProbe.implicit });
+  report(
+    `tenant bound at authorization time needs no tenantId argument (via ${boundProbe.name})`,
+    !accounts.isError && boundProbe.expect.test(textOf(accounts)),
+    firstLine(textOf(accounts)),
+  );
+
+  // The tenant chosen at authorization time must be a boundary, not a default.
+  const crossTenant = await client.callTool({ name: boundProbe.name, arguments: boundProbe.cross });
+  const crossText = textOf(crossTenant);
+  report(
+    `a bound connection refuses a different tenant (via ${boundProbe.name})`,
+    crossTenant.isError === true && /bound to tenant/i.test(crossText),
+    crossTenant.isError ? "refused" : `NOT REFUSED: ${crossText.slice(0, 160)}`,
+  );
 
   if (visible.has("reai_list_vouchers")) {
     const vouchers = await client.callTool({ name: "reai_list_vouchers", arguments: {} });
@@ -532,7 +567,9 @@ async function main() {
         "  does not run. Never point such a deployment at books you are only testing with.\n",
     );
     for (const [label] of sendingPaths) {
-      console.log(`  [SKIP] ${label} — not probed; external sending is enabled here`);
+      // skip(), not console.log: these seven were printed as [SKIP] but never counted, so the summary line
+      // read "N passed, 0 failed" on a run that had not probed the most dangerous thing in the script.
+      skip(label, "not probed; external sending is enabled here");
     }
   } else {
     for (const [label, method, path, body] of sendingPaths) {
