@@ -14,6 +14,7 @@ there rather than here, because a result restated in two places goes stale in on
 | [`audit-quirks-write.mjs`](#audit-quirks-writemjs-the-refusal-claims-a-get-cannot-reach) | quirks whose claim is that a **write is refused** | only requests built to fail |
 | [`audit-messages.mjs`](#why-audit-messagesmjs-exists-and-what-it-does-not-cover) | the nineteen places in `src/` that read a ReAI error's **text** | only requests built to fail |
 | [`audit-storage.mjs`](#audit-storagemjs-the-half-the-message-audit-cannot-reach) | claims about what the API **accepts, normalises or stores** | yes — customers, deleted in a `finally` |
+| [`spec-drift.mjs`](#spec-driftmjs-has-the-api-moved-away-from-the-pinned-spec) | whether the pinned spec still describes the live API | no — fetches the spec, nothing tenant-scoped |
 
 Everything that writes refuses to run unless the tenant is named in `REAI_WRITE_TEST_TENANTS`, and
 refuses tenant 2634 whatever that says: see
@@ -367,3 +368,37 @@ spec, and catches the mistake before a call is ever made.
 A note on why the patterns above are a list rather than a table: `test/docs.test.mjs` reads a tool name in a
 documentation table row as a claim about that tool's risk, and rejected an earlier draft for appearing to call an
 irreversible tool something else. The guard is right to be suspicious of tool names in table cells.
+
+## `spec-drift.mjs`: has the API moved away from the pinned spec?
+
+`npm run spec:drift`. Fetches `https://app.reai.no/openapi` and compares it to `spec/reai-openapi.json`, exiting
+**1** when something this repository depends on has moved and **0** when nothing has.
+
+It exists because of one incident. On 2026-08-10 ReAI renamed `/api/opening-balances` to the singular and moved
+voucher **writes** from `/api/vouchers` to `/api/manual-vouchers`. Nothing here noticed for three iterations. A
+smoke check eventually went red on the renamed path; the far more serious half — `reai_create_voucher` and
+`reai_delete_voucher`, both irreversible, both pointing at a route that now answers `405` — was found only
+afterwards, by diffing the spec by hand.
+
+Three properties of that incident shaped it, and each is load-bearing:
+
+- **Per operation, not per path.** `/api/vouchers` still exists; its GET never moved. A path-level diff would
+  have reported it unchanged while POST, PUT and DELETE had all left.
+- **A removal matters only if something depends on it.** That refresh added 12 paths and removed 1; reporting all
+  thirteen equally is how a report gets skimmed. Dependencies are derived — curated tool `apiPaths`, quirk paths
+  with their method scoping, and audit or smoke probes naming the literal path — so a new tool is covered without
+  editing the script. Removals nothing depends on are listed separately, below the breaking ones.
+- **A field becoming required is as breaking as a route vanishing, and quieter.** ReAI declares no
+  `additionalProperties: false` anywhere, so a field an endpoint stops accepting is silently discarded rather
+  than refused: a 200, and the value is gone. Required-field changes are reported only for operations something
+  calls, because 320 public operations churn their schemas and a report has to stay readable enough to be run.
+
+**Verified by replaying the incident**, which is the only test that means anything for a script like this. With
+the pre-refresh spec pinned and `reai_get_opening_balance` restored to the old path, it exits 1 and reports
+`GET /api/opening-balances is GONE, and it is depended on by: curated tool reai_get_opening_balance (read)`,
+alongside the three voucher write operations and their audit probes. With a required field removed from
+`POST /api/manual-vouchers` it names that tool and the three quirks keyed to the path. Against the current
+pinned spec: 438 operations both sides, nothing broken, exit 0.
+
+It cannot run in CI — it needs a token and the network — so it belongs in the same category as the smoke scripts:
+run it before trusting the spec, and after any report that an endpoint has started behaving oddly.
