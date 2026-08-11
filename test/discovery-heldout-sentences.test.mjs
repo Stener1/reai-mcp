@@ -138,14 +138,25 @@ test("a `legg til` query asks for a WRITE, not the ledger view of the same resou
   }
 });
 
-test("the past participle `lagt til` is a question about history, not a request to add", () => {
-  // The trap that keeps "make", "cancel", "new" and "start" out of WRITE_INTENT_VERBS, one word on:
-  // "hvor mange kunder ble lagt til i fjor" asks what happened, and a POST ranked first for it would
-  // be a write offered in answer to a question. PHRASE_INTENT matches only legg/legge/legger + til.
+test("neither the past participle nor the present tense asks for a write", () => {
+  // Two traps, one conjugation apart.
+  //
+  // `lagt til` is the past participle: "hvor mange kunder ble lagt til i fjor" asks what happened, and
+  // a POST first for it is a write offered in answer to a question — what keeps "make", "cancel",
+  // "new" and "start" out of WRITE_INTENT_VERBS.
+  //
+  // `legger til` is the present tense, and the first version of this change matched it while claiming
+  // present tense was unambiguous. Review found it inside a RELATIVE CLAUSE of an explicit read
+  // request: "vis kunder vi legger til i år" returned POST /api/customers, and the supplier form
+  // offered to UNARCHIVE a supplier in answer to "show me". writeIntent is evaluated before
+  // readIntent, so the phrase silently beat as plain a read verb as `vis`.
   for (const query of [
     "hvor mange kunder ble lagt til i fjor",
     "hvilke ansatte er lagt til",
     "hvilke vedlegg ble lagt til pa ordren",
+    "vis kunder vi legger til i år",
+    "vis kunder vi legger til i ar",
+    "vis leverandorer vi legger til i ar",
   ]) {
     const [top] = searchOperations({ query, limit: 1 });
     assert.equal(top.method, "GET", `${query} ranked ${top.method} ${top.path} first`);
@@ -193,5 +204,10 @@ test("the third miss was fixed, and its cause is the documented prose bias", () 
     "",
     "POST /api/suppliers now carries prose, so the cause of this miss has changed",
   );
-  assert.ok(rankOf("legg til en leverandor", "POST", "/api/suppliers") <= 2, "it must at least stay in the top 3");
+  // `>= 0` as well as `<= 2`. rankOf returns -1 when the target is not in the ten-result window at
+  // all, and -1 satisfies `<= 2` — so the first version of this line passed when the operation was
+  // ENTIRELY ABSENT while claiming it stayed in the top three. Caught in review; it is the vacuous
+  // assertion this repository keeps shipping, here in a test written to guard against exactly that.
+  const supplierRank = rankOf("legg til en leverandor", "POST", "/api/suppliers");
+  assert.ok(supplierRank >= 0 && supplierRank <= 2, `POST /api/suppliers is at rank ${supplierRank}`);
 });

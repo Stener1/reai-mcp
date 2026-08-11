@@ -1146,11 +1146,26 @@ const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
   // customer ledger. `opprett` reached the same endpoints first, so the gap was purely which synonym
   // the caller happened to use.
   //
-  // `lagt` is deliberately NOT matched. It is the past participle, and "hvor mange kunder ble lagt
-  // til i fjor" is a question about history, not a request to add anything — the past-tense trap that
-  // keeps "make", "cancel", "new" and "start" out of WRITE_INTENT_VERBS. Only the imperative,
-  // infinitive and present forms.
-  [/\blegg(e|er)?\s+til\b/, ["POST"]],
+  // IMPERATIVE AND INFINITIVE ONLY — `legg til`, `legge til`. Neither the past participle nor the
+  // present tense.
+  //
+  // `lagt` was excluded from the first version: "hvor mange kunder ble lagt til i fjor" asks about
+  // history, not for a customer, and that is the past-tense trap keeping "make", "cancel", "new" and
+  // "start" out of WRITE_INTENT_VERBS. But that version also claimed the present tense was
+  // unambiguous, and the review of PR #192 showed it is not, one conjugation further on: a present
+  // tense verb appears inside a RELATIVE CLAUSE of an explicit read request.
+  //
+  //     vis kunder vi legger til i år          POST /api/customers            (want a customer GET)
+  //     vis leverandorer vi legger til i år    POST /api/suppliers/{id}/unarchive
+  //
+  // `vis` is as plain a read verb as exists, and the phrase overrode it — writeIntent is evaluated
+  // before readIntent precisely so that a query holding both is treated as a write. The second one is
+  // worse than a wrong resource: it offers to UNARCHIVE a supplier in answer to "show me".
+  //
+  // Dropping `er` fixes both and costs nothing measurable: "jeg legger til en kunde" is a statement
+  // about what the speaker is doing, not a request, and every imperative and infinitive phrasing still
+  // matches. Verified against both corpora.
+  [/\blegg(e)?\s+til\b/, ["POST"]],
 ];
 
 function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {

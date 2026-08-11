@@ -114,9 +114,24 @@ So the gap was purely which synonym the caller happened to use. It went into `PH
 `METHOD_INTENT` for the reason `lag` is excluded from the latter: bare `legg` is not a create request, but
 the two-word phrase is unambiguous — the same argument `last opp` already rests on.
 
-`lagt` is deliberately not matched. It is the past participle, and "hvor mange kunder ble lagt til i fjor"
-asks about history; matching it would offer a POST in answer to a question, which is the trap that keeps
-`make`, `cancel`, `new` and `start` out of `WRITE_INTENT_VERBS`.
+**Imperative and infinitive only** — `legg til`, `legge til`. Two conjugations are excluded, and the second
+one had to be found in review:
+
+- `lagt til` is the past participle. "hvor mange kunder ble lagt til i fjor" asks about history, and matching
+  it would offer a POST in answer to a question — the trap that keeps `make`, `cancel`, `new` and `start` out
+  of `WRITE_INTENT_VERBS`. Excluded from the start.
+- `legger til` is the present tense, and the first version matched it **while claiming present tense was
+  unambiguous**. It is not: a present-tense verb turns up inside a relative clause of an explicit read
+  request.
+
+      vis kunder vi legger til i år          ->  POST /api/customers
+      vis leverandorer vi legger til i år    ->  POST /api/suppliers/{id}/unarchive
+
+  `vis` is as plain a read verb as exists, and the phrase beat it, because `writeIntent` is evaluated before
+  `readIntent` so that a query holding both reads as a write. The supplier case is worse than a wrong
+  resource: it offers to **unarchive** a supplier in answer to "show me". Dropping `er` fixes both and costs
+  nothing measurable — "jeg legger til en kunde" is a statement about what the speaker is doing, not a
+  request.
 
 ### Two measurement errors worth recording, both mine
 
@@ -127,6 +142,10 @@ asks about history; matching it would offer a POST in answer to a question, whic
 - **Scoring on the path alone inflates by two.** `lag et tilbud til en kunde` targets POST `/api/offers`,
   the ranker returns GET `/api/offers` first, and a path-only comparison counted that as rank 1 — passing
   the very case the corpus existed to record. A method is half of what an agent needs.
+- **`-1 <= 2` is true.** The assertion pinning the one known miss in the top three read
+  `rankOf(...) <= 2`, and `rankOf` returns `-1` for a target outside the ten-result window — so it passed
+  when the operation was **entirely absent** while claiming it stayed in the top three. Found in review, in
+  a test written to guard against exactly this.
 
 And two of the original labels were simply worse than what the ranker returned: `change a customers
 address` → PUT `/api/customers/{id}/address`, and `hvilke varer har jeg pa lager` → GET
