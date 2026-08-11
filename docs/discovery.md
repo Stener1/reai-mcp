@@ -154,6 +154,54 @@ Norwegian separable particles allow an object in between, so `legg kunden til` a
 ordren` still rank reads. So does `legg inn`, an equally common "enter". Covering those needs particle
 handling, not another table entry.
 
+### The sweep said 0/0/0/0, and that meant nothing at all
+
+The first sweep of this change against `main` reported **0 rank-1 changes, 0 no-longer-reachable, 0 newly
+answered, 0 writes promoted — across 69,204 queries.** It reads as *provably harmless*. It was empty:
+`legg til` was not in the sweep's `WRITE_VERBS`, so **not one of the 69,204 generated queries contained the
+phrase.** The instrument was blind to the change it had been run to check, and a silence about its own
+vocabulary is indistinguishable from a silence about the change.
+
+What hid it: 660 queries matched `last opp`, so the phrase mechanism looked covered. That number was the
+reassurance, and it was about a different entry.
+
+This is worse than the three failures in this file's and the script's headers, where the sweep at least ran
+the query and compared two rankings. Here nothing was compared.
+
+Adding `legg til`/`legge til` to `WRITE_VERBS` took the affected corpus from **0 to 1,320** queries. The
+re-run then reported **634 queries newly ranking an irreversible or externally-transmitting write first** —
+the opposite headline, and it needs reading rather than counting, exactly as the script's footer says:
+
+- **99.7% of it is the behaviour `main` already had.** For all 1,320 affected queries, `legg til <noun>` and
+  `opprett <noun>` return the **same** top-1 operation in 1,316 cases. `opprett`, `registrer` and the other
+  write verbs already produced every one of those writes; the change gave one more synonym the same
+  treatment, which is its entire purpose. Only two distinct nouns diverge (`reconcile`, `utgående
+  avstemmingen`), both landing on different reconciliation POSTs that are irreversible either way.
+- **116 of the 1,320 are not language.** They are controller names from the spec — `legg til
+  admin-consent-check-ctrl`, `legg til adyen-component-session-rest-ctrl` — so the 634 overstates the
+  real-language exposure.
+
+### A pre-existing property the number did expose
+
+A bare "add X" ranks an **externally transmitting** operation first for several nouns, and has done all
+along via `opprett`:
+
+    legg til / opprett arbeidsgiveravgift  ->  POST /api/salary-payments/{id}/complete   [irreversible, EXTERNAL]
+    legg til / opprett agreements          ->  POST /api/agreements/{id}/sign-request    [irreversible, EXTERNAL]
+
+An a-melding submission and a signature request, offered in answer to "add employer's tax". Discovery only
+*names* an endpoint — the write policy still gates execution, and transmitting tools are not even registered
+unless `REAI_ALLOW_EXTERNAL_SEND` is set — so this is a bad suggestion rather than an unsafe action. It is
+recorded here rather than fixed because it belongs to write intent generally, not to this phrase, and any fix
+is a change to how every write verb ranks.
+
+### The fix is enforced, not remembered
+
+`PHRASE_INTENT` is exported and `test/discovery-sweep.test.mjs` now fails when any entry matches no swept
+query. It found a second gap the moment it was added: **`last ned` was in `PHRASE_INTENT` and absent from
+`READ_VERBS`**, so the GET half of the phrase mechanism had never been swept either. All three entries are
+now reachable — 660, 660 and 1,320 queries — where two of the three were 0 and 660.
+
 ### Two measurement errors worth recording, both mine
 
 - **The harness, not the ranker.** The first run scored **0 of 20** with all twenty queries returning the

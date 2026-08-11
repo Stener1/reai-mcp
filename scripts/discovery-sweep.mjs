@@ -49,14 +49,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** Verbs that ask to change something, and verbs that ask to look. Both have found defects. */
+/**
+ * Verbs that ask to change something, and verbs that ask to look. Both have found defects.
+ *
+ * A VERB THIS LIST DOES NOT KNOW MAKES THE WHOLE SWEEP VACUOUS FOR ANY CHANGE ABOUT IT, and that is not
+ * hypothetical. PR #192 added `legg til` to `PHRASE_INTENT`, swept it against main, and got
+ * `0 rank-1 changes / 0 unreachable / 0 newly answered` across **69,204 queries** — which reads as
+ * "provably harmless" and meant nothing: `legg til` was not in this list, so not one of the 69,204
+ * generated queries contained the phrase. The instrument could not see the change at all. (660 queries
+ * matched `last opp`, which is why the omission was invisible: the phrase mechanism looked covered.)
+ *
+ * So the rule when adding a phrase or verb to `src/reai/spec.ts`: add it here too, or the sweep's
+ * silence is about its own corpus rather than about the change. This file's header lists three PRs whose
+ * over-match a sweep failed to catch; this is worse than those, because there the sweep at least ran the
+ * query.
+ */
 export const WRITE_VERBS = [
   "opprett", "slett", "endre", "send", "lever", "registrer", "bokfor", "godkjenn", "krediter", "avskriv",
   "last opp", "fullfor", "lukk", "create", "delete", "update", "upload", "submit", "approve", "lag", "generer",
+  // Added with the PHRASE_INTENT entry that needed it. `legge til` as well as `legg til`, because the
+  // pattern accepts the infinitive and an imperative-only corpus would leave that arm unswept.
+  "legg til", "legge til",
 ];
 export const READ_VERBS = [
   "vis", "se", "list", "hent", "finn", "sok", "hvilke", "hva", "hvor mange",
   "get", "show", "find", "search", "which", "what",
+  // `last ned` was in PHRASE_INTENT and absent here, so the GET half of the phrase mechanism had NEVER
+  // been swept. Found the moment the reachability test was added — which is the argument for the test:
+  // the count I used to reassure myself ("660 queries match last opp/last ned") was all `last opp`.
+  "last ned",
 ];
 
 /**

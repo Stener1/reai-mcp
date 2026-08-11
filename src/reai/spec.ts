@@ -1134,7 +1134,20 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
  * reasoning as PHRASE_SYNONYMS, which exists because "skylder oss" and "skylder vi" point at opposite
  * sides of the books while sharing a verb.
  */
-const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
+/**
+ * EXPORTED so a test can require every entry to be reachable from the discovery sweep's corpus.
+ *
+ * Not for callers — `phraseMethodsFor` is the interface. It is exported because a phrase this table
+ * knows and the sweep's vocabulary does not makes the sweep VACUOUS for any change about that phrase,
+ * and PR #192 proved that is not hypothetical: `legg til` was added here, swept against main, and
+ * returned 0 rank-1 changes across 69,204 queries because not one generated query contained the phrase.
+ * A silence about the corpus read exactly like a silence about the change.
+ *
+ * `test/discovery-sweep.test.mjs` now fails when an entry here matches nothing the sweep generates, so
+ * the next phrase cannot escape it. A convention to remember is what failed; this is the same fact
+ * enforced instead of written down.
+ */
+export const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
   [/\blast(e|er)?\s+opp\b/, ["POST"]],
   [/\blast(e|er)?\s+ned\b/, ["GET"]],
   // "legg til" is the commonest Norwegian way to say ADD, and it belongs HERE rather than in
