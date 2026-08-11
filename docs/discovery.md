@@ -191,9 +191,49 @@ along via `opprett`:
 
 An a-melding submission and a signature request, offered in answer to "add employer's tax". Discovery only
 *names* an endpoint — the write policy still gates execution, and transmitting tools are not even registered
-unless `REAI_ALLOW_EXTERNAL_SEND` is set — so this is a bad suggestion rather than an unsafe action. It is
-recorded here rather than fixed because it belongs to write intent generally, not to this phrase, and any fix
-is a change to how every write verb ranks.
+unless `REAI_ALLOW_EXTERNAL_SEND` is set — so this is a bad suggestion rather than an unsafe action.
+
+### Measured afterwards, and it does not justify a ranking change
+
+The obvious next move was a rule demoting externally-transmitting operations for queries that state no
+outward intent. Measuring first killed it.
+
+**The first measurement said 6% of the corpus and was worthless.** Of 71,184 queries, 5,274 rank an external
+operation first and 4,276 of those "state no transmit intent" — where intent was tested against a list of
+send-ish verbs I wrote. The sample shows what that list did:
+
+    aksjer fullfor       ->  POST /api/salary-payments/{id}/complete
+    abonnement krediter  ->  POST /api/invoices/{id}/credit
+
+*fullfør* **is** the verb for completing a salary run, which **is** the a-melding submission; *krediter* is
+the verb for issuing a credit note. Both queries name the outward act precisely, and both were counted as
+naming none, because the words were not on my list. That is the allowlist-of-shapes failure this repository
+has shipped before: enumerate the cases you thought of, and everything else is silently classified as the
+thing you are looking for. The 4,276 measured my vocabulary, not the ranker.
+
+**The focused measurement is small and mostly correct.** The real hazard is narrower: a *generic* create verb
+plus a noun — the caller asked to make something and named no outward act. All 8 generic verbs × 41 domain
+nouns = 328 queries, of which **65** land on an external operation:
+
+| count | target | verdict |
+|---|---|---|
+| 30 | `POST /api/invoices` | correct — creating an invoice IS the external act, and `classifyTransmission` says so |
+| 12 | `POST /api/invoices/{id}/ehf` | correct — the query says `ehf` or `peppol` |
+| 6 | `POST /api/invoices/{id}/credit` | correct — `opprett kreditnota` |
+| 6 | `POST /api/invoices/{id}/reminders` | correct — `purring` *is* a reminder |
+| 11 | `POST /api/agreements/{id}/sign-request(s)` | **mis-ranked** — and already analysed at length in this document |
+
+So 54 of the 65 are the right answer, and the externality belongs to the endpoint rather than to the ranking.
+The 11 that remain are the agreements case this file already dissects under "Three blockers, sequential".
+
+**And the query that started it is a vocabulary gap, not a write-intent bug.** `legg til
+arbeidsgiveravgift` reaches `POST /api/salary-payments/{id}/complete` because **no endpoint creates
+employer's tax** — it arises from completing a salary run, so that genuinely is the closest operation. No
+demotion rule fixes a missing resource.
+
+Decision: **no rule.** Any demotion keyed on transmit-intent vocabulary would be the same allowlist that
+produced the false 4,276, and it would demote 54 correct answers to reach 11 wrong ones that have a known,
+separately-documented cause.
 
 ### The fix is enforced, not remembered
 
