@@ -90,6 +90,49 @@ target that is irreversible or transmitting is now named whatever the previous m
 Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
 as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
 
+## Sentence-length queries, and the `legg til` gap they found
+
+A third corpus, `test/discovery-heldout-sentences.test.mjs`: 20 whole sentences of the kind an accountant
+would type at an agent ("hvor mye skylder kundene meg", "book a supplier invoice to an expense account"),
+written before looking at what the ranker did with any of them. The two older sets are single terms and
+short phrases, so filler words, question forms and prepositions were untested.
+
+**15 of 20 at rank 1, 18 of 20 in the top 3**, after one fix. Every remaining miss is named in that file
+with its cause.
+
+### The fix: `legg til` is a write, and was not recognised
+
+`legg til` is the commonest Norwegian way to say *add*. Measured before the change:
+
+| query | rank of the write it asks for |
+|---|---|
+| `legg til en leverandor` | POST `/api/suppliers` **5th**, behind two supplier-ledger GETs |
+| `legg til en ny kunde` | POST `/api/customers` **3rd**, behind the customer ledger |
+| `opprett en ny kunde` | rank 1 |
+
+So the gap was purely which synonym the caller happened to use. It went into `PHRASE_INTENT` rather than
+`METHOD_INTENT` for the reason `lag` is excluded from the latter: bare `legg` is not a create request, but
+the two-word phrase is unambiguous — the same argument `last opp` already rests on.
+
+`lagt` is deliberately not matched. It is the past participle, and "hvor mange kunder ble lagt til i fjor"
+asks about history; matching it would offer a POST in answer to a question, which is the trap that keeps
+`make`, `cancel`, `new` and `start` out of `WRITE_INTENT_VERBS`.
+
+### Two measurement errors worth recording, both mine
+
+- **The harness, not the ranker.** The first run scored **0 of 20** with all twenty queries returning the
+  same three operations. `searchOperations` takes one options object and had been called positionally, so
+  every query ran as the empty string. A total ranking collapse and a broken probe look identical; the tell
+  was that the results never varied.
+- **Scoring on the path alone inflates by two.** `lag et tilbud til en kunde` targets POST `/api/offers`,
+  the ranker returns GET `/api/offers` first, and a path-only comparison counted that as rank 1 — passing
+  the very case the corpus existed to record. A method is half of what an agent needs.
+
+And two of the original labels were simply worse than what the ranker returned: `change a customers
+address` → PUT `/api/customers/{id}/address`, and `hvilke varer har jeg pa lager` → GET
+`/api/warehouses/inventory`. Both are the endpoint that does the job. Scoring them as failures would have
+set a floor punishing the ranker for being right, and invited a "fix" that made it wronger.
+
 ## More than half the API documents nothing, and prose is worth a flat +3 whatever it says
 
 Measured 2026-08-10 on the refreshed spec: **173 of the 320 public operations carry neither a summary nor a

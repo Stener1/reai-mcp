@@ -1137,6 +1137,20 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
 const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
   [/\blast(e|er)?\s+opp\b/, ["POST"]],
   [/\blast(e|er)?\s+ned\b/, ["GET"]],
+  // "legg til" is the commonest Norwegian way to say ADD, and it belongs HERE rather than in
+  // METHOD_INTENT for the reason `lag` is excluded there: bare `legg` is not a create request on its
+  // own. As a phrase it is unambiguous, which is what this table is for.
+  //
+  // Measured before adding it: "legg til en leverandor" ranked POST /api/suppliers FIFTH, behind two
+  // supplier-ledger GETs, and "legg til en ny kunde" ranked POST /api/customers third behind the
+  // customer ledger. `opprett` reached the same endpoints first, so the gap was purely which synonym
+  // the caller happened to use.
+  //
+  // `lagt` is deliberately NOT matched. It is the past participle, and "hvor mange kunder ble lagt
+  // til i fjor" is a question about history, not a request to add anything — the past-tense trap that
+  // keeps "make", "cancel", "new" and "start" out of WRITE_INTENT_VERBS. Only the imperative,
+  // infinitive and present forms.
+  [/\blegg(e|er)?\s+til\b/, ["POST"]],
 ];
 
 function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
