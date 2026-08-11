@@ -513,13 +513,32 @@ async function main() {
             include: ["summary"],
           },
         });
-        const okFlag =
-          !rec.isError && /Reconciliation for bank account/.test(textOf(rec));
+        const recText = textOf(rec);
+        const okFlag = !rec.isError && /Reconciliation for bank account/.test(recText);
         report(
           `reai_get_bank_reconciliation (account ${bankId}, ${thisMonth})`,
           okFlag,
-          okFlag ? firstLine(textOf(rec)) : textOf(rec).slice(0, 220),
+          okFlag ? firstLine(recText) : recText.slice(0, 220),
         );
+
+        // The computed bank-vs-books line must actually be emitted. Asserting only that the note
+        // mentions the account would pass with the verdict silently absent — the failure mode of the
+        // three prose versions this replaced was exactly that the answer never reached the caller.
+        //
+        // What it says is NOT asserted, and that is deliberate. The interesting cases are a
+        // foreign-currency account and a month whose two opening balances differ; this tenant has
+        // neither, so pinning the wording here would only re-verify the homogeneous case that was
+        // never in doubt. test/reconciliation-verdict.test.mjs carries those.
+        if (okFlag) {
+          const line = /^Bank vs books: (.+)$/m.exec(recText);
+          report(
+            "reai_get_bank_reconciliation computes bank-vs-books",
+            line !== null,
+            line
+              ? `${line[1].slice(0, 150)} (wording unasserted: this tenant is all-NOK with equal openings)`
+              : "the note carried no 'Bank vs books:' line, so the caller gets no answer",
+          );
+        }
       } else {
         skip(
           "reai_get_bank_reconciliation",

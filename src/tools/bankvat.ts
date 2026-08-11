@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ReaiApiError } from "../reai/errors.js";
+import { bankMatchesBooks, verdictLine } from "../reai/reconciliation-verdict.js";
 import {
   asArray,
   confirmAgainstResponse,
@@ -206,16 +207,17 @@ const getBankReconciliation = defineTool({
     "DO NOT ANSWER \"does the bank match the books\" BY SUBTRACTING `providerBalance`. It is the feed's CURRENT " +
     "balance and is not scoped to the month you asked for — measured on account 1338, it read 1039.70 for both " +
     "2026-07 and 2026-08, with the same lastSyncedAt, while the ledger closed at 554.31 and 1002.36. Using it " +
-    "for July reports a 485.39 shortfall against books that balance. The month-scoped balance is " +
-    "`actualBankDisplayedBalance`; compare that against `bankLedgerClosingBalance`, and compare " +
-    "`actualBankMonthStartBalance` against `bankLedgerOpeningBalance` too, because a gap carried in from an " +
-    "earlier month passes through both closings untouched. `pendingDiscrepancy` and `matchedDiscrepancy` do " +
-    "NOT answer this: each subtracts postings from transactions within one bucket of the month's activity, so " +
-    "both can read 0 while the balances differ by the opening gap. They tell you WHERE a difference arose, " +
-    "not whether there is one. The balance comparison holds only when `bankCurrency` equals `tenantCurrency` " +
-    "— the reconciliation view refuses to compute a difference otherwise, because nothing in the spec says " +
-    "which posting figure is the bank side. For the CURRENT month " +
-    "a gap is expected rather than a fault, and `actualBankCurrentMonth` is the flag that says so. " +
+    "for July reports a 485.39 shortfall against books that balance.\n\n" +
+    "DO NOT COMPUTE THE ANSWER YOURSELF EITHER. The note above the data already carries it, on the " +
+    "\"Bank vs books:\" line, from `actualBankDisplayedBalance` against `bankLedgerClosingBalance` — with the " +
+    "three things that make the subtraction wrong when they are skipped: it refuses outright when " +
+    "`bankCurrency` differs from `tenantCurrency` (nothing in the spec says which posting figure is the bank " +
+    "side), it splits the gap into what was carried in from an earlier month and what arose in this one, and " +
+    "it reports UNKNOWN rather than a match when a balance is absent, which is what an `include` without " +
+    "`summary` produces. `pendingDiscrepancy` and `matchedDiscrepancy` are not the answer: each subtracts " +
+    "postings from transactions within ONE bucket of this month's activity, so both read 0 while the balances " +
+    "differ by an opening gap. For the CURRENT month a gap is expected rather than a fault, and " +
+    "`actualBankCurrentMonth` — which the line reports — is the flag that says so. " +
     "See the quirk provider-balance-is-not-month-scoped.\n\n" +
     "This is the view for BANK-SYNCED accounts. If reai_list_company_banks reports " +
     'providerType "manual" for the account, use reai_request GET ' +
@@ -256,7 +258,15 @@ const getBankReconciliation = defineTool({
       query: { month: args.month, include: args.include },
       tenantId: requireTenantId(args.tenantId, ctx),
     });
-    return ok(res.data, { note: `Reconciliation for bank account ${args.bankAccountId}, ${args.month}.` });
+    // The bank-vs-books answer is COMPUTED and put in front of the data, not left to the caller. Three
+    // versions of it as prose in the description below were wrong, each in a case tenant 2634 cannot
+    // produce; src/reai/reconciliation-verdict.ts is where those cases are tests instead of sentences.
+    const verdict = bankMatchesBooks((res.data ?? {}) as Parameters<typeof bankMatchesBooks>[0]);
+    return ok(res.data, {
+      note:
+        `Reconciliation for bank account ${args.bankAccountId}, ${args.month}.\n` +
+        `Bank vs books: ${verdictLine(verdict)}`,
+    });
   },
 });
 
