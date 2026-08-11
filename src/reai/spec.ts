@@ -422,6 +422,46 @@ export function searchOperations(opts: SearchOptions): SearchHit[] {
           score *= familyOffersNonNested(index, op.path, op.method) ? 0.45 : 0.9;
         }
       }
+
+      // A SECOND, NARROWER ARM for the hyphenated segments the rule above deliberately skips.
+      //
+      // The skip is right in general: removing it inverts "Apply a manual credit note to an invoice" onto the
+      // DELETE that unapplies it, and drops the rounding-adjustment endpoint for "Settle insignificant invoice
+      // outstanding" from rank 2 to 31. Both are measured, and both are pinned by test/ranking.test.mjs.
+      //
+      // But it leaves one live defect: "opprett avtale" and "legg til avtale" return
+      // POST /api/agreements/{id}/sign-request at rank 1 — an EXTERNAL send, a signature request to a
+      // counterparty, in answer to a request to create an agreement. The five concrete creation templates sit
+      // behind it at 16.00.
+      //
+      // Two things make this arm safe where widening the first one is not:
+      //
+      //   1. `transmits` ONLY, never `irreversible`. That is what excludes both documented breakages by
+      //      construction: `manual-credit-note-applications` and the rounding adjustment are irreversible and
+      //      local, so this arm cannot reach them. Measured across the spec, exactly THREE operations have a
+      //      single hyphenated nested action segment and transmit externally — the two agreement sign-request
+      //      calls and POST /salary/{id}/register-payment.
+      //   2. NONE of the parts named, not "not all of them". The first arm demotes unless the query names the
+      //      whole segment, which is why "apply a manual credit note…" lost: it names manual, credit and note
+      //      but not `applications`, and no stemming reaches apply -> applications. Requiring zero overlap
+      //      means any query that gestures at signing keeps the operation.
+      //
+      // The 0.9 tie-break is useless here — 19.00 x 0.9 = 17.10, still above the 16.00 templates — and
+      // `familyOffersNonNested` returns false because `familyOf` truncates at the first `{param}`, so
+      // `/api/agreements/rent-agreement` is its own family and the five alternatives are invisible to it. That
+      // is the "blocker 2" of docs/discovery.md. Rather than change `familyOf` for every caller, this arm asks
+      // the question directly: is there a same-method, parameter-free operation under the same collection?
+      // There are five, so the cut is 0.45 and the send drops out of the window.
+      const hyphenated = only !== undefined && only.includes("-") ? only : undefined;
+      if (
+        score > 0 &&
+        !wantMethod &&
+        hyphenated !== undefined &&
+        classifyTransmission(op.method, op.path) === "external" &&
+        !namesAnyPart(terms, hyphenated)
+      ) {
+        score *= collectionOffersParameterFree(index, op.path, op.method) ? 0.45 : 0.9;
+      }
       if (op.deprecated) score -= 3;
     }
 
@@ -1839,6 +1879,22 @@ const TERM_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // — open items, i.e. unpaid — is a read. Mapped unconditionally it put the three mutating
   // POST /api/postings/{customer,employee,supplier}/open operations above GET /api/postings/groups
   // for that phrase. `gjenapne` carries the same meaning unambiguously when reopening IS the intent.
+  // Signing an agreement, which had NO Norwegian vocabulary at all despite the API carrying three
+  // sign-request operations. Found by the demotion arm above mis-firing: "send avtale til signering" asks
+  // to send an agreement for signature as plainly as a sentence can, and because `signering` reached
+  // nothing, `namesAnyPart` saw no mention of signing and cut the POST from rank 2 to rank 5. The verbal
+  // nouns are the commonest form in Norwegian and the imperative alone does not cover them.
+  //
+  // `signer` maps too, although it happened to work without this: it worked by scoring the sign-request
+  // PATH, not by being understood, so the exemption check never saw it either.
+  signer: ["sign"],
+  signere: ["sign"],
+  signering: ["sign"],
+  signeringen: ["sign"],
+  signatur: ["sign"],
+  signaturen: ["sign"],
+  underskrift: ["sign"],
+  underskrive: ["sign"],
   gjenopprett: ["unarchive", "restore"],
   gjenopprette: ["unarchive", "restore"],
   dearkiver: ["unarchive"],
@@ -2376,6 +2432,66 @@ function nestedActionSegments(path: string): string[] {
  * replacement counts too — the a-melding filing survives because "salary-payments-complete" carries `complete`
  * as one of its parts. Raw tokens would have demoted both.
  */
+/**
+ * Did the query name ANY part of this hyphenated segment?
+ *
+ * The mirror of `namesAction`, and deliberately a different question. `namesAction` demotes unless EVERY part
+ * is named, which is right for the general rule and is exactly why hyphenated segments had to be excluded from
+ * it: "apply a manual credit note to an invoice" names three parts of `manual-credit-note-applications` and
+ * loses on the fourth, because no stemming gets from `apply` to `applications`.
+ *
+ * The externally-transmitting arm asks the weaker question instead. It only needs to know whether the caller
+ * gestured at the outward act at all — "opprett avtale" mentions neither `sign` nor `request`, while anything
+ * about signing mentions one of them and keeps the operation.
+ */
+/**
+ * `namesAnyPart` for a raw query string, exported so a test can assert the exemption DIRECTLY.
+ *
+ * Inferring it from scores does not work: a signing query's POST sat at 11.32 and there was no way to tell a
+ * 0.45 cut from a lower base score without a baseline build. Two of the checks in this change were wrong on a
+ * first attempt for exactly that reason, one of them a mutation that silently patched nothing.
+ */
+export function queryNamesActionPart(query: string, segment: string): boolean {
+  return namesAnyPart(expandQuery(query).terms, segment);
+}
+
+function namesAnyPart(terms: ReadonlyArray<{ term: string }>, segment: string): boolean {
+  const asked = new Set<string>();
+  for (const { term } of terms) {
+    asked.add(term);
+    for (const part of term.split("-")) if (part.length > 1) asked.add(part);
+  }
+  const named = (word: string): boolean =>
+    asked.has(word) ||
+    (word.endsWith("s") && asked.has(word.slice(0, -1))) ||
+    asked.has(`${word}s`);
+  return segment.split("-").some((part) => part.length > 1 && named(part));
+}
+
+/**
+ * Is there a same-method operation under this collection with NO path parameter at all?
+ *
+ * Asked directly rather than through `familyOf`, which truncates at the first `{param}` — so
+ * `/api/agreements/{id}/sign-request` is in family `/api/agreements` while `/api/agreements/rent-agreement`
+ * is its own family, and `familyOffersNonNested` cannot see the five creation templates that are the whole
+ * point of the comparison. Changing `familyOf` would move every caller; this asks only what this one arm needs.
+ *
+ * "Under the collection" means the path up to the first parameter. Parameter-free is the test for
+ * resource-level, because a parameter means the operation acts on one existing record rather than creating.
+ */
+function collectionOffersParameterFree(index: SpecIndex, path: string, method: string): boolean {
+  const cut = path.indexOf("/{");
+  if (cut < 0) return false;
+  const collection = path.slice(0, cut);
+  return index.operations.some(
+    (op) =>
+      op.method === method &&
+      op.path !== path &&
+      !op.path.includes("{") &&
+      (op.path === collection || op.path.startsWith(`${collection}/`)),
+  );
+}
+
 function namesAction(terms: ReadonlyArray<{ term: string }>, actions: readonly string[]): boolean {
   const asked = new Set<string>();
   for (const { term } of terms) {

@@ -312,15 +312,48 @@ So the bias is not "better documented endpoints match more". It is: **having any
 
 This is not an unknown bias. `PROSE_CAP` and `IDENTITY_BONUS` exist for it and say so at their definitions ("Verbose documentation should not outrank being the right resource"). What this case shows is that the cap bounds the bias without removing it: 3 points is small, and still decisive when 173 operations bring nothing to the other side.
 
-### Three blockers, sequential — and fixing the two obvious ones does not fix the symptom
+### FIXED — a fourth gate the three blockers did not consider
 
-There is already a rule for this shape: an irreversible or transmitting action hanging off a resource, where the query does not name the action. It does not fire, and would not be enough if it did.
+The three blockers below were all real, and all three fix paths were measured and rejected because each traded
+this defect for a worse one. The defect is now fixed by a gate none of them tested: **`transmits` only, and
+exempt when the query names ANY part of the segment.**
 
-1. **`sign-request` is hyphenated**, and the rule is deliberately scoped to single-word segments, so the block never executes. Removing that scope fails the test pinning it (`test/ranking.test.mjs`, "the demotion is scoped to single-word segments"): it inverts "Apply a manual credit note to an invoice" into the DELETE that *unapplies* it, and drops the rounding-adjustment endpoint for "Settle insignificant invoice outstanding" from rank 2 to 31, outside the default limit.
-2. **Even then the cut is ×0.9, not ×0.45** — 19.0 → 17.1, so it still wins. `familyOffersNonNested` compares `familyOf` values, and `familyOf` truncates at the first `{param}`: the signing call is in family `/api/agreements`, while `/api/agreements/rent-agreement` has no parameter and is its own family. The check that asks "is there a better alternative?" cannot see the five alternatives. Note the order — fixing this *alone* changes nothing, because blocker 1 means the block never runs.
-3. **Fixing both used to leave an external send at rank 1, and no longer does.** Applying both changes, `sign-request` correctly collapses to 8.55 and disappears. `POST /api/agreements/{id}/sign-requests/{signRequestId}/send` is still exempt from the block for a third reason — `nestedActionSegments` returns **two** segments (`sign-requests`, `send`), so the single-segment requirement excludes it whatever the hyphen guard does — but it no longer takes rank 1: it used to win the 16-point tie on `localeCompare`, and by codepoint the concrete creation templates do. (Where exactly it lands after both fixes is not measured here — the two changes are hypothetical, and the last version of this paragraph stated a rank for it that came from a review rather than a run.) So this blocker is now about a wasted slot rather than a wrong first answer, which weakens the "sequential blockers" argument rather than removing it: the first two fixes on their own still do not surface a creation template above the 19 and 18.
+Why that threads the needle. Both breakages that sank the earlier attempts are *local* writes —
+`POST /api/invoices/{id}/manual-credit-note-applications` and the rounding adjustment are irreversible and go
+nowhere outside the tenant. A gate on `transmits` **cannot reach them**, by construction rather than by
+tuning. Measured across the spec, exactly **three** operations have a single hyphenated nested action segment
+and transmit externally:
 
-An earlier version of this page called blocker 2 "the real defect". That was wrong: it is *a* blocker, and the implied fix path does not fix the reported symptom.
+    POST /api/agreements/{id}/sign-request
+    POST /api/agreements/{id}/sign-requests
+    POST /salary/{id}/register-payment
+
+That set is pinned in `test/ranking.test.mjs`, so a fourth cannot appear unnoticed.
+
+And **any** part rather than every part. The first arm demotes unless the query names the whole segment, which
+is precisely why "apply a manual credit note to an invoice" lost: it names *manual*, *credit* and *note* and
+fails on `applications`, because no stemming gets from `apply` to `applications`. Requiring zero overlap
+instead means anything gesturing at the act keeps the operation.
+
+Because `familyOffersNonNested` cannot see the five parameter-free creation templates — blocker 2 below, and
+still true — this arm asks the question directly: is there a same-method operation under the same collection
+with no path parameter at all? There are five, so the cut is 0.45 and the send leaves the window.
+
+    opprett avtale   before: POST …/{id}/sign-request 19.00   after: POST /api/agreements/accounting-services 16.00
+
+**A vocabulary gap the fix exposed.** The arm mis-fired on "send avtale til signering" — as plain a signing
+request as Norwegian gets — cutting the POST from rank 2 to 5, because **no Norwegian signing word was in
+`TERM_SYNONYMS` at all**. `signer` only appeared to work: it substring-matches the `sign-request` path rather
+than being understood, so the exemption check never saw it either. `signer`, `signere`, `signering`,
+`signatur`, `underskrift` and `underskrive` now map to `sign`.
+
+**And a measurement lesson.** A 0.45 cut and a lower base score are indistinguishable from a score alone —
+"underskrive avtale" sits at 11.32 either way. The exemption is therefore asserted through an exported
+predicate, `queryNamesActionPart`, not inferred. A mutation run that was supposed to isolate the arm silently
+patched nothing and reported "before" and "after" identical for a query that had certainly changed; the tell
+was that *nothing at all* moved.
+
+### The three blockers, for the record — all real, none of them the fix
 
 ### A third lever, considered and set aside
 

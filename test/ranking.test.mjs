@@ -832,12 +832,19 @@ test("a multiword tag and a joined field-name list take the prose rule, not the 
   assert.equal(matchStrength(nested, fieldTokens(nested), "salary-payments-complete", "structural"), 1);
 });
 
-test("the ranking defect docs/discovery.md describes is still present", async () => {
-  // This test EXISTS TO FAIL when the defect is fixed. docs/discovery.md reasons in detail from the table
-  // below — three irreversible external sends above five tied creation endpoints — and nothing asserted it,
-  // so the day someone widens the family notion or drops the identity-bonus hyphen guard the page becomes
-  // false and the suite stays green. If you are reading this because it failed: good. Check whether the
-  // creation endpoints now win, and if so rewrite that section rather than adjusting this test.
+test("the agreements defect is FIXED: a create query no longer returns an external send", async () => {
+  // This replaces a test whose name was "…is still present" and whose comment said it existed to fail the day
+  // the defect was fixed, with the instruction to rewrite the docs section rather than adjust the assertion.
+  // That is what happened. It failed, and the section is rewritten.
+  //
+  // THE DEFECT: "opprett avtale" returned POST /api/agreements/{id}/sign-request at rank 1 (19.00) and
+  // /sign-requests at 2 (18.00) — both irreversible AND externally transmitting, i.e. sending a signature
+  // request to a counterparty — with the five concrete creation templates tied behind them at 16.00.
+  //
+  // THE FIX is a second demotion arm scoped to hyphenated nested action segments that TRANSMIT, exempted when
+  // the query names ANY part of the segment. `transmits`-only is what keeps it away from the two breakages that
+  // sank every earlier attempt: the manual-credit-note-application inversion and the rounding-adjustment drop
+  // are both local, so this arm cannot reach them. They are asserted below.
   const { classifyRequest, classifyTransmission } = await import("../dist/policy.js");
   const CREATION = [
     "/api/agreements/accounting-services",
@@ -847,51 +854,99 @@ test("the ranking defect docs/discovery.md describes is still present", async ()
     "/api/agreements/service-agreement",
   ];
 
-  for (const query of ["create agreement", "opprett avtale", "create lease agreement"]) {
+  for (const query of ["create agreement", "opprett avtale", "legg til avtale", "create lease agreement"]) {
     const hits = searchOperations({ query, limit: 8 });
-    // TWO, not three. This was three until the path tie-break stopped using `localeCompare`: under that
-    // collation `{` sorted before letters, so `{id}/sign-requests/{signRequestId}/send` took rank 3 out of the
-    // 16-point tie; by codepoint it sorts after `a`-`z` and the concrete creation templates do. Nothing about
-    // merit changed — the whole group ties at 16 — which is why this number is a fact about the tie-break and
-    // the assertions below still pin the defect itself.
-    const leading = hits.slice(0, 2);
-    const sendScores = leading.map((h) => h.score);
-    for (const hit of leading) {
-      const concrete = hit.path.replace(/\{[^}]+\}/g, "7");
-      assert.match(hit.path, /sign-request/, `"${query}": rank ${hits.indexOf(hit) + 1} is ${hit.path}`);
-      // The reason it matters that these are first, stated as an assertion rather than as prose.
-      assert.equal(classifyTransmission(hit.method, concrete), "external", `${hit.path} should transmit`);
-      assert.equal(classifyRequest(hit.method, concrete), "irreversible", `${hit.path} should be irreversible`);
-    }
-    // And rank 3 IS a creation template now, which is the part the tie-break changed. If this fails because a
-    // send has come back to rank 3, the tie-break has regressed; if it fails because rank 3 outscores the sends,
-    // the defect is genuinely fixed and this whole test should go.
     assert.ok(
-      CREATION.includes(hits[2].path),
-      `"${query}": rank 3 should be a creation template, got ${hits[2].path}`,
+      CREATION.includes(hits[0].path),
+      `"${query}": rank 1 should be a creation template, got ${hits[0].method} ${hits[0].path}`,
     );
-
-    // And the five creation endpoints tie, which is why the page names no order among them — the order comes
-    // from a path tie-break, not from merit. (The page used to say "tied for fourth through eighth"; since the
-    // tie-break change they are third through seventh, and this comment cited the old wording for one commit.)
+    // No externally-transmitting operation anywhere in the top three, stated as the property rather than as a
+    // list of paths — a fourth sign-request endpoint would otherwise slip in unnoticed.
+    for (const hit of hits.slice(0, 3)) {
+      const concrete = hit.path.replace(/\{[^}]+\}/g, "7");
+      assert.notEqual(
+        classifyTransmission(hit.method, concrete),
+        "external",
+        `"${query}": rank ${hits.indexOf(hit) + 1} transmits externally: ${hit.method} ${hit.path}`,
+      );
+    }
+    // The five still tie, so no order among them is claimed — the order is a path tie-break, not merit.
     const creation = hits.filter((h) => CREATION.includes(h.path));
     assert.equal(creation.length, 5, `"${query}": expected all five creation templates in the top 8`);
-    assert.equal(
-      new Set(creation.map((h) => h.score)).size,
-      1,
-      `"${query}": the creation templates no longer tie — docs/discovery.md says they do`,
-    );
-    // There WAS a score assertion here — "no creation template matches or beats a send" — and it is gone rather
-    // than repaired, because under codepoint ordering it cannot fail. Any creation scoring at or above a send
-    // also sorts before it (a letter beats `{`), so the position assertions above fire first, every time. Review
-    // found the version I had just rewritten was unfalsifiable, and rewriting it again against the sends by name
-    // did not help: the two conditions are the same condition.
-    //
-    // What remains pins the defect completely: ranks 1 and 2 are the sends, and rank 3 is a creation template. If
-    // the sends ever stop leading, the first assertion fails; if a send returns to rank 3, the second does.
-    // Keeping a third line that can only ever be decoration would misrepresent how much is checked.
-    assert.ok(sendScores.every((s) => s > creation[0].score), `"${query}": the sends should still outscore`);
+    assert.equal(new Set(creation.map((h) => h.score)).size, 1, `"${query}": the creation templates no longer tie`);
   }
+});
+
+test("the demotion arm exempts any query that names the signing act", async () => {
+  // Asserted through the predicate rather than through scores. Inferring it from scores does not work: the POST
+  // for "underskrive avtale" sits at 11.32, and there is no way to tell a 0.45 cut from a lower base score
+  // without a baseline build. One check in this change was wrong for exactly that reason.
+  const { queryNamesActionPart } = await import("../dist/reai/spec.js");
+  for (const query of [
+    "signer avtale",
+    "signere avtalen",
+    "send avtale til signering",
+    "be om signatur pa avtale",
+    "underskrive avtale",
+    "opprett sign-request",
+  ]) {
+    assert.equal(queryNamesActionPart(query, "sign-request"), true, `"${query}" names the signing act`);
+  }
+  for (const query of ["opprett avtale", "legg til avtale", "create agreement", "vis avtaler"]) {
+    assert.equal(queryNamesActionPart(query, "sign-request"), false, `"${query}" does not name signing`);
+  }
+
+  // ANY part, not every part — which is the whole difference from `namesAction` and the reason hyphenated
+  // segments could not simply be added to the first arm. "apply a manual credit note to an invoice" names three
+  // parts of a four-part segment and no stemming reaches apply -> applications.
+  assert.equal(
+    queryNamesActionPart("apply a manual credit note to an invoice", "manual-credit-note-applications"),
+    true,
+  );
+
+  // And a signing query still reaches the POST rather than being cut out of the window.
+  for (const query of ["signer avtale", "send avtale til signering", "underskrive avtale"]) {
+    const hits = searchOperations({ query, limit: 8 });
+    assert.ok(
+      hits.some((h) => h.method === "POST" && /sign-request/.test(h.path)),
+      `"${query}" must keep a sign-request POST in reach`,
+    );
+  }
+});
+
+test("the transmits-only gate keeps the arm away from the two documented breakages", async () => {
+  // The measured reason every earlier attempt failed. Both endpoints have a hyphenated nested action segment and
+  // are irreversible, so a gate on `irreversible` would reach them; a gate on `transmits` cannot.
+  const { classifyTransmission } = await import("../dist/policy.js");
+  for (const path of ["/api/invoices/7/manual-credit-note-applications", "/api/assets/7/write-off"]) {
+    assert.notEqual(classifyTransmission("POST", path), "external", `${path} must stay outside the new arm`);
+  }
+
+  // The inversion that sank attempt one: the endpoint's own summary must still return the POST, not the DELETE
+  // that undoes it.
+  const applied = searchOperations({ query: "apply a manual credit note to an invoice", limit: 5 });
+  assert.equal(applied[0].method, "POST", `rank 1 is ${applied[0].method} ${applied[0].path}`);
+
+  // Exactly three operations are in scope. Pinned as a count so a fourth cannot appear unnoticed.
+  const { getSpecIndex } = await import("../dist/reai/spec.js");
+  const inScope = getSpecIndex().operations.filter((op) => {
+    if (op.internal) return false;
+    const segs = op.path.split("/").filter(Boolean);
+    const first = segs.findIndex((x) => x.startsWith("{"));
+    if (first < 0 || first >= segs.length - 1) return false;
+    const actions = segs.slice(first + 1).filter((x) => !x.startsWith("{"));
+    if (actions.length !== 1 || !actions[0].includes("-")) return false;
+    return classifyTransmission(op.method, op.path.replace(/\{[^}]+\}/g, "7")) === "external";
+  });
+  assert.deepEqual(
+    inScope.map((op) => `${op.method} ${op.path}`).sort(),
+    [
+      "POST /api/agreements/{id}/sign-request",
+      "POST /api/agreements/{id}/sign-requests",
+      "POST /salary/{id}/register-payment",
+    ],
+    "the set of operations this arm can demote has changed",
+  );
 });
 
 test("search ranks identically whatever locale the process is in", async () => {
