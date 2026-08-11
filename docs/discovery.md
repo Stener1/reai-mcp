@@ -353,6 +353,32 @@ predicate, `queryNamesActionPart`, not inferred. A mutation run that was suppose
 patched nothing and reported "before" and "after" identical for a query that had certainly changed; the tell
 was that *nothing at all* moved.
 
+**The sweep, 72,160 queries against main.**
+
+    rank-1 changes:             676
+    answer no longer reachable:  56
+    newly answered:               0
+    writes newly at rank 1:       0     <- nothing that answered with a read now answers with a write
+    risky new answers:          180
+
+`writesPromoted` counts only non-write -> write, so 0 there means every one of the 180 is a
+write-to-write substitution. The 56 "no longer reachable" are the demotion working: `lukk avtale`,
+`opprett avtale aksjer`, `krediter agreements` all lose `POST .../sign-request` from the window.
+
+**Five of the 180 moved the wrong way, and they are named rather than buried:**
+
+    avskriv signatur / signaturen / signere / signering / signeringen
+        PUT /api/assets/{id}/depreciation  ->  POST /api/agreements/{id}/sign-request  [EXTERNAL]
+
+Those are corpus pairs, not language — "depreciate signature". Both answers are wrong; the new one is
+wrong *and* transmits. The cause is the added signing vocabulary outscoring `avskriv`, not the demotion
+arm, and no scoring rule distinguishes two incoherent topics in one query. Accepted at five nonsense
+queries against the real gain, and written down so the next person to see an EXTERNAL arrival in a sweep
+knows which five are already explained.
+
+A second group — `avtale fullfor`, `avtale ferdigstille` — moved from one external send to another
+(`sign-request` to `salary-payments/{id}/complete`). Nonsense either way, and no change in risk class.
+
 ### The three blockers, for the record — all real, none of them the fix
 
 ### A third lever, considered and set aside
