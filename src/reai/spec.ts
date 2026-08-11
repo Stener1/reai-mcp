@@ -1134,19 +1134,90 @@ const METHOD_INTENT: ReadonlyArray<readonly [readonly string[], readonly HttpMet
  * reasoning as PHRASE_SYNONYMS, which exists because "skylder oss" and "skylder vi" point at opposite
  * sides of the books while sharing a verb.
  */
-const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
+/**
+ * EXPORTED so a test can require every entry to be reachable from the discovery sweep's corpus.
+ *
+ * Not for callers — `phraseMethodsFor` is the interface. It is exported because a phrase this table
+ * knows and the sweep's vocabulary does not makes the sweep VACUOUS for any change about that phrase,
+ * and PR #192 proved that is not hypothetical: `legg til` was added here, swept against main, and
+ * returned 0 rank-1 changes across 69,204 queries because not one generated query contained the phrase.
+ * A silence about the corpus read exactly like a silence about the change.
+ *
+ * `test/discovery-sweep.test.mjs` now fails when an entry here matches nothing the sweep generates, so
+ * the next phrase cannot escape it. A convention to remember is what failed; this is the same fact
+ * enforced instead of written down.
+ */
+export const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
   [/\blast(e|er)?\s+opp\b/, ["POST"]],
   [/\blast(e|er)?\s+ned\b/, ["GET"]],
+  // "legg til" is the commonest Norwegian way to say ADD, and it belongs HERE rather than in
+  // METHOD_INTENT for the reason `lag` is excluded there: bare `legg` is not a create request on its
+  // own. As a phrase it is unambiguous, which is what this table is for.
+  //
+  // Measured before adding it: "legg til en leverandor" ranked POST /api/suppliers FIFTH, behind two
+  // supplier-ledger GETs, and "legg til en ny kunde" ranked POST /api/customers third behind the
+  // customer ledger. `opprett` reached the same endpoints first, so the gap was purely which synonym
+  // the caller happened to use.
+  //
+  // IMPERATIVE AND INFINITIVE ONLY — `legg til`, `legge til`. Neither the past participle nor the
+  // present tense.
+  //
+  // `lagt` was excluded from the first version: "hvor mange kunder ble lagt til i fjor" asks about
+  // history, not for a customer, and that is the past-tense trap keeping "make", "cancel", "new" and
+  // "start" out of WRITE_INTENT_VERBS. But that version also claimed the present tense was
+  // unambiguous, and the review of PR #192 showed it is not, one conjugation further on: a present
+  // tense verb appears inside a RELATIVE CLAUSE of an explicit read request.
+  //
+  //     vis kunder vi legger til i år          POST /api/customers            (want a customer GET)
+  //     vis leverandorer vi legger til i år    POST /api/suppliers/{id}/unarchive
+  //
+  // `vis` is as plain a read verb as exists, and the phrase overrode it — writeIntent is evaluated
+  // before readIntent precisely so that a query holding both is treated as a write. The second one is
+  // worse than a wrong resource: it offers to UNARCHIVE a supplier in answer to "show me".
+  //
+  // Dropping `er` fixes both and costs nothing measurable: "jeg legger til en kunde" is a statement
+  // about what the speaker is doing, not a request, and every imperative and infinitive phrasing still
+  // matches. Verified against both corpora.
+  // The negative lookahead is not tidying: `legge til grunn` ("to base on", "to assume") and `legge til
+  // rette` ("to facilitate") are stock Norwegian accounting language, and both contain the phrase
+  // contiguously. Without the exclusion they promoted IRREVERSIBLE writes over a read:
+  //
+  //   hvilket beløp skal jeg legge til grunn for mva
+  //       GET /api/vat-codes  ->  POST /api/vat-returns, /complete-manually, /reopen  (all irreversible)
+  //   legge til rette for avstemming
+  //       GET /api/manual-reconciliations/{id}  ->  POST …/groups/{id}/unmatch        (irreversible)
+  //
+  // A question with no stated intent ranking a write first is the failure this file's tables are
+  // repeatedly written to avoid, and offering to reopen a VAT return in answer to "what amount should
+  // I use" is the worst version of it in this change.
+  [/\blegg(e)?\s+til\b(?!\s+(grunn|rette))/, ["POST"]],
 ];
 
 function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
   const text = query.toLowerCase();
   const matched = PHRASE_INTENT.filter(([pattern]) => pattern.test(text));
-  // One phrase only. Two competing phrases say the user asked for two things, and guessing between
-  // them is how the verb heuristic got worse than none — the same rule impliedMethodsFor applies to
-  // its groups.
-  const only = matched.length === 1 ? matched[0] : undefined;
-  return only ? new Set(only[1]) : undefined;
+  if (matched.length === 0) return undefined;
+
+  // COMPETING phrases yield nothing; AGREEING ones do not compete.
+  //
+  // The rule was "one phrase only", and while `last opp`/`last ned` were the whole table that was the
+  // same thing. Adding `legg til` broke it: two POST phrases in one query — "last opp og legg til
+  // vedlegg", the natural way to ask for both — matched twice, so the hint was discarded and every
+  // non-GET took the no-intent 0.7 cut. Measured, the entire top three inverted from writes to reads:
+  //
+  //   last opp og legg til vedlegg              POST /api/attachments        ->  GET /api/attachments/{id}
+  //   last opp et vedlegg og legg til ordren    POST /api/orders/{id}/…      ->  GET /api/orders/{id}/…
+  //
+  // Worse than having no phrase table for those queries, and caused entirely by the new entry.
+  //
+  // So: intersect. Two phrases that name the same method are one statement made twice, and the
+  // original reasoning — "two competing phrases say the user asked for two things, and guessing
+  // between them is how the verb heuristic got worse than none" — applies only when they disagree.
+  // `last opp` with `last ned` still yields undefined, which is the case that reasoning was about.
+  const intersection = matched
+    .map(([, methods]) => new Set(methods))
+    .reduce((acc, next) => new Set([...acc].filter((m) => next.has(m))));
+  return intersection.size > 0 ? intersection : undefined;
 }
 
 /**

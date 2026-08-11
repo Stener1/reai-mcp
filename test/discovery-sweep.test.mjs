@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getSpecIndex, termSynonymKeys } from "../dist/reai/spec.js";
+import { PHRASE_INTENT, getSpecIndex, termSynonymKeys } from "../dist/reai/spec.js";
 import {
   ADJECTIVES,
   NOUNS,
@@ -60,6 +60,42 @@ test("the sweep covers every dimension that has caught a defect", () => {
   for (const q of ["registrer kvittering", "endre inngående faktura", "last opp kvittering"]) {
     assert.ok(queries.has(q), `a query a review had to find is still not swept: ${q}`);
   }
+});
+
+test("every PHRASE_INTENT entry is reachable from the corpus", () => {
+  // THE SWEEP'S SILENCE MUST BE ABOUT THE CHANGE, NOT ABOUT ITS OWN VOCABULARY.
+  //
+  // PR #192 added `legg til` to PHRASE_INTENT, swept it against main, and got 0 rank-1 changes, 0
+  // unreachable and 0 newly answered across 69,204 queries. That reads as "provably harmless" and meant
+  // nothing whatsoever: `legg til` was not in WRITE_VERBS, so not ONE of the 69,204 generated queries
+  // contained the phrase. The instrument was blind to the change it had been run to check, and the
+  // omission was invisible because 660 queries matched `last opp`, so the phrase mechanism looked covered.
+  //
+  // Worse than the three failures in this file's header: there the query at least ran and two rankings
+  // were compared. Here nothing was compared, and the zero row was nearly reported as the last gate
+  // passing.
+  //
+  // So this is the same fact enforced rather than written down. A phrase the ranker knows and the corpus
+  // does not now fails here, at the moment it is added.
+  const queries = buildQueries(getSpecIndex(), { synonymKeys: termSynonymKeys() });
+  const unreached = PHRASE_INTENT.filter(([pattern]) => !queries.some((q) => pattern.test(q.toLowerCase())));
+  assert.deepEqual(
+    unreached.map(([pattern]) => String(pattern)),
+    [],
+    "these PHRASE_INTENT patterns match no swept query, so `--against` cannot see a change to them. Add " +
+      "the phrase to WRITE_VERBS or READ_VERBS in scripts/discovery-sweep.mjs:\n  " +
+      unreached.map(([pattern]) => String(pattern)).join("\n  "),
+  );
+
+  // Non-vacuous in both directions: the table must be non-empty, and a phrase the corpus genuinely cannot
+  // produce must be reported. Without this the assertion above passes for an empty table.
+  assert.ok(PHRASE_INTENT.length >= 3, `PHRASE_INTENT has only ${PHRASE_INTENT.length} entries`);
+  const invented = [[/\bzzz\s+quux\b/, ["POST"]]];
+  assert.equal(
+    invented.filter(([pattern]) => !queries.some((q) => pattern.test(q.toLowerCase()))).length,
+    1,
+    "the reachability check cannot detect an unreachable phrase, so it proves nothing about the real ones",
+  );
 });
 
 test("the corpus is large enough to be a sweep rather than a sample", () => {

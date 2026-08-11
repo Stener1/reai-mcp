@@ -90,6 +90,143 @@ target that is irreversible or transmitting is now named whatever the previous m
 Nothing it prints is automatically a regression: a phrase rule narrowing a query to the family it names shows
 as "no longer reachable" for the family it replaced. Read the lines rather than counting them.
 
+## Sentence-length queries, and the `legg til` gap they found
+
+A third corpus, `test/discovery-heldout-sentences.test.mjs`: 20 whole sentences of the kind an accountant
+would type at an agent ("hvor mye skylder kundene meg", "book a supplier invoice to an expense account"),
+written before looking at what the ranker did with any of them. The two older sets are mostly single terms
+and short phrases, so what is new here is sentence LENGTH — filler words, subordinate clauses and
+prepositional phrases around the resource word.
+
+Not question forms, which the first version of this claimed: `test/discovery-heldout.test.mjs` already
+holds "hvor mye skylder vi leverandørene", "hva er neste fakturanummer" and "hvilke varer er på lager",
+and `src/reai/spec.ts` says so in its own words. One of the new cases is a near-duplicate of an existing
+one.
+
+**15 of 20 at rank 1, 18 of 20 in the top 3**, after one fix (13 and 16 before it). All five that are not
+at rank 1 are named in that file with their causes.
+
+### The fix: `legg til` is a write, and was not recognised
+
+`legg til` is the commonest Norwegian way to say *add*. Measured before the change:
+
+| query | rank of the write it asks for, before |
+|---|---|
+| `legg til en leverandor` | POST `/api/suppliers` **11th** — nine GETs and `DELETE /api/suppliers/{id}` ahead of it |
+| `legg til en ny kunde` | POST `/api/customers` **5th**, behind four customer GETs |
+| `opprett en ny kunde` | rank 1 |
+
+The first version of this table said 5th and 3rd. Both were measured with a **path-only** comparison, so
+they were the ranks of the GET on the same path — the identical inflation recorded two sections down. The
+supplier case is sharper than the number I published: a `DELETE` outranked the create.
+
+So the gap was purely which synonym the caller happened to use. It went into `PHRASE_INTENT` rather than
+`METHOD_INTENT` for the reason `lag` is excluded from the latter: bare `legg` is not a create request, but
+the two-word phrase is unambiguous — the same argument `last opp` already rests on.
+
+**Imperative and infinitive only** — `legg til`, `legge til`. Two conjugations are excluded, and the second
+one had to be found in review:
+
+- `lagt til` is the past participle. "hvor mange kunder ble lagt til i fjor" asks about history, and matching
+  it would offer a POST in answer to a question — the trap that keeps `make`, `cancel`, `new` and `start` out
+  of `WRITE_INTENT_VERBS`. Excluded from the start.
+- `legger til` is the present tense, and the first version matched it **while claiming present tense was
+  unambiguous**. It is not: a present-tense verb turns up inside a relative clause of an explicit read
+  request.
+
+      vis kunder vi legger til i år          ->  POST /api/customers
+      vis leverandorer vi legger til i år    ->  POST /api/suppliers/{id}/unarchive
+
+  `vis` is as plain a read verb as exists, and the phrase beat it, because `writeIntent` is evaluated before
+  `readIntent` so that a query holding both reads as a write. The supplier case is worse than a wrong
+  resource: it offers to **unarchive** a supplier in answer to "show me". Dropping `er` fixes both and costs
+  nothing measurable — "jeg legger til en kunde" is a statement about what the speaker is doing, not a
+  request.
+
+Two idioms are excluded by lookahead for the same reason, and they are commoner in accounting prose than
+either conjugation above: **`legge til grunn`** ("to base on", "to assume") and **`legge til rette`** ("to
+facilitate"). Both contain the phrase contiguously, and both promoted *irreversible* writes over a read —
+"hvilket beløp skal jeg legge til grunn for mva" offered `POST /api/vat-returns/reopen` in answer to a
+question about which figure to use.
+
+And the phrase is recognised only **contiguously**, which is a real limitation rather than a decision:
+Norwegian separable particles allow an object in between, so `legg kunden til` and `legger vedlegget til
+ordren` still rank reads. So does `legg inn`, an equally common "enter". Covering those needs particle
+handling, not another table entry.
+
+### The sweep said 0/0/0/0, and that meant nothing at all
+
+The first sweep of this change against `main` reported **0 rank-1 changes, 0 no-longer-reachable, 0 newly
+answered, 0 writes promoted — across 69,204 queries.** It reads as *provably harmless*. It was empty:
+`legg til` was not in the sweep's `WRITE_VERBS`, so **not one of the 69,204 generated queries contained the
+phrase.** The instrument was blind to the change it had been run to check, and a silence about its own
+vocabulary is indistinguishable from a silence about the change.
+
+What hid it: 660 queries matched `last opp`, so the phrase mechanism looked covered. That number was the
+reassurance, and it was about a different entry.
+
+This is worse than the three failures in this file's and the script's headers, where the sweep at least ran
+the query and compared two rankings. Here nothing was compared.
+
+Adding `legg til`/`legge til` to `WRITE_VERBS` took the affected corpus from **0 to 1,320** queries. The
+re-run then reported **634 queries newly ranking an irreversible or externally-transmitting write first** —
+the opposite headline, and it needs reading rather than counting, exactly as the script's footer says:
+
+- **99.7% of it is the behaviour `main` already had.** For all 1,320 affected queries, `legg til <noun>` and
+  `opprett <noun>` return the **same** top-1 operation in 1,316 cases. `opprett`, `registrer` and the other
+  write verbs already produced every one of those writes; the change gave one more synonym the same
+  treatment, which is its entire purpose. Only two distinct nouns diverge (`reconcile`, `utgående
+  avstemmingen`), both landing on different reconciliation POSTs that are irreversible either way.
+- **116 of the 1,320 are not language.** They are controller names from the spec — `legg til
+  admin-consent-check-ctrl`, `legg til adyen-component-session-rest-ctrl` — so the 634 overstates the
+  real-language exposure.
+
+### A pre-existing property the number did expose
+
+A bare "add X" ranks an **externally transmitting** operation first for several nouns, and has done all
+along via `opprett`:
+
+    legg til / opprett arbeidsgiveravgift  ->  POST /api/salary-payments/{id}/complete   [irreversible, EXTERNAL]
+    legg til / opprett agreements          ->  POST /api/agreements/{id}/sign-request    [irreversible, EXTERNAL]
+
+An a-melding submission and a signature request, offered in answer to "add employer's tax". Discovery only
+*names* an endpoint — the write policy still gates execution, and transmitting tools are not even registered
+unless `REAI_ALLOW_EXTERNAL_SEND` is set — so this is a bad suggestion rather than an unsafe action. It is
+recorded here rather than fixed because it belongs to write intent generally, not to this phrase, and any fix
+is a change to how every write verb ranks.
+
+### The fix is enforced, not remembered
+
+`PHRASE_INTENT` is exported and `test/discovery-sweep.test.mjs` now fails when any entry matches no swept
+query. It found a second gap the moment it was added: **`last ned` was in `PHRASE_INTENT` and absent from
+`READ_VERBS`**, so the GET half of the phrase mechanism had never been swept either. All three entries are
+now reachable — 660, 660 and 1,320 queries — where two of the three were 0 and 660.
+
+### Two measurement errors worth recording, both mine
+
+- **The harness, not the ranker.** The first run scored **0 of 20** with all twenty queries returning the
+  same three operations. `searchOperations` takes one options object and had been called positionally, so
+  every query ran as the empty string. A total ranking collapse and a broken probe look identical; the tell
+  was that the results never varied.
+- **Scoring on the path alone inflates by two.** `lag et tilbud til en kunde` targets POST `/api/offers`,
+  the ranker returns GET `/api/offers` first, and a path-only comparison counted that as rank 1 — passing
+  the very case the corpus existed to record. A method is half of what an agent needs.
+- **Two agreeing phrases were treated as competing.** `phraseMethodsFor` discarded its hint whenever two
+  entries matched, which was indistinguishable from "one phrase only" while `last opp`/`last ned` were the
+  whole table. With a second POST phrase in it, "last opp og legg til vedlegg" — the natural way to ask for
+  both — matched twice, lost the hint, and inverted its whole top three from writes to reads. Fixed by
+  intersecting the matched method sets: two phrases naming the same method are one statement made twice,
+  and the original reasoning applies only when they disagree.
+- **`-1 <= 2` is true.** The assertion pinning the one known miss in the top three read
+  `rankOf(...) <= 2`, and `rankOf` returns `-1` for a target outside the ten-result window — so it passed
+  when the operation was **entirely absent** while claiming it stayed in the top three. Found in review, in
+  a test written to guard against exactly this.
+
+And two of the original labels were simply worse than what the ranker returned: `change a customers
+address` → PUT `/api/customers/{id}/address`, and `hvilke varer har jeg pa lager` → GET
+`/api/warehouses/inventory`. Both are the endpoint that does the job. Scoring them as failures would have
+set a floor punishing the ranker for being right, and invited a "fix" that made it wronger.
+
 ## More than half the API documents nothing, and prose is worth a flat +3 whatever it says
 
 Measured 2026-08-10 on the refreshed spec: **173 of the 320 public operations carry neither a summary nor a
