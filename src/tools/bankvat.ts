@@ -206,10 +206,15 @@ const getBankReconciliation = defineTool({
     "DO NOT ANSWER \"does the bank match the books\" BY SUBTRACTING `providerBalance`. It is the feed's CURRENT " +
     "balance and is not scoped to the month you asked for — measured on account 1338, it read 1039.70 for both " +
     "2026-07 and 2026-08, with the same lastSyncedAt, while the ledger closed at 554.31 and 1002.36. Using it " +
-    "for July reports a 485.39 shortfall against books that balance. The response answers the question itself: " +
-    "`pendingDiscrepancy` and `matchedDiscrepancy` were both 0 there. The month-scoped balance is " +
-    "`actualBankDisplayedBalance`, and it is only comparable to the ledger when `bankCurrency` equals " +
-    "`tenantCurrency` — the reconciliation view refuses to compute a difference otherwise. For the CURRENT month " +
+    "for July reports a 485.39 shortfall against books that balance. The month-scoped balance is " +
+    "`actualBankDisplayedBalance`; compare that against `bankLedgerClosingBalance`, and compare " +
+    "`actualBankMonthStartBalance` against `bankLedgerOpeningBalance` too, because a gap carried in from an " +
+    "earlier month passes through both closings untouched. `pendingDiscrepancy` and `matchedDiscrepancy` do " +
+    "NOT answer this: each subtracts postings from transactions within one bucket of the month's activity, so " +
+    "both can read 0 while the balances differ by the opening gap. They tell you WHERE a difference arose, " +
+    "not whether there is one. The balance comparison holds only when `bankCurrency` equals `tenantCurrency` " +
+    "— the reconciliation view refuses to compute a difference otherwise, because nothing in the spec says " +
+    "which posting figure is the bank side. For the CURRENT month " +
     "a gap is expected rather than a fault, and `actualBankCurrentMonth` is the flag that says so. " +
     "See the quirk provider-balance-is-not-month-scoped.\n\n" +
     "This is the view for BANK-SYNCED accounts. If reai_list_company_banks reports " +

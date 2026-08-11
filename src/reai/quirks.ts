@@ -1674,11 +1674,23 @@ export const QUIRKS: readonly Quirk[] = [
       "difference rather than computing one. All three accounts on 2634 are NOK, so the foreign-currency " +
       "case is unobservable here and one NOK account establishes nothing about it — on a currency account, " +
       "subtracting a bank figure from a book figure manufactures a discrepancy the size of the exchange " +
-      "rate. Check the two currencies first, and if they differ use `bankInTenantCurrency` to see which " +
-      "side the figures are stated in rather than converting anything yourself.\n\n" +
-      "Better still, the endpoint answers the question directly: " +
-      "`pendingDiscrepancy` and `matchedDiscrepancy` were both 0 for July, with matchedTransactionsTotal and " +
-      "matchedPostingsTotal both 554.31. Use those rather than subtracting balances yourself.\n\n" +
+      "rate. Check the two currencies first, and when they differ report that no comparison is available " +
+      "rather than producing one. `bankInTenantCurrency` does NOT rescue this: it says whether the account " +
+      "runs in the tenant currency, not which response figure is stated in which currency. Postings carry " +
+      "both `amount` and `currencyAmount`, and the OpenAPI document describes neither, so which one is the " +
+      "bank side is not established anywhere — src/ui/reconciliation.ts records exactly that as the reason " +
+      "it refuses. Do not convert, and do not infer the side from a boolean.\n\n" +
+      "THE DISCREPANCY FIELDS DO NOT ANSWER THIS QUESTION EITHER, which was a mistake in an earlier version " +
+      "of this note. `pendingDiscrepancy` is pendingTransactionsTotal minus pendingPostingsTotal and " +
+      "`matchedDiscrepancy` is matchedTransactionsTotal minus matchedPostingsTotal — both compare the two " +
+      "sides WITHIN one bucket of the month's activity. Neither looks at a balance. The response ships " +
+      "`actualBankMonthStartBalance` and `bankLedgerOpeningBalance` as separate fields, so an opening gap is " +
+      "a representable state, and it passes straight through to the closing balances while both discrepancy " +
+      "fields stay 0. To answer \"does the bank match the books\", compare `actualBankDisplayedBalance` " +
+      "against `bankLedgerClosingBalance` and check the two openings against each other; the discrepancy " +
+      "fields then tell you whether the gap arose this month or was carried in. Every month reachable on " +
+      "2634 has the two openings equal (0/0 for July, 554.31/554.31 for August), so this comes from what " +
+      "the fields are, not from a divergence anyone here could observe.\n\n" +
       "For the CURRENT month a gap between the ledger and the feed is expected rather than a fault — August " +
       "shows 1002.36 against 1039.70 because the feed has movements not yet booked. `actualBankCurrentMonth` " +
       "is true exactly then, so it is the flag that tells you a difference is not yet a problem.",
