@@ -125,8 +125,13 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
   // over a cap that reported no truncation. The truncating branches only escaped because
   // TRUNCATION_NOTE_RESERVE happens to be larger than the note it reserves for; that is luck, so the
   // budget subtracts this too rather than relying on the slack.
+  // CLAMPED AT ZERO, and not for tidiness. `body.slice(0, negative)` counts from the END of the string
+  // rather than returning nothing, so subtracting an oversized note produced results far LARGER than the
+  // cap it was meant to enforce: a note of 23,000 characters turned a 60,000-character text body into
+  // 82,937 delivered and a nested object into 141,961. A regression introduced by the fix above, caught
+  // by probing the branch rather than by the suite, which had no case for a note near the cap.
   const suppliedOverhead = parts.reduce((n, part) => n + part.length + 1, 0) + (parts.length ? 1 : 0);
-  const bodyBudget = BODY_BUDGET - suppliedOverhead;
+  const bodyBudget = Math.max(0, BODY_BUDGET - suppliedOverhead);
 
   let body = stringify(data);
   if (body.length + suppliedOverhead > MAX_RESULT_CHARS) {

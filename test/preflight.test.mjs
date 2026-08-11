@@ -959,7 +959,23 @@ test("a caller-supplied note counts against the cap", () => {
   assert.ok(ok(nested, { note }).content[0].text.length <= 24_000, "nested-object branch");
   assert.ok(ok({ blob: "A".repeat(40_000), id: 7 }, { note }).content[0].text.length <= 24_000, "fallback branch");
 
-  // 3. A link is part of the same overhead as a note.
+  // 3. A note that is itself near the cap. `slice(0, negative)` counts from the END of the string, so
+  //    subtracting an oversized note made results LARGER than the cap: 82,937 characters delivered for a
+  //    text body and 141,961 for a nested object. Every branch is probed because two of the five had it.
+  const oversizedNote = "N".repeat(23_000);
+  for (const [label, payload] of [
+    ["text", "Z".repeat(60_000)],
+    ["array", Array.from({ length: 4000 }, (_, i) => ({ id: i }))],
+    ["nested object", { label: "x", rows: Array.from({ length: 4000 }, (_, i) => ({ id: i })) }],
+    ["single oversized field", { blob: "A".repeat(40_000) }],
+    ["flat scalars", filler],
+  ]) {
+    const out = ok(payload, { note: oversizedNote }).content[0].text;
+    assert.ok(out.length <= 24_000, `${label} with a 23,000-character note came back at ${out.length}`);
+    assert.ok(out.startsWith(oversizedNote), `${label} must still deliver the note`);
+  }
+
+  // 4. A link is part of the same overhead as a note.
   const both = ok(filler, { note, link: "https://app.reai.no/" + "p".repeat(300) }).content[0].text;
   assert.ok(both.length <= 24_000, `note + link came back at ${both.length}`);
 });
