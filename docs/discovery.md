@@ -94,21 +94,31 @@ as "no longer reachable" for the family it replaced. Read the lines rather than 
 
 A third corpus, `test/discovery-heldout-sentences.test.mjs`: 20 whole sentences of the kind an accountant
 would type at an agent ("hvor mye skylder kundene meg", "book a supplier invoice to an expense account"),
-written before looking at what the ranker did with any of them. The two older sets are single terms and
-short phrases, so filler words, question forms and prepositions were untested.
+written before looking at what the ranker did with any of them. The two older sets are mostly single terms
+and short phrases, so what is new here is sentence LENGTH — filler words, subordinate clauses and
+prepositional phrases around the resource word.
 
-**15 of 20 at rank 1, 18 of 20 in the top 3**, after one fix. Every remaining miss is named in that file
-with its cause.
+Not question forms, which the first version of this claimed: `test/discovery-heldout.test.mjs` already
+holds "hvor mye skylder vi leverandørene", "hva er neste fakturanummer" and "hvilke varer er på lager",
+and `src/reai/spec.ts` says so in its own words. One of the new cases is a near-duplicate of an existing
+one.
+
+**15 of 20 at rank 1, 18 of 20 in the top 3**, after one fix (13 and 16 before it). All five that are not
+at rank 1 are named in that file with their causes.
 
 ### The fix: `legg til` is a write, and was not recognised
 
 `legg til` is the commonest Norwegian way to say *add*. Measured before the change:
 
-| query | rank of the write it asks for |
+| query | rank of the write it asks for, before |
 |---|---|
-| `legg til en leverandor` | POST `/api/suppliers` **5th**, behind two supplier-ledger GETs |
-| `legg til en ny kunde` | POST `/api/customers` **3rd**, behind the customer ledger |
+| `legg til en leverandor` | POST `/api/suppliers` **11th** — nine GETs and `DELETE /api/suppliers/{id}` ahead of it |
+| `legg til en ny kunde` | POST `/api/customers` **5th**, behind four customer GETs |
 | `opprett en ny kunde` | rank 1 |
+
+The first version of this table said 5th and 3rd. Both were measured with a **path-only** comparison, so
+they were the ranks of the GET on the same path — the identical inflation recorded two sections down. The
+supplier case is sharper than the number I published: a `DELETE` outranked the create.
 
 So the gap was purely which synonym the caller happened to use. It went into `PHRASE_INTENT` rather than
 `METHOD_INTENT` for the reason `lag` is excluded from the latter: bare `legg` is not a create request, but
@@ -133,6 +143,17 @@ one had to be found in review:
   nothing measurable — "jeg legger til en kunde" is a statement about what the speaker is doing, not a
   request.
 
+Two idioms are excluded by lookahead for the same reason, and they are commoner in accounting prose than
+either conjugation above: **`legge til grunn`** ("to base on", "to assume") and **`legge til rette`** ("to
+facilitate"). Both contain the phrase contiguously, and both promoted *irreversible* writes over a read —
+"hvilket beløp skal jeg legge til grunn for mva" offered `POST /api/vat-returns/reopen` in answer to a
+question about which figure to use.
+
+And the phrase is recognised only **contiguously**, which is a real limitation rather than a decision:
+Norwegian separable particles allow an object in between, so `legg kunden til` and `legger vedlegget til
+ordren` still rank reads. So does `legg inn`, an equally common "enter". Covering those needs particle
+handling, not another table entry.
+
 ### Two measurement errors worth recording, both mine
 
 - **The harness, not the ranker.** The first run scored **0 of 20** with all twenty queries returning the
@@ -142,6 +163,12 @@ one had to be found in review:
 - **Scoring on the path alone inflates by two.** `lag et tilbud til en kunde` targets POST `/api/offers`,
   the ranker returns GET `/api/offers` first, and a path-only comparison counted that as rank 1 — passing
   the very case the corpus existed to record. A method is half of what an agent needs.
+- **Two agreeing phrases were treated as competing.** `phraseMethodsFor` discarded its hint whenever two
+  entries matched, which was indistinguishable from "one phrase only" while `last opp`/`last ned` were the
+  whole table. With a second POST phrase in it, "last opp og legg til vedlegg" — the natural way to ask for
+  both — matched twice, lost the hint, and inverted its whole top three from writes to reads. Fixed by
+  intersecting the matched method sets: two phrases naming the same method are one statement made twice,
+  and the original reasoning applies only when they disagree.
 - **`-1 <= 2` is true.** The assertion pinning the one known miss in the top three read
   `rankOf(...) <= 2`, and `rankOf` returns `-1` for a target outside the ten-result window — so it passed
   when the operation was **entirely absent** while claiming it stayed in the top three. Found in review, in

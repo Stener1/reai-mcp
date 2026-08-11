@@ -1165,17 +1165,46 @@ const PHRASE_INTENT: ReadonlyArray<readonly [RegExp, readonly HttpMethod[]]> = [
   // Dropping `er` fixes both and costs nothing measurable: "jeg legger til en kunde" is a statement
   // about what the speaker is doing, not a request, and every imperative and infinitive phrasing still
   // matches. Verified against both corpora.
-  [/\blegg(e)?\s+til\b/, ["POST"]],
+  // The negative lookahead is not tidying: `legge til grunn` ("to base on", "to assume") and `legge til
+  // rette` ("to facilitate") are stock Norwegian accounting language, and both contain the phrase
+  // contiguously. Without the exclusion they promoted IRREVERSIBLE writes over a read:
+  //
+  //   hvilket beløp skal jeg legge til grunn for mva
+  //       GET /api/vat-codes  ->  POST /api/vat-returns, /complete-manually, /reopen  (all irreversible)
+  //   legge til rette for avstemming
+  //       GET /api/manual-reconciliations/{id}  ->  POST …/groups/{id}/unmatch        (irreversible)
+  //
+  // A question with no stated intent ranking a write first is the failure this file's tables are
+  // repeatedly written to avoid, and offering to reopen a VAT return in answer to "what amount should
+  // I use" is the worst version of it in this change.
+  [/\blegg(e)?\s+til\b(?!\s+(grunn|rette))/, ["POST"]],
 ];
 
 function phraseMethodsFor(query: string): Set<HttpMethod> | undefined {
   const text = query.toLowerCase();
   const matched = PHRASE_INTENT.filter(([pattern]) => pattern.test(text));
-  // One phrase only. Two competing phrases say the user asked for two things, and guessing between
-  // them is how the verb heuristic got worse than none — the same rule impliedMethodsFor applies to
-  // its groups.
-  const only = matched.length === 1 ? matched[0] : undefined;
-  return only ? new Set(only[1]) : undefined;
+  if (matched.length === 0) return undefined;
+
+  // COMPETING phrases yield nothing; AGREEING ones do not compete.
+  //
+  // The rule was "one phrase only", and while `last opp`/`last ned` were the whole table that was the
+  // same thing. Adding `legg til` broke it: two POST phrases in one query — "last opp og legg til
+  // vedlegg", the natural way to ask for both — matched twice, so the hint was discarded and every
+  // non-GET took the no-intent 0.7 cut. Measured, the entire top three inverted from writes to reads:
+  //
+  //   last opp og legg til vedlegg              POST /api/attachments        ->  GET /api/attachments/{id}
+  //   last opp et vedlegg og legg til ordren    POST /api/orders/{id}/…      ->  GET /api/orders/{id}/…
+  //
+  // Worse than having no phrase table for those queries, and caused entirely by the new entry.
+  //
+  // So: intersect. Two phrases that name the same method are one statement made twice, and the
+  // original reasoning — "two competing phrases say the user asked for two things, and guessing
+  // between them is how the verb heuristic got worse than none" — applies only when they disagree.
+  // `last opp` with `last ned` still yields undefined, which is the case that reasoning was about.
+  const intersection = matched
+    .map(([, methods]) => new Set(methods))
+    .reduce((acc, next) => new Set([...acc].filter((m) => next.has(m))));
+  return intersection.size > 0 ? intersection : undefined;
 }
 
 /**

@@ -5,10 +5,15 @@ import { searchOperations, findOperation } from "../dist/reai/spec.js";
 /**
  * A third corpus: whole SENTENCES, written before looking at what the ranker did with any of them.
  *
- * The two existing sets are single terms and short phrases — "inngående faktura", "feriepenger",
+ * The two existing sets are mostly single terms and short phrases — "inngående faktura", "feriepenger",
  * "slett utgift". This one is what an accountant would actually type at an agent: "hvor mye skylder
- * kundene meg", "book a supplier invoice to an expense account". Longer queries carry filler words,
- * question forms and prepositions, and none of that vocabulary was added for them.
+ * kundene meg", "book a supplier invoice to an expense account". What is new is sentence LENGTH: filler
+ * words, subordinate clauses and prepositional phrases around the resource word.
+ *
+ * NOT question forms. The first version of this comment claimed those were untested, and review showed
+ * otherwise — test/discovery-heldout.test.mjs already holds "hvor mye skylder vi leverandørene", "hva er
+ * neste fakturanummer" and "hvilke varer er på lager", and src/reai/spec.ts says as much in its own
+ * words. "hvilke varer har jeg pa lager" below is a near-duplicate of one of them.
  *
  * Written in one sitting, then measured once. With every target labelled as the endpoint that actually
  * does the job — not as whatever the ranker happened to return — and scored on METHOD AND PATH, this
@@ -64,8 +69,12 @@ const CASES = [
   ["lag et tilbud til en kunde", "POST", "/api/offers"],
 
   // `legg til` — the commonest Norwegian "add", and the gap this corpus found. Before the
-  // PHRASE_INTENT entry, "legg til en leverandor" ranked POST /api/suppliers FIFTH behind two
-  // supplier-ledger GETs, while `opprett` reached it first. Purely which synonym the caller used.
+  // PHRASE_INTENT entry, "legg til en leverandor" ranked POST /api/suppliers ELEVENTH, with nine GETs
+  // and DELETE /api/suppliers/{id} ahead of it, and "legg til en ny kunde" ranked POST /api/customers
+  // fifth. `opprett` reached both first, so it was purely which synonym the caller used.
+  //
+  // Those figures were first published as "5th" and "3rd", measured with a path-only comparison — the
+  // ranks of the GET on the same path. The same inflation as rankOf below, in the prose this time.
   ["legg til en ny kunde", "POST", "/api/customers"],
   ["legge til et vedlegg pa en ordre", "POST", "/api/orders/{id}/attachments"],
 
@@ -132,9 +141,53 @@ test("a `legg til` query asks for a WRITE, not the ledger view of the same resou
   // The gap this corpus found. `legg til` is a PHRASE, which is why it belongs in PHRASE_INTENT and
   // not in METHOD_INTENT: bare `legg` is not a create request. Asserted per query rather than only
   // through the aggregate floor above, or the aggregate could absorb its loss silently.
-  for (const query of ["legg til en leverandor", "legg til en ny kunde", "legge til et vedlegg pa en ordre"]) {
+  for (const [query, path] of [
+    ["legg til en leverandor", "/api/suppliers"],
+    ["legg til en ny kunde", "/api/customers"],
+    ["legge til et vedlegg pa en ordre", "/api/orders/{id}/attachments"],
+  ]) {
+    const hits = searchOperations({ query, limit: 3 });
+    assert.ok(hits.length > 0, `${query} returned nothing`);
+    assert.equal(hits[0].method, "POST", `${query} ranked ${hits[0].method} ${hits[0].path} first`);
+    // The METHOD alone is not enough. Asserting only that the top hit is a POST passed while the first
+    // result for the supplier query was POST /api/supplier-invoices/{id}/attachments/existing — a write,
+    // and the wrong endpoint entirely. The target must be in the top three as well.
+    const rank = rankOf(query, "POST", path);
+    assert.ok(rank >= 0 && rank <= 2, `POST ${path} is at rank ${rank} for "${query}"`);
+  }
+});
+
+test("two phrases that agree on a method do not cancel each other out", () => {
+  // `phraseMethodsFor` discarded its hint whenever TWO entries matched, which was the same thing as
+  // "one phrase only" while last opp/last ned were the whole table. A second POST phrase broke it: the
+  // natural way to ask for both operations matched twice, lost the hint, and every non-GET took the
+  // no-intent 0.7 cut — the whole top three inverting from writes to reads.
+  for (const query of [
+    "last opp og legg til vedlegg",
+    "last opp et vedlegg og legg til ordren",
+    "last opp faktura og legg til bilag",
+  ]) {
     const [top] = searchOperations({ query, limit: 1 });
     assert.equal(top.method, "POST", `${query} ranked ${top.method} ${top.path} first`);
+  }
+
+  // And phrases that DISAGREE still yield nothing, which is what the exclusivity rule was for.
+  const [top] = searchOperations({ query: "last opp og last ned filen", limit: 1 });
+  assert.equal(top.method, "GET", "a query naming an upload AND a download must not imply either");
+});
+
+test("`legge til grunn` and `legge til rette` are idioms, not requests to add", () => {
+  // Both contain the phrase contiguously and are stock Norwegian accounting language. Unexcluded they
+  // promoted IRREVERSIBLE writes over a read — "hvilket beløp skal jeg legge til grunn for mva" offered
+  // POST /api/vat-returns/reopen in answer to a question about which figure to use.
+  for (const query of [
+    "hvilket belop skal jeg legge til grunn for mva",
+    "hvilket beløp skal jeg legge til grunn for mva",
+    "legge til rette for avstemming",
+  ]) {
+    const hits = searchOperations({ query, limit: 1 });
+    assert.ok(hits.length > 0, `${query} returned nothing`);
+    assert.equal(hits[0].method, "GET", `${query} ranked ${hits[0].method} ${hits[0].path} first`);
   }
 });
 
@@ -143,7 +196,10 @@ test("neither the past participle nor the present tense asks for a write", () =>
   //
   // `lagt til` is the past participle: "hvor mange kunder ble lagt til i fjor" asks what happened, and
   // a POST first for it is a write offered in answer to a question — what keeps "make", "cancel",
-  // "new" and "start" out of WRITE_INTENT_VERBS.
+  // "new" and "start" out of WRITE_INTENT_VERBS. Its exclusion is less of a decision than the source
+  // comment implies: legge/la/lagt is a strong verb, so `lagt` is a different STEM and no suffix group
+  // on `legg` could produce it. The case is still worth asserting, because a future entry could add it
+  // deliberately — mutating the pattern to `(legg(e|er)?|lagt)` turns this test red.
   //
   // `legger til` is the present tense, and the first version of this change matched it while claiming
   // present tense was unambiguous. Review found it inside a RELATIVE CLAUSE of an explicit read
@@ -158,13 +214,19 @@ test("neither the past participle nor the present tense asks for a write", () =>
     "vis kunder vi legger til i ar",
     "vis leverandorer vi legger til i ar",
   ]) {
-    const [top] = searchOperations({ query, limit: 1 });
-    assert.equal(top.method, "GET", `${query} ranked ${top.method} ${top.path} first`);
+    // `hits[0]` rather than a destructure: `const [top] = …` throws a TypeError on an empty result set
+    // instead of failing an assertion, and an empty set is reachable — "legge til grunn" alone returns
+    // nothing. A crash and a failure are not the same signal.
+    const hits = searchOperations({ query, limit: 1 });
+    assert.ok(hits.length > 0, `${query} returned nothing`);
+    assert.equal(hits[0].method, "GET", `${query} ranked ${hits[0].method} ${hits[0].path} first`);
   }
 });
 
-test("the two remaining misses are recorded limitations, with their causes", () => {
-  // NAMED, so that "16 of 20" is not a number anyone has to re-derive to understand.
+test("all five queries that are not at rank 1 are named, with their causes", () => {
+  // NAMED, so that "15 of 20" is not a number anyone has to re-derive to understand. The title and the
+  // count were both stale from a two-item version of this test, which is its own small lesson: a test
+  // that enumerates cases has to be renamed when the list grows, or it understates its own coverage.
   //
   // 1. `lag et tilbud til en kunde` returns GET /api/offers, and POST /api/offers is not in the top ten
   //    at all. `lag` is excluded from METHOD_INTENT on purpose (it is also the everyday noun for a
@@ -186,13 +248,23 @@ test("the two remaining misses are recorded limitations, with their causes", () 
   //    There IS no read endpoint for a VAT position — the quirk `vat-position-has-no-read-endpoint`
   //    records that — so no ranking change can produce a satisfying first hit here.
   assert.equal(rankOf("what is my vat position this term", "POST", "/api/vat-returns"), 2);
+  // The second hit is GET /vat-return/altinn-sync, which this repo classifies as a read-shaped
+  // operation that TRANSMITS to Altinn — worth knowing about in a top three for a VAT question.
+  assert.equal(searchOperations({ query: "what is my vat position this term", limit: 2 })[1].path, "/vat-return/altinn-sync");
+
+  // 5. `se alle banktransaksjoner som ikke er avstemt` ranks GET /api/company-banks first, ahead of the
+  //    reconciliation view. Not a near-miss: a list of bank ACCOUNTS does not answer a question about
+  //    unreconciled transactions. It scores 33.3 against 32.8 — the query names "bank" twice over
+  //    (banktransaksjoner) and the company-banks path is the shortest thing carrying it.
+  assert.equal(rankOf("se alle banktransaksjoner som ikke er avstemt", "GET", "/api/company-banks"), 0);
+  assert.equal(rankOf("se alle banktransaksjoner som ikke er avstemt", "GET", "/api/bank-reconciliations/{bankAccountId}"), 1);
 });
 
-test("the third miss was fixed, and its cause is the documented prose bias", () => {
+test("the fixed query still has a wrong FIRST hit, and its cause is the documented prose bias", () => {
   // "legg til en leverandor" ranks POST /api/supplier-invoices/{id}/attachments/existing above
   // POST /api/suppliers. It is not the verb and not the formula: `POST /api/suppliers` carries NO
   // summary and NO description, so it is scored on path, tag and id alone, while the nested
-  // attachment route has prose mentioning "supplier" twice. 173 of the 320 public operations are bare
+  // attachment route has prose mentioning "supplier" three times. 173 of the 320 public operations are bare
   // in exactly this way — docs/discovery.md measures it and records that a derived-phrase haystack for
   // them was tried and rejected.
   //
