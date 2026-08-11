@@ -61,6 +61,21 @@ export type ReconciliationView = {
   month?: string;
   closed?: boolean;
   reconciliationLocked?: boolean;
+  /**
+   * The four BALANCES, which are what answers "does the bank match the books".
+   *
+   * They live on this type rather than only inside `src/reai/reconciliation-verdict.ts` because both
+   * the view surface and the plain tool need them: `reai_reconcile_ui` was claiming a month
+   * "reconciled" from empty unmatched lists while never reading a balance at all.
+   *
+   * `actualBankCurrentMonth` is optional and must not be read as `false` when absent — see `Timing`.
+   */
+  bankLedgerOpeningBalance?: number | null;
+  bankLedgerClosingBalance?: number | null;
+  actualBankMonthStartBalance?: number | null;
+  actualBankDisplayedBalance?: number | null;
+  actualBankCurrentMonth?: boolean | null;
+  matchedDiscrepancy?: number | null;
   pendingTransactionCount?: number;
   pendingPostingCount?: number;
   pendingTransactionsTotal?: number;

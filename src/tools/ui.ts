@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineTool, ok, requireTenantId, tenantIdArg, type ToolDef } from "./registry.js";
 import { isAllowed } from "../policy.js";
+import { bankMatchesBooks, verdictLine } from "../reai/reconciliation-verdict.js";
 import {
   buildReconcileData,
   MAX_ROWS,
@@ -156,7 +157,15 @@ const reconcileUi = defineTool({
         ` The endpoint gave counts without the corresponding list, so the view cannot show ` +
         `those rows. Read reai_get_bank_reconciliation to see the raw response.`;
     } else if (tx.total === 0 && post.total === 0) {
-      note = `Nothing unmatched on ${where} — this month is reconciled.`;
+      // "Nothing unmatched, therefore reconciled" is the SAME wrong answer that
+      // src/reai/reconciliation-verdict.ts was written to retire, reached here by a different route:
+      // both sides having no outstanding items says nothing about a balance gap carried in from an
+      // earlier month, and this branch REPLACED the whole note so nothing else qualified it. The
+      // balance answer is one call away and was not being made.
+      note =
+        `Nothing unmatched on ${where}, so there is nothing to pair here. That is not the same as ` +
+        `reconciled — a difference carried in from an earlier month leaves both sides empty. ` +
+        `${verdictLine(bankMatchesBooks(view))}`;
     } else {
       note += ` Pick a pairing in the view, then call reai_match_bank_transactions with the ids.`;
     }
@@ -207,6 +216,15 @@ const reconcileUi = defineTool({
       pendingTransactionsTotal: view.pendingTransactionsTotal,
       pendingPostingsTotal: view.pendingPostingsTotal,
       pendingDiscrepancy: view.pendingDiscrepancy,
+      // The four BALANCES, because without them the text surface cannot check the note's claim — and
+      // `pendingDiscrepancy` above is specifically the field that does not answer it. Reviewed as a
+      // real gap: an agent on a host without MCP Apps saw a bucket discrepancy and no balance at all.
+      bankLedgerOpeningBalance: view.bankLedgerOpeningBalance,
+      bankLedgerClosingBalance: view.bankLedgerClosingBalance,
+      actualBankMonthStartBalance: view.actualBankMonthStartBalance,
+      actualBankDisplayedBalance: view.actualBankDisplayedBalance,
+      actualBankCurrentMonth: view.actualBankCurrentMonth,
+      bankVsBooks: bankMatchesBooks(view).answer,
     };
 
     const result = ok(summary, { note });

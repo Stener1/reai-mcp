@@ -513,13 +513,37 @@ async function main() {
             include: ["summary"],
           },
         });
-        const okFlag =
-          !rec.isError && /Reconciliation for bank account/.test(textOf(rec));
+        const recText = textOf(rec);
+        const okFlag = !rec.isError && /Reconciliation for bank account/.test(recText);
         report(
           `reai_get_bank_reconciliation (account ${bankId}, ${thisMonth})`,
           okFlag,
-          okFlag ? firstLine(textOf(rec)) : textOf(rec).slice(0, 220),
+          okFlag ? firstLine(recText) : recText.slice(0, 220),
         );
+
+        // The computed bank-vs-books line must be emitted AND must be an answer.
+        //
+        // Requiring only that the line exists was the first version, and it passed on "Cannot
+        // answer: … absent" and on "comparison unavailable" — then printed the refusal as the
+        // success detail. A rename of actualBankDisplayedBalance, or bankCurrency arriving as the
+        // schema's default "", would make every call return `unknown` forever with smoke green.
+        //
+        // The SHAPE is asserted, not the figures: this tenant is all-NOK with equal openings, so
+        // pinning amounts here would only re-verify the one case that was never in doubt, and the
+        // synthetic cases live in test/reconciliation-verdict.test.mjs. But which shape is known —
+        // the quirk measured actualBankDisplayedBalance equal to bankLedgerClosingBalance in both
+        // reachable months, so anything other than a match or a stated difference is a regression.
+        if (okFlag) {
+          const line = /^Bank vs books: (.+)$/m.exec(recText);
+          const answered = line !== null && /matches the books|bank shows (more|less) than the books/.test(line[1]);
+          report(
+            "reai_get_bank_reconciliation answers bank-vs-books",
+            answered,
+            line
+              ? `${line[1].slice(0, 160)}`
+              : "the note carried no 'Bank vs books:' line, so the caller gets no answer",
+          );
+        }
       } else {
         skip(
           "reai_get_bank_reconciliation",

@@ -1686,9 +1686,17 @@ export const QUIRKS: readonly Quirk[] = [
       "sides WITHIN one bucket of the month's activity. Neither looks at a balance. The response ships " +
       "`actualBankMonthStartBalance` and `bankLedgerOpeningBalance` as separate fields, so an opening gap is " +
       "a representable state, and it passes straight through to the closing balances while both discrepancy " +
-      "fields stay 0. To answer \"does the bank match the books\", compare `actualBankDisplayedBalance` " +
-      "against `bankLedgerClosingBalance` and check the two openings against each other; the discrepancy " +
-      "fields then tell you whether the gap arose this month or was carried in. Every month reachable on " +
+      "fields stay 0.\n\n" +
+      "DO NOT DO THIS ARITHMETIC BY HAND. `reai_get_bank_reconciliation` computes it and puts the result on " +
+      "a \"Bank vs books:\" line above the data, and `reai_reconcile_ui` says the same thing in its note. " +
+      "It compares `actualBankDisplayedBalance` against `bankLedgerClosingBalance`, refuses when the two " +
+      "currencies differ, says UNKNOWN rather than \"matches\" when a balance is absent, and splits the gap " +
+      "into what was carried in and what changed this month. An earlier version of this note told you to " +
+      "compare the balances yourself and then use the discrepancy fields to tell carried-in from arisen — " +
+      "which is the same error twice over, since those fields only ever see this month's activity. It is " +
+      "`actualBankMonthStartBalance` against `bankLedgerOpeningBalance` that separates the two, and the " +
+      "tool already does it.\n\n" +
+      "Every month reachable on " +
       "2634 has the two openings equal (0/0 for July, 554.31/554.31 for August), so this comes from what " +
       "the fields are, not from a divergence anyone here could observe.\n\n" +
       "For the CURRENT month a gap between the ledger and the feed is expected rather than a fault — August " +
