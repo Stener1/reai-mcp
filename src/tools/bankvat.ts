@@ -212,12 +212,21 @@ const getBankReconciliation = defineTool({
     "\"Bank vs books:\" line, from `actualBankDisplayedBalance` against `bankLedgerClosingBalance` — with the " +
     "three things that make the subtraction wrong when they are skipped: it refuses outright when " +
     "`bankCurrency` differs from `tenantCurrency` (nothing in the spec says which posting figure is the bank " +
-    "side), it splits the gap into what was carried in from an earlier month and what arose in this one, and " +
-    "it reports UNKNOWN rather than a match when a balance is absent, which is what an `include` without " +
-    "`summary` produces. `pendingDiscrepancy` and `matchedDiscrepancy` are not the answer: each subtracts " +
-    "postings from transactions within ONE bucket of this month's activity, so both read 0 while the balances " +
-    "differ by an opening gap. For the CURRENT month a gap is expected rather than a fault, and " +
-    "`actualBankCurrentMonth` — which the line reports — is the flag that says so. " +
+    "side), it splits the gap into what was carried in from an earlier month and what changed in this one, " +
+    "and it says \"Cannot answer\" rather than \"matches\" when a balance is absent, which is what an " +
+    "`include` without `summary` produces. `pendingDiscrepancy` and `matchedDiscrepancy` are not the answer: " +
+    "each subtracts postings from transactions within ONE bucket of this month's activity, so both read 0 " +
+    "while the balances differ by an opening gap. For the CURRENT month a gap that AROSE this month is " +
+    "expected rather than a fault, and the line says so when `actualBankCurrentMonth` is true — but it will " +
+    "not excuse a gap carried in from before the month, and it reports the timing as unknown rather than " +
+    "guessing when that flag is absent.\n\n" +
+    "ONE THING THE LINE CANNOT TELL YOU, stated because it bears on how much weight to put on a match: " +
+    "whether `actualBankDisplayedBalance` is genuinely the bank's own figure or is derived from booked " +
+    "activity. On every month reachable from this repository it equalled `bankLedgerClosingBalance` exactly, " +
+    "including a month where the feed's own `providerBalance` did NOT (1002.36 against 1039.70). If it turns " +
+    "out to be ledger-derived, the comparison can only ever say \"matches\" and a match is worth less than " +
+    "it reads. So treat a reported DIFFERENCE as strong evidence and a reported MATCH as weak, and confirm a " +
+    "month that matters against the bank's own statement. No tenant this repository can read settles it. " +
     "See the quirk provider-balance-is-not-month-scoped.\n\n" +
     "This is the view for BANK-SYNCED accounts. If reai_list_company_banks reports " +
     'providerType "manual" for the account, use reai_request GET ' +

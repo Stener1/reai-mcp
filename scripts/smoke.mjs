@@ -521,21 +521,26 @@ async function main() {
           okFlag ? firstLine(recText) : recText.slice(0, 220),
         );
 
-        // The computed bank-vs-books line must actually be emitted. Asserting only that the note
-        // mentions the account would pass with the verdict silently absent — the failure mode of the
-        // three prose versions this replaced was exactly that the answer never reached the caller.
+        // The computed bank-vs-books line must be emitted AND must be an answer.
         //
-        // What it says is NOT asserted, and that is deliberate. The interesting cases are a
-        // foreign-currency account and a month whose two opening balances differ; this tenant has
-        // neither, so pinning the wording here would only re-verify the homogeneous case that was
-        // never in doubt. test/reconciliation-verdict.test.mjs carries those.
+        // Requiring only that the line exists was the first version, and it passed on "Cannot
+        // answer: … absent" and on "comparison unavailable" — then printed the refusal as the
+        // success detail. A rename of actualBankDisplayedBalance, or bankCurrency arriving as the
+        // schema's default "", would make every call return `unknown` forever with smoke green.
+        //
+        // The SHAPE is asserted, not the figures: this tenant is all-NOK with equal openings, so
+        // pinning amounts here would only re-verify the one case that was never in doubt, and the
+        // synthetic cases live in test/reconciliation-verdict.test.mjs. But which shape is known —
+        // the quirk measured actualBankDisplayedBalance equal to bankLedgerClosingBalance in both
+        // reachable months, so anything other than a match or a stated difference is a regression.
         if (okFlag) {
           const line = /^Bank vs books: (.+)$/m.exec(recText);
+          const answered = line !== null && /matches the books|bank shows (more|less) than the books/.test(line[1]);
           report(
-            "reai_get_bank_reconciliation computes bank-vs-books",
-            line !== null,
+            "reai_get_bank_reconciliation answers bank-vs-books",
+            answered,
             line
-              ? `${line[1].slice(0, 150)} (wording unasserted: this tenant is all-NOK with equal openings)`
+              ? `${line[1].slice(0, 160)}`
               : "the note carried no 'Bank vs books:' line, so the caller gets no answer",
           );
         }

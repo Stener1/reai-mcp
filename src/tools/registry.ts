@@ -115,8 +115,21 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
   if (opts.note) parts.push(opts.note);
   if (opts.link) parts.push(`Open in ReAI: ${opts.link}`);
 
+  // What the caller-supplied note and link cost, before any truncation note is added.
+  //
+  // THE TRIGGER HAS TO COUNT THIS. `BODY_BUDGET` below records that three branches sized only the body
+  // and overshot by ~130 characters each — but the check that decides whether to truncate at all had the
+  // same defect and was left with it, so a body just under the cap plus a long note sailed past
+  // untouched. Measured on a reconciliation whose body serialises to 23,950 characters: with the old
+  // one-line note the result was 23,998, and with the computed bank-vs-books line it was 24,534 — 534
+  // over a cap that reported no truncation. The truncating branches only escaped because
+  // TRUNCATION_NOTE_RESERVE happens to be larger than the note it reserves for; that is luck, so the
+  // budget subtracts this too rather than relying on the slack.
+  const suppliedOverhead = parts.reduce((n, part) => n + part.length + 1, 0) + (parts.length ? 1 : 0);
+  const bodyBudget = BODY_BUDGET - suppliedOverhead;
+
   let body = stringify(data);
-  if (body.length > MAX_RESULT_CHARS) {
+  if (body.length + suppliedOverhead > MAX_RESULT_CHARS) {
     // Truncation must never leave a value that LOOKS complete. Cutting the string at
     // a byte offset splits tokens, so a ledger could end `"closingBalance": 481`
     // where the figure was 4812.60 — a plausible wrong number, silently, in an
@@ -165,18 +178,17 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
             `no paging argument, and a page or limit sent to the API directly is silently ignored rather than ` +
             `refused — so adding one will not narrow anything.`;
 
-      const overhead = parts.reduce((n, part) => n + part.length + 1, 0) + 2;
-      let shown = countFittingSerialized(data, BODY_BUDGET);
+      let shown = countFittingSerialized(data, bodyBudget);
       const refined = countFittingSerialized(
         data,
-        MAX_RESULT_CHARS - overhead - arrayNote(Math.max(shown, 1)).length,
+        MAX_RESULT_CHARS - suppliedOverhead - 1 - arrayNote(Math.max(shown, 1)).length,
       );
       if (refined > shown) shown = refined;
       // The note grows by a digit or two as the count rises, so confirm rather than
       // assume: step down until the assembled result genuinely fits.
       while (
         shown > 0 &&
-        stringify(data.slice(0, shown)).length + arrayNote(shown).length + overhead > MAX_RESULT_CHARS
+        stringify(data.slice(0, shown)).length + arrayNote(shown).length + suppliedOverhead + 1 > MAX_RESULT_CHARS
       ) {
         shown -= 1;
       }
@@ -194,12 +206,12 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       // no JSON token to split, so a prefix is safe; it is simply partial, and the note
       // has to say that rather than the opposite.
       const total = body.length;
-      body = body.slice(0, BODY_BUDGET);
+      body = body.slice(0, bodyBudget);
       parts.push(
-        `NOTE: text truncated — showing the first ${BODY_BUDGET} of ${total} characters. ` +
+        `NOTE: text truncated — showing the first ${bodyBudget} of ${total} characters. ` +
           `It ends mid-text, so do not read the tail as the end of the document.`,
       );
-    } else if (trimNestedArrays(data) !== undefined) {
+    } else if (trimNestedArrays(data, bodyBudget) !== undefined) {
       // A nested object whose bulk is in its arrays. The line-boundary rule below keeps
       // every SCALAR whole, but it cut those arrays mid-item and then claimed "no value
       // shown is partial" — and, worse, dropped later fields with no field-level signal.
@@ -211,7 +223,7 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       //
       // Trimming the arrays themselves keeps the result valid JSON, keeps every item
       // whole, keeps every field present, and says per field what was cut.
-      const { value, trims } = trimNestedArrays(data)!;
+      const { value, trims } = trimNestedArrays(data, bodyBudget)!;
       body = stringify(value);
       const trimmed = trims.filter((t) => t.shown < t.total);
       const named = trimmed
@@ -236,7 +248,7 @@ export function ok(data: unknown, opts: { note?: string; link?: string } = {}): 
       // Otherwise drop back to a line boundary and discard the final line, which may
       // be a partial token. JSON.stringify with indentation puts each scalar on its
       // own line, so a whole-line cut cannot split a number or a string.
-      const cut = body.slice(0, BODY_BUDGET);
+      const cut = body.slice(0, bodyBudget);
       const lastNewline = cut.lastIndexOf("\n");
       const kept = lastNewline > 0 ? cut.slice(0, lastNewline) : "";
       // One early oversized field — a base64 attachment, a long description — pushes the
@@ -367,6 +379,8 @@ const TRUNCATION_NOTE_MAX_FIELDS = 6;
  */
 function trimNestedArrays(
   data: unknown,
+  /** What the body may occupy. Passed in because a caller-supplied note eats into it. */
+  budget: number = BODY_BUDGET,
 ): { value: Record<string, unknown>; trims: Array<{ field: string; shown: number; total: number }> } | undefined {
   if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
   const entries = Object.entries(data as Record<string, unknown>);
@@ -383,8 +397,8 @@ function trimNestedArrays(
 
   // The note counts against the cap too: it names every trimmed field, so an object
   // with a thousand short arrays produced a 23.9 KB body under an 18.7 KB note — a
-  // "capped" response of 42.6 KB, still crowding out the conversation.
-  const budget = BODY_BUDGET;
+  // "capped" response of 42.6 KB, still crowding out the conversation. `budget` arrives
+  // already reduced by whatever note the CALLER supplied, for the same reason.
   const base = stringify(build()).length;
   if (base > budget) return undefined;
 

@@ -529,9 +529,60 @@ test("an empty period says so, and a missing one does not claim to be reconciled
   assert.match(stale.text, /count disagreed with the list/);
   assert.equal(stale.structured.transactionTotal, 1);
 
-  // And a genuinely reconciled month still says so.
+  // NOTHING UNMATCHED IS NOT RECONCILED, and this assertion used to say it was — it read
+  // /this month is reconciled/ and so held the wrong claim green. Both sides being empty says
+  // only that there is nothing to pair; a balance gap carried in from an earlier month leaves
+  // exactly this state, and this branch REPLACES the whole note, so nothing else qualified it.
   const done = await callTool({ pendingTransactionCount: 0, pendingPostingCount: 0 });
-  assert.match(done.text, /this month is reconciled/);
+  assert.match(done.text, /nothing to pair here/);
+  assert.match(done.text, /not the same as reconciled/);
+  assert.doesNotMatch(done.text, /this month is reconciled/);
+
+  // With no balances in the response it must say it cannot answer, not that the books balance.
+  assert.match(done.text, /Cannot answer/);
+
+  // Given the balances, the computed answer is what appears — and the four balances reach the
+  // TEXT surface, or a host without MCP Apps cannot check the claim. `pendingDiscrepancy` alone
+  // was all it used to carry, which is specifically the field that does not answer this.
+  const balanced = await callTool({
+    pendingTransactionCount: 0,
+    pendingPostingCount: 0,
+    bankCurrency: "NOK",
+    tenantCurrency: "NOK",
+    bankLedgerOpeningBalance: 0,
+    bankLedgerClosingBalance: 554.31,
+    actualBankMonthStartBalance: 0,
+    actualBankDisplayedBalance: 554.31,
+    actualBankCurrentMonth: false,
+  });
+  assert.match(balanced.text, /bank matches the books/);
+  assert.equal(JSON.parse(balanced.text.slice(balanced.text.indexOf("{"))).bankVsBooks, "matches");
+  for (const field of [
+    "bankLedgerOpeningBalance",
+    "bankLedgerClosingBalance",
+    "actualBankMonthStartBalance",
+    "actualBankDisplayedBalance",
+  ]) {
+    assert.ok(balanced.text.includes(`"${field}"`), `${field} must reach the text surface`);
+  }
+
+  // And the case the old wording got wrong: nothing unmatched, but the openings differ, so the
+  // month is NOT reconciled. This is unobservable on tenant 2634, which is why it is synthetic.
+  const carriedIn = await callTool({
+    pendingTransactionCount: 0,
+    pendingPostingCount: 0,
+    bankCurrency: "NOK",
+    tenantCurrency: "NOK",
+    bankLedgerOpeningBalance: 554.31,
+    bankLedgerClosingBalance: 1002.36,
+    actualBankMonthStartBalance: 654.31,
+    actualBankDisplayedBalance: 1102.36,
+    actualBankCurrentMonth: false,
+  });
+  assert.match(carriedIn.text, /bank shows more than the books by 100 NOK/);
+  assert.match(carriedIn.text, /carried in/);
+  assert.doesNotMatch(carriedIn.text, /matches the books/);
+  assert.equal(JSON.parse(carriedIn.text.slice(carriedIn.text.indexOf("{"))).bankVsBooks, "differs");
 });
 
 /** Call the tool with a stubbed client and return its text plus structuredContent. */

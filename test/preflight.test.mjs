@@ -928,6 +928,42 @@ test("a nested object is truncated by shortening its lists, not by cutting text"
   assert.ok(text.length <= 24_000, `the whole payload must respect the cap, got ${text.length}`);
 });
 
+test("a caller-supplied note counts against the cap", () => {
+  // THE TRIGGER used to size the body alone and then prepend the note, so a body just under the cap
+  // plus a long note went out over it, reporting no truncation. The reconciliation tool made this
+  // reachable: its computed bank-vs-books line runs to ~520 characters.
+  //
+  // Every branch is probed, because the truncating ones only escaped by TRUNCATION_NOTE_RESERVE being
+  // larger than the note it reserves for — luck, not a guarantee.
+  const note = "N".repeat(600);
+
+  // 1. A body UNDER the cap on its own, over it once the note is added. This is the case that shipped.
+  //    Flat scalars, deliberately: an object with arrays gets its lists trimmed and never reaches the
+  //    untruncated path this is about.
+  const filler = Object.fromEntries(
+    Array.from({ length: 860 }, (_, i) => [`field${String(i).padStart(4, "0")}`, `value-${i}`]),
+  );
+  const bare = ok(filler).content[0].text;
+  assert.ok(bare.length > 23_000 && bare.length <= 24_000, `fixture must sit just under the cap, got ${bare.length}`);
+  assert.ok(!/NOTE:/.test(bare), "the fixture must not be truncated on its own, or the note is not what pushed it over");
+  assert.ok(bare.length + note.length > 24_000, "fixture plus note must exceed the cap or this proves nothing");
+  const withNote = ok(filler, { note }).content[0].text;
+  assert.ok(withNote.length <= 24_000, `body + note came back at ${withNote.length}`);
+  assert.ok(withNote.startsWith(note), "the note must still be delivered, not dropped to make room");
+
+  // 2. Array, string and nested-object branches, each with a note, all respecting the cap.
+  const rows = Array.from({ length: 4000 }, (_, i) => ({ id: i, closingBalance: 4812.6 }));
+  assert.ok(ok(rows, { note }).content[0].text.length <= 24_000, "array branch");
+  assert.ok(ok("Z".repeat(60_000), { note }).content[0].text.length <= 24_000, "string branch");
+  const nested = { label: "x", rows: Array.from({ length: 4000 }, (_, i) => ({ id: i, text: "z".repeat(30) })) };
+  assert.ok(ok(nested, { note }).content[0].text.length <= 24_000, "nested-object branch");
+  assert.ok(ok({ blob: "A".repeat(40_000), id: 7 }, { note }).content[0].text.length <= 24_000, "fallback branch");
+
+  // 3. A link is part of the same overhead as a note.
+  const both = ok(filler, { note, link: "https://app.reai.no/" + "p".repeat(300) }).content[0].text;
+  assert.ok(both.length <= 24_000, `note + link came back at ${both.length}`);
+});
+
 test("truncation falls back cleanly when shortening lists cannot help", () => {
   // No arrays to shorten, and one oversized scalar.
   assert.match(ok({ blob: "A".repeat(40000), id: 7 }).content[0].text, /nothing is shown/);
