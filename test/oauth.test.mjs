@@ -818,3 +818,59 @@ test("every consent-page render passes its redirect target to sendHtml", async (
     `${renders} consent pages are rendered but only ${targets.length} pass a form-action target`,
   );
 });
+
+test("a grant can be deliberately unbound, and that is not the same as an accidental one", async () => {
+  // WHY THIS EXISTS. A connection bound to one company is the right default and stays the default —
+  // but Claude caches its authorization, so "disconnect and reconnect" reuses the stored grant and
+  // never re-runs consent. With a single bound company that leaves no way to change company at all
+  // short of rotating the encryption key. Someone keeping several sets of books needs to switch.
+  //
+  // The hazard is that "no bound company" already existed as an ACCIDENT: grants minted before the
+  // consent flow required a company carry no tenantId, had no boundary, and stay valid for the full
+  // 90-day TTL. Those are refused at redemption. So a chosen absence and an accidental absence must
+  // not be representable as the same payload — hence a separate flag, asserted here in both
+  // directions, because a test that only checks the new case would pass on an implementation that
+  // simply stopped refusing the old one.
+  const { ANY_COMPANY } = await import("../dist/auth/oauth.js");
+  assert.equal(ANY_COMPANY, "any", "the sentinel is part of the form contract");
+
+  const legacy = { reaiToken: "t", writeMode: "read-only", subject: "x", clientId: "c" };
+  const chosen = { ...legacy, allTenants: true };
+  const bound = { ...legacy, tenantId: 2634 };
+
+  // THE REAL PREDICATE, imported. The first version of this test re-stated the rule here as
+  // `g.tenantId === undefined && g.allTenants !== true`, and mutating src/http.ts to accept every
+  // legacy grant left it green — it was verifying its own restatement. Importing is what makes the
+  // three assertions below say anything about the server.
+  const { grantHasNoTenantBoundary: refused } = await import("../dist/auth/oauth.js");
+  assert.equal(refused(legacy), true, "a legacy unbound grant must still be refused");
+  assert.equal(refused(chosen), false, "an unbound grant the user asked for must be accepted");
+  assert.equal(refused(bound), false, "a bound grant is unaffected");
+});
+
+test("the consent page offers 'all companies' only when there is something to switch between", async () => {
+  const { renderConsentPage } = await import("../dist/auth/pages.js");
+  const base = {
+    sealedRequest: "s",
+    redirectUri: "https://claude.ai/cb",
+    serverWriteMode: "reversible",
+    baseUrl: "https://example.test",
+    sealedToken: "v",
+    subject: "someone@example.test",
+  };
+  const many = renderConsentPage({
+    ...base,
+    tenants: [
+      { id: 1581, companyName: "Torstensen Handel" },
+      { id: 2634, companyName: "Torstensen Digital" },
+    ],
+  });
+  assert.match(many, /value="any"/, "several companies must offer the choice");
+  assert.match(many, /All companies/);
+  // And it says what the choice costs, because the whole point of the bound default is a boundary.
+  assert.match(many, /refuses calls naming any other|nothing then stops a mistaken company id/);
+
+  const one = renderConsentPage({ ...base, tenants: [{ id: 2634, companyName: "Torstensen Digital" }] });
+  assert.doesNotMatch(one, /value="any"/, "one company means the choice has no meaning and drops a boundary for nothing");
+  assert.match(one, /2634/, "the single company is still offered");
+});

@@ -39,11 +39,28 @@ export const CLIENT_REGISTRATION_TTL = 60 * 60 * 24 * 365 * 5; // 5 years
 const CODE_TTL = 60; // RFC 6749 recommends <= 10 minutes; a paste-and-redirect needs far less
 const AUTHREQ_TTL = 15 * 60; // how long a user may sit on the consent page
 
+/**
+ * The consent page's value for "any company".
+ *
+ * A sentinel rather than an empty string, because empty already means "the user did not answer" and
+ * that path re-renders the page. The two must stay distinguishable all the way to the grant.
+ */
+export const ANY_COMPANY = "any";
+
 export type GrantPayload = {
   /** The user's ReAI API token, sealed inside our own token. */
   reaiToken: string;
   /** Tenant this grant is bound to, chosen at authorization time. */
   tenantId?: number;
+  /**
+   * The user chose "any company" at the consent page, DELIBERATELY leaving this grant unbound.
+   *
+   * A separate flag rather than simply omitting `tenantId`, because those two states must not be
+   * confused: grants minted before the consent flow required a company also have no `tenantId`, and
+   * they are refused at redemption precisely so an accidental absence can never read as a choice.
+   * This says the absence was chosen, so redemption can allow it while still refusing the legacy kind.
+   */
+  allTenants?: true;
   /** Write ceiling for this grant. Never exceeds the server's own mode. */
   writeMode: WriteMode;
   /** For audit lines; never the token itself. */
@@ -52,6 +69,24 @@ export type GrantPayload = {
   /** Unix seconds when the user authorized. Bounds the whole refresh chain. */
   authTime?: number;
 };
+
+/**
+ * Does this grant lack a tenant boundary it was never meant to lack?
+ *
+ * Lives HERE, beside `GrantPayload`, and not in `src/http.ts`: that module calls `main()` at the top
+ * level, so importing it to reach this function starts a listening server and hangs the test run. The first version of that test
+ * re-stated the rule inline — `g.tenantId === undefined && g.allTenants !== true` — and passed
+ * happily when this function was mutated to `false`, i.e. when every legacy grant was accepted. A
+ * test that restates the rule verifies the restatement.
+ *
+ * Two absences that look identical in the payload and must not be treated alike:
+ *   - `allTenants: true` — the user picked "All companies" at consent. Deliberate; allowed.
+ *   - neither field — minted before the consent flow required a company. Those had no boundary at
+ *     all, and stay valid for the full 90-day TTL, re-minted on every refresh. Refused.
+ */
+export function grantHasNoTenantBoundary(grant: { tenantId?: number; allTenants?: true }): boolean {
+  return grant.tenantId === undefined && grant.allTenants !== true;
+}
 
 type AuthRequest = {
   clientId: string;
@@ -414,6 +449,16 @@ export class OAuthProvider {
     }
     const rawTenant = (form.get("tenantId") ?? "").trim();
 
+    // "any" is a CHOICE, not a missing answer. It mints a grant that addresses every company the
+    // ReAI token reaches, selected per tool call — which is what a bookkeeper working across several
+    // companies needs, and what a single bound connection cannot express. A client that caches its
+    // authorization (Claude reuses the stored grant on reconnect) otherwise gives no way to change
+    // company at all without rotating the encryption key.
+    //
+    // The boundary property is unchanged for everyone who picks a company: `resolveTenantId` still
+    // throws on a mismatch. This only removes the boundary for a grant whose owner asked for it.
+    const anyCompany = rawTenant === ANY_COMPANY;
+
     // With several companies available, make the user choose explicitly rather
     // than guessing which set of books the agent should touch.
     if (!rawTenant && tenants.length > 1) {
@@ -440,7 +485,9 @@ export class OAuthProvider {
     }
 
     let tenantId: number | undefined;
-    if (rawTenant) {
+    if (anyCompany) {
+      // Left unbound on purpose. `allTenants` below is what tells redemption this was chosen.
+    } else if (rawTenant) {
       const n = Number(rawTenant);
       if (!Number.isInteger(n) || !tenants.some((t) => t.id === n)) {
         sendHtml(
@@ -459,6 +506,7 @@ export class OAuthProvider {
       reaiToken,
       authTime: Math.floor(Date.now() / 1000),
       ...(tenantId !== undefined ? { tenantId } : {}),
+      ...(anyCompany ? { allTenants: true as const } : {}),
       writeMode,
       subject: me.email ?? me.name ?? "unknown",
       clientId: request.clientId,

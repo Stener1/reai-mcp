@@ -20,6 +20,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
+import { grantHasNoTenantBoundary } from "./auth/oauth.js";
 import { loadConfig, lastForwardedValue, type ServerConfig } from "./config.js";
 import { narrowerWriteMode } from "./policy.js";
 import { Sealer } from "./auth/crypto.js";
@@ -346,7 +347,7 @@ async function handleMcp(
   // one the documented behaviour is to choose per tool call. Rejecting it here broke
   // that mode outright and told the user to "re-authorize the connector" — advice
   // that makes no sense when passthrough is what skips OAuth in the first place.
-  if (!auth.passthrough && grant.tenantId === undefined) {
+  if (!auth.passthrough && grantHasNoTenantBoundary(grant)) {
     res.setHeader(
       "WWW-Authenticate",
       oauth.challengeHeader(

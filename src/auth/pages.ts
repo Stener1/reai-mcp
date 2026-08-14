@@ -1,3 +1,4 @@
+import { ANY_COMPANY } from "./oauth.js";
 import type { WriteMode } from "../policy.js";
 
 /**
@@ -152,7 +153,20 @@ export function renderConsentPage(opts: ConsentPageOptions): string {
       const id = escapeHtml(String(t.id));
       parts.push(`<option value="${id}">${escapeHtml(label)} (${id})</option>`);
     }
+    // Offered only when there is something to switch BETWEEN. On a single-company token it would be
+    // a choice with no consequence, and it would drop the tenant boundary for nothing.
+    if ((opts.tenants ?? []).length > 1) {
+      parts.push(`<option value="${ANY_COMPANY}">All companies — choose per request</option>`);
+    }
     parts.push(`</select>`);
+    if ((opts.tenants ?? []).length > 1) {
+      parts.push(
+        `<p class="hint">Picking one company makes it a boundary: this connection then refuses ` +
+          `calls naming any other. <strong>All companies</strong> lets the agent work across every ` +
+          `company this token reaches, choosing per request — convenient if you keep several sets ` +
+          `of books, and weaker, because nothing then stops a mistaken company id.</p>`,
+      );
+    }
   } else {
     parts.push(`<label for="token">ReAI API token</label>`);
     parts.push(
